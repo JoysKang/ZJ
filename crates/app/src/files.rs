@@ -134,11 +134,14 @@ fn open_beneath(root: &Path, relative: &Path) -> io::Result<fs::File> {
         if components.peek().is_some() {
             flags |= libc::O_DIRECTORY;
         }
+        // SAFETY: `file` is a live directory descriptor and `name` is a NUL-terminated CString
+        // that outlives the call; openat does not retain either pointer.
         let fd = unsafe { libc::openat(file.as_raw_fd(), name.as_ptr(), flags) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        // openat returned a new owned descriptor, which File closes on all exit paths.
+        // SAFETY: openat returned a new descriptor that nothing else owns; File closes it on all
+        // exit paths.
         file = unsafe { fs::File::from_raw_fd(fd) };
     }
     Ok(file)
@@ -238,6 +241,7 @@ mod tests {
         fs::write(root.join("other-encoding"), [0xff, 0xfe]).unwrap();
         assert!(text_file(Some(&root), &root.join("other-encoding")).is_err());
         let fifo = std::ffi::CString::new(root.join("pipe").to_str().unwrap()).unwrap();
+        // SAFETY: `fifo` is a valid NUL-terminated path that outlives the call.
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         assert!(text_file(Some(&root), &root.join("pipe")).is_err());
         assert!(text_file(None, &root.join("pipe")).is_err());

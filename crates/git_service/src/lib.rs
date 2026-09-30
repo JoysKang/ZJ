@@ -381,6 +381,7 @@ fn nonblocking(fd: std::os::fd::RawFd) -> io::Result<()> {
     if flags < 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: same live descriptor as above; F_SETFL only changes its status flags.
     if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         return Err(io::Error::last_os_error());
     }

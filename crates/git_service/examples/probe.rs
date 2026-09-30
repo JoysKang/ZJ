@@ -1,3 +1,6 @@
+//! Command-line probe: stdout is its report.
+#![allow(clippy::print_stdout)]
+
 use std::{
     path::PathBuf,
     sync::{Mutex, atomic::AtomicBool},

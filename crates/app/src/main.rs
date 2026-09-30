@@ -26,6 +26,7 @@ fn open_workspace(
     Ok(())
 }
 
+#[allow(clippy::print_stdout)] // --help output belongs on stdout.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut roots = Vec::new();
     let mut windows = None;

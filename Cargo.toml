@@ -13,8 +13,27 @@ workspace-editor-core = { path = "crates/core" }
 workspace-editor-git = { path = "crates/git_service" }
 gpui-kit = { version = "=0.7.0", features = ["tree-sitter-rust", "tree-sitter-diff", "tree-sitter-markdown"] }
 
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "warn"
+undocumented_unsafe_blocks = "deny"
+print_stdout = "warn"
+
 [profile.release]
 debug = 1
+
+# 发布与体积测量专用：cargo build --profile dist
+# 未开 panic = "abort"：GPUI Kit 运行期用 catch_unwind 做状态清理后再 resume_unwind，
+# 改为 abort 前需单独验证行为与体积收益。
+[profile.dist]
+inherits = "release"
+debug = 0
+lto = "fat"
+codegen-units = 1
+strip = true
 
 [profile.dev]
 debug = 1

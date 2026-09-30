@@ -1,0 +1,41 @@
+# cargo deny check —— 依赖许可与重复版本检查。本地：cargo install cargo-deny --locked
+[graph]
+targets = ["aarch64-apple-darwin"]
+
+[licenses]
+version = 2
+# 依据 2026-09-30 aarch64-apple-darwin 依赖树实际出现的许可整理；新增许可需在 PR 中说明。
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "0BSD",
+    "CC0-1.0",
+    "BSL-1.0",
+    "MPL-2.0",
+    "Unlicense",
+    "bzip2-1.0.6",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+ignore = true
+
+[bans]
+# GPUI 生态有不少重复版本；先告警、定期收敛，不阻塞构建。
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[advisories]
+version = 2
+yanked = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
