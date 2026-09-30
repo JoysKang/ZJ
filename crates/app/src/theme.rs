@@ -17,7 +17,13 @@ use serde_json::{Value, json};
 
 // Heights: every list row shares one height; every bar shares another.
 pub const ROW_HEIGHT: Pixels = px(22.);
-pub const BAR_HEIGHT: Pixels = px(32.);
+pub const TAB_HEIGHT: Pixels = px(35.);
+pub const BREADCRUMB_HEIGHT: Pixels = px(22.);
+pub const TAB_CLOSE: Pixels = px(20.);
+pub const DIRTY_DOT: Pixels = px(8.);
+pub const KEYCAP: Pixels = px(20.);
+pub const WELCOME_WIDTH: Pixels = px(340.);
+pub const LOGO_TEXT: Pixels = px(180.);
 pub const TITLE_HEIGHT: Pixels = px(38.);
 pub const ACTIVITY_HEIGHT: Pixels = px(35.);
 pub const ACTIVITY_ITEM: Pixels = px(28.);
@@ -40,8 +46,8 @@ pub const QUICK_OPEN_ROWS: usize = 12;
 pub const RADIUS: Pixels = px(4.);
 pub const RADIUS_LARGE: Pixels = px(6.);
 pub const STATUS_HEIGHT: Pixels = px(24.);
-/// Active tab indicator thickness.
-pub const INDICATOR: Pixels = px(2.);
+/// Active tab indicator thickness (VS Code's tab.activeBorderTop).
+pub const INDICATOR: Pixels = px(1.);
 
 // Widths.
 pub const TWISTY_WIDTH: Pixels = px(16.);

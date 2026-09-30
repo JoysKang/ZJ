@@ -1,14 +1,10 @@
 use crate::files::{self, Entry, PathIndex, SearchResults};
 use crate::theme;
 use gpui_kit::{
-    assets::IconName,
     component::{
-        ActiveTheme, Sizable,
-        button::{Button, ButtonVariants},
-        h_flex,
-        input::{Editor, EditorState, InputEvent, InputState},
+        ActiveTheme, h_flex,
+        input::{EditorState, InputEvent, InputState},
         resizable::{h_resizable, resizable_panel},
-        text::TextView,
         v_flex,
     },
     prelude::FluentBuilder,
@@ -32,6 +28,7 @@ use workspace_editor_git::{
 };
 
 mod chrome;
+mod editor_area;
 mod quick_open;
 mod scm;
 mod sidebar;
@@ -46,9 +43,6 @@ gpui_kit::actions!(
         ToggleSidebar
     ]
 );
-
-const SAMPLE: &str = "// 临时输入测试，退出不保留。不会写入工作区文件。\n// 试用中文 IME、选区替换、粘贴、⌘Z / ⇧⌘Z、⌘F / ⌘H。\nfn main() {\n    println!(\"你好，工作区！\");\n}\n";
-const MARKDOWN: &str = "# Markdown 原生预览\n\n资源与输入原型 · P1\n\n- 标题与列表\n- **加粗**与 `行内代码`\n\n```rust\nfn main() { println!(\"你好\"); }\n```\n\n| 模块 | 状态 |\n| --- | --- |\n| Editor | 输入测试 |\n| Git | 只读 |\n\n本样例不含图片和外链。完整受限图片功能在 P6 验证。\n";
 
 #[derive(Clone)]
 pub struct DocumentOwner {
@@ -67,10 +61,9 @@ enum Sidebar {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Pane {
-    Scratch,
+    Welcome,
     Document(DocumentId),
     Diff,
-    Markdown,
 }
 
 struct Document {
@@ -80,7 +73,20 @@ struct Document {
     dirty: bool,
     readonly: bool,
     bytes: usize,
+    /// Display name of the language shown in the status bar.
+    #[allow(dead_code)] // Read by the status bar in the next commit.
+    language: &'static str,
+    #[allow(dead_code)]
+    crlf: bool,
+    #[allow(dead_code)]
+    bom: bool,
     _subscription: Subscription,
+}
+
+struct DiffTab {
+    label: String,
+    tooltip: String,
+    path: PathBuf,
 }
 
 struct TreeRow {
@@ -94,6 +100,39 @@ struct Group {
     expanded: bool,
     stale: bool,
 }
+/// Highlighter language (only grammars compiled into Kit) and status bar display name.
+fn language_for(path: &std::path::Path) -> (&'static str, &'static str) {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let extension = name
+        .rsplit_once('.')
+        .map(|(_, ext)| ext)
+        .unwrap_or_default();
+    match extension {
+        "rs" => ("rust", "Rust"),
+        "md" | "markdown" => ("markdown", "Markdown"),
+        "diff" | "patch" => ("diff", "Diff"),
+        "toml" => ("plain", "TOML"),
+        "json" | "jsonc" => ("plain", "JSON"),
+        "js" | "mjs" | "cjs" => ("plain", "JavaScript"),
+        "ts" | "tsx" => ("plain", "TypeScript"),
+        "py" => ("plain", "Python"),
+        "sh" | "bash" | "zsh" => ("plain", "Shell Script"),
+        "html" | "htm" => ("plain", "HTML"),
+        "css" => ("plain", "CSS"),
+        "yaml" | "yml" => ("plain", "YAML"),
+        "go" => ("plain", "Go"),
+        "c" | "h" => ("plain", "C"),
+        "cpp" | "cc" | "hpp" => ("plain", "C++"),
+        "java" => ("plain", "Java"),
+        "sql" => ("plain", "SQL"),
+        _ => ("plain", "纯文本"),
+    }
+}
+
 /// Explorer git decoration, VS Code style: colored name plus a letter (files) or dot (folders).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum DecorationKind {
@@ -146,7 +185,6 @@ pub struct Prototype {
     service: GitService,
     groups: Vec<Group>,
     rows: Vec<Row>,
-    scratch: Entity<EditorState>,
     sidebar: Sidebar,
     sidebar_visible: bool,
     quick_open: Option<quick_open::QuickOpen>,
@@ -174,10 +212,10 @@ pub struct Prototype {
     file_task: Option<Task<()>>,
     file_generation: u64,
     path_prompt_open: bool,
-    dirty: bool,
     closing: bool,
     preview: Option<Entity<EditorState>>,
     preview_title: String,
+    preview_diff: Option<DiffTab>,
     generation: u64,
     cancel: Arc<AtomicBool>,
     loading: bool,
@@ -220,21 +258,10 @@ impl Prototype {
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             theme::follow_appearance(Some(window), cx)
         });
-        let scratch = cx.new(|cx| {
-            EditorState::new(window, cx)
-                .language("rust")
-                .default_value(SAMPLE)
-        });
-        let subscription = cx.subscribe(&scratch, |this: &mut Self, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.dirty = true;
-                cx.notify();
-            }
-        });
         let weak = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             weak.update(cx, |this, cx| {
-                if !this.dirty && !this.documents.iter().any(|document| document.dirty) {
+                if !this.documents.iter().any(|document| document.dirty) {
                     return true;
                 }
                 if this.closing {
@@ -253,7 +280,6 @@ impl Prototype {
                     let _ = this.update_in(cx, |this, window, cx| {
                         this.closing = false;
                         if discard {
-                            this.dirty = false;
                             window.remove_window();
                         }
                         cx.notify();
@@ -286,11 +312,10 @@ impl Prototype {
             service,
             groups: vec![],
             rows: vec![],
-            scratch,
             sidebar: Sidebar::Explorer,
             sidebar_visible: true,
             quick_open: None,
-            active: Pane::Scratch,
+            active: Pane::Welcome,
             documents: Vec::new(),
             owners,
             tree: Vec::new(),
@@ -314,21 +339,21 @@ impl Prototype {
             file_task: None,
             file_generation: 0,
             path_prompt_open: false,
-            dirty: false,
             closing: false,
             preview: None,
             preview_title: String::new(),
+            preview_diff: None,
             generation: 0,
             cancel: Arc::new(AtomicBool::new(false)),
             loading: false,
             excluded: 0,
             issues: vec![],
-            message: "原型编辑不写磁盘；关闭和退出不保留内容".into(),
+            message: String::new(),
             refresh_task: None,
             preview_task: None,
             preview_cancel: Arc::new(AtomicBool::new(false)),
             preview_generation: 0,
-            _subscriptions: vec![subscription, search_subscription, appearance],
+            _subscriptions: vec![search_subscription, appearance],
         };
         this.refresh_tree(window, cx);
         this.refresh(window, cx);
@@ -506,14 +531,13 @@ impl Prototype {
 
     fn active_editor(&self) -> Option<Entity<EditorState>> {
         match self.active {
-            Pane::Scratch => Some(self.scratch.clone()),
             Pane::Document(id) => self
                 .documents
                 .iter()
                 .find(|doc| doc.id == id)
                 .map(|doc| doc.editor.clone()),
             Pane::Diff => self.preview.clone(),
-            Pane::Markdown => None,
+            Pane::Welcome => None,
         }
     }
 
@@ -528,18 +552,7 @@ impl Prototype {
         self.file_task = None;
         self.active = pane;
         self.reveal_pending = matches!(pane, Pane::Document(_));
-        let editor = match pane {
-            Pane::Scratch => Some(self.scratch.clone()),
-            Pane::Document(id) => self
-                .documents
-                .iter()
-                .find(|doc| doc.id == id)
-                .map(|doc| doc.editor.clone()),
-            _ => None,
-        };
-        if let Some(editor) = editor {
-            editor.update(cx, |editor, cx| editor.focus(window, cx));
-        }
+        self.focus_active_editor(window, cx);
         self.reveal_current_file(window, cx);
         cx.notify();
     }
@@ -729,11 +742,7 @@ impl Prototype {
                     cx.notify();
                     return;
                 }
-                let language = match loaded.path.extension().and_then(|ext| ext.to_str()) {
-                    Some("rs") => "rust",
-                    Some("md") => "markdown",
-                    _ => "plain",
-                };
+                let (language, language_name) = language_for(&loaded.path);
                 let editor = cx.new(|cx| {
                     EditorState::new(window, cx)
                         .language(language)
@@ -757,6 +766,9 @@ impl Prototype {
                     dirty: false,
                     readonly: loaded.readonly,
                     bytes: loaded.bytes,
+                    language: language_name,
+                    crlf: loaded.crlf,
+                    bom: loaded.bom,
                     _subscription: subscription,
                 });
                 this.owners.borrow_mut().insert(
@@ -767,7 +779,7 @@ impl Prototype {
                         window: window.window_handle(),
                     },
                 );
-                this.message = "原型编辑不写磁盘；关闭和退出不保留内容".into();
+                this.message.clear();
                 this.select_pane(Pane::Document(id), window, cx);
             });
         }));
@@ -782,7 +794,7 @@ impl Prototype {
                 .documents
                 .last()
                 .map(|doc| Pane::Document(doc.id))
-                .unwrap_or(Pane::Scratch);
+                .unwrap_or(Pane::Welcome);
             self.select_pane(pane, window, cx);
         }
         cx.notify();
@@ -1042,8 +1054,13 @@ impl Prototype {
         self.preview_task = None;
         self.preview = None;
         self.preview_title.clear();
-        if matches!(self.active, Pane::Diff | Pane::Markdown) {
-            self.active = Pane::Scratch;
+        self.preview_diff = None;
+        if self.active == Pane::Diff {
+            self.active = self
+                .documents
+                .last()
+                .map(|doc| Pane::Document(doc.id))
+                .unwrap_or(Pane::Welcome);
         }
         cx.notify();
     }
@@ -1076,6 +1093,22 @@ impl Prototype {
             },
         };
         let title = format!("{:?} · {}", side, change.path.display());
+        let diff_tab = DiffTab {
+            label: format!(
+                "{} ({})",
+                change
+                    .path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy(),
+                match side {
+                    DiffSide::Staged => "已暂存",
+                    DiffSide::Worktree => "工作树",
+                }
+            ),
+            tooltip: g.repo.worktree.join(&change.path).display().to_string(),
+            path: g.repo.worktree.join(&change.path),
+        };
         self.close_preview(cx);
         self.preview_cancel = Arc::new(AtomicBool::new(false));
         let cancel = self.preview_cancel.clone();
@@ -1084,6 +1117,7 @@ impl Prototype {
         let repo_id = request.repo.id.clone();
         let generation = request.generation;
         self.preview_title = format!("正在加载 {title}");
+        self.preview_diff = Some(diff_tab);
         self.active = Pane::Diff;
         let job = cx.background_spawn(async move { service.execute(&request, &cancel) });
         self.preview_task = Some(cx.spawn_in(window, async move |this, cx| {
@@ -1120,185 +1154,8 @@ impl Prototype {
 impl Render for Prototype {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = theme::colors(cx);
-        let content = match self.active {
-            Pane::Markdown => div()
-                .id("markdown-preview")
-                .size_full()
-                .overflow_y_scroll()
-                .p_4()
-                .child(TextView::markdown("sample-markdown", MARKDOWN))
-                .into_any_element(),
-            Pane::Diff => match &self.preview {
-                Some(editor) => Editor::new(editor)
-                    .readonly(true)
-                    .bordered(false)
-                    .size_full()
-                    .into_any_element(),
-                None => div()
-                    .p_4()
-                    .child(self.preview_title.clone())
-                    .into_any_element(),
-            },
-            Pane::Document(id) => match self.documents.iter().find(|document| document.id == id) {
-                Some(document) => Editor::new(&document.editor)
-                    .readonly(document.readonly)
-                    .bordered(false)
-                    .size_full()
-                    .into_any_element(),
-                None => div().into_any_element(),
-            },
-            Pane::Scratch => Editor::new(&self.scratch)
-                .bordered(false)
-                .size_full()
-                .into_any_element(),
-        };
-        let title = match self.active {
-            Pane::Document(id) => self
-                .documents
-                .iter()
-                .find(|doc| doc.id == id)
-                .map(|doc| {
-                    format!(
-                        "{} · {}",
-                        self.root
-                            .as_ref()
-                            .and_then(|root| doc.path.strip_prefix(root).ok())
-                            .unwrap_or(&doc.path)
-                            .display(),
-                        if doc.readonly {
-                            "硬链接：只读"
-                        } else {
-                            "临时编辑：不写磁盘"
-                        }
-                    )
-                })
-                .unwrap_or_default(),
-            Pane::Diff => format!("{} · 只读", self.preview_title),
-            Pane::Markdown => "Markdown 原生预览样例".into(),
-            Pane::Scratch => "输入测试.rs · 临时编辑：不写磁盘".into(),
-        };
-        let mut tabs = vec![
-            Button::new("scratch-tab")
-                .small()
-                .ghost()
-                .label(if self.dirty {
-                    "输入测试.rs ●"
-                } else {
-                    "输入测试.rs"
-                })
-                .on_click(
-                    cx.listener(|this, _, window, cx| this.select_pane(Pane::Scratch, window, cx)),
-                )
-                .into_any_element(),
-        ];
-        for (index, document) in self.documents.iter().enumerate() {
-            let id = document.id;
-            let label = format!(
-                "{}{}",
-                document
-                    .path
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy(),
-                if document.dirty { " ●" } else { "" }
-            );
-            tabs.push(
-                h_flex()
-                    .id(("document-tab", index))
-                    .flex_shrink_0()
-                    .h(theme::BAR_HEIGHT)
-                    .border_t(theme::INDICATOR)
-                    .border_color(if self.active == Pane::Document(id) {
-                        colors.accent
-                    } else {
-                        colors.tabs
-                    })
-                    .bg(if self.active == Pane::Document(id) {
-                        colors.editor
-                    } else {
-                        colors.tabs
-                    })
-                    .child(
-                        Button::new(("select-tab", index))
-                            .small()
-                            .ghost()
-                            .label(label)
-                            .tooltip(document.path.to_string_lossy().into_owned())
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.select_pane(Pane::Document(id), window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new(("close-tab", index))
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::Close)
-                            .tooltip("关闭文件")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.close_document(id, window, cx)
-                            })),
-                    )
-                    .into_any_element(),
-            );
-        }
-        if !self.preview_title.is_empty() {
-            tabs.push(
-                Button::new("diff-tab")
-                    .small()
-                    .ghost()
-                    .label("Diff · 只读")
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.select_pane(Pane::Diff, window, cx)),
-                    )
-                    .into_any_element(),
-            );
-            tabs.push(
-                Button::new("close-diff")
-                    .xsmall()
-                    .ghost()
-                    .icon(IconName::Close)
-                    .tooltip("关闭 Diff")
-                    .on_click(cx.listener(|this, _, _, cx| this.close_preview(cx)))
-                    .into_any_element(),
-            );
-        }
-        tabs.push(
-            Button::new("markdown-tab")
-                .small()
-                .ghost()
-                .label("Markdown 样例")
-                .on_click(
-                    cx.listener(|this, _, window, cx| this.select_pane(Pane::Markdown, window, cx)),
-                )
-                .into_any_element(),
-        );
         let sidebar = self.render_sidebar(cx);
-        let editor = v_flex()
-            .size_full()
-            .min_w_0()
-            .min_h_0()
-            .child(
-                h_flex()
-                    .id("file-tabs")
-                    .h(theme::BAR_HEIGHT)
-                    .w_full()
-                    .flex_shrink_0()
-                    .overflow_x_scroll()
-                    .bg(colors.tabs)
-                    .children(tabs),
-            )
-            .child(
-                h_flex()
-                    .h(theme::ROW_HEIGHT)
-                    .w_full()
-                    .flex_shrink_0()
-                    .overflow_hidden()
-                    .px_3()
-                    .text_size(theme::TEXT_CAPTION)
-                    .text_color(cx.theme().muted_foreground)
-                    .child(title),
-            )
-            .child(div().flex_1().min_h_0().child(content));
+        let editor = self.render_editor_area(cx);
         v_flex()
             .size_full()
             .key_context("WorkspaceEditor")

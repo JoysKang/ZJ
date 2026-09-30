@@ -249,6 +249,10 @@ pub struct TextFile {
     pub text: String,
     pub bytes: usize,
     pub readonly: bool,
+    /// The file uses CRLF line endings (first line ending decides).
+    pub crlf: bool,
+    /// A UTF-8 byte order mark was present and stripped for editing.
+    pub bom: bool,
 }
 
 // Anchor every component at an open directory; a replaced ancestor cannot redirect the read.
@@ -316,6 +320,10 @@ pub fn text_file(root: Option<&Path>, path: &Path) -> io::Result<TextFile> {
             inode: metadata.ino(),
         },
         path,
+        crlf: text
+            .find('\n')
+            .is_some_and(|newline| text[..newline].ends_with('\r')),
+        bom: text.starts_with('\u{feff}'),
         text: text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned(),
         bytes: size,
         readonly: metadata.nlink() > 1,
@@ -354,6 +362,7 @@ mod tests {
         assert!(PathIndex::build(&root, &AtomicBool::new(true), &not_git).incomplete);
         let loaded = text_file(Some(&root), &path).unwrap();
         assert_eq!(loaded.text, "hello\r\n");
+        assert!(loaded.crlf && loaded.bom);
         assert!(!loaded.readonly);
         fs::hard_link(&path, root.join("hard")).unwrap();
         assert!(text_file(Some(&root), &path).unwrap().readonly);
