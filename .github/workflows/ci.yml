@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # stripped aarch64 --profile dist 二进制体积上限（字节）。
+  # TODO: 首次在 macOS runner 上运行后，按实测值 + 约 10% 校准；
+  # 当前取 Linux x86_64 dist 实测 34.8 MB + 约 10%。
+  BINARY_BUDGET_BYTES: "38000000"
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: test
+        run: cargo test --workspace --locked
+      # tools/check_git_deadlines.py 依赖 target/release 产物，另需一次 release 构建，暂不放进 CI。
+      - name: build dist
+        run: cargo build --profile dist --locked
+      - name: 体积预算
+        run: |
+          size=$(stat -f%z target/dist/workspace-editor)
+          echo "binary: ${size} bytes (budget ${BINARY_BUDGET_BYTES})" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$size" -gt "$BINARY_BUDGET_BYTES" ]; then
+            echo "::error::dist 二进制 ${size} 字节，超过预算 ${BINARY_BUDGET_BYTES}"
+            exit 1
+          fi
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
