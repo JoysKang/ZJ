@@ -8492,6 +8492,7 @@ version = "0.1.0"
 dependencies = [
  "gpui-kit",
  "libc",
+ "serde_json",
  "workspace-editor-core",
  "workspace-editor-git",
 ]

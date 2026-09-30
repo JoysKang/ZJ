@@ -9,6 +9,8 @@ gpui-kit.workspace = true
 workspace-editor-core.workspace = true
 workspace-editor-git.workspace = true
 libc = "0.2"
+# Already in the tree through GPUI Kit; used to build the syntax theme in Kit's JSON shape.
+serde_json = "1"
 
 [lints]
 workspace = true

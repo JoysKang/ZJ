@@ -1117,7 +1117,7 @@ impl Prototype {
                 };
                 base.role(Role::Button)
                     .aria_label(format!("仓库 {name} · {status}"))
-                    .bg(colors.bar)
+                    .bg(colors.panel)
                     .hover(|row| row.bg(colors.hover))
                     .child(chevron(group.expanded, colors))
                     .child(format!("{name} · {status}"))
@@ -1435,12 +1435,12 @@ impl Render for Prototype {
                     .border_color(if self.active == Pane::Document(id) {
                         colors.accent
                     } else {
-                        colors.bar
+                        colors.tabs
                     })
                     .bg(if self.active == Pane::Document(id) {
                         colors.editor
                     } else {
-                        colors.bar
+                        colors.tabs
                     })
                     .child(
                         Button::new(("select-tab", index))
@@ -1590,7 +1590,7 @@ impl Render for Prototype {
                     .w_full()
                     .flex_shrink_0()
                     .overflow_x_scroll()
-                    .bg(colors.bar)
+                    .bg(colors.tabs)
                     .children(tabs),
             )
             .child(
@@ -1626,7 +1626,7 @@ impl Render for Prototype {
                     .flex_shrink_0()
                     .px_3()
                     .justify_between()
-                    .bg(colors.bar)
+                    .bg(colors.title)
                     .text_size(theme::TEXT_CAPTION)
                     .border_b_1()
                     .border_color(cx.theme().border)
@@ -1696,7 +1696,7 @@ impl Render for Prototype {
                     .flex_shrink_0()
                     .px_2()
                     .overflow_hidden()
-                    .bg(colors.bar)
+                    .bg(colors.panel)
                     .text_color(colors.muted)
                     .text_size(theme::TEXT_CAPTION)
                     .border_t_1()
