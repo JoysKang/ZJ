@@ -1,10 +1,39 @@
 mod files;
 mod fuzzy;
 mod prototype;
+mod theme;
 use gpui_kit::*;
 use prototype::{DocumentOwners, Prototype};
-use std::{cell::RefCell, path::PathBuf, rc::Rc, time::Duration};
+use std::{borrow::Cow, cell::RefCell, path::PathBuf, rc::Rc, time::Duration};
 use workspace_editor_git::GitService;
+
+/// Kit's default icon set plus the few Lucide icons it does not embed (see `assets/icons`).
+struct AppAssets;
+
+const EXTRA_ICONS: &[(&str, &[u8])] = &[(
+    "icons/git-branch.svg",
+    include_bytes!("../assets/icons/git-branch.svg"),
+)];
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        match EXTRA_ICONS.iter().find(|(name, _)| *name == path) {
+            Some((_, bytes)) => Ok(Some(Cow::Borrowed(bytes))),
+            None => gpui_kit::assets::Assets.load(path),
+        }
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        let mut names = gpui_kit::assets::Assets.list(path)?;
+        names.extend(
+            EXTRA_ICONS
+                .iter()
+                .filter(|(name, _)| name.starts_with(path))
+                .map(|(name, _)| SharedString::from(*name)),
+        );
+        Ok(names)
+    }
+}
 
 fn open_workspace(
     root: Option<PathBuf>,
@@ -12,13 +41,14 @@ fn open_workspace(
     documents: DocumentOwners,
     index: usize,
     cx: &mut App,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let offset = theme::WINDOW_ORIGIN + theme::WINDOW_CASCADE * index as f32;
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-            point(px(60. + index as f32 * 28.), px(60. + index as f32 * 28.)),
-            size(px(1100.), px(720.)),
+            point(offset, offset),
+            size(theme::WINDOW_WIDTH, theme::WINDOW_HEIGHT),
         ))),
-        window_min_size: Some(size(px(760.), px(480.))),
+        window_min_size: Some(size(theme::WINDOW_MIN_WIDTH, theme::WINDOW_MIN_HEIGHT)),
         ..Default::default()
     };
     gpui_kit::open_window(options, cx, |window, cx| {
@@ -28,7 +58,7 @@ fn open_workspace(
 }
 
 #[allow(clippy::print_stdout)] // --help output belongs on stdout.
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut roots = Vec::new();
     let mut windows = None;
     let mut args = std::env::args_os().skip(1);
@@ -63,9 +93,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let service = GitService::new(2, Duration::from_secs(30))?;
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            theme::follow_appearance(None, cx);
             cx.bind_keys([
                 KeyBinding::new("cmd-s", prototype::SaveUnavailable, Some("WorkspaceEditor")),
                 KeyBinding::new("cmd-o", prototype::OpenFile, Some("WorkspaceEditor")),

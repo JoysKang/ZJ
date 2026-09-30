@@ -1,8 +1,9 @@
 use crate::files::{self, Entry, PathIndex, SearchResults};
+use crate::theme;
 use gpui_kit::{
     assets::IconName,
     component::{
-        ActiveTheme, Disableable, Sizable,
+        ActiveTheme, Disableable, Icon, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         input::{Editor, EditorState, Input, InputEvent, InputState},
@@ -164,6 +165,10 @@ impl Prototype {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        theme::follow_appearance(Some(window), cx);
+        let appearance = cx.observe_window_appearance(window, |_, window, cx| {
+            theme::follow_appearance(Some(window), cx)
+        });
         let scratch = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language("rust")
@@ -213,7 +218,7 @@ impl Prototype {
             .and_then(|p| p.file_name())
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| format!("输入测试 {number}"));
-        window.set_window_title(&format!("workspace-editor · {name} · P1"));
+        window.set_window_title(&format!("workspace-editor · {name}"));
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("按文件名或路径搜索"));
         let search_subscription = cx.subscribe_in(
@@ -268,7 +273,7 @@ impl Prototype {
             preview_task: None,
             preview_cancel: Arc::new(AtomicBool::new(false)),
             preview_generation: 0,
-            _subscriptions: vec![subscription, search_subscription],
+            _subscriptions: vec![subscription, search_subscription, appearance],
         };
         this.refresh_tree(window, cx);
         this.refresh(window, cx);
@@ -545,7 +550,7 @@ impl Prototype {
                     Ok(Some(path)) if directory => {
                         if this.root.is_none() {
                             window.set_window_title(&format!(
-                                "workspace-editor · {} · P1",
+                                "workspace-editor · {}",
                                 path.display()
                             ));
                             this.root = Some(path);
@@ -1000,28 +1005,30 @@ impl Prototype {
             .documents
             .iter()
             .any(|doc| self.active == Pane::Document(doc.id) && doc.path == path);
+        let colors = theme::colors(cx);
         h_flex()
             .id(("tree-row", index))
-            .h(px(27.))
+            .h(theme::ROW_HEIGHT)
             .w_full()
             .gap_1()
-            .pl(px(8. + row.depth as f32 * 14.))
+            .pl(theme::SPACE_2 + theme::TREE_INDENT * row.depth as f32)
             .pr_2()
             .overflow_hidden()
-            .text_sm()
+            .text_size(theme::TEXT_BODY)
             .role(Role::Button)
             .aria_label(format!(
                 "{} {}",
                 if directory { "目录" } else { "文件" },
                 path.display()
             ))
-            .when(selected, |row| row.bg(cx.theme().secondary))
-            .hover(|row| row.bg(cx.theme().secondary))
-            .child(div().w(px(12.)).flex_shrink_0().child(if directory {
-                if expanded { "▾" } else { "▸" }
-            } else {
-                ""
-            }))
+            .when(selected, |row| row.bg(colors.selected))
+            .when(!selected, |row| row.hover(|row| row.bg(colors.hover)))
+            .child(
+                div()
+                    .w(theme::TWISTY_WIDTH)
+                    .flex_shrink_0()
+                    .when(directory, |twisty| twisty.child(chevron(expanded, colors))),
+            )
             .child(if directory {
                 if expanded {
                     IconName::FolderOpen
@@ -1056,17 +1063,18 @@ impl Prototype {
             .unwrap_or(&path)
             .to_string_lossy()
             .into_owned();
+        let colors = theme::colors(cx);
         h_flex()
             .id(("search-row", index))
-            .h(px(28.))
+            .h(theme::ROW_HEIGHT)
             .w_full()
             .px_2()
             .gap_2()
-            .text_sm()
+            .text_size(theme::TEXT_BODY)
             .overflow_hidden()
             .role(Role::Button)
             .aria_label(format!("打开文件 {label}"))
-            .hover(|row| row.bg(cx.theme().secondary))
+            .hover(|row| row.bg(colors.hover))
             .child(IconName::FileText)
             .child(label)
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -1076,15 +1084,17 @@ impl Prototype {
     }
 
     fn row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let colors = theme::colors(cx);
         let base = div()
             .id(index)
-            .h(px(28.))
+            .h(theme::ROW_HEIGHT)
             .w_full()
             .px_2()
             .flex()
             .items_center()
+            .gap_1()
             .overflow_hidden()
-            .text_sm();
+            .text_size(theme::TEXT_BODY);
         match self.rows[index] {
             Row::Group(g) => {
                 let group = &self.groups[g];
@@ -1107,11 +1117,10 @@ impl Prototype {
                 };
                 base.role(Role::Button)
                     .aria_label(format!("仓库 {name} · {status}"))
-                    .bg(cx.theme().secondary)
-                    .child(format!(
-                        "{} {name} · {status}",
-                        if group.expanded { "▾" } else { "▸" }
-                    ))
+                    .bg(colors.bar)
+                    .hover(|row| row.bg(colors.hover))
+                    .child(chevron(group.expanded, colors))
+                    .child(format!("{name} · {status}"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.groups[g].expanded = !this.groups[g].expanded;
                         this.rebuild_rows();
@@ -1132,14 +1141,16 @@ impl Prototype {
                     return base.into_any_element();
                 };
                 let c = &status.changes[i];
-                let state = if c.kind == ChangeKind::Conflict {
-                    "冲突".into()
-                } else {
-                    char::from(match side {
-                        DiffSide::Staged => c.index,
-                        DiffSide::Worktree => c.worktree,
-                    })
-                    .to_string()
+                let code = match side {
+                    DiffSide::Staged => c.index,
+                    DiffSide::Worktree => c.worktree,
+                };
+                let (state, color) = match (c.kind, code) {
+                    (ChangeKind::Conflict, _) => ("!".to_string(), colors.conflict),
+                    (ChangeKind::Untracked, _) => ("U".to_string(), colors.untracked),
+                    (_, b'A') => ("A".to_string(), colors.added),
+                    (_, b'D') => ("D".to_string(), colors.deleted),
+                    (_, code) => (char::from(code).to_string(), colors.modified),
                 };
                 base.role(Role::Button)
                     .aria_label(format!(
@@ -1149,7 +1160,15 @@ impl Prototype {
                         c.path.display()
                     ))
                     .pl_4()
-                    .child(format!("{state}  {}", c.path.display()))
+                    .hover(|row| row.bg(colors.hover))
+                    .child(
+                        div()
+                            .w(theme::STATUS_GLYPH_WIDTH)
+                            .flex_shrink_0()
+                            .text_color(color)
+                            .child(state),
+                    )
+                    .child(c.path.display().to_string())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_diff(g, i, side, window, cx)
                     }))
@@ -1159,8 +1178,19 @@ impl Prototype {
     }
 }
 
+fn chevron(expanded: bool, colors: theme::Colors) -> Icon {
+    Icon::new(if expanded {
+        IconName::ChevronDown
+    } else {
+        IconName::ChevronRight
+    })
+    .size(theme::ICON_SIZE)
+    .text_color(colors.muted)
+}
+
 impl Render for Prototype {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = theme::colors(cx);
         let sidebar_title = match self.sidebar {
             Sidebar::Explorer => "资源管理器",
             Sidebar::Search => "搜索",
@@ -1174,7 +1204,7 @@ impl Render for Prototype {
                     div()
                         .px_2()
                         .py_1()
-                        .text_xs()
+                        .text_size(theme::TEXT_CAPTION)
                         .text_color(cx.theme().muted_foreground)
                         .child(self.tree_message.clone()),
                 )
@@ -1201,33 +1231,30 @@ impl Render for Prototype {
                 .child(
                     div()
                         .px_2()
-                        .text_xs()
+                        .text_size(theme::TEXT_CAPTION)
                         .text_color(cx.theme().muted_foreground)
                         .child("模糊匹配文件名与路径 · 当前文件查找 ⌘F"),
                 )
-                .child(
-                    div()
-                        .px_2()
-                        .text_xs()
-                        .child(if self.searching && self.index.is_none() {
-                            "正在建立文件索引…".into()
-                        } else if self.searching {
-                            "搜索中…".into()
-                        } else if self.search_input.read(cx).value().trim().is_empty() {
-                            "输入文件名或相对路径".into()
-                        } else {
-                            format!(
-                                "{} 个结果{} · {} 项读取错误",
-                                self.search_results.paths.len(),
-                                if self.search_results.incomplete {
-                                    "（部分结果，请缩小搜索范围）"
-                                } else {
-                                    ""
-                                },
-                                self.search_results.errors
-                            )
-                        }),
-                )
+                .child(div().px_2().text_size(theme::TEXT_CAPTION).child(
+                    if self.searching && self.index.is_none() {
+                        "正在建立文件索引…".into()
+                    } else if self.searching {
+                        "搜索中…".into()
+                    } else if self.search_input.read(cx).value().trim().is_empty() {
+                        "输入文件名或相对路径".into()
+                    } else {
+                        format!(
+                            "{} 个结果{} · {} 项读取错误",
+                            self.search_results.paths.len(),
+                            if self.search_results.incomplete {
+                                "（部分结果，请缩小搜索范围）"
+                            } else {
+                                ""
+                            },
+                            self.search_results.errors
+                        )
+                    },
+                ))
                 .child(
                     uniform_list(
                         "file-search",
@@ -1245,7 +1272,7 @@ impl Render for Prototype {
                     div()
                         .px_2()
                         .pb_2()
-                        .text_xs()
+                        .text_size(theme::TEXT_CAPTION)
                         .text_color(cx.theme().muted_foreground)
                         .child(
                             "Git 仓库遵循 .gitignore；其他目录跳过依赖与构建目录；不遍历目录链接",
@@ -1289,15 +1316,21 @@ impl Render for Prototype {
                                 })),
                         ),
                 )
-                .child(div().px_2().pb_1().text_xs().child(format!(
-                    "全部仓库 · {} · {}",
-                    self.groups.len(),
-                    if self.loading {
-                        "刷新中"
-                    } else {
-                        "磁盘快照"
-                    }
-                )))
+                .child(
+                    div()
+                        .px_2()
+                        .pb_1()
+                        .text_size(theme::TEXT_CAPTION)
+                        .child(format!(
+                            "全部仓库 · {} · {}",
+                            self.groups.len(),
+                            if self.loading {
+                                "刷新中"
+                            } else {
+                                "磁盘快照"
+                            }
+                        )),
+                )
                 .child(
                     uniform_list(
                         "changes",
@@ -1397,17 +1430,17 @@ impl Render for Prototype {
                 h_flex()
                     .id(("document-tab", index))
                     .flex_shrink_0()
-                    .h(px(36.))
-                    .border_t_2()
+                    .h(theme::BAR_HEIGHT)
+                    .border_t(theme::INDICATOR)
                     .border_color(if self.active == Pane::Document(id) {
-                        cx.theme().primary
+                        colors.accent
                     } else {
-                        cx.theme().border
+                        colors.bar
                     })
                     .bg(if self.active == Pane::Document(id) {
-                        cx.theme().background
+                        colors.editor
                     } else {
-                        cx.theme().secondary
+                        colors.bar
                     })
                     .child(
                         Button::new(("select-tab", index))
@@ -1421,9 +1454,9 @@ impl Render for Prototype {
                     )
                     .child(
                         Button::new(("close-tab", index))
-                            .small()
+                            .xsmall()
                             .ghost()
-                            .label("×")
+                            .icon(IconName::Close)
                             .tooltip("关闭文件")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.close_document(id, window, cx)
@@ -1445,9 +1478,9 @@ impl Render for Prototype {
             );
             tabs.push(
                 Button::new("close-diff")
-                    .small()
+                    .xsmall()
                     .ghost()
-                    .label("×")
+                    .icon(IconName::Close)
                     .tooltip("关闭 Diff")
                     .on_click(cx.listener(|this, _, _, cx| this.close_preview(cx)))
                     .into_any_element(),
@@ -1463,25 +1496,28 @@ impl Render for Prototype {
                 )
                 .into_any_element(),
         );
+        let rail_item = |active: bool| {
+            if active {
+                colors.selected
+            } else {
+                colors.panel
+            }
+        };
         let rail = v_flex()
-            .w(px(48.))
+            .w(theme::RAIL_WIDTH)
             .h_full()
             .flex_shrink_0()
             .py_2()
             .gap_2()
             .items_center()
-            .bg(cx.theme().secondary)
+            .bg(colors.panel)
             .border_r_1()
-            .border_color(cx.theme().border)
+            .border_color(colors.border)
             .child(
                 Button::new("activity-explorer")
                     .ghost()
                     .accessibility_label("资源管理器")
-                    .bg(if self.sidebar == Sidebar::Explorer {
-                        cx.theme().background
-                    } else {
-                        cx.theme().secondary
-                    })
+                    .bg(rail_item(self.sidebar == Sidebar::Explorer))
                     .icon(IconName::Folder)
                     .tooltip("资源管理器")
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -1493,11 +1529,7 @@ impl Render for Prototype {
                 Button::new("activity-search")
                     .ghost()
                     .accessibility_label("搜索")
-                    .bg(if self.sidebar == Sidebar::Search {
-                        cx.theme().background
-                    } else {
-                        cx.theme().secondary
-                    })
+                    .bg(rail_item(self.sidebar == Sidebar::Search))
                     .icon(IconName::Search)
                     .tooltip("搜索")
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -1511,12 +1543,8 @@ impl Render for Prototype {
                 Button::new("activity-scm")
                     .ghost()
                     .accessibility_label("源代码管理")
-                    .bg(if self.sidebar == Sidebar::SourceControl {
-                        cx.theme().background
-                    } else {
-                        cx.theme().secondary
-                    })
-                    .label("⑂")
+                    .bg(rail_item(self.sidebar == Sidebar::SourceControl))
+                    .icon(IconName::GitBranch)
                     .tooltip("源代码管理")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.sidebar = Sidebar::SourceControl;
@@ -1527,14 +1555,14 @@ impl Render for Prototype {
             v_flex()
                 .size_full()
                 .min_h_0()
-                .bg(cx.theme().muted)
+                .bg(colors.panel)
                 .child(
                     h_flex()
-                        .h(px(38.))
+                        .h(theme::BAR_HEIGHT)
                         .px_3()
                         .justify_between()
                         .flex_shrink_0()
-                        .text_sm()
+                        .text_size(theme::TEXT_BODY)
                         .child(sidebar_title)
                         .when(self.sidebar == Sidebar::Explorer, |header| {
                             header.child(
@@ -1558,21 +1586,21 @@ impl Render for Prototype {
             .child(
                 h_flex()
                     .id("file-tabs")
-                    .h(px(38.))
+                    .h(theme::BAR_HEIGHT)
                     .w_full()
                     .flex_shrink_0()
                     .overflow_x_scroll()
-                    .bg(cx.theme().secondary)
+                    .bg(colors.bar)
                     .children(tabs),
             )
             .child(
-                div()
-                    .h(px(28.))
+                h_flex()
+                    .h(theme::ROW_HEIGHT)
                     .w_full()
                     .flex_shrink_0()
                     .overflow_hidden()
                     .px_3()
-                    .text_xs()
+                    .text_size(theme::TEXT_CAPTION)
                     .text_color(cx.theme().muted_foreground)
                     .child(title),
             )
@@ -1594,11 +1622,12 @@ impl Render for Prototype {
             .text_color(cx.theme().foreground)
             .child(
                 h_flex()
-                    .h(px(38.))
+                    .h(theme::BAR_HEIGHT)
                     .flex_shrink_0()
                     .px_3()
                     .justify_between()
-                    .text_xs()
+                    .bg(colors.bar)
+                    .text_size(theme::TEXT_CAPTION)
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .child(
@@ -1649,25 +1678,27 @@ impl Render for Prototype {
                         h_resizable("workbench-panels")
                             .child(
                                 resizable_panel()
-                                    .size(px(280.))
-                                    .size_range(px(200.)..px(520.))
+                                    .size(theme::SIDEBAR_WIDTH)
+                                    .size_range(theme::SIDEBAR_MIN..theme::SIDEBAR_MAX)
                                     .child(sidebar),
                             )
                             .child(
                                 resizable_panel()
-                                    .size_range(px(320.)..px(4000.))
+                                    .size_range(theme::EDITOR_MIN..theme::EDITOR_MAX)
                                     .child(editor),
                             ),
                     ),
                 ),
             )
             .child(
-                div()
-                    .h(px(25.))
+                h_flex()
+                    .h(theme::STATUS_HEIGHT)
                     .flex_shrink_0()
                     .px_2()
                     .overflow_hidden()
-                    .text_xs()
+                    .bg(colors.bar)
+                    .text_color(colors.muted)
+                    .text_size(theme::TEXT_CAPTION)
                     .border_t_1()
                     .border_color(cx.theme().border)
                     .child(format!(
