@@ -1,0 +1,9 @@
+[package]
+name = "workspace-editor-git"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+workspace-editor-core.workspace = true
+libc = "=0.2.189"

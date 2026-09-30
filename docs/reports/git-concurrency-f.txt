@@ -1,0 +1,4 @@
+discovery worktrees=36 issues=0 seconds=1.387
+concurrency=1 changes=32 errors=0 seconds=0.467
+concurrency=2 changes=32 errors=0 seconds=0.226
+concurrency=4 changes=32 errors=0 seconds=0.122

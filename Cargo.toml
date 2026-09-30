@@ -1,0 +1,20 @@
+[workspace]
+members = ["crates/app", "crates/core", "crates/git_service"]
+default-members = ["crates/app"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+workspace-editor-core = { path = "crates/core" }
+workspace-editor-git = { path = "crates/git_service" }
+gpui-kit = { version = "=0.7.0", features = ["tree-sitter-rust", "tree-sitter-diff", "tree-sitter-markdown"] }
+
+[profile.release]
+debug = 1
+
+[profile.dev]
+debug = 1

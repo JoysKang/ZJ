@@ -1,0 +1,11 @@
+[package]
+name = "workspace-editor"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui-kit.workspace = true
+workspace-editor-core.workspace = true
+workspace-editor-git.workspace = true
+libc = "=0.2.189"
