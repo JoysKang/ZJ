@@ -39,6 +39,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 - `crates/git_service`：调用系统 git，负责有界输出、超时、取消、全局限流，**不依赖 GPUI**。
 - `crates/app`：GPUI 界面。
   - `theme.rs`：唯一允许写字面尺寸和颜色的地方。
+  - `assets.rs`：内嵌资源；`file_icons.rs`：文件类型到图标的映射。
   - `files.rs`：受限的只读文件访问与快速打开路径索引；`fuzzy.rs`：模糊匹配打分。
   - `prototype.rs`：工作台。
 - UI 的 render 回调里不做 IO、不跑 Git 命令、不做全文解析；这些都通过 `background_spawn` 执行，结果带 generation 校验。
@@ -47,7 +48,8 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 - 尺寸、间距、行高、颜色都从 `crates/app/src/theme.rs` 的 token 取，不要在 UI 代码里新写 `px(数字)` 或色值。
 - 使用 4 px 网格。列表行统一用 `ROW_HEIGHT`，各种栏统一用 `BAR_HEIGHT` 或 `STATUS_HEIGHT`。
-- 图标只用 Lucide（`IconName`），不要用文本符号充当图标。Kit 默认只内嵌 101 个图标；需要额外的图标时，把 SVG 放进 `crates/app/assets/icons/`，并登记到 `main.rs` 的 `EXTRA_ICONS`。
+- 界面图标只用 Lucide（`IconName`），不要用文本符号充当图标。Kit 默认只内嵌 101 个图标；需要额外的图标时，把 SVG 放进 `crates/app/assets/icons/`，并登记到 `assets.rs` 的 `EXTRA`。
+- 文件类型图标用 vscode-icons 的一个子集（`crates/app/assets/file-icons/`，MIT 许可），映射写在 `file_icons.rs`。这些是彩色 SVG，用 `img()` 绘制：每个窗口第一次画彩色图片时，GPUI 会分配一张 1024² 的 polychrome 图集（约 4 MiB）。新增图标前先看体积（当前合计约 58 KB）。
 - 文字对比度：正文 ≥ 7:1，次要文字 ≥ 4.5:1（`theme.rs` 里有测试检查）。
 - 外观跟随系统亮暗；可以用环境变量 `ZJ_APPEARANCE=light|dark` 强制指定，方便截图和调试。
 

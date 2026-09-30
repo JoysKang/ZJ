@@ -36,6 +36,7 @@ pub const EDITOR_MAX: Pixels = px(4000.);
 
 // Icons and text.
 pub const ICON_SIZE: Pixels = px(14.);
+pub const FILE_ICON_SIZE: Pixels = px(16.);
 pub const TEXT_BODY: Pixels = px(13.);
 pub const TEXT_CAPTION: Pixels = px(12.);
 

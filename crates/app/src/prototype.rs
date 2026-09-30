@@ -1,5 +1,5 @@
 use crate::files::{self, Entry, PathIndex, SearchResults};
-use crate::theme;
+use crate::{file_icons, theme};
 use gpui_kit::{
     assets::IconName,
     component::{
@@ -1029,15 +1029,15 @@ impl Prototype {
                     .flex_shrink_0()
                     .when(directory, |twisty| twisty.child(chevron(expanded, colors))),
             )
-            .child(if directory {
+            .child(file_icons::icon(if directory {
                 if expanded {
-                    IconName::FolderOpen
+                    file_icons::FOLDER_OPEN
                 } else {
-                    IconName::Folder
+                    file_icons::FOLDER
                 }
             } else {
-                IconName::FileText
-            })
+                file_icons::for_file(&name)
+            }))
             .child(
                 div()
                     .min_w_0()
@@ -1075,7 +1075,9 @@ impl Prototype {
             .role(Role::Button)
             .aria_label(format!("打开文件 {label}"))
             .hover(|row| row.bg(colors.hover))
-            .child(IconName::FileText)
+            .child(file_icons::icon(file_icons::for_file(
+                &path.file_name().unwrap_or_default().to_string_lossy(),
+            )))
             .child(label)
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.open_file(path.clone(), this.root.clone(), window, cx)
