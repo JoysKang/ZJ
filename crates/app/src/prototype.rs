@@ -2,12 +2,10 @@ use crate::files::{self, Entry, PathIndex, SearchResults};
 use crate::theme;
 use gpui_kit::{
     component::{
-        ActiveTheme, h_flex,
         input::{EditorState, InputEvent, InputState},
         resizable::{h_resizable, resizable_panel},
         v_flex,
     },
-    prelude::FluentBuilder,
     *,
 };
 use std::{
@@ -74,11 +72,8 @@ struct Document {
     readonly: bool,
     bytes: usize,
     /// Display name of the language shown in the status bar.
-    #[allow(dead_code)] // Read by the status bar in the next commit.
     language: &'static str,
-    #[allow(dead_code)]
     crlf: bool,
-    #[allow(dead_code)]
     bom: bool,
     _subscription: Subscription,
 }
@@ -213,6 +208,9 @@ pub struct Prototype {
     file_generation: u64,
     path_prompt_open: bool,
     closing: bool,
+    /// Cursor (line, column) of the active editor, 0-based, for the status bar.
+    cursor: Option<(u32, u32)>,
+    _cursor_observer: Option<Subscription>,
     preview: Option<Entity<EditorState>>,
     preview_title: String,
     preview_diff: Option<DiffTab>,
@@ -340,6 +338,8 @@ impl Prototype {
             file_generation: 0,
             path_prompt_open: false,
             closing: false,
+            cursor: None,
+            _cursor_observer: None,
             preview: None,
             preview_title: String::new(),
             preview_diff: None,
@@ -541,6 +541,26 @@ impl Prototype {
         }
     }
 
+    /// Tracks the active editor's cursor. The editor also notifies on caret blink, so the
+    /// workbench only re-renders when the position actually changed.
+    fn observe_cursor(&mut self, cx: &mut Context<Self>) {
+        let editor = self.active_editor();
+        self.cursor = editor.as_ref().map(|editor| {
+            let position = editor.read(cx).cursor_position();
+            (position.line, position.character)
+        });
+        self._cursor_observer = editor.map(|editor| {
+            cx.observe(&editor, |this: &mut Self, editor, cx| {
+                let position = editor.read(cx).cursor_position();
+                let cursor = Some((position.line, position.character));
+                if this.cursor != cursor {
+                    this.cursor = cursor;
+                    cx.notify();
+                }
+            })
+        });
+    }
+
     fn focus_active_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(editor) = self.active_editor() {
             editor.update(cx, |editor, cx| editor.focus(window, cx));
@@ -553,6 +573,7 @@ impl Prototype {
         self.active = pane;
         self.reveal_pending = matches!(pane, Pane::Document(_));
         self.focus_active_editor(window, cx);
+        self.observe_cursor(cx);
         self.reveal_current_file(window, cx);
         cx.notify();
     }
@@ -1139,6 +1160,9 @@ impl Prototype {
                                 .default_value(text)
                         }));
                         this.preview_title = title;
+                        if this.active == Pane::Diff {
+                            this.observe_cursor(cx);
+                        }
                     }
                     Err(e) => {
                         this.preview_title = format!("Diff 加载失败: {e}");
@@ -1154,10 +1178,27 @@ impl Prototype {
 impl Render for Prototype {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = theme::colors(cx);
-        let sidebar = self.render_sidebar(cx);
         let editor = self.render_editor_area(cx);
+        let workbench = if self.sidebar_visible {
+            h_resizable("workbench-panels")
+                .child(
+                    resizable_panel()
+                        .size(theme::SIDEBAR_WIDTH)
+                        .size_range(theme::SIDEBAR_MIN..theme::SIDEBAR_MAX)
+                        .child(self.render_sidebar(cx)),
+                )
+                .child(
+                    resizable_panel()
+                        .size_range(theme::EDITOR_MIN..theme::EDITOR_MAX)
+                        .child(editor),
+                )
+                .into_any_element()
+        } else {
+            editor
+        };
         v_flex()
             .size_full()
+            .relative()
             .key_context("WorkspaceEditor")
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| {
                 this.choose_path(false, window, cx);
@@ -1166,65 +1207,18 @@ impl Render for Prototype {
                 this.choose_path(true, window, cx);
             }))
             .on_action(cx.listener(|this, _: &SaveUnavailable, _, cx| {
-                this.message = "当前原型尚未支持保存：修改仅在内存中，原文件未改动".into();
+                this.message = "尚未支持保存：修改只在内存中，原文件未改动".into();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &QuickOpenFile, window, cx| {
                 this.open_quick_open(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
-            .relative()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
+            .bg(colors.editor)
+            .text_color(colors.foreground)
             .child(self.render_title_bar(cx))
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(div().flex_1().h_full().min_w_0().map(|area| {
-                        if self.sidebar_visible {
-                            area.child(
-                                h_resizable("workbench-panels")
-                                    .child(
-                                        resizable_panel()
-                                            .size(theme::SIDEBAR_WIDTH)
-                                            .size_range(theme::SIDEBAR_MIN..theme::SIDEBAR_MAX)
-                                            .child(sidebar),
-                                    )
-                                    .child(
-                                        resizable_panel()
-                                            .size_range(theme::EDITOR_MIN..theme::EDITOR_MAX)
-                                            .child(editor),
-                                    ),
-                            )
-                        } else {
-                            area.child(editor)
-                        }
-                    })),
-            )
-            .child(
-                h_flex()
-                    .h(theme::STATUS_HEIGHT)
-                    .flex_shrink_0()
-                    .px_2()
-                    .overflow_hidden()
-                    .bg(colors.panel)
-                    .text_color(colors.muted)
-                    .text_size(theme::TEXT_CAPTION)
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(format!(
-                        "{} · {} 个打开文件 · 仓库 {} · 查询错误 {}{}",
-                        self.message,
-                        self.documents.len(),
-                        self.groups.len(),
-                        self.issues.len(),
-                        self.issues
-                            .first()
-                            .map(|issue| format!(" · {issue}"))
-                            .unwrap_or_default()
-                    )),
-            )
+            .child(div().flex_1().min_h_0().w_full().child(workbench))
+            .child(self.render_status_bar(cx))
             .children(self.render_quick_open(cx))
     }
 }
