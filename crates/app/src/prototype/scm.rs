@@ -1,5 +1,6 @@
 //! Source Control view: every repository of the workspace in one tree, VS Code style.
 
+use super::SINGLE_LINE;
 use super::{Prototype, Row, sidebar::chevron};
 use crate::{file_icons, theme};
 use gpui_kit::{
@@ -113,7 +114,7 @@ impl Prototype {
                     .and_then(|root| group.repo.worktree.strip_prefix(root).ok())
                     .filter(|path| !path.as_os_str().is_empty())
                     .unwrap_or(&group.repo.worktree);
-                let name = path.to_string_lossy().into_owned();
+                let name = path.to_string_lossy().replace(SINGLE_LINE, "⏎");
                 let (detail, detail_color, count) = match &group.status {
                     None => ("待确认".to_string(), colors.muted, None),
                     Some(Err(error)) => (format!("错误：{error}"), colors.deleted, None),
@@ -193,11 +194,11 @@ impl Prototype {
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
-                    .into_owned();
+                    .replace(SINGLE_LINE, "⏎");
                 let directory = change
                     .path
                     .parent()
-                    .map(|parent| parent.to_string_lossy().into_owned())
+                    .map(|parent| parent.to_string_lossy().replace(SINGLE_LINE, "⏎"))
                     .unwrap_or_default();
                 base.pl(theme::TREE_BASE + theme::TREE_STEP + theme::TWISTY_WIDTH)
                     .gap_2()

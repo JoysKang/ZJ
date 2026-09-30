@@ -38,8 +38,8 @@ pub const DECORATION_DOT: Pixels = px(6.);
 pub const DECORATION_WIDTH: Pixels = px(16.);
 pub const BADGE_SIZE: Pixels = px(15.);
 pub const BADGE_OFFSET: Pixels = px(-3.);
-pub const COMMAND_CENTER_HEIGHT: Pixels = px(24.);
-pub const COMMAND_CENTER_WIDTH: Pixels = px(480.);
+pub const COMMAND_CENTER_HEIGHT: Pixels = px(22.);
+pub const COMMAND_CENTER_WIDTH: Pixels = px(600.);
 pub const QUICK_OPEN_WIDTH: Pixels = px(600.);
 pub const QUICK_OPEN_TOP: Pixels = px(6.);
 pub const QUICK_OPEN_ROWS: usize = 12;
@@ -187,6 +187,9 @@ const SOLARIZED_SYNTAX: &[(&str, u32, Option<&str>)] = &[
     ("embedded", 0x839496, None),
     ("enum", 0xb58900, None),
     ("function", 0x268bd2, None),
+    // Diff additions / deletions (see diff_syntax.rs).
+    ("hint", 0xdc322f, None),
+    ("predictive", 0x859900, None),
     ("keyword", 0x859900, None),
     ("label", 0x6c71c4, None),
     ("link_text", 0x268bd2, None),
@@ -225,6 +228,8 @@ const NORD_LIGHT_SYNTAX: &[(&str, u32, Option<&str>)] = &[
     ("embedded", 0x2e3440, None),
     ("enum", 0x2f6f6d, None),
     ("function", 0x2f6b8f, None),
+    ("hint", 0x99353f, None),
+    ("predictive", 0x4f7433, None),
     ("keyword", 0x4c6a94, Some("bold")),
     ("label", 0x81587a, None),
     ("link_text", 0x4c6a94, None),

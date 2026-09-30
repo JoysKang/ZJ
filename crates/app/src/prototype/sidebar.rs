@@ -1,5 +1,6 @@
 //! The sidebar: VS Code-style view switcher on top, then Explorer / Search / Source Control.
 
+use super::SINGLE_LINE;
 use super::{Decoration, DecorationKind, Prototype, Sidebar};
 use crate::{file_icons, theme};
 use gpui_kit::{
@@ -228,7 +229,7 @@ impl Prototype {
             .file_name()
             .unwrap_or(root.entry.path.as_os_str())
             .to_string_lossy()
-            .into_owned();
+            .replace(SINGLE_LINE, "⏎");
         let expanded = !self.explorer_collapsed;
         let header = h_flex()
             .id("explorer-section")
@@ -322,7 +323,7 @@ impl Prototype {
             .file_name()
             .unwrap_or(path.as_os_str())
             .to_string_lossy()
-            .into_owned();
+            .replace(SINGLE_LINE, "⏎");
         let directory = entry.directory;
         let expanded = self.expanded.contains(&path);
         let selected = self
@@ -511,7 +512,7 @@ impl Prototype {
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
-            .into_owned();
+            .replace(SINGLE_LINE, "⏎");
         let directory = path
             .parent()
             .and_then(|parent| {
@@ -519,7 +520,7 @@ impl Prototype {
                     .as_ref()
                     .and_then(|root| parent.strip_prefix(root).ok())
             })
-            .map(|parent| parent.to_string_lossy().into_owned())
+            .map(|parent| parent.to_string_lossy().replace(SINGLE_LINE, "⏎"))
             .unwrap_or_default();
         let row = h_flex()
             .id(("search-row", index))

@@ -1,5 +1,6 @@
 //! Editor area: VS Code-style tabs, breadcrumbs, the editor itself, and the welcome page.
 
+use super::SINGLE_LINE;
 use super::{OpenFile, OpenFolder, Pane, Prototype, QuickOpenFile, ToggleSidebar};
 use crate::{file_icons, theme};
 use gpui_kit::{
@@ -142,7 +143,7 @@ impl Prototype {
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
-                    .into_owned();
+                    .replace(SINGLE_LINE, "⏎");
                 TabSpec {
                     key: index,
                     pane: Pane::Document(doc.id),
@@ -204,7 +205,12 @@ impl Prototype {
         let relative = self.relative(&path).to_path_buf();
         let segments: Vec<String> = relative
             .components()
-            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .map(|component| {
+                component
+                    .as_os_str()
+                    .to_string_lossy()
+                    .replace(SINGLE_LINE, "⏎")
+            })
             .collect();
         let last = segments.len().saturating_sub(1);
         let mut crumbs = h_flex()

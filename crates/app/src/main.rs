@@ -1,4 +1,5 @@
 mod assets;
+mod diff_syntax;
 mod file_icons;
 mod files;
 mod fuzzy;
@@ -75,6 +76,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .with_assets(assets::AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            diff_syntax::register();
             theme::follow_appearance(None, cx);
             cx.bind_keys([
                 KeyBinding::new("cmd-s", prototype::SaveUnavailable, Some("WorkspaceEditor")),

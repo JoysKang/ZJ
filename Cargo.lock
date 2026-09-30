@@ -8493,6 +8493,8 @@ dependencies = [
  "gpui-kit",
  "libc",
  "serde_json",
+ "tree-sitter",
+ "tree-sitter-diff",
  "workspace-editor-core",
  "workspace-editor-git",
 ]

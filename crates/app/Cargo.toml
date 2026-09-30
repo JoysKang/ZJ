@@ -11,6 +11,10 @@ workspace-editor-git.workspace = true
 libc = "0.2"
 # Already in the tree through GPUI Kit; used to build the syntax theme in Kit's JSON shape.
 serde_json = "1"
+# Already compiled in through GPUI Kit's tree-sitter-diff feature; used to re-register the
+# diff grammar with add/remove captures.
+tree-sitter = "0.26"
+tree-sitter-diff = "0.1"
 
 [lints]
 workspace = true

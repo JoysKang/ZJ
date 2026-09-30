@@ -95,6 +95,9 @@ struct Group {
     expanded: bool,
     stale: bool,
 }
+/// Line breaks in file names would break single-line rows; they are shown as ⏎.
+const SINGLE_LINE: [char; 2] = ['\n', '\r'];
+
 /// Highlighter language (only grammars compiled into Kit) and status bar display name.
 fn language_for(path: &std::path::Path) -> (&'static str, &'static str) {
     let name = path
@@ -109,7 +112,7 @@ fn language_for(path: &std::path::Path) -> (&'static str, &'static str) {
     match extension {
         "rs" => ("rust", "Rust"),
         "md" | "markdown" => ("markdown", "Markdown"),
-        "diff" | "patch" => ("diff", "Diff"),
+        "diff" | "patch" => (crate::diff_syntax::LANGUAGE, "Diff"),
         "toml" => ("plain", "TOML"),
         "json" | "jsonc" => ("plain", "JSON"),
         "js" | "mjs" | "cjs" => ("plain", "JavaScript"),
@@ -1156,7 +1159,7 @@ impl Prototype {
                     Ok(text) => {
                         this.preview = Some(cx.new(|cx| {
                             EditorState::new(window, cx)
-                                .language("diff")
+                                .language(crate::diff_syntax::LANGUAGE)
                                 .default_value(text)
                         }));
                         this.preview_title = title;

@@ -1,6 +1,7 @@
 //! ⌘P "转到文件": a VS Code-style quick open over the workspace path index.
 
 use super::Prototype;
+use super::SINGLE_LINE;
 use crate::{file_icons, theme};
 use gpui_kit::{
     component::{
@@ -146,7 +147,7 @@ impl Prototype {
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
-            .into_owned();
+            .replace(SINGLE_LINE, "⏎");
         let directory = path
             .parent()
             .map(|parent| {
@@ -155,7 +156,7 @@ impl Prototype {
                     .and_then(|root| parent.strip_prefix(root).ok())
                     .unwrap_or(parent)
                     .to_string_lossy()
-                    .into_owned()
+                    .replace(SINGLE_LINE, "⏎")
             })
             .unwrap_or_default();
         let selected = index == quick.selected;
