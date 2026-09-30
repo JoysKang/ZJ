@@ -25,7 +25,7 @@ impl Prototype {
             .unwrap_or_else(|| "ZJ".into())
     }
 
-    pub(super) fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
         let command_center = h_flex()
             .id("command-center")
@@ -77,5 +77,6 @@ impl Prototype {
                     .child(command_center)
                     .child(actions),
             )
+            .into_any_element()
     }
 }

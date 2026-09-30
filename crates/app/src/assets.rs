@@ -17,6 +17,8 @@ macro_rules! embed {
 }
 
 pub const EXTRA: &[(&str, &[u8])] = &[
+    embed!("icons/chevrons-down-up.svg"),
+    embed!("icons/files.svg"),
     embed!("icons/git-branch.svg"),
     embed!("file-icons/default_folder.svg"),
     embed!("file-icons/default_folder_opened.svg"),

@@ -1,12 +1,12 @@
 use crate::files::{self, Entry, PathIndex, SearchResults};
-use crate::{file_icons, theme};
+use crate::theme;
 use gpui_kit::{
     assets::IconName,
     component::{
-        ActiveTheme, Icon, Sizable,
+        ActiveTheme, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
-        input::{Editor, EditorState, Input, InputEvent, InputState},
+        input::{Editor, EditorState, InputEvent, InputState},
         resizable::{h_resizable, resizable_panel},
         text::TextView,
         v_flex,
@@ -33,6 +33,8 @@ use workspace_editor_git::{
 
 mod chrome;
 mod quick_open;
+mod scm;
+mod sidebar;
 
 gpui_kit::actions!(
     workspace,
@@ -92,6 +94,39 @@ struct Group {
     expanded: bool,
     stale: bool,
 }
+/// Explorer git decoration, VS Code style: colored name plus a letter (files) or dot (folders).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum DecorationKind {
+    Untracked,
+    Added,
+    Modified,
+    Deleted,
+    Conflict,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Decoration {
+    kind: DecorationKind,
+    letter: char,
+}
+
+fn decoration(change: &workspace_editor_git::Change) -> Decoration {
+    let code = if change.worktree != b'.' {
+        change.worktree
+    } else {
+        change.index
+    };
+    let (kind, letter) = match (change.kind, code) {
+        (ChangeKind::Conflict, _) => (DecorationKind::Conflict, '!'),
+        (ChangeKind::Untracked, _) => (DecorationKind::Untracked, 'U'),
+        (_, b'A') => (DecorationKind::Added, 'A'),
+        (_, b'D') => (DecorationKind::Deleted, 'D'),
+        (ChangeKind::Renamed, _) => (DecorationKind::Modified, 'R'),
+        _ => (DecorationKind::Modified, 'M'),
+    };
+    Decoration { kind, letter }
+}
+
 #[derive(Clone, Copy)]
 enum Row {
     Group(usize),
@@ -119,6 +154,8 @@ pub struct Prototype {
     documents: Vec<Document>,
     owners: DocumentOwners,
     tree: Vec<TreeRow>,
+    explorer_collapsed: bool,
+    decorations: HashMap<PathBuf, Decoration>,
     tree_scroll: UniformListScrollHandle,
     reveal_pending: bool,
     expanded: HashSet<PathBuf>,
@@ -257,6 +294,8 @@ impl Prototype {
             documents: Vec::new(),
             owners,
             tree: Vec::new(),
+            explorer_collapsed: false,
+            decorations: HashMap::new(),
             tree_scroll: UniformListScrollHandle::new(),
             reveal_pending: false,
             expanded: HashSet::new(),
@@ -921,6 +960,7 @@ impl Prototype {
     }
 
     fn rebuild_rows(&mut self) {
+        self.rebuild_decorations();
         self.rows.clear();
         for (g, group) in self.groups.iter().enumerate() {
             self.rows.push(Row::Group(g));
@@ -947,6 +987,51 @@ impl Prototype {
                 }
             }
         }
+    }
+
+    /// Files keep their own decoration; each ancestor folder up to the workspace root takes the
+    /// most severe decoration below it, as VS Code does.
+    fn rebuild_decorations(&mut self) {
+        self.decorations.clear();
+        let root = self.root.clone();
+        for group in &self.groups {
+            let Some(Ok(status)) = &group.status else {
+                continue;
+            };
+            for change in &status.changes {
+                let decoration = decoration(change);
+                let path = group.repo.worktree.join(&change.path);
+                let mut ancestor = path.parent();
+                self.decorations.insert(path.clone(), decoration);
+                while let Some(folder) = ancestor {
+                    if root.as_ref().is_some_and(|root| !folder.starts_with(root)) {
+                        break;
+                    }
+                    let entry = self
+                        .decorations
+                        .entry(folder.to_path_buf())
+                        .or_insert(decoration);
+                    if decoration.kind > entry.kind {
+                        *entry = decoration;
+                    }
+                    if root.as_deref() == Some(folder) {
+                        break;
+                    }
+                    ancestor = folder.parent();
+                }
+            }
+        }
+    }
+
+    fn collapse_tree(&mut self, cx: &mut Context<Self>) {
+        self.reveal_pending = false;
+        let Some(root) = self.tree.first().map(|row| row.entry.path.clone()) else {
+            return;
+        };
+        self.tree.retain(|row| row.depth <= 1);
+        self.expanded.retain(|path| *path == root);
+        self.tree_tasks.clear();
+        cx.notify();
     }
 
     fn close_preview(&mut self, cx: &mut Context<Self>) {
@@ -1031,101 +1116,6 @@ impl Prototype {
         cx.notify();
     }
 
-    fn tree_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        let row = &self.tree[index];
-        let entry = &row.entry;
-        let path = entry.path.clone();
-        let name = path
-            .file_name()
-            .unwrap_or(path.as_os_str())
-            .to_string_lossy()
-            .into_owned();
-        let directory = entry.directory;
-        let expanded = self.expanded.contains(&path);
-        let selected = self
-            .documents
-            .iter()
-            .any(|doc| self.active == Pane::Document(doc.id) && doc.path == path);
-        let colors = theme::colors(cx);
-        h_flex()
-            .id(("tree-row", index))
-            .h(theme::ROW_HEIGHT)
-            .w_full()
-            .gap_1()
-            .pl(theme::SPACE_2 + theme::TREE_INDENT * row.depth as f32)
-            .pr_2()
-            .overflow_hidden()
-            .text_size(theme::TEXT_BODY)
-            .role(Role::Button)
-            .aria_label(format!(
-                "{} {}",
-                if directory { "目录" } else { "文件" },
-                path.display()
-            ))
-            .when(selected, |row| row.bg(colors.selected))
-            .when(!selected, |row| row.hover(|row| row.bg(colors.hover)))
-            .child(
-                div()
-                    .w(theme::TWISTY_WIDTH)
-                    .flex_shrink_0()
-                    .when(directory, |twisty| twisty.child(chevron(expanded, colors))),
-            )
-            .child(file_icons::icon(if directory {
-                if expanded {
-                    file_icons::FOLDER_OPEN
-                } else {
-                    file_icons::FOLDER
-                }
-            } else {
-                file_icons::for_file(&name)
-            }))
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .child(format!("{name}{}", if entry.symlink { " ↗" } else { "" })),
-            )
-            .on_click(cx.listener(move |this, _, window, cx| {
-                if directory {
-                    this.toggle_directory(index, window, cx);
-                } else {
-                    this.open_file(path.clone(), this.root.clone(), window, cx);
-                }
-            }))
-            .into_any_element()
-    }
-
-    fn search_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        let path = self.search_results.paths[index].clone();
-        let label = self
-            .root
-            .as_ref()
-            .and_then(|root| path.strip_prefix(root).ok())
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .into_owned();
-        let colors = theme::colors(cx);
-        h_flex()
-            .id(("search-row", index))
-            .h(theme::ROW_HEIGHT)
-            .w_full()
-            .px_2()
-            .gap_2()
-            .text_size(theme::TEXT_BODY)
-            .overflow_hidden()
-            .role(Role::Button)
-            .aria_label(format!("打开文件 {label}"))
-            .hover(|row| row.bg(colors.hover))
-            .child(file_icons::icon(file_icons::for_file(
-                &path.file_name().unwrap_or_default().to_string_lossy(),
-            )))
-            .child(label)
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.open_file(path.clone(), this.root.clone(), window, cx)
-            }))
-            .into_any_element()
-    }
-
     fn row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
         let base = div()
@@ -1162,7 +1152,7 @@ impl Prototype {
                     .aria_label(format!("仓库 {name} · {status}"))
                     .bg(colors.panel)
                     .hover(|row| row.bg(colors.hover))
-                    .child(chevron(group.expanded, colors))
+                    .child(sidebar::chevron(group.expanded, colors.muted))
                     .child(format!("{name} · {status}"))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.groups[g].expanded = !this.groups[g].expanded;
@@ -1221,172 +1211,9 @@ impl Prototype {
     }
 }
 
-fn chevron(expanded: bool, colors: theme::Colors) -> Icon {
-    Icon::new(if expanded {
-        IconName::ChevronDown
-    } else {
-        IconName::ChevronRight
-    })
-    .size(theme::ICON_SIZE)
-    .text_color(colors.muted)
-}
-
 impl Render for Prototype {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = theme::colors(cx);
-        let sidebar_title = match self.sidebar {
-            Sidebar::Explorer => "资源管理器",
-            Sidebar::Search => "搜索",
-            Sidebar::SourceControl => "源代码管理",
-        };
-        let sidebar_content = match self.sidebar {
-            Sidebar::Explorer => v_flex()
-                .size_full()
-                .min_h_0()
-                .child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .text_size(theme::TEXT_CAPTION)
-                        .text_color(cx.theme().muted_foreground)
-                        .child(self.tree_message.clone()),
-                )
-                .child(
-                    uniform_list(
-                        "file-tree",
-                        self.tree.len(),
-                        cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                            range
-                                .map(|index| this.tree_row(index, cx))
-                                .collect::<Vec<_>>()
-                        }),
-                    )
-                    .track_scroll(&self.tree_scroll)
-                    .flex_1()
-                    .w_full(),
-                )
-                .into_any_element(),
-            Sidebar::Search => v_flex()
-                .size_full()
-                .min_h_0()
-                .gap_2()
-                .child(div().px_2().child(Input::new(&self.search_input).small()))
-                .child(
-                    div()
-                        .px_2()
-                        .text_size(theme::TEXT_CAPTION)
-                        .text_color(cx.theme().muted_foreground)
-                        .child("模糊匹配文件名与路径 · 当前文件查找 ⌘F"),
-                )
-                .child(div().px_2().text_size(theme::TEXT_CAPTION).child(
-                    if self.searching && self.index.is_none() {
-                        "正在建立文件索引…".into()
-                    } else if self.searching {
-                        "搜索中…".into()
-                    } else if self.search_input.read(cx).value().trim().is_empty() {
-                        "输入文件名或相对路径".into()
-                    } else {
-                        format!(
-                            "{} 个结果{} · {} 项读取错误",
-                            self.search_results.paths.len(),
-                            if self.search_results.incomplete {
-                                "（部分结果，请缩小搜索范围）"
-                            } else {
-                                ""
-                            },
-                            self.search_results.errors
-                        )
-                    },
-                ))
-                .child(
-                    uniform_list(
-                        "file-search",
-                        self.search_results.paths.len(),
-                        cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                            range
-                                .map(|index| this.search_row(index, cx))
-                                .collect::<Vec<_>>()
-                        }),
-                    )
-                    .flex_1()
-                    .w_full(),
-                )
-                .child(
-                    div()
-                        .px_2()
-                        .pb_2()
-                        .text_size(theme::TEXT_CAPTION)
-                        .text_color(cx.theme().muted_foreground)
-                        .child(
-                            "Git 仓库遵循 .gitignore；其他目录跳过依赖与构建目录；不遍历目录链接",
-                        ),
-                )
-                .into_any_element(),
-            Sidebar::SourceControl => v_flex()
-                .size_full()
-                .min_h_0()
-                .child(
-                    h_flex()
-                        .px_2()
-                        .pb_2()
-                        .gap_1()
-                        .child(
-                            Button::new("refresh-git")
-                                .small()
-                                .ghost()
-                                .label(if self.loading {
-                                    "重新扫描"
-                                } else {
-                                    "刷新"
-                                })
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.refresh(window, cx)),
-                                ),
-                        )
-                        .child(
-                            Button::new("cancel-git")
-                                .small()
-                                .ghost()
-                                .label("取消")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.cancel.store(true, Ordering::Relaxed);
-                                    this.generation += 1;
-                                    this.refresh_task = None;
-                                    this.loading = false;
-                                    this.close_preview(cx);
-                                    this.message = "已取消；当前结果可能不完整，请重新扫描".into();
-                                    cx.notify();
-                                })),
-                        ),
-                )
-                .child(
-                    div()
-                        .px_2()
-                        .pb_1()
-                        .text_size(theme::TEXT_CAPTION)
-                        .child(format!(
-                            "全部仓库 · {} · {}",
-                            self.groups.len(),
-                            if self.loading {
-                                "刷新中"
-                            } else {
-                                "磁盘快照"
-                            }
-                        )),
-                )
-                .child(
-                    uniform_list(
-                        "changes",
-                        self.rows.len(),
-                        cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                            range.map(|index| this.row(index, cx)).collect::<Vec<_>>()
-                        }),
-                    )
-                    .flex_1()
-                    .w_full(),
-                )
-                .into_any_element(),
-        };
         let content = match self.active {
             Pane::Markdown => div()
                 .id("markdown-preview")
@@ -1539,89 +1366,7 @@ impl Render for Prototype {
                 )
                 .into_any_element(),
         );
-        let rail_item = |active: bool| {
-            if active {
-                colors.selected
-            } else {
-                colors.panel
-            }
-        };
-        let rail = v_flex()
-            .w(theme::RAIL_WIDTH)
-            .h_full()
-            .flex_shrink_0()
-            .py_2()
-            .gap_2()
-            .items_center()
-            .bg(colors.panel)
-            .border_r_1()
-            .border_color(colors.border)
-            .child(
-                Button::new("activity-explorer")
-                    .ghost()
-                    .accessibility_label("资源管理器")
-                    .bg(rail_item(self.sidebar == Sidebar::Explorer))
-                    .icon(IconName::Folder)
-                    .tooltip("资源管理器")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sidebar = Sidebar::Explorer;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("activity-search")
-                    .ghost()
-                    .accessibility_label("搜索")
-                    .bg(rail_item(self.sidebar == Sidebar::Search))
-                    .icon(IconName::Search)
-                    .tooltip("搜索")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.sidebar = Sidebar::Search;
-                        this.search_input
-                            .update(cx, |input, cx| input.focus(window, cx));
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("activity-scm")
-                    .ghost()
-                    .accessibility_label("源代码管理")
-                    .bg(rail_item(self.sidebar == Sidebar::SourceControl))
-                    .icon(IconName::GitBranch)
-                    .tooltip("源代码管理")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sidebar = Sidebar::SourceControl;
-                        cx.notify();
-                    })),
-            );
-        let sidebar =
-            v_flex()
-                .size_full()
-                .min_h_0()
-                .bg(colors.panel)
-                .child(
-                    h_flex()
-                        .h(theme::BAR_HEIGHT)
-                        .px_3()
-                        .justify_between()
-                        .flex_shrink_0()
-                        .text_size(theme::TEXT_BODY)
-                        .child(sidebar_title)
-                        .when(self.sidebar == Sidebar::Explorer, |header| {
-                            header.child(
-                                Button::new("refresh-tree")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::RefreshCw)
-                                    .accessibility_label("刷新目录")
-                                    .tooltip("刷新目录")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.refresh_tree(window, cx)
-                                    })),
-                            )
-                        }),
-                )
-                .child(sidebar_content);
+        let sidebar = self.render_sidebar(cx);
         let editor = v_flex()
             .size_full()
             .min_w_0()
@@ -1673,7 +1418,6 @@ impl Render for Prototype {
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .when(self.sidebar_visible, |row| row.child(rail))
                     .child(div().flex_1().h_full().min_w_0().map(|area| {
                         if self.sidebar_visible {
                             area.child(

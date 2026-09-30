@@ -14,12 +14,24 @@ use serde_json::{Value, json};
 
 // Spacing (4 px grid). Kit's Tailwind-style helpers (`gap_1` = 4, `px_2` = 8, `px_3` = 12,
 // `p_4` = 16) are already on the grid; constants exist only where arithmetic is needed.
-pub const SPACE_2: Pixels = px(8.);
 
 // Heights: every list row shares one height; every bar shares another.
-pub const ROW_HEIGHT: Pixels = px(24.);
+pub const ROW_HEIGHT: Pixels = px(22.);
 pub const BAR_HEIGHT: Pixels = px(32.);
 pub const TITLE_HEIGHT: Pixels = px(38.);
+pub const ACTIVITY_HEIGHT: Pixels = px(35.);
+pub const ACTIVITY_ITEM: Pixels = px(28.);
+pub const SIDEBAR_TITLE_HEIGHT: Pixels = px(35.);
+pub const SECTION_HEIGHT: Pixels = px(22.);
+/// Explorer tree geometry, measured from the owner's VS Code screenshot (rows are 22).
+pub const TREE_BASE: Pixels = px(12.);
+pub const TREE_STEP: Pixels = px(8.);
+pub const ROW_INSET: Pixels = px(2.);
+pub const GUIDE_WIDTH: Pixels = px(1.);
+pub const DECORATION_DOT: Pixels = px(6.);
+pub const DECORATION_WIDTH: Pixels = px(16.);
+pub const BADGE_SIZE: Pixels = px(15.);
+pub const BADGE_OFFSET: Pixels = px(-3.);
 pub const COMMAND_CENTER_HEIGHT: Pixels = px(24.);
 pub const COMMAND_CENTER_WIDTH: Pixels = px(480.);
 pub const QUICK_OPEN_WIDTH: Pixels = px(600.);
@@ -32,8 +44,6 @@ pub const STATUS_HEIGHT: Pixels = px(24.);
 pub const INDICATOR: Pixels = px(2.);
 
 // Widths.
-pub const RAIL_WIDTH: Pixels = px(40.);
-pub const TREE_INDENT: Pixels = px(12.);
 pub const TWISTY_WIDTH: Pixels = px(16.);
 pub const STATUS_GLYPH_WIDTH: Pixels = px(16.);
 pub const SIDEBAR_WIDTH: Pixels = px(280.);
@@ -48,6 +58,8 @@ pub const SMALL_ICON_SIZE: Pixels = px(12.);
 pub const FILE_ICON_SIZE: Pixels = px(16.);
 pub const TEXT_BODY: Pixels = px(13.);
 pub const TEXT_CAPTION: Pixels = px(12.);
+pub const TEXT_SECTION: Pixels = px(11.);
+pub const TEXT_BADGE: Pixels = px(9.);
 
 // Window geometry.
 pub const WINDOW_WIDTH: Pixels = px(1280.);
