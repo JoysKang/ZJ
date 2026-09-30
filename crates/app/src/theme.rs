@@ -19,6 +19,14 @@ pub const SPACE_2: Pixels = px(8.);
 // Heights: every list row shares one height; every bar shares another.
 pub const ROW_HEIGHT: Pixels = px(24.);
 pub const BAR_HEIGHT: Pixels = px(32.);
+pub const TITLE_HEIGHT: Pixels = px(38.);
+pub const COMMAND_CENTER_HEIGHT: Pixels = px(24.);
+pub const COMMAND_CENTER_WIDTH: Pixels = px(480.);
+pub const QUICK_OPEN_WIDTH: Pixels = px(600.);
+pub const QUICK_OPEN_TOP: Pixels = px(6.);
+pub const QUICK_OPEN_ROWS: usize = 12;
+pub const RADIUS: Pixels = px(4.);
+pub const RADIUS_LARGE: Pixels = px(6.);
 pub const STATUS_HEIGHT: Pixels = px(24.);
 /// Active tab indicator thickness.
 pub const INDICATOR: Pixels = px(2.);
@@ -36,17 +44,20 @@ pub const EDITOR_MAX: Pixels = px(4000.);
 
 // Icons and text.
 pub const ICON_SIZE: Pixels = px(14.);
+pub const SMALL_ICON_SIZE: Pixels = px(12.);
 pub const FILE_ICON_SIZE: Pixels = px(16.);
 pub const TEXT_BODY: Pixels = px(13.);
 pub const TEXT_CAPTION: Pixels = px(12.);
 
 // Window geometry.
-pub const WINDOW_WIDTH: Pixels = px(1100.);
-pub const WINDOW_HEIGHT: Pixels = px(720.);
+pub const WINDOW_WIDTH: Pixels = px(1280.);
+pub const WINDOW_HEIGHT: Pixels = px(800.);
 pub const WINDOW_MIN_WIDTH: Pixels = px(760.);
 pub const WINDOW_MIN_HEIGHT: Pixels = px(480.);
 pub const WINDOW_ORIGIN: Pixels = px(60.);
 pub const WINDOW_CASCADE: Pixels = px(28.);
+pub const TRAFFIC_LIGHT_X: Pixels = px(12.);
+pub const TRAFFIC_LIGHT_Y: Pixels = px(12.);
 
 /// Semantic colors as 0xRRGGBB.
 #[derive(Clone, Copy, Debug)]
@@ -264,6 +275,9 @@ pub struct Colors {
     pub deleted: Hsla,
     pub untracked: Hsla,
     pub conflict: Hsla,
+    /// VS Code's command center: foreground at 5 % / 20 % opacity.
+    pub command_bg: Hsla,
+    pub command_border: Hsla,
 }
 
 fn hsla(hex: u32) -> Hsla {
@@ -294,6 +308,8 @@ impl Palette {
             deleted: hsla(self.deleted),
             untracked: hsla(self.untracked),
             conflict: hsla(self.conflict),
+            command_bg: hsla(self.foreground).opacity(0.05),
+            command_border: hsla(self.foreground).opacity(0.2),
         }
     }
 }

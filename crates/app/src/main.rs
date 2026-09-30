@@ -18,12 +18,17 @@ fn open_workspace(
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let offset = theme::WINDOW_ORIGIN + theme::WINDOW_CASCADE * index as f32;
     let options = WindowOptions {
+        titlebar: Some(TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            traffic_light_position: Some(point(theme::TRAFFIC_LIGHT_X, theme::TRAFFIC_LIGHT_Y)),
+        }),
         window_bounds: Some(WindowBounds::Windowed(Bounds::new(
             point(offset, offset),
             size(theme::WINDOW_WIDTH, theme::WINDOW_HEIGHT),
         ))),
         window_min_size: Some(size(theme::WINDOW_MIN_WIDTH, theme::WINDOW_MIN_HEIGHT)),
-        ..Default::default()
+        ..gpui_kit::component::TitleBar::window_options()
     };
     gpui_kit::open_window(options, cx, |window, cx| {
         cx.new(|cx| Prototype::new(root, service, documents, index + 1, window, cx))
@@ -77,6 +82,16 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 KeyBinding::new(
                     "cmd-shift-o",
                     prototype::OpenFolder,
+                    Some("WorkspaceEditor"),
+                ),
+                KeyBinding::new(
+                    "secondary-p",
+                    prototype::QuickOpenFile,
+                    Some("WorkspaceEditor"),
+                ),
+                KeyBinding::new(
+                    "secondary-b",
+                    prototype::ToggleSidebar,
                     Some("WorkspaceEditor"),
                 ),
             ]);

@@ -3,7 +3,7 @@ use crate::{file_icons, theme};
 use gpui_kit::{
     assets::IconName,
     component::{
-        ActiveTheme, Disableable, Icon, Sizable,
+        ActiveTheme, Icon, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         input::{Editor, EditorState, Input, InputEvent, InputState},
@@ -31,7 +31,19 @@ use workspace_editor_git::{
     ChangeKind, DiffSide, Discovery, GitService, Operation, Request, Status,
 };
 
-gpui_kit::actions!(workspace, [SaveUnavailable, OpenFile, OpenFolder]);
+mod chrome;
+mod quick_open;
+
+gpui_kit::actions!(
+    workspace,
+    [
+        SaveUnavailable,
+        OpenFile,
+        OpenFolder,
+        QuickOpenFile,
+        ToggleSidebar
+    ]
+);
 
 const SAMPLE: &str = "// 临时输入测试，退出不保留。不会写入工作区文件。\n// 试用中文 IME、选区替换、粘贴、⌘Z / ⇧⌘Z、⌘F / ⌘H。\nfn main() {\n    println!(\"你好，工作区！\");\n}\n";
 const MARKDOWN: &str = "# Markdown 原生预览\n\n资源与输入原型 · P1\n\n- 标题与列表\n- **加粗**与 `行内代码`\n\n```rust\nfn main() { println!(\"你好\"); }\n```\n\n| 模块 | 状态 |\n| --- | --- |\n| Editor | 输入测试 |\n| Git | 只读 |\n\n本样例不含图片和外链。完整受限图片功能在 P6 验证。\n";
@@ -101,6 +113,8 @@ pub struct Prototype {
     rows: Vec<Row>,
     scratch: Entity<EditorState>,
     sidebar: Sidebar,
+    sidebar_visible: bool,
+    quick_open: Option<quick_open::QuickOpen>,
     active: Pane,
     documents: Vec<Document>,
     owners: DocumentOwners,
@@ -237,6 +251,8 @@ impl Prototype {
             rows: vec![],
             scratch,
             sidebar: Sidebar::Explorer,
+            sidebar_visible: true,
+            quick_open: None,
             active: Pane::Scratch,
             documents: Vec::new(),
             owners,
@@ -403,6 +419,7 @@ impl Prototype {
                 }
                 this.index = Some(Arc::new(index));
                 this.search_files(window, cx);
+                this.update_quick_open(window, cx);
             });
         }));
     }
@@ -441,6 +458,30 @@ impl Prototype {
             });
         }));
         cx.notify();
+    }
+
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_visible = !self.sidebar_visible;
+        cx.notify();
+    }
+
+    fn active_editor(&self) -> Option<Entity<EditorState>> {
+        match self.active {
+            Pane::Scratch => Some(self.scratch.clone()),
+            Pane::Document(id) => self
+                .documents
+                .iter()
+                .find(|doc| doc.id == id)
+                .map(|doc| doc.editor.clone()),
+            Pane::Diff => self.preview.clone(),
+            Pane::Markdown => None,
+        }
+    }
+
+    fn focus_active_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| editor.focus(window, cx));
+        }
     }
 
     fn select_pane(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
@@ -1620,77 +1661,39 @@ impl Render for Prototype {
                 this.message = "当前原型尚未支持保存：修改仅在内存中，原文件未改动".into();
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &QuickOpenFile, window, cx| {
+                this.open_quick_open(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .relative()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .child(self.render_title_bar(cx))
             .child(
                 h_flex()
-                    .h(theme::BAR_HEIGHT)
-                    .flex_shrink_0()
-                    .px_3()
-                    .justify_between()
-                    .bg(colors.title)
-                    .text_size(theme::TEXT_CAPTION)
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        self.root
-                            .as_ref()
-                            .map(|root| {
-                                root.file_name()
-                                    .unwrap_or(root.as_os_str())
-                                    .to_string_lossy()
-                                    .into_owned()
-                            })
-                            .unwrap_or_else(|| "未打开工作区".into()),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("open-folder")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::Folder)
-                                    .label("打开文件夹")
-                                    .accessibility_label("打开文件夹")
-                                    .tooltip("打开文件夹（⌘⇧O）；已有工作区时新开窗口")
-                                    .disabled(self.path_prompt_open)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.choose_path(true, window, cx)
-                                    })),
+                    .flex_1()
+                    .min_h_0()
+                    .when(self.sidebar_visible, |row| row.child(rail))
+                    .child(div().flex_1().h_full().min_w_0().map(|area| {
+                        if self.sidebar_visible {
+                            area.child(
+                                h_resizable("workbench-panels")
+                                    .child(
+                                        resizable_panel()
+                                            .size(theme::SIDEBAR_WIDTH)
+                                            .size_range(theme::SIDEBAR_MIN..theme::SIDEBAR_MAX)
+                                            .child(sidebar),
+                                    )
+                                    .child(
+                                        resizable_panel()
+                                            .size_range(theme::EDITOR_MIN..theme::EDITOR_MAX)
+                                            .child(editor),
+                                    ),
                             )
-                            .child(
-                                Button::new("open-file")
-                                    .small()
-                                    .ghost()
-                                    .icon(IconName::FileText)
-                                    .label("打开文件")
-                                    .accessibility_label("打开文件")
-                                    .tooltip("打开文件（⌘O）")
-                                    .disabled(self.path_prompt_open)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.choose_path(false, window, cx)
-                                    })),
-                            ),
-                    ),
-            )
-            .child(
-                h_flex().flex_1().min_h_0().child(rail).child(
-                    div().flex_1().h_full().min_w_0().child(
-                        h_resizable("workbench-panels")
-                            .child(
-                                resizable_panel()
-                                    .size(theme::SIDEBAR_WIDTH)
-                                    .size_range(theme::SIDEBAR_MIN..theme::SIDEBAR_MAX)
-                                    .child(sidebar),
-                            )
-                            .child(
-                                resizable_panel()
-                                    .size_range(theme::EDITOR_MIN..theme::EDITOR_MAX)
-                                    .child(editor),
-                            ),
-                    ),
-                ),
+                        } else {
+                            area.child(editor)
+                        }
+                    })),
             )
             .child(
                 h_flex()
@@ -1715,5 +1718,6 @@ impl Render for Prototype {
                             .unwrap_or_default()
                     )),
             )
+            .children(self.render_quick_open(cx))
     }
 }
