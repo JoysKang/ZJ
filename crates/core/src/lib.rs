@@ -3,6 +3,15 @@
 use std::os::unix::fs::MetadataExt;
 use std::{fs, io, path::PathBuf};
 
+/// Generated or dependency directories that repository discovery and the non-Git file walk skip.
+/// Git-tracked listings additionally follow the repository's own ignore rules.
+pub const EXCLUDED_DIRS: &[&str] = &[".git", "node_modules", "target", ".venv", "__pycache__"];
+
+/// Whether a directory entry name is one of [`EXCLUDED_DIRS`].
+pub fn is_excluded_dir(name: &std::ffi::OsStr) -> bool {
+    EXCLUDED_DIRS.iter().any(|excluded| name == *excluded)
+}
+
 /// A linked worktree has its own private Git directory and therefore its own RepoId.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RepoId(pub PathBuf);

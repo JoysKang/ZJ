@@ -1,4 +1,5 @@
 mod files;
+mod fuzzy;
 mod prototype;
 use gpui_kit::*;
 use prototype::{DocumentOwners, Prototype};

@@ -35,10 +35,10 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 ## 模块边界
 
-- `crates/core`：身份模型与共享常量（`RepoId`、`DocumentId`），**不依赖 GPUI**。
+- `crates/core`：身份模型与共享常量（`RepoId`、`DocumentId`、`EXCLUDED_DIRS`），**不依赖 GPUI**。
 - `crates/git_service`：调用系统 git，负责有界输出、超时、取消、全局限流，**不依赖 GPUI**。
 - `crates/app`：GPUI 界面。
-  - `files.rs`：受限的只读文件访问。
+  - `files.rs`：受限的只读文件访问与快速打开路径索引；`fuzzy.rs`：模糊匹配打分。
   - `prototype.rs`：工作台。
 - UI 的 render 回调里不做 IO、不跑 Git 命令、不做全文解析；这些都通过 `background_spawn` 执行，结果带 generation 校验。
 

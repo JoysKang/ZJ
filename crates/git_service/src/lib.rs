@@ -1,6 +1,8 @@
 //! Bounded, cancellable, read-only system Git operations.
 
+mod ls_files;
 mod status;
+pub use ls_files::{ListedKind, parse_ls_files};
 pub use status::{Change, ChangeKind, Status, parse_status};
 
 use std::{
@@ -19,7 +21,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use workspace_editor_core::{RepoId, Repository};
+use workspace_editor_core::{RepoId, Repository, is_excluded_dir};
 
 const OUTPUT_LIMIT: usize = 16_000_000;
 const ERROR_LIMIT: usize = 32_000;
@@ -291,6 +293,24 @@ impl GitService {
         parse_status(&reply.output)
     }
 
+    /// Lists tracked and non-ignored untracked files below `dir`, relative to `dir`.
+    ///
+    /// Fails outside a Git worktree; callers fall back to a bounded directory walk.
+    pub fn list_files(&self, dir: &Path, cancel: &AtomicBool) -> io::Result<Vec<u8>> {
+        self.run(
+            dir,
+            &[
+                "ls-files".into(),
+                "-z".into(),
+                "--stage".into(),
+                "--cached".into(),
+                "--others".into(),
+                "--exclude-standard".into(),
+            ],
+            cancel,
+        )
+    }
+
     /// Streaming discovery continues below repositories; ignore rules do not hide nested repos.
     pub fn discover(
         &self,
@@ -336,10 +356,7 @@ impl GitService {
                         match entry.file_type() {
                             Ok(t) if t.is_dir() => {
                                 let name = entry.file_name();
-                                if [".git", "node_modules", "target", ".venv", "__pycache__"]
-                                    .iter()
-                                    .any(|n| name == *n)
-                                {
+                                if is_excluded_dir(&name) {
                                     event(Discovery::Excluded(entry.path()));
                                 } else {
                                     queue.push_back(entry.path());

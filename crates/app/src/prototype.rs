@@ -1,4 +1,4 @@
-use crate::files::{self, Entry, SearchResults};
+use crate::files::{self, Entry, PathIndex, SearchResults};
 use gpui_kit::{
     assets::IconName,
     component::{
@@ -113,9 +113,12 @@ pub struct Prototype {
     search_input: Entity<InputState>,
     search_results: SearchResults,
     search_task: Option<Task<()>>,
-    search_cancel: Arc<AtomicBool>,
     search_generation: u64,
     searching: bool,
+    index: Option<Arc<PathIndex>>,
+    index_task: Option<Task<()>>,
+    index_cancel: Arc<AtomicBool>,
+    index_generation: u64,
     file_task: Option<Task<()>>,
     file_generation: u64,
     path_prompt_open: bool,
@@ -140,7 +143,7 @@ impl Drop for Prototype {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
         self.preview_cancel.store(true, Ordering::Relaxed);
-        self.search_cancel.store(true, Ordering::Relaxed);
+        self.index_cancel.store(true, Ordering::Relaxed);
         for document in &self.documents {
             self.owners.borrow_mut().remove(&document.id);
         }
@@ -242,9 +245,12 @@ impl Prototype {
             search_input,
             search_results: SearchResults::default(),
             search_task: None,
-            search_cancel: Arc::new(AtomicBool::new(false)),
             search_generation: 0,
             searching: false,
+            index: None,
+            index_task: None,
+            index_cancel: Arc::new(AtomicBool::new(false)),
+            index_generation: 0,
             file_task: None,
             file_generation: 0,
             path_prompt_open: false,
@@ -285,7 +291,8 @@ impl Prototype {
                 },
                 depth: 0,
             });
-            self.load_directory(root, window, cx);
+            self.load_directory(root.clone(), window, cx);
+            self.build_index(root, window, cx);
         } else {
             self.tree_message = "点击顶部“打开文件夹”选择工作区；也可单独打开文件".into();
         }
@@ -362,30 +369,63 @@ impl Prototype {
         cx.notify();
     }
 
+    /// Builds the quick-open path index once per root; the refresh button rebuilds it.
+    fn build_index(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.index_cancel.store(true, Ordering::Relaxed);
+        self.index_cancel = Arc::new(AtomicBool::new(false));
+        self.index_generation += 1;
+        self.index = None;
+        let generation = self.index_generation;
+        let cancel = self.index_cancel.clone();
+        let service = self.service.clone();
+        let job = cx.background_spawn(async move {
+            let started = Instant::now();
+            let list = |dir: &std::path::Path, cancel: &AtomicBool| service.list_files(dir, cancel);
+            let index = PathIndex::build(&root, &cancel, &list);
+            eprintln!(
+                "event=index_built entries={} incomplete={} seconds={:.3}",
+                index.len(),
+                index.incomplete,
+                started.elapsed().as_secs_f64()
+            );
+            index
+        });
+        self.index_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let index = job.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.index_generation != generation {
+                    return;
+                }
+                this.index = Some(Arc::new(index));
+                this.search_files(window, cx);
+            });
+        }));
+    }
+
     fn search_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search_cancel.store(true, Ordering::Relaxed);
-        self.search_cancel = Arc::new(AtomicBool::new(false));
         self.search_generation += 1;
         self.search_task = None;
-        self.search_results = SearchResults::default();
         let query = self.search_input.read(cx).value().to_string();
         self.searching = false;
-        let Some(root) = self.root.clone().filter(|_| !query.trim().is_empty()) else {
+        if self.root.is_none() || query.trim().is_empty() {
+            self.search_results = SearchResults::default();
+            cx.notify();
+            return;
+        }
+        self.searching = true;
+        // Until the index is ready, keep the previous results; build_index re-runs the search.
+        let Some(index) = self.index.clone() else {
             cx.notify();
             return;
         };
-        self.searching = true;
         let generation = self.search_generation;
-        let cancel = self.search_cancel.clone();
         self.search_task = Some(cx.spawn_in(window, async move |this, cx| {
+            // Coalesce bursts of typing; matching itself is in memory and cheap.
             cx.background_executor()
-                .timer(Duration::from_millis(180))
+                .timer(Duration::from_millis(30))
                 .await;
-            if cancel.load(Ordering::Relaxed) {
-                return;
-            }
             let result = cx
-                .background_spawn(async move { files::search(&root, &query, &cancel) })
+                .background_spawn(async move { index.search(&query) })
                 .await;
             let _ = this.update_in(cx, |this, _, cx| {
                 if this.search_generation == generation {
@@ -1163,24 +1203,31 @@ impl Render for Prototype {
                         .px_2()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("文件名快速打开 · 当前文件查找 ⌘F"),
+                        .child("模糊匹配文件名与路径 · 当前文件查找 ⌘F"),
                 )
-                .child(div().px_2().text_xs().child(if self.searching {
-                    "搜索中…".into()
-                } else if self.search_input.read(cx).value().trim().is_empty() {
-                    "输入文件名或相对路径".into()
-                } else {
-                    format!(
-                        "{} 个结果{} · {} 项读取错误",
-                        self.search_results.paths.len(),
-                        if self.search_results.incomplete {
-                            "（部分结果，请缩小搜索范围）"
+                .child(
+                    div()
+                        .px_2()
+                        .text_xs()
+                        .child(if self.searching && self.index.is_none() {
+                            "正在建立文件索引…".into()
+                        } else if self.searching {
+                            "搜索中…".into()
+                        } else if self.search_input.read(cx).value().trim().is_empty() {
+                            "输入文件名或相对路径".into()
                         } else {
-                            ""
-                        },
-                        self.search_results.errors
-                    )
-                }))
+                            format!(
+                                "{} 个结果{} · {} 项读取错误",
+                                self.search_results.paths.len(),
+                                if self.search_results.incomplete {
+                                    "（部分结果，请缩小搜索范围）"
+                                } else {
+                                    ""
+                                },
+                                self.search_results.errors
+                            )
+                        }),
+                )
                 .child(
                     uniform_list(
                         "file-search",
@@ -1200,7 +1247,9 @@ impl Render for Prototype {
                         .pb_2()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child("跳过 .git、依赖与构建目录；不遍历目录链接"),
+                        .child(
+                            "Git 仓库遵循 .gitignore；其他目录跳过依赖与构建目录；不遍历目录链接",
+                        ),
                 )
                 .into_any_element(),
             Sidebar::SourceControl => v_flex()
