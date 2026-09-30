@@ -45,7 +45,6 @@ pub const INDICATOR: Pixels = px(2.);
 
 // Widths.
 pub const TWISTY_WIDTH: Pixels = px(16.);
-pub const STATUS_GLYPH_WIDTH: Pixels = px(16.);
 pub const SIDEBAR_WIDTH: Pixels = px(280.);
 pub const SIDEBAR_MIN: Pixels = px(200.);
 pub const SIDEBAR_MAX: Pixels = px(520.);

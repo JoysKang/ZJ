@@ -130,7 +130,7 @@ fn decoration(change: &workspace_editor_git::Change) -> Decoration {
 #[derive(Clone, Copy)]
 enum Row {
     Group(usize),
-    Heading(DiffSide),
+    Heading(DiffSide, usize),
     File(usize, usize, DiffSide),
 }
 enum Event {
@@ -980,7 +980,7 @@ impl Prototype {
                         .map(|(i, _)| i)
                         .collect();
                     if !changes.is_empty() {
-                        self.rows.push(Row::Heading(side));
+                        self.rows.push(Row::Heading(side, changes.len()));
                     }
                     self.rows
                         .extend(changes.into_iter().map(|i| Row::File(g, i, side)));
@@ -1114,100 +1114,6 @@ impl Prototype {
             });
         }));
         cx.notify();
-    }
-
-    fn row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        let colors = theme::colors(cx);
-        let base = div()
-            .id(index)
-            .h(theme::ROW_HEIGHT)
-            .w_full()
-            .px_2()
-            .flex()
-            .items_center()
-            .gap_1()
-            .overflow_hidden()
-            .text_size(theme::TEXT_BODY);
-        match self.rows[index] {
-            Row::Group(g) => {
-                let group = &self.groups[g];
-                let path = self
-                    .root
-                    .as_ref()
-                    .and_then(|root| group.repo.worktree.strip_prefix(root).ok())
-                    .filter(|path| !path.as_os_str().is_empty())
-                    .unwrap_or(&group.repo.worktree);
-                let name = path.to_string_lossy();
-                let status = match &group.status {
-                    None => "待确认".into(),
-                    Some(Err(e)) => format!("错误: {e}"),
-                    Some(Ok(s)) => format!(
-                        "{} · {} 项{}",
-                        s.branch.as_deref().unwrap_or("未知分支"),
-                        s.changes.len(),
-                        if group.stale { " · 陈旧" } else { "" }
-                    ),
-                };
-                base.role(Role::Button)
-                    .aria_label(format!("仓库 {name} · {status}"))
-                    .bg(colors.panel)
-                    .hover(|row| row.bg(colors.hover))
-                    .child(sidebar::chevron(group.expanded, colors.muted))
-                    .child(format!("{name} · {status}"))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.groups[g].expanded = !this.groups[g].expanded;
-                        this.rebuild_rows();
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            }
-            Row::Heading(side) => base
-                .pl_4()
-                .text_color(cx.theme().muted_foreground)
-                .child(match side {
-                    DiffSide::Staged => "已暂存",
-                    DiffSide::Worktree => "Changes（磁盘）",
-                })
-                .into_any_element(),
-            Row::File(g, i, side) => {
-                let Some(Ok(status)) = &self.groups[g].status else {
-                    return base.into_any_element();
-                };
-                let c = &status.changes[i];
-                let code = match side {
-                    DiffSide::Staged => c.index,
-                    DiffSide::Worktree => c.worktree,
-                };
-                let (state, color) = match (c.kind, code) {
-                    (ChangeKind::Conflict, _) => ("!".to_string(), colors.conflict),
-                    (ChangeKind::Untracked, _) => ("U".to_string(), colors.untracked),
-                    (_, b'A') => ("A".to_string(), colors.added),
-                    (_, b'D') => ("D".to_string(), colors.deleted),
-                    (_, code) => (char::from(code).to_string(), colors.modified),
-                };
-                base.role(Role::Button)
-                    .aria_label(format!(
-                        "{:?} · {} · {}",
-                        side,
-                        self.groups[g].repo.worktree.display(),
-                        c.path.display()
-                    ))
-                    .pl_4()
-                    .hover(|row| row.bg(colors.hover))
-                    .child(
-                        div()
-                            .w(theme::STATUS_GLYPH_WIDTH)
-                            .flex_shrink_0()
-                            .text_color(color)
-                            .child(state),
-                    )
-                    .child(c.path.display().to_string())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_diff(g, i, side, window, cx)
-                    }))
-                    .into_any_element()
-            }
-        }
     }
 }
 
