@@ -44,7 +44,8 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `watch.rs`：共用原生文件监听、路径引用回收和有界事件信号；不持有界面实体。
   - `prototype.rs`：工作台的状态和逻辑；`prototype/` 下是各区域的渲染（`chrome` 标题栏与状态栏、`sidebar` 侧栏与资源管理器、`scm`、`editor_area`、`quick_open`），以及 `workspace_refresh` 的事件刷新编排。
   - `diff_syntax.rs`：重新注册 diff 语法，让新增 / 删除有独立的颜色。
-  - `diff_model.rs`：后台解析并配对补丁行；`prototype/diff_view.rs`：虚拟化左右 Diff 与内联回退。
+  - `languages.rs`：文件名 / 扩展名到语法的映射；新增语法要同时打开 Kit 的 feature 并在 `SAMPLES` 里加样例。
+  - `diff_doc.rs`：在后台把全上下文补丁还原成两侧全文，做行对齐、语法高亮和字符级差异；`prototype/diff_view.rs`：只切片现成数据的虚拟化左右 / 内联 Diff 编辑器。
   - `prototype/scm_actions.rs`：Git 写操作确认与结果展示；`git_service/src/write.rs`：仓库锁内校验及有界执行。
 - UI 的 render 回调里不做 IO、不跑 Git 命令、不做全文解析；这些都通过 `background_spawn` 执行，结果带 generation 校验。
 

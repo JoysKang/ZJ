@@ -1,5 +1,5 @@
 mod assets;
-mod diff_model;
+mod diff_doc;
 mod diff_syntax;
 mod file_icons;
 mod files;

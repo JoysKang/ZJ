@@ -201,7 +201,11 @@ pub struct Prototype {
     cursor: Option<(u32, u32)>,
     _cursor_observer: Option<Subscription>,
     preview: Option<Entity<EditorState>>,
-    diff_model: Option<crate::diff_model::DiffModel>,
+    /// The parsed diff editor document; `preview` is only Git's raw text when parsing fails.
+    diff_doc: Option<Arc<crate::diff_doc::DiffDoc>>,
+    /// Patch text and dark mode the document was built from; equal reloads keep the view.
+    diff_source: Option<(Arc<str>, bool)>,
+    diff_change: Option<usize>,
     diff_inline: bool,
     diff_scroll: UniformListScrollHandle,
     preview_title: String,
@@ -252,8 +256,12 @@ impl Prototype {
         cx: &mut Context<Self>,
     ) -> Self {
         theme::follow_appearance(Some(window), cx);
-        let appearance = cx.observe_window_appearance(window, |_, window, cx| {
-            theme::follow_appearance(Some(window), cx)
+        let appearance = cx.observe_window_appearance(window, |this, window, cx| {
+            theme::follow_appearance(Some(window), cx);
+            // Diff colors and syntax spans are baked into the document; rebuild them.
+            if this.preview_diff.is_some() {
+                this.load_diff(window, cx);
+            }
         });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() && this.root.is_some() {
@@ -355,7 +363,9 @@ impl Prototype {
             cursor: None,
             _cursor_observer: None,
             preview: None,
-            diff_model: None,
+            diff_doc: None,
+            diff_source: None,
+            diff_change: None,
             diff_inline: false,
             diff_scroll: UniformListScrollHandle::new(),
             preview_title: String::new(),
@@ -1170,7 +1180,9 @@ impl Prototype {
         self.preview_generation += 1;
         self.preview_task = None;
         self.preview = None;
-        self.diff_model = None;
+        self.diff_doc = None;
+        self.diff_source = None;
+        self.diff_change = None;
         self.diff_scroll = UniformListScrollHandle::new();
         self.preview_title.clear();
         self.preview_diff = None;
@@ -1223,7 +1235,7 @@ impl Prototype {
                     .unwrap_or_default()
                     .to_string_lossy(),
                 match side {
-                    DiffSide::Staged => "已暂存",
+                    DiffSide::Staged => "索引",
                     DiffSide::Worktree => "工作树",
                 }
             ),
@@ -1257,6 +1269,19 @@ impl Prototype {
         let repo_id = request.repo.id.clone();
         let generation = request.generation;
         self.preview_title = format!("正在加载 {title}");
+        let highlight = gpui_kit::component::Theme::global(cx)
+            .highlight_theme
+            .clone();
+        let dark = gpui_kit::component::Theme::global(cx).is_dark();
+        let colors = theme::colors(cx);
+        let change_colors = crate::diff_doc::ChangeColors {
+            inserted_text: colors.diff_added_text,
+            removed_text: colors.diff_deleted_text,
+        };
+        let language = match language_for(&diff.path).0 {
+            "plain" => None,
+            language => Some(language),
+        };
         let job = cx.background_spawn(async move {
             let reply = service.execute(&request, &cancel)?;
             if reply.repo != repo_id || reply.generation != generation {
@@ -1265,8 +1290,9 @@ impl Prototype {
             let text: Arc<str> = String::from_utf8(reply.output)
                 .map_err(std::io::Error::other)?
                 .into();
-            let model = crate::diff_model::DiffModel::parse(text.clone());
-            Ok::<_, std::io::Error>((text, model))
+            let doc = crate::diff_doc::DiffDoc::parse(&text, language, &highlight, change_colors)
+                .map(Arc::new);
+            Ok::<_, std::io::Error>((text, doc))
         });
         self.preview_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = job.await;
@@ -1285,31 +1311,46 @@ impl Prototype {
                 match result {
                     Ok((text, _)) if text.is_empty() => {
                         this.preview = None;
-                        this.diff_model = None;
+                        this.diff_doc = None;
+                        this.diff_source = None;
                         this.preview_title = "当前没有差异".into();
                     }
-                    Ok((text, model)) => {
-                        // Equal patches keep cursor and scroll position through a refresh.
+                    Ok((text, doc)) => {
+                        // Equal patches keep the scroll position through a refresh.
                         if this
-                            .preview
+                            .diff_source
                             .as_ref()
-                            .is_some_and(|editor| *editor.read(cx).text() == text.as_ref())
+                            .is_some_and(|(old, was_dark)| *old == text && *was_dark == dark)
                         {
                             this.preview_title = title;
                             cx.notify();
                             return;
                         }
-                        this.diff_model = model;
-                        this.preview = Some(cx.new(|cx| {
-                            EditorState::new(window, cx)
-                                .language(crate::diff_syntax::LANGUAGE)
-                                .default_value(text.to_string())
-                        }));
+                        let fresh = this.diff_source.is_none();
+                        this.diff_source = Some((text.clone(), dark));
                         this.preview_title = title;
+                        match doc {
+                            Some(doc) => {
+                                this.preview = None;
+                                this.diff_doc = Some(doc);
+                                if fresh {
+                                    this.reveal_first_change();
+                                }
+                            }
+                            None => {
+                                this.diff_doc = None;
+                                this.preview = Some(cx.new(|cx| {
+                                    EditorState::new(window, cx)
+                                        .language(crate::diff_syntax::LANGUAGE)
+                                        .default_value(text.to_string())
+                                }));
+                            }
+                        }
                     }
                     Err(e) => {
                         this.preview = None;
-                        this.diff_model = None;
+                        this.diff_doc = None;
+                        this.diff_source = None;
                         this.preview_title = format!("Diff 加载失败: {e}");
                     }
                 }

@@ -158,28 +158,32 @@ impl Prototype {
             specs.push(TabSpec {
                 key: usize::MAX,
                 pane: Pane::Diff,
-                icon: "file-icons/file_type_diff.svg",
+                icon: file_icons::for_file(
+                    &diff.path.file_name().unwrap_or_default().to_string_lossy(),
+                ),
                 label: diff.label.clone(),
                 tooltip: diff.tooltip.clone(),
                 dirty: false,
             });
         }
         let tabs: Vec<AnyElement> = specs.into_iter().map(|spec| self.tab(spec, cx)).collect();
-        h_flex()
+        let strip = h_flex()
             .id("tab-strip")
+            .h_full()
+            .flex_1()
+            .min_w_0()
+            .overflow_x_scroll()
+            .children(tabs)
+            .child(div().flex_1().h_full());
+        h_flex()
             .h(theme::TAB_HEIGHT)
             .w_full()
             .flex_shrink_0()
-            .overflow_x_scroll()
             .bg(colors.tabs)
-            .children(tabs)
-            .child(
-                div()
-                    .flex_1()
-                    .h_full()
-                    .border_b_1()
-                    .border_color(colors.tabs),
-            )
+            .child(strip)
+            .when(self.active == Pane::Diff, |bar| {
+                bar.child(self.render_diff_actions(cx))
+            })
             .into_any_element()
     }
 

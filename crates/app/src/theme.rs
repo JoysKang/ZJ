@@ -66,9 +66,16 @@ pub const TEXT_CAPTION: Pixels = px(12.);
 pub const TEXT_SECTION: Pixels = px(11.);
 pub const TEXT_BADGE: Pixels = px(9.);
 
+// Diff editor (VS Code: 13 px font, ~20 px lines, 5-digit line numbers, +/- indicators).
 pub const DIFF_COLUMN_WIDTH: Pixels = px(7.8);
-pub const DIFF_GUTTER: Pixels = px(52.);
+pub const DIFF_GUTTER: Pixels = px(48.);
+pub const DIFF_INDICATOR: Pixels = px(20.);
+pub const DIFF_TEXT_END: Pixels = px(32.);
 pub const DIFF_TEXT: Pixels = px(13.);
+pub const DIFF_ROW_HEIGHT: Pixels = px(20.);
+/// Filler stripes: (line width, gap) in pixels; their sum divides `DIFF_ROW_HEIGHT` so the
+/// pattern continues across rows.
+pub const DIFF_HATCH: (f32, f32) = (1., 4.);
 pub const SCM_NOTICE_MAX: Pixels = px(100.);
 pub const COMMIT_HEIGHT: Pixels = px(60.);
 

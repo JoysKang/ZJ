@@ -133,7 +133,10 @@ impl Prototype {
             _ => None,
         };
         let language = match self.active {
-            Pane::Diff => Some("Diff"),
+            Pane::Diff => self
+                .preview_diff
+                .as_ref()
+                .map(|diff| super::language_for(&diff.path).1),
             _ => document.map(|doc| doc.language),
         };
         let any_dirty = self.documents.iter().any(|doc| doc.dirty);

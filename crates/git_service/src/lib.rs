@@ -26,6 +26,8 @@ use std::{
 use workspace_editor_core::{RepoId, Repository, is_excluded_dir};
 
 const OUTPUT_LIMIT: usize = 16_000_000;
+/// Diffs carry the whole file so the diff editor can rebuild both sides.
+const FULL_CONTEXT: &str = "--unified=1000000";
 const ERROR_LIMIT: usize = 32_000;
 
 #[derive(Clone, Copy, Debug)]
@@ -326,6 +328,7 @@ impl GitService {
                             "--no-ext-diff".into(),
                             "--no-textconv".into(),
                             "--no-color".into(),
+                            FULL_CONTEXT.into(),
                             "--".into(),
                             path.as_os_str().to_owned(),
                         ],
@@ -349,6 +352,7 @@ impl GitService {
                             "--no-ext-diff".into(),
                             "--no-textconv".into(),
                             "--no-color".into(),
+                            FULL_CONTEXT.into(),
                             "--".into(),
                             "/dev/null".into(),
                             path.as_os_str().to_owned(),
@@ -379,6 +383,7 @@ impl GitService {
                     "--no-ext-diff".into(),
                     "--no-textconv".into(),
                     "--no-color".into(),
+                    FULL_CONTEXT.into(),
                 ];
                 if matches!(side, DiffSide::Staged) {
                     args.push("--cached".into());
