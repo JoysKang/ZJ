@@ -1,7 +1,10 @@
-//! ⌘P "转到文件": a VS Code-style quick open over the workspace path index.
+//! ⌘P "转到文件": a VS Code-style quick open over the workspace path index. The same panel
+//! lists symbols (⌘⇧O) and definition / reference locations.
 
 use super::Prototype;
 use super::SINGLE_LINE;
+use super::navigation::Target;
+use crate::symbols::Kind;
 use crate::{file_icons, theme};
 use gpui_kit::{
     component::{
@@ -14,9 +17,25 @@ use gpui_kit::{
 };
 use std::{path::PathBuf, time::Duration};
 
+/// A row of a symbol or location list.
+pub(super) struct PickItem {
+    pub label: String,
+    pub detail: String,
+    pub icon: PickIcon,
+    pub target: Target,
+}
+
+pub(super) enum PickIcon {
+    File(&'static str),
+    Symbol(Kind),
+}
+
 pub(super) struct QuickOpen {
     input: Entity<InputState>,
     results: Vec<PathBuf>,
+    /// `Some` for a symbol / location list: the items and the indexes matching the query.
+    items: Option<(Vec<PickItem>, Vec<usize>)>,
+    empty_note: &'static str,
     selected: usize,
     generation: u64,
     task: Option<Task<()>>,
@@ -43,6 +62,8 @@ impl Prototype {
         self.quick_open = Some(QuickOpen {
             input,
             results: Vec::new(),
+            items: None,
+            empty_note: "",
             selected: 0,
             generation: 0,
             task: None,
@@ -52,8 +73,73 @@ impl Prototype {
         self.update_quick_open(window, cx);
     }
 
+    /// Opens the panel over a fixed list (symbols or locations), filtered as the user types.
+    pub(super) fn open_picker(
+        &mut self,
+        items: Vec<PickItem>,
+        placeholder: String,
+        empty_note: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.quick_open = None;
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        input.update(cx, |input, cx| input.focus(window, cx));
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.update_quick_open(window, cx);
+                }
+            },
+        );
+        let all = (0..items.len()).collect();
+        self.quick_open = Some(QuickOpen {
+            input,
+            results: Vec::new(),
+            items: Some((items, all)),
+            empty_note,
+            selected: 0,
+            generation: 0,
+            task: None,
+            scroll: UniformListScrollHandle::new(),
+            _subscription: subscription,
+        });
+        cx.notify();
+    }
+
+    fn quick_open_len(&self) -> usize {
+        self.quick_open
+            .as_ref()
+            .map_or(0, |quick| match &quick.items {
+                Some((_, filtered)) => filtered.len(),
+                None => quick.results.len(),
+            })
+    }
+
     /// Empty query lists open files, most recent first; otherwise fuzzy results from the index.
     pub(super) fn update_quick_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(quick) = self.quick_open.as_mut()
+            && let Some((items, filtered)) = &mut quick.items
+        {
+            let query = crate::fuzzy::query_chars(&quick.input.read(cx).value());
+            let mut scored: Vec<(i32, usize)> = items
+                .iter()
+                .enumerate()
+                .filter_map(|(i, item)| {
+                    let key = item.label.to_lowercase();
+                    crate::fuzzy::score(&query, &key, 0).map(|score| (score, i))
+                })
+                .collect();
+            if !query.is_empty() {
+                scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            }
+            *filtered = scored.into_iter().map(|(_, i)| i).collect();
+            quick.selected = 0;
+            cx.notify();
+            return;
+        }
         let recent: Vec<PathBuf> = self
             .documents
             .iter()
@@ -112,6 +198,20 @@ impl Prototype {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(quick) = self.quick_open.as_ref()
+            && let Some((items, filtered)) = &quick.items
+        {
+            let target = filtered
+                .get(index.unwrap_or(quick.selected))
+                .map(|i| items[*i].target.clone());
+            self.quick_open = None;
+            match target {
+                Some(target) => self.jump_to(target, true, window, cx),
+                None => self.focus_active_editor(window, cx),
+            }
+            cx.notify();
+            return;
+        }
         let path = self
             .quick_open
             .as_ref()
@@ -125,10 +225,11 @@ impl Prototype {
     }
 
     fn move_quick_open(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let len = self.quick_open_len();
         if let Some(quick) = self.quick_open.as_mut()
-            && !quick.results.is_empty()
+            && len > 0
         {
-            let last = quick.results.len() - 1;
+            let last = len - 1;
             quick.selected = quick.selected.saturating_add_signed(delta).min(last);
             quick
                 .scroll
@@ -142,6 +243,9 @@ impl Prototype {
         let Some(quick) = self.quick_open.as_ref() else {
             return div().into_any_element();
         };
+        if let Some((items, filtered)) = &quick.items {
+            return self.pick_row(&items[filtered[index]], index, index == quick.selected, cx);
+        }
         let path = &quick.results[index];
         let name = path
             .file_name()
@@ -196,11 +300,13 @@ impl Prototype {
     pub(super) fn render_quick_open(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let quick = self.quick_open.as_ref()?;
         let colors = theme::colors(cx);
-        let count = quick.results.len();
+        let count = self.quick_open_len();
         let visible = count.min(theme::QUICK_OPEN_ROWS);
         let query_empty = quick.input.read(cx).value().trim().is_empty();
         let note = if count > 0 {
             None
+        } else if quick.items.is_some() {
+            Some(quick.empty_note)
         } else if query_empty {
             Some("输入文件名或路径片段；按 ↑↓ 选择，回车打开，Esc 关闭")
         } else if self.index.is_none() {
@@ -277,5 +383,69 @@ impl Prototype {
                 .child(panel)
                 .into_any_element(),
         )
+    }
+}
+
+impl Prototype {
+    fn pick_row(
+        &self,
+        item: &PickItem,
+        index: usize,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = theme::colors(cx);
+        let icon = match item.icon {
+            PickIcon::File(icon) => file_icons::icon(icon).into_any_element(),
+            PickIcon::Symbol(kind) => {
+                let (name, color) = super::navigation::kind_icon(kind, colors);
+                gpui_kit::component::Icon::new(name)
+                    .size(theme::ICON_SIZE)
+                    .text_color(color)
+                    .into_any_element()
+            }
+        };
+        h_flex()
+            .id(("pick-row", index))
+            .h(theme::ROW_HEIGHT)
+            .w_full()
+            .px_2()
+            .gap_2()
+            .rounded(theme::RADIUS)
+            .overflow_hidden()
+            .text_size(theme::TEXT_BODY)
+            .when(selected, |row| {
+                row.bg(colors.selected).text_color(colors.selected_fg)
+            })
+            .when(!selected, |row| row.hover(|row| row.bg(colors.hover)))
+            .child(div().flex_shrink_0().child(icon))
+            .child(
+                div()
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(item.label.replace(SINGLE_LINE, "⏎")),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(theme::TEXT_CAPTION)
+                    .text_color(if selected {
+                        colors.selected_fg
+                    } else {
+                        colors.muted
+                    })
+                    .child(item.detail.replace(SINGLE_LINE, "⏎")),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.confirm_quick_open(Some(index), window, cx)
+            }))
+            .into_any_element()
     }
 }

@@ -318,7 +318,7 @@ impl Prototype {
                     .child(item(
                         "welcome-open-folder",
                         "打开文件夹",
-                        &["⇧", "⌘", "O"],
+                        &["⌘K", "⌘O"],
                         Box::new(OpenFolder),
                     ))
                     .child(item(

@@ -245,7 +245,8 @@ impl Prototype {
     }
 
     /// Hook for per-file consumers (the symbol index) of a partial refresh.
-    fn apply_files_changed(&mut self, _plan: &Plan, _window: &mut Window, _cx: &mut Context<Self>) {
+    fn apply_files_changed(&mut self, plan: &Plan, _window: &mut Window, cx: &mut Context<Self>) {
+        self.update_symbol_index(plan.files.iter().cloned().collect(), cx);
     }
 
     pub(super) fn invalidate_preview(&mut self, cx: &mut Context<Self>) {

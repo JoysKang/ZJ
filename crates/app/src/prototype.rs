@@ -29,6 +29,7 @@ use workspace_editor_git::{
 mod chrome;
 mod diff_view;
 mod editor_area;
+pub mod navigation;
 mod quick_open;
 mod scm;
 mod scm_actions;
@@ -204,6 +205,17 @@ pub struct Prototype {
     cursor: Option<(u32, u32)>,
     _cursor_observer: Option<Subscription>,
     preview: Option<Entity<EditorState>>,
+    /// Workspace symbols for cross-file go to definition, built on first use.
+    symbols: Option<Arc<crate::symbol_index::SymbolIndex>>,
+    symbols_task: Option<Task<()>>,
+    symbols_cancel: Arc<AtomicBool>,
+    symbols_requested: bool,
+    nav_generation: u64,
+    nav_targets: (u64, Vec<navigation::Target>),
+    nav_back: Vec<navigation::NavPoint>,
+    nav_forward: Vec<navigation::NavPoint>,
+    nav_task: Option<Task<()>>,
+    pending_place: Option<(PathBuf, navigation::Placement)>,
     /// The parsed diff editor document; `preview` is only Git's raw text when parsing fails.
     diff_doc: Option<Arc<crate::diff_doc::DiffDoc>>,
     /// Patch text and dark mode the document was built from; equal reloads keep the view.
@@ -369,6 +381,16 @@ impl Prototype {
             cursor: None,
             _cursor_observer: None,
             preview: None,
+            symbols: None,
+            symbols_task: None,
+            symbols_cancel: Arc::new(AtomicBool::new(false)),
+            symbols_requested: false,
+            nav_generation: 0,
+            nav_targets: (0, Vec::new()),
+            nav_back: Vec::new(),
+            nav_forward: Vec::new(),
+            nav_task: None,
+            pending_place: None,
             diff_doc: None,
             diff_source: None,
             diff_change: None,
@@ -566,6 +588,10 @@ impl Prototype {
                 }
                 this.index_task = None;
                 this.index = Some(Arc::new(index));
+                // A rebuilt file list rebuilds the symbol index if navigation has been used.
+                if this.symbols_requested {
+                    this.build_symbol_index(cx);
+                }
                 this.search_files(window, cx);
                 this.update_quick_open(window, cx);
                 this.flush_workspace_refresh(window, cx);
@@ -829,6 +855,7 @@ impl Prototype {
                 {
                     this.select_pane(Pane::Document(existing), window, cx);
                     this.message = "已定位到打开的标签；保留缓冲区内容".into();
+                    this.apply_pending_place(window, cx);
                     return;
                 }
                 let owner = this
@@ -864,10 +891,14 @@ impl Prototype {
                     return;
                 }
                 let (language, language_name) = language_for(&loaded.path);
+                let path = loaded.path.clone();
+                let view = cx.weak_entity();
                 let editor = cx.new(|cx| {
-                    EditorState::new(window, cx)
+                    let mut state = EditorState::new(window, cx)
                         .language(language)
-                        .default_value(loaded.text)
+                        .default_value(loaded.text);
+                    navigation::attach(&mut state, &path, view);
+                    state
                 });
                 let subscription = cx.subscribe(
                     &editor,
@@ -902,6 +933,7 @@ impl Prototype {
                 );
                 this.message.clear();
                 this.select_pane(Pane::Document(id), window, cx);
+                this.apply_pending_place(window, cx);
             });
         }));
         cx.notify();
@@ -1484,6 +1516,24 @@ impl Render for Prototype {
                 this.open_quick_open(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &navigation::GoToSymbol, window, cx| {
+                this.go_to_symbol(window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &navigation::FindReferences, window, cx| {
+                    this.find_references(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &navigation::NavigateBack, window, cx| {
+                    this.navigate_back(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &navigation::NavigateForward, window, cx| {
+                    this.navigate_forward(window, cx)
+                }),
+            )
             .bg(colors.editor)
             .text_color(colors.foreground)
             .child(self.render_title_bar(cx))

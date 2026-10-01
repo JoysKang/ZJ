@@ -51,6 +51,7 @@ python3 tools/fixtures.py /tmp/zj-fixture-f
 - 自动刷新保留目录展开状态、文件标签、dirty 内容和撤销历史；手动折叠优先。打开的 Diff 保留原内容，磁盘变更后自动重新查询；补丁未变时保留滚动位置和光标。编辑缓冲区不会随外部修改自动重载。
 - 激活窗口会补查；「刷新 Changes」和「刷新目录」仍可手动使用。源代码管理静默刷新，保留原列表，不插入扫描进度或取消行；再次刷新与关闭窗口会取消旧任务，查询仍有超时保护。不显示扫描、陈旧或过期标记；已有列表、空状态和错误在查询期间保持，只有新结果才更新。首次发现完成前不会提示「未发现 Git 仓库」。监听失败会在状态栏显示异常；事件丢失或溢出触发重新扫描。
 - 编辑器复用 Kit 的真实 Editor，带行号、Rust、Python、JavaScript / JSX、TypeScript / TSX、JSON、TOML、YAML、Go、Shell、HTML、CSS、C、C++、Java、SQL、Markdown、Diff 高亮（映射见 `crates/app/src/languages.rs`）、选择、复制粘贴、撤销重做及组件内置查找替换。JSONC 使用已有 JSON grammar 的注释与容错高亮，不作为语法校验器；其他语言是纯文本。中文组合输入仍需要实机专项验收。
+- 代码跳转（不跑语言服务器，基于 tree-sitter）：⌘ 悬停显示下划线，⌘ 单击或 F12 转到定义（同文件局部变量按作用域解析，跨文件用后台建立的符号索引；多个候选时弹出列表），⌘⇧O 转到文件中的符号，⇧F12 查找引用，⌃- / ⌃⇧- 后退 / 前进。支持 Rust、Python、JS、TS / TSX、Go、C、C++、Java、Bash。打开文件夹的快捷键改为 ⌘K ⌘O（⌘⇧O 让给符号列表，与 VS Code 一致）。
 - Markdown 预览（原型样例已移除）将在 P6 接入。
 
 后台 Git 采用独立 argv、porcelain v2 NUL 格式、全局最多两个命令和每仓库串行；状态和 diff 结果带 generation，旧任务不能覆盖新刷新。Git 命令清除继承的 `GIT_*` 定位与配置变量，避免命令被导向其他仓库。查询禁用 optional locks 和 fsmonitor。写操作在同一仓库锁内核对身份及状态版本；刷新不取消已开始的写操作，操作期间禁止关闭对应窗口，失败会刷新状态并显示错误。

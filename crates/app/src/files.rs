@@ -125,6 +125,14 @@ impl PathIndex {
         self.entries.len()
     }
 
+    /// Absolute paths of all indexed files.
+    pub fn paths(&self) -> Vec<PathBuf> {
+        self.entries
+            .iter()
+            .map(|entry| self.root.join(&entry.relative))
+            .collect()
+    }
+
     fn position(&self, relative: &Path) -> Result<usize, usize> {
         self.entries
             .binary_search_by(|entry| entry.relative.as_path().cmp(relative))

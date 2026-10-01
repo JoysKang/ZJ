@@ -7,9 +7,13 @@ mod fuzzy;
 mod languages;
 mod prototype;
 mod refresh_plan;
+mod symbol_index;
+mod symbols;
 mod theme;
 mod watch;
+use gpui_kit::component::input::GoToDefinition;
 use gpui_kit::*;
+use prototype::navigation as nav;
 use prototype::{DocumentOwners, Prototype};
 use std::{cell::RefCell, path::PathBuf, rc::Rc, time::Duration};
 use workspace_editor_git::GitService;
@@ -92,9 +96,23 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 KeyBinding::new("cmd-shift-n", prototype::NewWindow, Some("WorkspaceEditor")),
                 KeyBinding::new("cmd-s", prototype::SaveUnavailable, Some("WorkspaceEditor")),
                 KeyBinding::new("cmd-o", prototype::OpenFile, Some("WorkspaceEditor")),
+                // VS Code: ⌘⇧O is go to symbol; open folder moves to ⌘K ⌘O.
                 KeyBinding::new(
-                    "cmd-shift-o",
+                    "cmd-k cmd-o",
                     prototype::OpenFolder,
+                    Some("WorkspaceEditor"),
+                ),
+                KeyBinding::new(
+                    "secondary-shift-o",
+                    nav::GoToSymbol,
+                    Some("WorkspaceEditor"),
+                ),
+                KeyBinding::new("f12", GoToDefinition, Some("Input")),
+                KeyBinding::new("shift-f12", nav::FindReferences, Some("WorkspaceEditor")),
+                KeyBinding::new("ctrl--", nav::NavigateBack, Some("WorkspaceEditor")),
+                KeyBinding::new(
+                    "ctrl-shift--",
+                    nav::NavigateForward,
                     Some("WorkspaceEditor"),
                 ),
                 KeyBinding::new(
@@ -115,6 +133,14 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     MenuItem::separator(),
                     MenuItem::action("打开文件…", prototype::OpenFile),
                     MenuItem::action("打开文件夹…", prototype::OpenFolder),
+                ]),
+                Menu::new("转到").items([
+                    MenuItem::action("返回", nav::NavigateBack),
+                    MenuItem::action("前进", nav::NavigateForward),
+                    MenuItem::separator(),
+                    MenuItem::action("转到定义", GoToDefinition),
+                    MenuItem::action("查找所有引用", nav::FindReferences),
+                    MenuItem::action("转到文件中的符号…", nav::GoToSymbol),
                 ]),
             ]);
             let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));

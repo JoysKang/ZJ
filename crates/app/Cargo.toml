@@ -18,6 +18,8 @@ tree-sitter-diff = "0.1"
 # Already in GPUI Kit's dependency tree; native FSEvents and a bounded async wakeup.
 notify = "=7.0.0"
 async-channel = "=2.5.0"
+# Already in GPUI Kit's tree (its editor speaks LSP types); go to definition answers in them.
+lsp-types = "=0.97.0"
 
 [lints]
 workspace = true

@@ -1,0 +1,4 @@
+The *-tags.scm files and javascript-locals.scm / typescript-locals.scm are copied unchanged
+from the tree-sitter grammar crates (tree-sitter-rust, -python, -go, -c, -cpp, -java,
+-javascript, -typescript), all released under the MIT license by their authors.
+Files whose first line says "ZJ" were written for this project.
