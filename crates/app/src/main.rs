@@ -4,6 +4,7 @@ mod diff_syntax;
 mod file_icons;
 mod files;
 mod fuzzy;
+mod languages;
 mod prototype;
 mod theme;
 mod watch;

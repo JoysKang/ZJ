@@ -110,36 +110,7 @@ const SINGLE_LINE: [char; 2] = ['\n', '\r'];
 
 /// Highlighter language (only grammars compiled into Kit) and status bar display name.
 fn language_for(path: &std::path::Path) -> (&'static str, &'static str) {
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let extension = name
-        .rsplit_once('.')
-        .map(|(_, ext)| ext)
-        .unwrap_or_default();
-    match extension {
-        "rs" => ("rust", "Rust"),
-        "md" | "markdown" => ("markdown", "Markdown"),
-        "diff" | "patch" => (crate::diff_syntax::LANGUAGE, "Diff"),
-        "toml" => ("plain", "TOML"),
-        "json" => ("json", "JSON"),
-        "jsonc" => ("json", "JSON with Comments"),
-        "js" | "mjs" | "cjs" => ("plain", "JavaScript"),
-        "ts" | "tsx" => ("plain", "TypeScript"),
-        "py" => ("plain", "Python"),
-        "sh" | "bash" | "zsh" => ("plain", "Shell Script"),
-        "html" | "htm" => ("plain", "HTML"),
-        "css" => ("plain", "CSS"),
-        "yaml" | "yml" => ("plain", "YAML"),
-        "go" => ("plain", "Go"),
-        "c" | "h" => ("plain", "C"),
-        "cpp" | "cc" | "hpp" => ("plain", "C++"),
-        "java" => ("plain", "Java"),
-        "sql" => ("plain", "SQL"),
-        _ => ("plain", "纯文本"),
-    }
+    crate::languages::for_path(path)
 }
 
 /// Explorer git decoration, VS Code style: colored name plus a letter (files) or dot (folders).

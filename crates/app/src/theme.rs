@@ -119,6 +119,13 @@ pub struct Palette {
     pub deleted: u32,
     pub untracked: u32,
     pub conflict: u32,
+    /// Default code color (Solarized base0 / Nord polar night).
+    pub code: u32,
+    /// Diff hues: Solarized green/red, Nord aurora green/red.
+    pub diff_green: u32,
+    pub diff_red: u32,
+    pub diff_line_alpha: f32,
+    pub diff_text_alpha: f32,
 }
 
 /// Solarized Dark, mapped like VS Code's built-in theme (sidebar #00212B, editor #002B36,
@@ -150,6 +157,11 @@ pub const DARK: Palette = Palette {
     deleted: 0xe8735f,
     untracked: 0x73c991,
     conflict: 0xe4676b,
+    code: 0x839496,
+    diff_green: 0x859900,
+    diff_red: 0xdc322f,
+    diff_line_alpha: 0.16,
+    diff_text_alpha: 0.38,
 };
 
 /// Nord Light: snow storm backgrounds, polar night text, frost accents. Aurora colors are
@@ -179,10 +191,18 @@ pub const LIGHT: Palette = Palette {
     deleted: 0x99353f,
     untracked: 0x3f6b2d,
     conflict: 0x7a4e73,
+    code: 0x2e3440,
+    diff_green: 0xa3be8c,
+    diff_red: 0xbf616a,
+    diff_line_alpha: 0.26,
+    diff_text_alpha: 0.5,
 };
 
 /// Syntax colors (tree-sitter capture → color, style) in the same Kit JSON shape as its theme
-/// files. Solarized keeps its canonical comment color (#586E75, below 4.5:1 by design).
+/// files, following VS Code's Solarized Dark token colors (keyword/operator green, function and
+/// property blue, type/constructor orange, constants yellow, numbers magenta, strings cyan).
+/// Solarized keeps its canonical comment color (#586E75, below 4.5:1 by design). Captures a
+/// table does not list fall back to their prefix (`function.method` → `function`).
 const SOLARIZED_SYNTAX: &[(&str, u32, Option<&str>)] = &[
     ("attribute", 0x93a1a1, None),
     ("boolean", 0xb58900, None),
@@ -191,7 +211,9 @@ const SOLARIZED_SYNTAX: &[(&str, u32, Option<&str>)] = &[
     ("constant", 0xb58900, None),
     ("constructor", 0xcb4b16, None),
     ("embedded", 0x839496, None),
-    ("enum", 0xb58900, None),
+    ("emphasis", 0xd33682, Some("italic")),
+    ("emphasis.strong", 0xd33682, Some("bold")),
+    ("enum", 0xcb4b16, None),
     ("function", 0x268bd2, None),
     // Diff additions / deletions (see diff_syntax.rs).
     ("hint", 0xdc322f, None),
@@ -202,16 +224,17 @@ const SOLARIZED_SYNTAX: &[(&str, u32, Option<&str>)] = &[
     ("link_uri", 0x2aa198, None),
     ("number", 0xd33682, None),
     ("operator", 0x859900, None),
-    ("preproc", 0xcb4b16, None),
+    ("preproc", 0xb58900, None),
     ("primary", 0x839496, None),
-    ("property", 0x839496, None),
+    // VS Code maps variable.other.property / variable.other to blue.
+    ("property", 0x268bd2, None),
     ("punctuation", 0x839496, None),
     ("punctuation.bracket", 0x839496, None),
     ("punctuation.delimiter", 0x839496, None),
     ("punctuation.list_marker", 0xcb4b16, None),
     ("punctuation.special", 0xdc322f, None),
     ("string", 0x2aa198, None),
-    ("string.escape", 0xdc322f, None),
+    ("string.escape", 0xcb4b16, None),
     ("string.regex", 0xdc322f, None),
     ("string.special", 0x2aa198, None),
     ("string.special.symbol", 0x2aa198, None),
@@ -232,6 +255,8 @@ const NORD_LIGHT_SYNTAX: &[(&str, u32, Option<&str>)] = &[
     ("constant", 0x81587a, None),
     ("constructor", 0x2f6f6d, None),
     ("embedded", 0x2e3440, None),
+    ("emphasis", 0x81587a, Some("italic")),
+    ("emphasis.strong", 0x81587a, Some("bold")),
     ("enum", 0x2f6f6d, None),
     ("function", 0x2f6b8f, None),
     ("hint", 0x99353f, None),
@@ -304,8 +329,16 @@ pub struct Colors {
     pub untracked: Hsla,
     pub conflict: Hsla,
     /// VS Code's command center: foreground at 5 % / 20 % opacity.
+    /// VS Code `diffEditor.insertedLineBackground` / `removedLineBackground`.
     pub diff_added: Hsla,
     pub diff_deleted: Hsla,
+    /// VS Code `diffEditor.insertedTextBackground` / `removedTextBackground`.
+    pub diff_added_text: Hsla,
+    pub diff_deleted_text: Hsla,
+    /// VS Code `diffEditor.diagonalFill` for filler rows.
+    pub diff_filler: Hsla,
+    /// The editor's default text color (syntax theme `editor.foreground`).
+    pub code: Hsla,
     pub command_bg: Hsla,
     pub command_border: Hsla,
 }
@@ -338,8 +371,12 @@ impl Palette {
             deleted: hsla(self.deleted),
             untracked: hsla(self.untracked),
             conflict: hsla(self.conflict),
-            diff_added: hsla(self.added).opacity(0.12),
-            diff_deleted: hsla(self.deleted).opacity(0.12),
+            diff_added: hsla(self.diff_green).opacity(self.diff_line_alpha),
+            diff_deleted: hsla(self.diff_red).opacity(self.diff_line_alpha),
+            diff_added_text: hsla(self.diff_green).opacity(self.diff_text_alpha),
+            diff_deleted_text: hsla(self.diff_red).opacity(self.diff_text_alpha),
+            diff_filler: hsla(self.foreground).opacity(0.12),
+            code: hsla(self.code),
             command_bg: hsla(self.foreground).opacity(0.05),
             command_border: hsla(self.foreground).opacity(0.2),
         }
@@ -388,11 +425,7 @@ pub fn follow_appearance(window: Option<&mut Window>, cx: &mut App) {
         // The Editor paints from the syntax theme's own style block, not from ThemeColor.
         let style = &mut std::sync::Arc::make_mut(&mut theme.highlight_theme).style;
         style.editor_background = Some(hsla(palette.editor));
-        style.editor_foreground = Some(hsla(if mode.is_dark() {
-            0x839496
-        } else {
-            palette.foreground
-        }));
+        style.editor_foreground = Some(hsla(palette.code));
         style.editor_active_line = Some(hsla(palette.active_line));
         style.editor_line_number = Some(hsla(palette.muted));
         style.editor_active_line_number = Some(hsla(palette.foreground));
@@ -448,6 +481,24 @@ fn apply(palette: &Palette, theme: &mut ThemeColor) {
     theme.link = c.accent;
     theme.selection = hsla(palette.selection);
     theme.caret = hsla(palette.caret);
+}
+
+/// The app's syntax theme on top of Kit's defaults, for tests that run without a window.
+#[cfg(test)]
+pub fn highlight_theme_for_tests(dark: bool) -> gpui_kit::component::highlighter::HighlightTheme {
+    use gpui_kit::component::highlighter::HighlightTheme;
+    let mut theme = if dark {
+        (*HighlightTheme::default_dark()).clone()
+    } else {
+        (*HighlightTheme::default_light()).clone()
+    };
+    let syntax = if dark {
+        SOLARIZED_SYNTAX
+    } else {
+        NORD_LIGHT_SYNTAX
+    };
+    theme.style.syntax = serde_json::from_value(syntax_json(syntax)).unwrap();
+    theme
 }
 
 #[cfg(test)]
