@@ -66,6 +66,12 @@ pub const TEXT_CAPTION: Pixels = px(12.);
 pub const TEXT_SECTION: Pixels = px(11.);
 pub const TEXT_BADGE: Pixels = px(9.);
 
+pub const DIFF_COLUMN_WIDTH: Pixels = px(7.8);
+pub const DIFF_GUTTER: Pixels = px(52.);
+pub const DIFF_TEXT: Pixels = px(13.);
+pub const SCM_NOTICE_MAX: Pixels = px(100.);
+pub const COMMIT_HEIGHT: Pixels = px(60.);
+
 // Window geometry.
 pub const WINDOW_WIDTH: Pixels = px(1280.);
 pub const WINDOW_HEIGHT: Pixels = px(800.);
@@ -298,6 +304,8 @@ pub struct Colors {
     pub untracked: Hsla,
     pub conflict: Hsla,
     /// VS Code's command center: foreground at 5 % / 20 % opacity.
+    pub diff_added: Hsla,
+    pub diff_deleted: Hsla,
     pub command_bg: Hsla,
     pub command_border: Hsla,
 }
@@ -330,6 +338,8 @@ impl Palette {
             deleted: hsla(self.deleted),
             untracked: hsla(self.untracked),
             conflict: hsla(self.conflict),
+            diff_added: hsla(self.added).opacity(0.12),
+            diff_deleted: hsla(self.deleted).opacity(0.12),
             command_bg: hsla(self.foreground).opacity(0.05),
             command_border: hsla(self.foreground).opacity(0.2),
         }
@@ -426,7 +436,14 @@ fn apply(palette: &Palette, theme: &mut ThemeColor) {
     theme.popover = c.panel;
     theme.popover_foreground = c.foreground;
     theme.input = c.border;
-    theme.primary = c.accent;
+    theme.primary = c.badge;
+    theme.primary_hover = c.badge;
+    theme.primary_active = c.badge;
+    theme.primary_foreground = c.badge_fg;
+    theme.button_primary = c.badge;
+    theme.button_primary_hover = c.badge;
+    theme.button_primary_active = c.badge;
+    theme.button_primary_foreground = c.badge_fg;
     theme.ring = c.accent;
     theme.link = c.accent;
     theme.selection = hsla(palette.selection);

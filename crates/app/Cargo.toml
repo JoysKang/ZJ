@@ -15,6 +15,9 @@ serde_json = "1"
 # diff grammar with add/remove captures.
 tree-sitter = "0.26"
 tree-sitter-diff = "0.1"
+# Already in GPUI Kit's dependency tree; native FSEvents and a bounded async wakeup.
+notify = "=7.0.0"
+async-channel = "=2.5.0"
 
 [lints]
 workspace = true

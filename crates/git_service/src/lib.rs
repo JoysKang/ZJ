@@ -1,15 +1,17 @@
-//! Bounded, cancellable, read-only system Git operations.
+//! Bounded, cancellable system Git operations, serialized by worktree identity.
 
 mod ls_files;
 mod status;
+mod write;
 pub use ls_files::{ListedKind, parse_ls_files};
 pub use status::{Change, ChangeKind, Status, parse_status};
+pub use write::{WriteOperation, WriteRequest};
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     ffi::OsString,
     fs,
-    io::{self, Read},
+    io::{self, Read, Write},
     os::unix::ffi::OsStringExt,
     os::{fd::AsRawFd, unix::process::CommandExt},
     path::{Path, PathBuf},
@@ -36,6 +38,9 @@ pub enum DiffSide {
 #[derive(Clone, Debug)]
 pub enum Operation {
     Status,
+    UntrackedDiff {
+        path: PathBuf,
+    },
     Diff {
         side: DiffSide,
         path: PathBuf,
@@ -121,6 +126,27 @@ impl GitService {
     }
 
     fn run(&self, root: &Path, args: &[OsString], cancel: &AtomicBool) -> io::Result<Vec<u8>> {
+        self.run_command(root, args, cancel, false)
+    }
+
+    fn run_command(
+        &self,
+        root: &Path,
+        args: &[OsString],
+        cancel: &AtomicBool,
+        allow_difference: bool,
+    ) -> io::Result<Vec<u8>> {
+        self.run_with_input(root, args, cancel, allow_difference, None)
+    }
+
+    fn run_with_input(
+        &self,
+        root: &Path,
+        args: &[OsString],
+        cancel: &AtomicBool,
+        allow_difference: bool,
+        input: Option<&[u8]>,
+    ) -> io::Result<Vec<u8>> {
         let _permit = self.permit(cancel)?;
         let started = Instant::now();
         let mut command = Command::new("git");
@@ -137,7 +163,11 @@ impl GitService {
             .arg(root)
             .args(args)
             .env("GIT_TERMINAL_PROMPT", "0")
-            .stdin(Stdio::null())
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0)
@@ -146,17 +176,34 @@ impl GitService {
         let mut stderr = child.stderr.take().unwrap();
         let mut output = Output::new(OUTPUT_LIMIT);
         let mut errors = Output::new(ERROR_LIMIT);
+        let mut stdin = child.stdin.take();
+        let mut remaining = input.unwrap_or_default();
         // Nonblocking pipes keep helpers holding a pipe inside the same deadline.
         let result = (|| {
             nonblocking(stdout.as_raw_fd())?;
             nonblocking(stderr.as_raw_fd())?;
+            if let Some(stdin) = &stdin {
+                nonblocking(stdin.as_raw_fd())?;
+            }
             let mut status = None;
             loop {
                 if cancel.load(Ordering::Relaxed) {
                     return Err(cancelled());
                 }
                 if started.elapsed() >= self.timeout {
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, "Git 查询超时"));
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "Git 操作超时"));
+                }
+                if let Some(pipe) = &mut stdin {
+                    if !remaining.is_empty() {
+                        match pipe.write(remaining) {
+                            Ok(n) => remaining = &remaining[n..],
+                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    if remaining.is_empty() {
+                        stdin = None;
+                    }
                 }
                 output.read_available(&mut stdout)?;
                 errors.read_available(&mut stderr)?;
@@ -183,7 +230,10 @@ impl GitService {
             let _ = child.wait();
         }
         let status = result?;
-        if !status.success() {
+        // `git diff --no-index` returns 1 for a successful comparison with differences.
+        if !status.success()
+            && !(allow_difference && status.code() == Some(1) && errors.bytes.is_empty())
+        {
             return Err(error(format!(
                 "Git 退出码 {:?}: {}",
                 status.code(),
@@ -217,33 +267,106 @@ impl GitService {
     }
 
     pub fn execute(&self, request: &Request, cancel: &AtomicBool) -> io::Result<Reply> {
-        let lock = {
+        let lock = self.repo_lock(&request.repo.id);
+        let _serial = self.lock_repo(&lock, cancel)?;
+        self.execute_locked(request, cancel)
+    }
+
+    fn repo_lock(&self, id: &RepoId) -> Arc<Mutex<()>> {
+        {
             let mut locks = self.shared.repo_locks.lock().unwrap();
             locks.retain(|_, lock| lock.strong_count() > 0);
             let lock = locks
-                .get(&request.repo.id)
+                .get(id)
                 .and_then(|l| l.upgrade())
                 .unwrap_or_else(|| Arc::new(Mutex::new(())));
-            locks.insert(request.repo.id.clone(), Arc::downgrade(&lock));
+            locks.insert(id.clone(), Arc::downgrade(&lock));
             lock
-        };
-        let _serial = loop {
+        }
+    }
+
+    fn lock_repo<'a>(
+        &self,
+        lock: &'a Mutex<()>,
+        cancel: &AtomicBool,
+    ) -> io::Result<std::sync::MutexGuard<'a, ()>> {
+        loop {
             if cancel.load(Ordering::Relaxed) {
                 return Err(cancelled());
             }
             if let Ok(guard) = lock.try_lock() {
-                break guard;
+                return Ok(guard);
             }
             thread::sleep(Duration::from_millis(10));
-        };
-        let args = match &request.operation {
-            Operation::Status => vec![
-                "status".into(),
-                "--porcelain=v2".into(),
-                "-z".into(),
-                "--branch".into(),
-                "--untracked-files=all".into(),
-            ],
+        }
+    }
+
+    fn execute_locked(&self, request: &Request, cancel: &AtomicBool) -> io::Result<Reply> {
+        let (args, allow_difference) = match &request.operation {
+            Operation::UntrackedDiff { path } => {
+                validate_relative_path(path)?;
+                // The selected row may have been staged since its last status snapshot.
+                let tracked = self.run(
+                    &request.repo.worktree,
+                    &[
+                        "--literal-pathspecs".into(),
+                        "ls-files".into(),
+                        "--cached".into(),
+                        "-z".into(),
+                        "--".into(),
+                        path.as_os_str().to_owned(),
+                    ],
+                    cancel,
+                )?;
+                if !tracked.is_empty() {
+                    (
+                        vec![
+                            "--literal-pathspecs".into(),
+                            "diff".into(),
+                            "--no-ext-diff".into(),
+                            "--no-textconv".into(),
+                            "--no-color".into(),
+                            "--".into(),
+                            path.as_os_str().to_owned(),
+                        ],
+                        false,
+                    )
+                } else {
+                    let absolute = request.repo.worktree.join(path);
+                    let parent =
+                        fs::canonicalize(absolute.parent().ok_or_else(|| error("无效文件路径"))?)?;
+                    if !parent.starts_with(&request.repo.worktree) {
+                        return Err(error("未跟踪文件位于工作树之外"));
+                    }
+                    let kind = fs::symlink_metadata(&absolute)?.file_type();
+                    if !kind.is_file() && !kind.is_symlink() {
+                        return Err(error("Diff 仅支持文件与符号链接"));
+                    }
+                    (
+                        vec![
+                            "diff".into(),
+                            "--no-index".into(),
+                            "--no-ext-diff".into(),
+                            "--no-textconv".into(),
+                            "--no-color".into(),
+                            "--".into(),
+                            "/dev/null".into(),
+                            path.as_os_str().to_owned(),
+                        ],
+                        true,
+                    )
+                }
+            }
+            Operation::Status => (
+                vec![
+                    "status".into(),
+                    "--porcelain=v2".into(),
+                    "-z".into(),
+                    "--branch".into(),
+                    "--untracked-files=all".into(),
+                ],
+                false,
+            ),
             Operation::Diff {
                 side,
                 path,
@@ -265,10 +388,10 @@ impl GitService {
                     validate_relative_path(original)?;
                     args.push(original.as_os_str().to_owned());
                 }
-                args
+                (args, false)
             }
         };
-        let output = self.run(&request.repo.worktree, &args, cancel)?;
+        let output = self.run_command(&request.repo.worktree, &args, cancel, allow_difference)?;
         Ok(Reply {
             repo: request.repo.id.clone(),
             generation: request.generation,
@@ -282,7 +405,19 @@ impl GitService {
         generation: u64,
         cancel: &AtomicBool,
     ) -> io::Result<Status> {
-        let reply = self.execute(
+        let lock = self.repo_lock(&repo.id);
+        let _serial = self.lock_repo(&lock, cancel)?;
+        self.status_locked(repo, generation, cancel)
+    }
+
+    fn status_locked(
+        &self,
+        repo: &Repository,
+        generation: u64,
+        cancel: &AtomicBool,
+    ) -> io::Result<Status> {
+        let before = write::snapshot_version(repo)?;
+        let reply = self.execute_locked(
             &Request {
                 repo: repo.clone(),
                 generation,
@@ -290,7 +425,13 @@ impl GitService {
             },
             cancel,
         )?;
-        parse_status(&reply.output)
+        let mut status = parse_status(&reply.output)?;
+        let after = write::snapshot_version(repo)?;
+        if before != after {
+            return Err(error("Git 索引在查询期间发生变化，请刷新"));
+        }
+        status.version = write::worktree_version(repo, &status, after)?;
+        Ok(status)
     }
 
     /// Lists tracked and non-ignored untracked files below `dir`, relative to `dir`.

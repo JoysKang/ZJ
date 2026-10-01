@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "before": {
+    "pid": 7019,
+    "started_at_utc": "2026-10-01T03:54:25.900502+00:00",
+    "bundle_binary": "target/ZJ-scm-before-check.app/Contents/MacOS/workspace-editor",
+    "appearance": "dark",
+    "window_logical_pixels": [
+      1280,
+      800
+    ],
+    "windows": 1,
+    "documents": 0,
+    "workspace": "self-created empty directory",
+    "foreground_confirmed": true,
+    "finished_at_utc": "2026-10-01T03:54:37.978971+00:00",
+    "binary_sha256": "dc02066736a5d04c1bed15bcf75b64ec8aecdb2a482f4dd86d2fbbfefb760b35"
+  },
+  "after": {
+    "pid": 7897,
+    "started_at_utc": "2026-10-01T03:55:47.305514+00:00",
+    "bundle_binary": "target/ZJ-scm-vscode-check.app/Contents/MacOS/ZJ",
+    "appearance": "dark",
+    "window_logical_pixels": [
+      1280,
+      800
+    ],
+    "windows": 1,
+    "documents": 0,
+    "workspace": "self-created empty directory",
+    "foreground_confirmed": true,
+    "binary_sha256": "3999039f49fb24a643ceea8539aa9b5c7faab9da99b1c7d3f09cca7cc84d0aa6",
+    "finished_at_utc": "2026-10-01T03:55:59.395630+00:00"
+  },
+  "previous_samples_not_used": [
+    "target/scm-before.csv",
+    "target/scm-after.csv"
+  ],
+  "formal_resource_gate_passed": false
+}

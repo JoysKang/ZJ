@@ -177,23 +177,15 @@ impl Prototype {
                                         .xsmall()
                                         .ghost()
                                         .icon(IconName::RefreshCw)
-                                        .tooltip(if self.loading {
-                                            "重新扫描"
-                                        } else {
-                                            "刷新"
-                                        })
+                                        .tooltip("刷新")
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.refresh(window, cx)
                                         })),
                                 )
                             })
-                            .child(
-                                Button::new("sidebar-more")
-                                    .xsmall()
-                                    .ghost()
-                                    .icon(IconName::Ellipsis)
-                                    .tooltip("更多操作"),
-                            ),
+                            .when(self.sidebar == Sidebar::SourceControl, |actions| {
+                                actions.child(self.scm_more(cx))
+                            }),
                     ),
             )
             .child(div().flex_1().min_h_0().child(content))
@@ -272,9 +264,9 @@ impl Prototype {
                             .ghost()
                             .icon(IconName::ChevronsDownUp)
                             .tooltip("全部折叠")
-                            .on_click(cx.listener(|this, _, _, cx| {
+                            .on_click(cx.listener(|this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.collapse_tree(cx)
+                                this.collapse_tree(window, cx)
                             })),
                     ),
             )

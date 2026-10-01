@@ -1,14 +1,18 @@
 mod assets;
+mod diff_model;
 mod diff_syntax;
 mod file_icons;
 mod files;
 mod fuzzy;
 mod prototype;
 mod theme;
+mod watch;
 use gpui_kit::*;
 use prototype::{DocumentOwners, Prototype};
 use std::{cell::RefCell, path::PathBuf, rc::Rc, time::Duration};
 use workspace_editor_git::GitService;
+
+impl Global for watch::WatchService {}
 
 fn open_workspace(
     root: Option<PathBuf>,
@@ -17,6 +21,9 @@ fn open_workspace(
     index: usize,
     cx: &mut App,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    if cx.windows().len() >= 5 {
+        return Err("原型最多打开 5 个窗口，请先关闭一个窗口".into());
+    }
     let offset = theme::WINDOW_ORIGIN + theme::WINDOW_CASCADE * index as f32;
     let options = WindowOptions {
         titlebar: Some(TitlebarOptions {
@@ -56,7 +63,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             windows = Some(count);
         } else if arg == "--help" {
             println!(
-                "workspace-editor [--windows 1..5] [工作区根目录 ...]\nP1 原型：目录、文件名搜索、临时文件编辑、只读 Changes、双状态 diff。编辑不写磁盘，退出不保留。"
+                "ZJ [--windows 1..5] [工作区根目录 ...]\nP1 原型：目录、文件名搜索、临时文件编辑、只读 Changes、双状态 diff。编辑不写磁盘，退出不保留。"
             );
             return Ok(());
         } else {
@@ -67,7 +74,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             roots.push(root);
         }
     }
-    let count = windows.unwrap_or(roots.len().max(3));
+    let count = windows.unwrap_or(roots.len().max(1));
     if count > 5 || roots.len() > count {
         return Err("原型最多支持 5 个窗口，每个根目录一个窗口".into());
     }
@@ -76,9 +83,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .with_assets(assets::AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            cx.set_global(watch::WatchService::default());
             diff_syntax::register();
             theme::follow_appearance(None, cx);
             cx.bind_keys([
+                KeyBinding::new("cmd-shift-n", prototype::NewWindow, Some("WorkspaceEditor")),
                 KeyBinding::new("cmd-s", prototype::SaveUnavailable, Some("WorkspaceEditor")),
                 KeyBinding::new("cmd-o", prototype::OpenFile, Some("WorkspaceEditor")),
                 KeyBinding::new(
@@ -96,6 +105,15 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     prototype::ToggleSidebar,
                     Some("WorkspaceEditor"),
                 ),
+            ]);
+            cx.set_menus([
+                Menu::new("ZJ").items([MenuItem::os_submenu("服务", SystemMenuType::Services)]),
+                Menu::new("文件").items([
+                    MenuItem::action("新建窗口", prototype::NewWindow),
+                    MenuItem::separator(),
+                    MenuItem::action("打开文件…", prototype::OpenFile),
+                    MenuItem::action("打开文件夹…", prototype::OpenFolder),
+                ]),
             ]);
             let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
             for index in 0..count {

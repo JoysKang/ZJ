@@ -6,14 +6,16 @@ use crate::{file_icons, theme};
 use gpui_kit::{
     assets::IconName,
     component::{
-        Icon, Sizable,
+        Disableable, Icon, Sizable,
         button::{Button, ButtonVariants},
-        h_flex, v_flex,
+        h_flex,
+        input::Textarea,
+        menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
+        v_flex,
     },
     prelude::FluentBuilder,
     *,
 };
-use std::sync::atomic::Ordering;
 use workspace_editor_git::DiffSide;
 
 fn count_badge(count: usize, colors: theme::Colors) -> impl IntoElement {
@@ -32,13 +34,151 @@ fn count_badge(count: usize, colors: theme::Colors) -> impl IntoElement {
 }
 
 impl Prototype {
+    pub(super) fn scm_more(&self, cx: &mut Context<Self>) -> AnyElement {
+        let weak = cx.weak_entity();
+        let selected = self
+            .scm_repo
+            .as_ref()
+            .and_then(|id| self.groups.iter().position(|g| &g.repo.id == id))
+            .or_else(|| (!self.groups.is_empty()).then_some(0));
+        let stage = selected.and_then(|g| self.scm_paths(g, None, DiffSide::Worktree));
+        let unstage = selected.and_then(|g| self.scm_paths(g, None, DiffSide::Staged));
+        Button::new("scm-more-button")
+            .xsmall()
+            .ghost()
+            .icon(IconName::Ellipsis)
+            .tooltip("源码管理操作")
+            .accessibility_label("源码管理操作")
+            .dropdown_menu(move |menu, _, _| {
+                let view = weak.clone();
+                menu.item(PopupMenuItem::new("刷新").on_click(move |_, window, cx| {
+                    let _ = view.update(cx, |this, cx| this.refresh(window, cx));
+                }))
+                .when_some(stage.clone(), |menu, request| {
+                    menu.item(git_menu_item("全部暂存", request, weak.clone()))
+                })
+                .when_some(unstage.clone(), |menu, request| {
+                    menu.item(git_menu_item("全部取消暂存", request, weak.clone()))
+                })
+            })
+            .into_any_element()
+    }
+
+    fn scm_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = theme::colors(cx);
+        let selected = self
+            .scm_repo
+            .as_ref()
+            .and_then(|id| self.groups.iter().find(|g| &g.repo.id == id))
+            .or_else(|| self.groups.first());
+        let Some(group) = selected else {
+            return div().into_any_element();
+        };
+        let id = group.repo.id.clone();
+        let push_id = id.clone();
+        let status = group.status.as_ref().and_then(|s| s.as_ref().ok());
+        let can_commit = status.is_some_and(|s| {
+            s.changes.iter().any(|c| c.staged())
+                && !s
+                    .changes
+                    .iter()
+                    .any(|c| c.kind == workspace_editor_git::ChangeKind::Conflict)
+        });
+        let message = group.commit_input.read(cx).value();
+        let target = group
+            .repo
+            .worktree
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .replace(SINGLE_LINE, "⏎");
+        let branch = status
+            .and_then(|s| s.branch.as_deref())
+            .unwrap_or("未知分支");
+        let tracking = status
+            .map(|s| {
+                format!(
+                    "{} · ↑{} ↓{}",
+                    s.upstream.as_deref().unwrap_or("未配置上游"),
+                    s.ahead,
+                    s.behind
+                )
+            })
+            .unwrap_or_default();
+        v_flex()
+            .flex_shrink_0()
+            .p_2()
+            .gap_2()
+            .border_b_1()
+            .border_color(colors.border)
+            .child(
+                div()
+                    .text_size(theme::TEXT_CAPTION)
+                    .text_color(colors.foreground)
+                    .child(format!("{target} · {branch}")),
+            )
+            .child(
+                Textarea::new(&group.commit_input)
+                    .h(theme::COMMIT_HEIGHT)
+                    .disabled(group.write_pending)
+                    .aria_label(format!("{target} 的提交信息")),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("scm-commit")
+                            .small()
+                            .primary()
+                            .icon(IconName::Check)
+                            .label("提交")
+                            .tooltip("仅提交当前仓库暂存区")
+                            .disabled(
+                                group.write_pending || !can_commit || message.trim().is_empty(),
+                            )
+                            .flex_1()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.scm_commit(id.clone(), false, window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("scm-push")
+                            .small()
+                            .ghost()
+                            .icon(IconName::ArrowUp)
+                            .label("推送")
+                            .tooltip(tracking.clone())
+                            .disabled(group.write_pending || status.is_none())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.scm_commit(push_id.clone(), true, window, cx)
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(theme::TEXT_CAPTION)
+                    .text_color(colors.muted)
+                    .child(tracking),
+            )
+            .when(!group.write_message.is_empty(), |view| {
+                view.child(
+                    div()
+                        .id("git-operation-result")
+                        .max_h(theme::SCM_NOTICE_MAX)
+                        .overflow_y_scroll()
+                        .text_size(theme::TEXT_CAPTION)
+                        .text_color(colors.foreground)
+                        .child(group.write_message.clone()),
+                )
+            })
+            .into_any_element()
+    }
+
     pub(super) fn render_scm(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
-        let status_line = if self.loading {
-            Some(format!("正在刷新 {} 个仓库…", self.groups.len()))
-        } else if !self.issues.is_empty() {
+        let status_line = if !self.issues.is_empty() {
             Some(format!("{} 项仓库错误", self.issues.len()))
-        } else if self.groups.is_empty() && self.root.is_some() {
+        } else if self.refresh_completed && self.groups.is_empty() && self.root.is_some() {
             Some("未发现 Git 仓库".into())
         } else {
             None
@@ -53,30 +193,12 @@ impl Prototype {
                         .flex_shrink_0()
                         .pl(theme::TREE_BASE)
                         .pr_2()
-                        .justify_between()
                         .text_size(theme::TEXT_CAPTION)
                         .text_color(colors.muted)
-                        .child(line)
-                        .when(self.loading, |row| {
-                            row.child(
-                                Button::new("cancel-git")
-                                    .xsmall()
-                                    .ghost()
-                                    .label("取消")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.cancel.store(true, Ordering::Relaxed);
-                                        this.generation += 1;
-                                        this.refresh_task = None;
-                                        this.loading = false;
-                                        this.close_preview(cx);
-                                        this.message =
-                                            "已取消；当前结果可能不完整，请重新扫描".into();
-                                        cx.notify();
-                                    })),
-                            )
-                        }),
+                        .child(line),
                 )
             })
+            .child(self.scm_controls(cx))
             .child(
                 uniform_list(
                     "changes",
@@ -113,17 +235,15 @@ impl Prototype {
                     .as_ref()
                     .and_then(|root| group.repo.worktree.strip_prefix(root).ok())
                     .filter(|path| !path.as_os_str().is_empty())
-                    .unwrap_or(&group.repo.worktree);
+                    .unwrap_or_else(|| {
+                        std::path::Path::new(group.repo.worktree.file_name().unwrap_or_default())
+                    });
                 let name = path.to_string_lossy().replace(SINGLE_LINE, "⏎");
                 let (detail, detail_color, count) = match &group.status {
-                    None => ("待确认".to_string(), colors.muted, None),
+                    None => (String::new(), colors.muted, None),
                     Some(Err(error)) => (format!("错误：{error}"), colors.deleted, None),
                     Some(Ok(status)) => (
-                        format!(
-                            "{}{}",
-                            status.branch.as_deref().unwrap_or("未知分支"),
-                            if group.stale { " · 陈旧" } else { "" }
-                        ),
+                        status.branch.as_deref().unwrap_or("未知分支").to_string(),
                         colors.muted,
                         Some(status.changes.len()),
                     ),
@@ -159,12 +279,15 @@ impl Prototype {
                         row.child(count_badge(count, colors))
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.groups[g].expanded = !this.groups[g].expanded;
+                        if this.scm_repo.as_ref() == Some(&this.groups[g].repo.id) {
+                            this.groups[g].expanded = !this.groups[g].expanded;
+                        }
+                        this.scm_repo = Some(this.groups[g].repo.id.clone());
                         this.rebuild_rows();
                         cx.notify();
                     }))
             }
-            Row::Heading(side, count) => base
+            Row::Heading(g, side, count) => base
                 .pl(theme::TREE_BASE + theme::TREE_STEP)
                 .text_size(theme::TEXT_SECTION)
                 .font_weight(FontWeight::BOLD)
@@ -173,12 +296,45 @@ impl Prototype {
                     DiffSide::Staged => "暂存的更改",
                     DiffSide::Worktree => "更改",
                 }))
-                .child(count_badge(count, colors)),
+                .child(count_badge(count, colors))
+                .when_some(self.scm_paths(g, None, side), |row, request| {
+                    row.child(
+                        Button::new(("scm-all", index))
+                            .xsmall()
+                            .ghost()
+                            .icon(match side {
+                                DiffSide::Staged => IconName::Minus,
+                                DiffSide::Worktree => IconName::Plus,
+                            })
+                            .accessibility_label(match side {
+                                DiffSide::Staged => "取消暂存",
+                                DiffSide::Worktree => "暂存更改",
+                            })
+                            .tooltip(match side {
+                                DiffSide::Staged => "全部取消暂存",
+                                DiffSide::Worktree => "全部暂存",
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.request_git_write(request.clone(), window, cx);
+                            })),
+                    )
+                }),
             Row::File(g, i, side) => {
                 let Some(Ok(status)) = &self.groups[g].status else {
                     return base.into_any_element();
                 };
                 let change = &status.changes[i];
+                let file_path = self.groups[g].repo.worktree.join(&change.path);
+                let mut discard = self.scm_paths(g, Some(i), DiffSide::Worktree);
+                if let Some(request) = &mut discard
+                    && let workspace_editor_git::WriteOperation::Stage { paths } =
+                        &request.operation
+                {
+                    request.operation = workspace_editor_git::WriteOperation::Discard {
+                        paths: paths.clone(),
+                    };
+                }
                 let mut decoration = super::decoration(change);
                 if matches!(side, DiffSide::Staged) && change.index != b'.' {
                     // The staged row reflects the index side (e.g. A or R), not the worktree.
@@ -200,7 +356,16 @@ impl Prototype {
                     .parent()
                     .map(|parent| parent.to_string_lossy().replace(SINGLE_LINE, "⏎"))
                     .unwrap_or_default();
-                base.pl(theme::TREE_BASE + theme::TREE_STEP + theme::TWISTY_WIDTH)
+                let weak = cx.weak_entity();
+                let context_file = file_path.clone();
+                let context_stage = self.scm_paths(g, Some(i), side);
+                let context_discard = discard.clone().filter(|_| {
+                    matches!(side, DiffSide::Worktree)
+                        && change.kind != workspace_editor_git::ChangeKind::Untracked
+                        && change.kind != workspace_editor_git::ChangeKind::Conflict
+                });
+                let row = base
+                    .pl(theme::TREE_BASE + theme::TREE_STEP + theme::TWISTY_WIDTH)
                     .gap_2()
                     .cursor_pointer()
                     .role(Role::Button)
@@ -233,9 +398,93 @@ impl Prototype {
                             .text_color(color)
                             .child(decoration.letter.to_string()),
                     )
+                    .child(
+                        Button::new(("scm-open", index))
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::File)
+                            .tooltip("打开文件")
+                            .accessibility_label("打开文件")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.scm_open_file(&file_path, window, cx);
+                            })),
+                    )
+                    .when(
+                        matches!(side, DiffSide::Worktree)
+                            && change.kind != workspace_editor_git::ChangeKind::Untracked
+                            && change.kind != workspace_editor_git::ChangeKind::Conflict,
+                        |row| {
+                            row.when_some(discard, |row, request| {
+                                row.child(
+                                    Button::new(("scm-discard", index))
+                                        .xsmall()
+                                        .ghost()
+                                        .icon(IconName::Undo2)
+                                        .tooltip("放弃更改")
+                                        .accessibility_label("放弃更改")
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.request_git_write(request.clone(), window, cx);
+                                        })),
+                                )
+                            })
+                        },
+                    )
+                    .when_some(self.scm_paths(g, Some(i), side), |row, request| {
+                        row.child(
+                            Button::new(("scm-stage", index))
+                                .xsmall()
+                                .ghost()
+                                .icon(match side {
+                                    DiffSide::Staged => IconName::Minus,
+                                    DiffSide::Worktree => IconName::Plus,
+                                })
+                                .accessibility_label(match side {
+                                    DiffSide::Staged => "取消暂存",
+                                    DiffSide::Worktree => "暂存更改",
+                                })
+                                .tooltip(match side {
+                                    DiffSide::Staged => "取消暂存",
+                                    DiffSide::Worktree => "暂存更改",
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.request_git_write(request.clone(), window, cx);
+                                })),
+                        )
+                    })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_diff(g, i, side, window, cx)
-                    }))
+                    }));
+                return row
+                    .context_menu(move |menu, _, _| {
+                        let view = weak.clone();
+                        let path = context_file.clone();
+                        menu.item(
+                            PopupMenuItem::new("打开文件").on_click(move |_, window, cx| {
+                                let _ = view
+                                    .update(cx, |this, cx| this.scm_open_file(&path, window, cx));
+                            }),
+                        )
+                        .when_some(context_stage.clone(), |menu, request| {
+                            menu.item(git_menu_item(
+                                match side {
+                                    DiffSide::Staged => "取消暂存",
+                                    DiffSide::Worktree => "暂存更改",
+                                },
+                                request,
+                                weak.clone(),
+                            ))
+                        })
+                        .when_some(
+                            context_discard.clone(),
+                            |menu, request| {
+                                menu.item(git_menu_item("放弃更改…", request, weak.clone()))
+                            },
+                        )
+                    })
+                    .into_any_element();
             }
         };
         div()
@@ -244,4 +493,16 @@ impl Prototype {
             .child(row)
             .into_any_element()
     }
+}
+
+fn git_menu_item(
+    label: &str,
+    request: workspace_editor_git::WriteRequest,
+    view: WeakEntity<Prototype>,
+) -> PopupMenuItem {
+    PopupMenuItem::new(label.to_string()).on_click(move |_, window, cx| {
+        let _ = view.update(cx, |this, cx| {
+            this.request_git_write(request.clone(), window, cx)
+        });
+    })
 }

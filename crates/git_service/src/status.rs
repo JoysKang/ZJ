@@ -19,6 +19,17 @@ pub struct Change {
 }
 
 impl Change {
+    /// HEAD↔index rename operations need both paths; a local edit after a staged
+    /// rename uses the new index path only.
+    pub fn paths(&self, side: super::DiffSide) -> Vec<PathBuf> {
+        let mut paths = vec![self.path.clone()];
+        if (matches!(side, super::DiffSide::Staged) || self.worktree == b'R')
+            && let Some(old) = &self.original_path
+        {
+            paths.push(old.clone());
+        }
+        paths
+    }
     pub fn staged(&self) -> bool {
         self.index != b'.' && self.kind != ChangeKind::Untracked
     }
@@ -31,6 +42,11 @@ impl Change {
 pub struct Status {
     pub branch: Option<String>,
     pub oid: Option<String>,
+    pub upstream: Option<String>,
+    pub ahead: usize,
+    pub behind: usize,
+    /// Filesystem snapshot attached by GitService, never inferred from display strings.
+    pub version: u64,
     pub changes: Vec<Change>,
 }
 
@@ -60,6 +76,25 @@ pub fn parse_status(bytes: &[u8]) -> io::Result<Status> {
         }
         if let Some(value) = record.strip_prefix(b"# branch.oid ") {
             status.oid = Some(String::from_utf8_lossy(value).into_owned());
+            continue;
+        }
+        if let Some(value) = record.strip_prefix(b"# branch.upstream ") {
+            status.upstream = Some(String::from_utf8_lossy(value).into_owned());
+            continue;
+        }
+        if let Some(value) = record.strip_prefix(b"# branch.ab ") {
+            let value = std::str::from_utf8(value).map_err(|_| malformed())?;
+            let (ahead, behind) = value.split_once(' ').ok_or_else(malformed)?;
+            status.ahead = ahead
+                .strip_prefix('+')
+                .ok_or_else(malformed)?
+                .parse()
+                .map_err(|_| malformed())?;
+            status.behind = behind
+                .strip_prefix('-')
+                .ok_or_else(malformed)?
+                .parse()
+                .map_err(|_| malformed())?;
             continue;
         }
         if record.starts_with(b"# ") || record.starts_with(b"! ") {

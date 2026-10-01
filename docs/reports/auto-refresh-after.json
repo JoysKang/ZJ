@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "metric": "simultaneous_process_tree_physical_footprint",
+  "unit": "decimal bytes",
+  "samples": 147,
+  "unavailable_child_samples": 0,
+  "duration_seconds": 29.883,
+  "footprint_median": 89539712,
+  "footprint_p95": 89539712,
+  "footprint_max": 89539712,
+  "cpu_p95_one_core_percent": 0.0003627505413527696,
+  "sample_cost_p95_seconds": 0.02673612500000111,
+  "interval_p95_seconds": 0.20511883300000022,
+  "limitations": [
+    "Short-lived children between samples can be missed",
+    "No GPU command or draw instrumentation",
+    "No theoretical peak guarantee",
+    "First observation of each child has no CPU delta"
+  ]
+}

@@ -64,18 +64,31 @@ impl Prototype {
                     .text_color(colors.muted),
             )
             .child(self.workspace_name());
-        let actions = h_flex().flex_1().justify_end().pr_2().gap_1().child(
-            Button::new("toggle-sidebar")
-                .xsmall()
-                .ghost()
-                .icon(if self.sidebar_visible {
-                    IconName::PanelLeftClose
-                } else {
-                    IconName::PanelLeftOpen
-                })
-                .tooltip("切换侧栏（⌘B）")
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
-        );
+        let actions = h_flex()
+            .flex_1()
+            .justify_end()
+            .pr_2()
+            .gap_1()
+            .child(
+                Button::new("new-window")
+                    .xsmall()
+                    .ghost()
+                    .icon(IconName::Files)
+                    .tooltip("新建窗口（⌘⇧N）")
+                    .on_click(cx.listener(|this, _, _, cx| this.new_window(cx))),
+            )
+            .child(
+                Button::new("toggle-sidebar")
+                    .xsmall()
+                    .ghost()
+                    .icon(if self.sidebar_visible {
+                        IconName::PanelLeftClose
+                    } else {
+                        IconName::PanelLeftOpen
+                    })
+                    .tooltip("切换侧栏（⌘B）")
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+            );
         TitleBar::new()
             .h(theme::TITLE_HEIGHT)
             .bg(colors.title)
@@ -152,6 +165,17 @@ impl Prototype {
                         .child(format!("{} 项仓库错误", self.issues.len()))
                         .tooltip(move |window, cx| {
                             gpui_kit::component::tooltip::Tooltip::new(first.clone())
+                                .build(window, cx)
+                        }),
+                )
+            })
+            .when_some(self.watch_error.clone(), |bar, error| {
+                bar.child(
+                    status_item("status-watch-error", colors)
+                        .child(icon(IconName::TriangleAlert))
+                        .child("文件监听异常")
+                        .tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(error.clone())
                                 .build(window, cx)
                         }),
                 )

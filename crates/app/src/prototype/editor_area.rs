@@ -1,7 +1,7 @@
 //! Editor area: VS Code-style tabs, breadcrumbs, the editor itself, and the welcome page.
 
 use super::SINGLE_LINE;
-use super::{OpenFile, OpenFolder, Pane, Prototype, QuickOpenFile, ToggleSidebar};
+use super::{NewWindow, OpenFile, OpenFolder, Pane, Prototype, QuickOpenFile, ToggleSidebar};
 use crate::{file_icons, theme};
 use gpui_kit::{
     assets::IconName,
@@ -84,7 +84,7 @@ impl Prototype {
                 cx.stop_propagation();
                 match pane {
                     Pane::Document(id) => this.close_document(id, window, cx),
-                    Pane::Diff => this.close_preview(cx),
+                    Pane::Diff => this.close_preview(window, cx),
                     Pane::Welcome => {}
                 }
             }));
@@ -318,6 +318,12 @@ impl Prototype {
                         Box::new(OpenFolder),
                     ))
                     .child(item(
+                        "welcome-new-window",
+                        "新建窗口",
+                        &["⇧", "⌘", "N"],
+                        Box::new(NewWindow),
+                    ))
+                    .child(item(
                         "welcome-toggle-sidebar",
                         "切换侧栏",
                         &["⌘", "B"],
@@ -331,19 +337,7 @@ impl Prototype {
         let colors = theme::colors(cx);
         let content = match self.active {
             Pane::Welcome => return self.render_welcome(cx),
-            Pane::Diff => match &self.preview {
-                Some(editor) => Editor::new(editor)
-                    .readonly(true)
-                    .bordered(false)
-                    .size_full()
-                    .into_any_element(),
-                None => div()
-                    .p_4()
-                    .text_size(theme::TEXT_BODY)
-                    .text_color(colors.muted)
-                    .child(self.preview_title.clone())
-                    .into_any_element(),
-            },
+            Pane::Diff => self.render_diff(cx),
             Pane::Document(id) => match self.documents.iter().find(|doc| doc.id == id) {
                 Some(doc) => Editor::new(&doc.editor)
                     .readonly(doc.readonly)

@@ -1,8 +1,8 @@
 use crate::files::{self, Entry, PathIndex, SearchResults};
-use crate::theme;
+use crate::{theme, watch};
 use gpui_kit::{
     component::{
-        input::{EditorState, InputEvent, InputState},
+        input::{EditorState, InputEvent, InputState, TextareaState},
         resizable::{h_resizable, resizable_panel},
         v_flex,
     },
@@ -22,19 +22,24 @@ use std::{
 };
 use workspace_editor_core::{DocumentId, RepoId, Repository};
 use workspace_editor_git::{
-    ChangeKind, DiffSide, Discovery, GitService, Operation, Request, Status,
+    ChangeKind, DiffSide, Discovery, GitService, Operation, Request, Status, WriteOperation,
+    WriteRequest,
 };
 
 mod chrome;
+mod diff_view;
 mod editor_area;
 mod quick_open;
 mod scm;
+mod scm_actions;
 mod sidebar;
+mod workspace_refresh;
 
 gpui_kit::actions!(
     workspace,
     [
         SaveUnavailable,
+        NewWindow,
         OpenFile,
         OpenFolder,
         QuickOpenFile,
@@ -82,6 +87,7 @@ struct DiffTab {
     label: String,
     tooltip: String,
     path: PathBuf,
+    request: Request,
 }
 
 struct TreeRow {
@@ -91,9 +97,13 @@ struct TreeRow {
 
 struct Group {
     repo: Repository,
-    status: Option<Result<Status, String>>,
+    status: Option<Result<Arc<Status>, String>>,
     expanded: bool,
-    stale: bool,
+    commit_input: Entity<TextareaState>,
+    _commit_subscription: Subscription,
+    write_task: Option<Task<()>>,
+    write_pending: bool,
+    write_message: String,
 }
 /// Line breaks in file names would break single-line rows; they are shown as ⏎.
 const SINGLE_LINE: [char; 2] = ['\n', '\r'];
@@ -114,7 +124,8 @@ fn language_for(path: &std::path::Path) -> (&'static str, &'static str) {
         "md" | "markdown" => ("markdown", "Markdown"),
         "diff" | "patch" => (crate::diff_syntax::LANGUAGE, "Diff"),
         "toml" => ("plain", "TOML"),
-        "json" | "jsonc" => ("plain", "JSON"),
+        "json" => ("json", "JSON"),
+        "jsonc" => ("json", "JSON with Comments"),
         "js" | "mjs" | "cjs" => ("plain", "JavaScript"),
         "ts" | "tsx" => ("plain", "TypeScript"),
         "py" => ("plain", "Python"),
@@ -167,7 +178,7 @@ fn decoration(change: &workspace_editor_git::Change) -> Decoration {
 #[derive(Clone, Copy)]
 enum Row {
     Group(usize),
-    Heading(DiffSide, usize),
+    Heading(usize, DiffSide, usize),
     File(usize, usize, DiffSide),
 }
 enum Event {
@@ -179,10 +190,13 @@ enum Event {
 }
 
 pub struct Prototype {
+    focus_handle: FocusHandle,
     root: Option<PathBuf>,
     service: GitService,
     groups: Vec<Group>,
     rows: Vec<Row>,
+    scm_repo: Option<RepoId>,
+    write_generation: u64,
     sidebar: Sidebar,
     sidebar_visible: bool,
     quick_open: Option<quick_open::QuickOpen>,
@@ -195,6 +209,7 @@ pub struct Prototype {
     tree_scroll: UniformListScrollHandle,
     reveal_pending: bool,
     expanded: HashSet<PathBuf>,
+    restore_expanded: HashSet<PathBuf>,
     tree_tasks: HashMap<PathBuf, Task<()>>,
     tree_generation: u64,
     tree_message: String,
@@ -215,11 +230,16 @@ pub struct Prototype {
     cursor: Option<(u32, u32)>,
     _cursor_observer: Option<Subscription>,
     preview: Option<Entity<EditorState>>,
+    diff_model: Option<crate::diff_model::DiffModel>,
+    diff_inline: bool,
+    diff_scroll: UniformListScrollHandle,
     preview_title: String,
     preview_diff: Option<DiffTab>,
+    preview_stale: bool,
     generation: u64,
     cancel: Arc<AtomicBool>,
     loading: bool,
+    refresh_completed: bool,
     excluded: usize,
     issues: Vec<String>,
     message: String,
@@ -227,6 +247,11 @@ pub struct Prototype {
     preview_task: Option<Task<()>>,
     preview_cancel: Arc<AtomicBool>,
     preview_generation: u64,
+    watch: Option<Arc<watch::Subscription>>,
+    watch_task: Option<Task<()>>,
+    watch_error: Option<String>,
+    watch_debouncing: bool,
+    workspace_refresh_pending: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -259,9 +284,20 @@ impl Prototype {
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
             theme::follow_appearance(Some(window), cx)
         });
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() && this.root.is_some() {
+                this.workspace_refresh_pending = true;
+                this.flush_workspace_refresh(window, cx);
+            }
+        });
         let weak = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             weak.update(cx, |this, cx| {
+                if this.groups.iter().any(|g| g.write_pending) {
+                    this.message = "Git 操作尚未结束，请稍后关闭窗口".into();
+                    cx.notify();
+                    return false;
+                }
                 if !this.documents.iter().any(|document| document.dirty) {
                     return true;
                 }
@@ -295,8 +331,8 @@ impl Prototype {
             .as_ref()
             .and_then(|p| p.file_name())
             .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| format!("输入测试 {number}"));
-        window.set_window_title(&format!("workspace-editor · {name}"));
+            .unwrap_or_else(|| format!("新窗口 {number}"));
+        window.set_window_title(&format!("ZJ · {name}"));
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("按文件名或路径搜索"));
         let search_subscription = cx.subscribe_in(
@@ -309,10 +345,13 @@ impl Prototype {
             },
         );
         let mut this = Self {
+            focus_handle: cx.focus_handle(),
             root,
             service,
             groups: vec![],
             rows: vec![],
+            scm_repo: None,
+            write_generation: 0,
             sidebar: Sidebar::Explorer,
             sidebar_visible: true,
             quick_open: None,
@@ -325,6 +364,7 @@ impl Prototype {
             tree_scroll: UniformListScrollHandle::new(),
             reveal_pending: false,
             expanded: HashSet::new(),
+            restore_expanded: HashSet::new(),
             tree_tasks: HashMap::new(),
             tree_generation: 0,
             tree_message: String::new(),
@@ -344,11 +384,16 @@ impl Prototype {
             cursor: None,
             _cursor_observer: None,
             preview: None,
+            diff_model: None,
+            diff_inline: false,
+            diff_scroll: UniformListScrollHandle::new(),
             preview_title: String::new(),
             preview_diff: None,
+            preview_stale: false,
             generation: 0,
             cancel: Arc::new(AtomicBool::new(false)),
             loading: false,
+            refresh_completed: false,
             excluded: 0,
             issues: vec![],
             message: String::new(),
@@ -356,9 +401,16 @@ impl Prototype {
             preview_task: None,
             preview_cancel: Arc::new(AtomicBool::new(false)),
             preview_generation: 0,
-            _subscriptions: vec![search_subscription, appearance],
+            watch: None,
+            watch_task: None,
+            watch_error: None,
+            watch_debouncing: false,
+            workspace_refresh_pending: false,
+            _subscriptions: vec![search_subscription, appearance, activation],
         };
+        this.start_watching(window, cx);
         this.refresh_tree(window, cx);
+        this.focus_handle.focus(window, cx);
         this.refresh(window, cx);
         eprintln!("event=window_opened number={number}");
         this
@@ -368,7 +420,7 @@ impl Prototype {
         self.reveal_pending = matches!(self.active, Pane::Document(_));
         self.tree_generation += 1;
         self.tree_tasks.clear();
-        self.expanded.clear();
+        self.restore_expanded = std::mem::take(&mut self.expanded);
         self.tree.clear();
         if let Some(root) = self.root.clone() {
             self.tree.push(TreeRow {
@@ -409,6 +461,13 @@ impl Prototype {
                 };
                 match result {
                     Ok(entries) => {
+                        let restore: Vec<_> = entries
+                            .iter()
+                            .filter(|entry| {
+                                entry.directory && this.restore_expanded.remove(&entry.path)
+                            })
+                            .map(|entry| entry.path.clone())
+                            .collect();
                         let depth = this.tree[index].depth + 1;
                         this.tree.splice(
                             index + 1..index + 1,
@@ -416,6 +475,11 @@ impl Prototype {
                         );
                         this.tree_message.clear();
                         this.reveal_current_file(window, cx);
+                        for path in restore {
+                            if !this.expanded.contains(&path) {
+                                this.load_directory(path, window, cx);
+                            }
+                        }
                     }
                     Err(error) => {
                         this.expanded.remove(&path);
@@ -427,6 +491,7 @@ impl Prototype {
                         }
                     }
                 }
+                this.flush_workspace_refresh(window, cx);
                 cx.notify();
             });
         });
@@ -437,6 +502,8 @@ impl Prototype {
         self.reveal_pending = false;
         let path = self.tree[index].entry.path.clone();
         if self.expanded.remove(&path) {
+            self.restore_expanded
+                .retain(|restore| !restore.starts_with(&path));
             let depth = self.tree[index].depth;
             let end = self
                 .tree
@@ -454,10 +521,11 @@ impl Prototype {
         } else {
             self.load_directory(path, window, cx);
         }
+        self.flush_workspace_refresh(window, cx);
         cx.notify();
     }
 
-    /// Builds the quick-open path index once per root; the refresh button rebuilds it.
+    /// Builds the quick-open index in the background; events and manual refresh rebuild it.
     fn build_index(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.index_cancel.store(true, Ordering::Relaxed);
         self.index_cancel = Arc::new(AtomicBool::new(false));
@@ -484,9 +552,11 @@ impl Prototype {
                 if this.index_generation != generation {
                     return;
                 }
+                this.index_task = None;
                 this.index = Some(Arc::new(index));
                 this.search_files(window, cx);
                 this.update_quick_open(window, cx);
+                this.flush_workspace_refresh(window, cx);
             });
         }));
     }
@@ -567,6 +637,8 @@ impl Prototype {
     fn focus_active_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(editor) = self.active_editor() {
             editor.update(cx, |editor, cx| editor.focus(window, cx));
+        } else {
+            self.focus_handle.focus(window, cx);
         }
     }
 
@@ -620,7 +692,25 @@ impl Prototype {
         }
     }
 
+    fn new_window(&mut self, cx: &mut Context<Self>) {
+        if let Err(error) = crate::open_workspace(
+            None,
+            self.service.clone(),
+            self.owners.clone(),
+            cx.windows().len(),
+            cx,
+        ) {
+            self.message = format!("无法新建窗口：{error}");
+            cx.notify();
+        }
+    }
+
     fn choose_path(&mut self, directory: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if directory && self.groups.iter().any(|g| g.write_pending) {
+            self.message = "Git 操作尚未结束，请稍后切换工作区".into();
+            cx.notify();
+            return;
+        }
         if self.path_prompt_open {
             return;
         }
@@ -666,17 +756,12 @@ impl Prototype {
                 match selected {
                     Ok(Some(path)) if directory => {
                         if this.root.is_none() {
-                            window.set_window_title(&format!(
-                                "workspace-editor · {}",
-                                path.display()
-                            ));
+                            window.set_window_title(&format!("ZJ · {}", path.display()));
                             this.root = Some(path);
                             this.sidebar = Sidebar::Explorer;
+                            this.start_watching(window, cx);
                             this.refresh_tree(window, cx);
                             this.refresh(window, cx);
-                        } else if cx.windows().len() >= 5 {
-                            this.message =
-                                "原型最多打开 5 个窗口，请先关闭一个窗口再打开文件夹".into();
                         } else if let Err(error) = crate::open_workspace(
                             Some(path),
                             this.service.clone(),
@@ -857,29 +942,34 @@ impl Prototype {
         let Some(root) = self.root.clone() else {
             return;
         };
-        self.close_preview(cx);
         self.cancel.store(true, Ordering::Relaxed);
         self.cancel = Arc::new(AtomicBool::new(false));
         self.generation += 1;
         let generation = self.generation;
         let cancel = self.cancel.clone();
         let service = self.service.clone();
+        let watch = self.watch.clone();
         let (sender, receiver) = mpsc::sync_channel(64);
         self.loading = true;
         self.excluded = 0;
-        self.issues.clear();
-        for group in &mut self.groups {
-            group.stale = true;
-        }
+        self.preview_stale = self.preview_diff.is_some();
         std::thread::spawn(move || {
             let started = Instant::now();
             let mut repos = Vec::new();
+            let mut discovery_failed = false;
             service.discover(&[root], &cancel, |event| match event {
                 Discovery::Repository(repo) => {
+                    // External Git metadata must be watched before its first status query.
+                    if let Some(watch) = &watch
+                        && let Err(error) = watch.add_repository(&repo)
+                    {
+                        let _ = sender.send(Event::Issue(format!("Git 目录监听失败：{error}")));
+                    }
                     let _ = sender.send(Event::Repo(repo.clone()));
                     repos.push(repo);
                 }
                 Discovery::Issue(path, e) => {
+                    discovery_failed = true;
                     let _ = sender.send(Event::Issue(format!("{}: {e}", path.display())));
                 }
                 Discovery::Excluded(_) => {
@@ -887,6 +977,12 @@ impl Prototype {
                 }
                 Discovery::Cancelled => {}
             });
+            if !discovery_failed
+                && !cancel.load(Ordering::Relaxed)
+                && let Some(watch) = &watch
+            {
+                watch.retain_repositories(&repos);
+            }
             let queue = Mutex::new(repos.into_iter());
             std::thread::scope(|scope| {
                 for _ in 0..2 {
@@ -921,6 +1017,7 @@ impl Prototype {
         // Only poll while a bounded job is in flight; idle windows have no refresh timer.
         self.refresh_task = Some(cx.spawn_in(window, async move |this, cx| {
             let mut seen = std::collections::HashSet::new();
+            let mut issues = Vec::new();
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(50))
@@ -937,7 +1034,7 @@ impl Prototype {
                     })
                     .collect();
                 if this
-                    .update_in(cx, |this, _, cx| {
+                    .update_in(cx, |this, window, cx| {
                         if this.generation != generation {
                             done = true;
                             return;
@@ -947,11 +1044,27 @@ impl Prototype {
                                 Event::Repo(repo) => {
                                     seen.insert(repo.id.clone());
                                     if !this.groups.iter().any(|g| g.repo.id == repo.id) {
+                                        let commit_input = cx.new(|cx| {
+                                            TextareaState::new(window, cx)
+                                                .rows(2)
+                                                .placeholder("提交信息")
+                                        });
+                                        let subscription = cx.subscribe(
+                                            &commit_input,
+                                            |_, _, _: &InputEvent, cx| cx.notify(),
+                                        );
+                                        if this.scm_repo.is_none() {
+                                            this.scm_repo = Some(repo.id.clone());
+                                        }
                                         this.groups.push(Group {
                                             repo,
                                             status: None,
                                             expanded: true,
-                                            stale: true,
+                                            commit_input,
+                                            _commit_subscription: subscription,
+                                            write_task: None,
+                                            write_pending: false,
+                                            write_message: String::new(),
                                         });
                                     }
                                 }
@@ -959,30 +1072,37 @@ impl Prototype {
                                     if let Some(group) =
                                         this.groups.iter_mut().find(|g| g.repo.id == id)
                                     {
-                                        group.stale = status.is_err();
-                                        group.status = Some(status);
+                                        group.status = Some(status.map(Arc::new));
                                     }
                                 }
                                 Event::Issue(issue) => {
-                                    if this.issues.len() < 100 {
-                                        this.issues.push(issue);
+                                    if issues.len() < 100 {
+                                        issues.push(issue);
                                     }
                                 }
                                 Event::Excluded => this.excluded += 1,
                                 Event::Done => {
-                                    if this.issues.is_empty()
-                                        && !this.cancel.load(Ordering::Relaxed)
-                                    {
-                                        this.groups.retain(|g| seen.contains(&g.repo.id));
+                                    if issues.is_empty() && !this.cancel.load(Ordering::Relaxed) {
+                                        this.groups.retain(|g| {
+                                            g.write_pending || seen.contains(&g.repo.id)
+                                        });
                                     }
                                     done = true;
                                 }
                             }
                         }
                         if done {
+                            this.issues = std::mem::take(&mut issues);
                             this.loading = false;
+                            this.refresh_completed = true;
                         }
                         this.rebuild_rows();
+                        if done {
+                            this.flush_workspace_refresh(window, cx);
+                            if this.preview_stale && !this.loading {
+                                this.load_diff(window, cx);
+                            }
+                        }
                         cx.notify();
                     })
                     .is_err()
@@ -1016,7 +1136,7 @@ impl Prototype {
                         .map(|(i, _)| i)
                         .collect();
                     if !changes.is_empty() {
-                        self.rows.push(Row::Heading(side, changes.len()));
+                        self.rows.push(Row::Heading(g, side, changes.len()));
                     }
                     self.rows
                         .extend(changes.into_iter().map(|i| Row::File(g, i, side)));
@@ -1059,32 +1179,38 @@ impl Prototype {
         }
     }
 
-    fn collapse_tree(&mut self, cx: &mut Context<Self>) {
+    fn collapse_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reveal_pending = false;
         let Some(root) = self.tree.first().map(|row| row.entry.path.clone()) else {
             return;
         };
         self.tree.retain(|row| row.depth <= 1);
         self.expanded.retain(|path| *path == root);
+        self.restore_expanded.clear();
         self.tree_tasks.clear();
+        self.flush_workspace_refresh(window, cx);
         cx.notify();
     }
 
-    fn close_preview(&mut self, cx: &mut Context<Self>) {
+    fn close_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.file_generation += 1;
         self.file_task = None;
         self.preview_cancel.store(true, Ordering::Relaxed);
         self.preview_generation += 1;
         self.preview_task = None;
         self.preview = None;
+        self.diff_model = None;
+        self.diff_scroll = UniformListScrollHandle::new();
         self.preview_title.clear();
         self.preview_diff = None;
+        self.preview_stale = false;
         if self.active == Pane::Diff {
             self.active = self
                 .documents
                 .last()
                 .map(|doc| Pane::Document(doc.id))
                 .unwrap_or(Pane::Welcome);
+            self.focus_active_editor(window, cx);
         }
         cx.notify();
     }
@@ -1102,21 +1228,21 @@ impl Prototype {
             return;
         };
         let change = &status.changes[index];
-        if matches!(change.kind, ChangeKind::Untracked | ChangeKind::Conflict) {
-            self.message = "未跟踪文件内容和冲突视图将在 P5 接入；当前状态已列出".into();
-            cx.notify();
-            return;
-        }
         let request = Request {
             repo: g.repo.clone(),
             generation: self.generation,
-            operation: Operation::Diff {
-                side,
-                path: change.path.clone(),
-                original_path: change.original_path.clone(),
+            operation: if change.kind == ChangeKind::Untracked {
+                Operation::UntrackedDiff {
+                    path: change.path.clone(),
+                }
+            } else {
+                Operation::Diff {
+                    side,
+                    path: change.path.clone(),
+                    original_path: change.original_path.clone(),
+                }
             },
         };
-        let title = format!("{:?} · {}", side, change.path.display());
         let diff_tab = DiffTab {
             label: format!(
                 "{} ({})",
@@ -1132,8 +1258,27 @@ impl Prototype {
             ),
             tooltip: g.repo.worktree.join(&change.path).display().to_string(),
             path: g.repo.worktree.join(&change.path),
+            request,
         };
-        self.close_preview(cx);
+        self.close_preview(window, cx);
+        self.message.clear();
+        self.preview_diff = Some(diff_tab);
+        self.active = Pane::Diff;
+        self.focus_handle.focus(window, cx);
+        self.load_diff(window, cx);
+    }
+
+    /// Requery the selected comparison without discarding its last completed view.
+    fn load_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(diff) = &self.preview_diff else {
+            return;
+        };
+        let mut request = diff.request.clone();
+        let title = diff.label.clone();
+        self.preview_cancel.store(true, Ordering::Relaxed);
+        self.preview_generation += 1;
+        request.generation = self.preview_generation;
+        self.preview_stale = false;
         self.preview_cancel = Arc::new(AtomicBool::new(false));
         let cancel = self.preview_cancel.clone();
         let service = self.service.clone();
@@ -1141,34 +1286,66 @@ impl Prototype {
         let repo_id = request.repo.id.clone();
         let generation = request.generation;
         self.preview_title = format!("正在加载 {title}");
-        self.preview_diff = Some(diff_tab);
-        self.active = Pane::Diff;
-        let job = cx.background_spawn(async move { service.execute(&request, &cancel) });
+        let job = cx.background_spawn(async move {
+            let reply = service.execute(&request, &cancel)?;
+            if reply.repo != repo_id || reply.generation != generation {
+                return Err(std::io::Error::other("Diff 结果的仓库或版本不匹配"));
+            }
+            let text: Arc<str> = String::from_utf8(reply.output)
+                .map_err(std::io::Error::other)?
+                .into();
+            let model = crate::diff_model::DiffModel::parse(text.clone());
+            Ok::<_, std::io::Error>((text, model))
+        });
         self.preview_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = job.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if this.preview_generation != version || this.generation != generation {
+                if this.preview_generation != version {
                     return;
                 }
-                match result.and_then(|r| {
-                    if r.repo != repo_id || r.generation != generation {
-                        return Err(std::io::Error::other("Diff 结果的仓库或版本不匹配"));
+                let restore_focus = this.active == Pane::Diff
+                    && (this.focus_handle.is_focused(window)
+                        || this.preview.as_ref().is_some_and(|editor| {
+                            editor
+                                .read(cx)
+                                .focus_handle(cx)
+                                .contains_focused(window, cx)
+                        }));
+                match result {
+                    Ok((text, _)) if text.is_empty() => {
+                        this.preview = None;
+                        this.diff_model = None;
+                        this.preview_title = "当前没有差异".into();
                     }
-                    String::from_utf8(r.output).map_err(std::io::Error::other)
-                }) {
-                    Ok(text) => {
+                    Ok((text, model)) => {
+                        // Equal patches keep cursor and scroll position through a refresh.
+                        if this
+                            .preview
+                            .as_ref()
+                            .is_some_and(|editor| *editor.read(cx).text() == text.as_ref())
+                        {
+                            this.preview_title = title;
+                            cx.notify();
+                            return;
+                        }
+                        this.diff_model = model;
                         this.preview = Some(cx.new(|cx| {
                             EditorState::new(window, cx)
                                 .language(crate::diff_syntax::LANGUAGE)
-                                .default_value(text)
+                                .default_value(text.to_string())
                         }));
                         this.preview_title = title;
-                        if this.active == Pane::Diff {
-                            this.observe_cursor(cx);
-                        }
                     }
                     Err(e) => {
+                        this.preview = None;
+                        this.diff_model = None;
                         this.preview_title = format!("Diff 加载失败: {e}");
+                    }
+                }
+                if this.active == Pane::Diff {
+                    this.observe_cursor(cx);
+                    if restore_focus {
+                        this.focus_active_editor(window, cx);
                     }
                 }
                 cx.notify();
@@ -1203,6 +1380,8 @@ impl Render for Prototype {
             .size_full()
             .relative()
             .key_context("WorkspaceEditor")
+            .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &NewWindow, _, cx| this.new_window(cx)))
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| {
                 this.choose_path(false, window, cx);
             }))

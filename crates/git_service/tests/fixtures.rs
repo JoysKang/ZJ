@@ -145,6 +145,94 @@ fn real_git_identities_states_diffs_and_cancellation() {
             kind
         );
     }
+    let untracked = service
+        .identify(&roots[0].join("repo-03"), &cancel)
+        .unwrap();
+    let change = service
+        .status(&untracked, 5, &cancel)
+        .unwrap()
+        .changes
+        .remove(0);
+    let added = service
+        .execute(
+            &Request {
+                repo: untracked.clone(),
+                generation: 5,
+                operation: Operation::UntrackedDiff {
+                    path: change.path.clone(),
+                },
+            },
+            &cancel,
+        )
+        .unwrap();
+    assert!(
+        String::from_utf8(added.output).unwrap().contains("+未跟踪"),
+        "untracked file must have an addition patch"
+    );
+    assert!(
+        Command::new("git")
+            .arg("-C")
+            .arg(&untracked.worktree)
+            .args(["--literal-pathspecs", "add", "--"])
+            .arg(&change.path)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        service
+            .execute(
+                &Request {
+                    repo: untracked.clone(),
+                    generation: 6,
+                    operation: Operation::UntrackedDiff {
+                        path: change.path.clone()
+                    },
+                },
+                &cancel
+            )
+            .unwrap()
+            .output
+            .is_empty(),
+        "a newly staged file must compare against the index"
+    );
+    for path in ["../outside", "/etc/hosts", "missing-file"] {
+        assert!(
+            service
+                .execute(
+                    &Request {
+                        repo: untracked.clone(),
+                        generation: 5,
+                        operation: Operation::UntrackedDiff { path: path.into() },
+                    },
+                    &cancel
+                )
+                .is_err(),
+            "invalid/missing path must be an error: {path}"
+        );
+    }
+    for (number, expected) in [(4, "-fn main()"), (5, "diff --cc"), (7, "Binary files")] {
+        let repo = service
+            .identify(&roots[0].join(format!("repo-{number:02}")), &cancel)
+            .unwrap();
+        let change = service.status(&repo, 5, &cancel).unwrap().changes.remove(0);
+        let reply = service
+            .execute(
+                &Request {
+                    repo,
+                    generation: 5,
+                    operation: Operation::Diff {
+                        side: DiffSide::Worktree,
+                        path: change.path,
+                        original_path: change.original_path,
+                    },
+                },
+                &cancel,
+            )
+            .unwrap();
+        assert!(String::from_utf8(reply.output).unwrap().contains(expected));
+    }
     let unborn = service
         .identify(&roots[0].join("repo-06"), &cancel)
         .unwrap();

@@ -41,8 +41,11 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `theme.rs`：唯一允许写字面尺寸和颜色的地方。
   - `assets.rs`：内嵌资源；`file_icons.rs`：文件类型到图标的映射。
   - `files.rs`：受限的只读文件访问与快速打开路径索引；`fuzzy.rs`：模糊匹配打分。
-  - `prototype.rs`：工作台的状态和逻辑；`prototype/` 下是各区域的渲染（`chrome` 标题栏与状态栏、`sidebar` 侧栏与资源管理器、`scm`、`editor_area`、`quick_open`）。
+  - `watch.rs`：共用原生文件监听、路径引用回收和有界事件信号；不持有界面实体。
+  - `prototype.rs`：工作台的状态和逻辑；`prototype/` 下是各区域的渲染（`chrome` 标题栏与状态栏、`sidebar` 侧栏与资源管理器、`scm`、`editor_area`、`quick_open`），以及 `workspace_refresh` 的事件刷新编排。
   - `diff_syntax.rs`：重新注册 diff 语法，让新增 / 删除有独立的颜色。
+  - `diff_model.rs`：后台解析并配对补丁行；`prototype/diff_view.rs`：虚拟化左右 Diff 与内联回退。
+  - `prototype/scm_actions.rs`：Git 写操作确认与结果展示；`git_service/src/write.rs`：仓库锁内校验及有界执行。
 - UI 的 render 回调里不做 IO、不跑 Git 命令、不做全文解析；这些都通过 `background_spawn` 执行，结果带 generation 校验。
 
 ## 视觉规则
@@ -68,7 +71,7 @@ python3 tools/fixtures.py /tmp/zj-fixture-f  # 生成临时夹具，目标路径
 
 ## 编码约定
 
-- 错误要让用户看得见，不能被当成"干净"或"零变更"；Git 查询失败要显示为错误或陈旧状态。
+- 错误要让用户看得见，不能被当成"干净"或"零变更"；Git 查询失败显示真实错误。按用户要求静默刷新，不展示扫描、陈旧或过期标记。
 - 每个 `unsafe` 块都要写 `// SAFETY:` 注释（lint 会强制检查）。
 - 日志用 `eprintln!("event=... key=value")` 这种格式，不输出文件内容和凭据。
 - 提交信息用 Conventional Commits 格式（例如 `feat(scm): …`），正文可以写中文；一个提交只做一件事，每个提交都要能构建。
