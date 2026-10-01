@@ -1028,11 +1028,22 @@ impl Prototype {
                                         let commit_input = cx.new(|cx| {
                                             TextareaState::new(window, cx)
                                                 .rows(2)
-                                                .placeholder("提交信息")
+                                                .placeholder("消息（⌘Enter 提交）")
                                         });
-                                        let subscription = cx.subscribe(
+                                        let id = repo.id.clone();
+                                        let subscription = cx.subscribe_in(
                                             &commit_input,
-                                            |_, _, _: &InputEvent, cx| cx.notify(),
+                                            window,
+                                            move |this, _, event: &InputEvent, window, cx| {
+                                                if let InputEvent::PressEnter {
+                                                    secondary: true,
+                                                    ..
+                                                } = event
+                                                {
+                                                    this.scm_commit(id.clone(), false, window, cx);
+                                                }
+                                                cx.notify();
+                                            },
                                         );
                                         if this.scm_repo.is_none() {
                                             this.scm_repo = Some(repo.id.clone());

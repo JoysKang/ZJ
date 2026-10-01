@@ -42,6 +42,30 @@ impl Prototype {
         })
     }
 
+    /// Discard request for one change or the whole worktree group; conflicts are left out.
+    pub(super) fn scm_discard(&self, g: usize, index: Option<usize>) -> Option<WriteRequest> {
+        let group = self.groups.get(g)?;
+        if group.write_pending {
+            return None;
+        }
+        let status = group.status.as_ref()?.as_ref().ok()?;
+        let changes = match index {
+            Some(index) => std::slice::from_ref(status.changes.get(index)?),
+            None => status.changes.as_slice(),
+        };
+        let paths: Vec<PathBuf> = changes
+            .iter()
+            .filter(|change| change.unstaged() && change.kind != ChangeKind::Conflict)
+            .flat_map(|change| change.paths(DiffSide::Worktree))
+            .collect();
+        (!paths.is_empty()).then(|| WriteRequest {
+            repo: group.repo.clone(),
+            generation: 0,
+            expected: status.clone(),
+            operation: WriteOperation::Discard { paths },
+        })
+    }
+
     fn dirty_in(&self, repo: &Repository, paths: &[PathBuf], cx: &Context<Self>) -> bool {
         if self.documents.iter().any(|document| {
             document.dirty
@@ -76,22 +100,54 @@ impl Prototype {
     ) {
         let warning = match &request.operation {
             WriteOperation::Stage { paths } if self.dirty_in(&request.repo, paths, cx) => Some((
-                "暂存磁盘版本？",
+                "暂存磁盘版本？".to_string(),
                 "文件有未保存的编辑。本次只暂存磁盘内容，编辑缓冲区仍保留；当前版本尚不支持保存。"
                     .to_string(),
                 "暂存磁盘版本",
             )),
-            WriteOperation::Discard { paths } => Some((
-                "放弃工作区更改？",
-                format!(
-                    "仓库：{}\n{} 个路径将恢复为暂存区版本。磁盘上的更改无法撤销；编辑缓冲区不会写回磁盘。",
-                    request.repo.worktree.display(),
-                    paths.len()
-                ),
-                "放弃更改",
-            )),
+            WriteOperation::Discard { paths } => {
+                let untracked = paths
+                    .iter()
+                    .filter(|path| {
+                        request.expected.changes.iter().any(|change| {
+                            &change.path == *path && change.kind == ChangeKind::Untracked
+                        })
+                    })
+                    .count();
+                let tracked = paths.len() - untracked;
+                let name = |path: &PathBuf| {
+                    path.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                };
+                let title = match (paths.as_slice(), untracked) {
+                    ([path], 1) => format!("确定要删除“{}”吗？", name(path)),
+                    ([path], _) => format!("确定要放弃“{}”中的更改吗？", name(path)),
+                    _ => format!("确定要放弃 {} 个文件中的全部更改吗？", paths.len()),
+                };
+                let mut detail = format!("仓库：{}\n", request.repo.worktree.display());
+                if tracked > 0 {
+                    detail.push_str(&format!("{tracked} 个文件恢复为暂存区版本。"));
+                }
+                if untracked > 0 {
+                    detail.push_str(&format!(
+                        "{untracked} 个未跟踪文件将被永久删除，不进废纸篓。"
+                    ));
+                }
+                detail.push_str("此操作无法撤销；编辑缓冲区不会写回磁盘。");
+                Some((
+                    title,
+                    detail,
+                    if tracked == 0 {
+                        "删除文件"
+                    } else {
+                        "放弃更改"
+                    },
+                ))
+            }
             WriteOperation::Push => Some((
-                "推送当前分支？",
+                "推送当前分支？".to_string(),
                 format!(
                     "仓库：{}\n{} → {}\n仅推送当前 HEAD，不强制覆盖远程历史。",
                     request.repo.worktree.display(),
@@ -105,7 +161,7 @@ impl Prototype {
         if let Some((title, detail, action)) = warning {
             let answer = window.prompt(
                 PromptLevel::Warning,
-                title,
+                &title,
                 Some(&detail),
                 &["取消", action],
                 cx,
@@ -148,15 +204,13 @@ impl Prototype {
             WriteOperation::Commit { message } => Some(message.clone()),
             _ => None,
         };
+        // As in VS Code, a successful operation just shows up in the refreshed list.
         let success = match request.operation {
-            WriteOperation::Stage { .. } => "已暂存",
-            WriteOperation::Unstage { .. } => "已取消暂存",
-            WriteOperation::Discard { .. } => "已放弃磁盘更改",
-            WriteOperation::Commit { .. } => "提交成功",
-            WriteOperation::Push => "推送成功",
+            WriteOperation::Push => "已推送",
+            _ => "",
         };
         group.write_pending = true;
-        group.write_message = "正在执行 Git 操作…".into();
+        group.write_message.clear();
         let service = self.service.clone();
         // Window replacement/close is blocked while writing. Do not cancel a write on refresh.
         let job =
@@ -206,6 +260,15 @@ impl Prototype {
         let Some(Ok(status)) = &group.status else {
             return;
         };
+        let message = group.commit_input.read(cx).value().to_string();
+        if !push && message.trim().is_empty() {
+            let index = self.groups.iter().position(|g| g.repo.id == id);
+            if let Some(group) = index.map(|index| &mut self.groups[index]) {
+                group.write_message = "请输入提交消息".into();
+                cx.notify();
+            }
+            return;
+        }
         let request = WriteRequest {
             repo: group.repo.clone(),
             generation: 0,
@@ -213,9 +276,7 @@ impl Prototype {
             operation: if push {
                 WriteOperation::Push
             } else {
-                WriteOperation::Commit {
-                    message: group.commit_input.read(cx).value().to_string(),
-                }
+                WriteOperation::Commit { message }
             },
         };
         self.request_git_write(request, window, cx);

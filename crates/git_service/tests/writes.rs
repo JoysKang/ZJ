@@ -125,11 +125,26 @@ fn disk_stage_unborn_unstage_commit_hook_discard_and_local_push() {
         fs::read_to_string(root.join("src/main.rs")).unwrap(),
         "keep-out-of-commit\n"
     );
-    write(&service, &root, WriteOperation::Discard { paths: paths() }).unwrap();
+    // Discarding a tracked edit together with an untracked file restores one, deletes the other.
+    fs::write(root.join("src/new.rs"), "untracked\n").unwrap();
+    let mut both = paths();
+    both.push("src/new.rs".into());
+    write(&service, &root, WriteOperation::Discard { paths: both }).unwrap();
     assert_eq!(
         fs::read_to_string(root.join("src/main.rs")).unwrap(),
         "unsaved-on-disk\n"
     );
+    assert!(!root.join("src/new.rs").exists());
+    fs::write(root.join("only-new.txt"), "untracked\n").unwrap();
+    write(
+        &service,
+        &root,
+        WriteOperation::Discard {
+            paths: vec!["only-new.txt".into()],
+        },
+    )
+    .unwrap();
+    assert!(!root.join("only-new.txt").exists());
     assert!(
         write(&service, &root, WriteOperation::Push)
             .err()

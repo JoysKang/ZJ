@@ -72,6 +72,8 @@ impl GitService {
             return Err(error("文件、暂存区或分支已变化，请刷新后重试"));
         }
         let mut args: Vec<OsString> = vec!["--literal-pathspecs".into()];
+        // Discarding untracked files deletes them with `git clean`, after the tracked restore.
+        let mut untracked: Vec<PathBuf> = Vec::new();
         let mut input = None;
         match &request.operation {
             WriteOperation::Stage { paths }
@@ -95,13 +97,14 @@ impl GitService {
                             return Err(error("文件没有暂存更改"));
                         }
                         WriteOperation::Discard { .. }
-                            if !selected.unstaged()
-                                || selected.kind == ChangeKind::Untracked
-                                || selected.kind == ChangeKind::Conflict =>
+                            if !selected.unstaged() || selected.kind == ChangeKind::Conflict =>
                         {
-                            return Err(error(
-                                "仅支持放弃已跟踪文件的工作区更改；未跟踪或冲突文件请在外部处理",
-                            ));
+                            return Err(error("冲突文件不能直接放弃，请先解决冲突"));
+                        }
+                        WriteOperation::Discard { .. }
+                            if selected.kind == ChangeKind::Untracked =>
+                        {
+                            untracked.push(path.clone());
                         }
                         _ => {}
                     }
@@ -121,13 +124,22 @@ impl GitService {
                     WriteOperation::Unstage { .. } => {
                         args.extend(["restore".into(), "--staged".into()])
                     }
+                    WriteOperation::Discard { .. } if untracked.len() == paths.len() => {
+                        args.extend(["clean".into(), "-f".into(), "-q".into()]);
+                        untracked.clear();
+                    }
                     WriteOperation::Discard { .. } => {
                         args.extend(["restore".into(), "--worktree".into()])
                     }
                     _ => unreachable!(),
                 }
                 args.push("--".into());
-                args.extend(paths.iter().map(|p| p.as_os_str().to_owned()));
+                args.extend(
+                    paths
+                        .iter()
+                        .filter(|p| !untracked.contains(p))
+                        .map(|p| p.as_os_str().to_owned()),
+                );
             }
             WriteOperation::Commit { message } => {
                 if message.trim().is_empty() || message.len() > 65_536 || message.contains('\0') {
@@ -208,9 +220,26 @@ impl GitService {
             shared: self.shared.clone(),
             timeout: Duration::from_secs(120),
         };
-        let output = writer
+        let partial =
+            |e: io::Error| error(format!("{e}。操作可能已经部分完成；请刷新检查仓库状态"));
+        let mut output = writer
             .run_with_input(&request.repo.worktree, &args, cancel, false, input)
-            .map_err(|e| error(format!("{e}。操作可能已经部分完成；请刷新检查仓库状态")))?;
+            .map_err(partial)?;
+        if !untracked.is_empty() {
+            let mut clean: Vec<OsString> = vec![
+                "--literal-pathspecs".into(),
+                "clean".into(),
+                "-f".into(),
+                "-q".into(),
+                "--".into(),
+            ];
+            clean.extend(untracked.iter().map(|p| p.as_os_str().to_owned()));
+            output.extend(
+                writer
+                    .run_with_input(&request.repo.worktree, &clean, cancel, false, None)
+                    .map_err(partial)?,
+            );
+        }
         Ok(Reply {
             repo: request.repo.id.clone(),
             generation: request.generation,
