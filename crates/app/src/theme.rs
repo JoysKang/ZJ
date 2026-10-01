@@ -382,7 +382,7 @@ impl Palette {
             diff_deleted: hsla(self.diff_red).opacity(self.diff_line_alpha),
             diff_added_text: hsla(self.diff_green).opacity(self.diff_text_alpha),
             diff_deleted_text: hsla(self.diff_red).opacity(self.diff_text_alpha),
-            diff_filler: hsla(self.foreground).opacity(0.12),
+            diff_filler: hsla(self.foreground).opacity(0.2),
             code: hsla(self.code),
             command_bg: hsla(self.foreground).opacity(0.05),
             command_border: hsla(self.foreground).opacity(0.2),

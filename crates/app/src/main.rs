@@ -64,7 +64,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             windows = Some(count);
         } else if arg == "--help" {
             println!(
-                "ZJ [--windows 1..5] [工作区根目录 ...]\nP1 原型：目录、文件名搜索、临时文件编辑、只读 Changes、双状态 diff。编辑不写磁盘，退出不保留。"
+                "ZJ [--windows 1..5] [工作区根目录 ...]\n轻量代码编辑器：多仓库源代码管理、并排 Diff、临时文件编辑。编辑不写磁盘，退出不保留。"
             );
             return Ok(());
         } else {

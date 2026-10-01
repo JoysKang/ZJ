@@ -20,12 +20,6 @@ pub const EXTRA: &[(&str, &[u8])] = &[
     embed!("icons/chevrons-down-up.svg"),
     embed!("icons/files.svg"),
     embed!("icons/git-branch.svg"),
-    embed!("icons/arrow-up.svg"),
-    embed!("icons/file.svg"),
-    embed!("icons/check.svg"),
-    embed!("icons/undo-2.svg"),
-    embed!("icons/minus.svg"),
-    embed!("icons/plus.svg"),
     embed!("icons/columns-2.svg"),
     embed!("icons/rows-2.svg"),
     embed!("file-icons/default_folder.svg"),
@@ -98,5 +92,27 @@ mod tests {
         }
         let total: usize = EXTRA.iter().map(|(_, bytes)| bytes.len()).sum();
         assert!(total < 100_000, "embedded icons grew to {total} bytes");
+    }
+
+    /// Icons the workbench uses that Kit already embeds; they must not be duplicated in EXTRA.
+    #[test]
+    fn kit_defaults_cover_the_common_icons() {
+        for name in [
+            "icons/arrow-up.svg",
+            "icons/arrow-down.svg",
+            "icons/file.svg",
+            "icons/check.svg",
+            "icons/undo-2.svg",
+            "icons/minus.svg",
+            "icons/plus.svg",
+            "icons/ellipsis.svg",
+            "icons/refresh-cw.svg",
+        ] {
+            assert!(
+                gpui_kit::assets::Assets.load(name).unwrap().is_some(),
+                "{name}"
+            );
+            assert!(!EXTRA.iter().any(|(extra, _)| *extra == name), "{name}");
+        }
     }
 }
