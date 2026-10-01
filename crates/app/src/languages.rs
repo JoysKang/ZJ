@@ -42,10 +42,10 @@ pub fn for_path(path: &Path) -> (&'static str, &'static str) {
         "css" => ("css", "CSS"),
         "yaml" | "yml" => ("yaml", "YAML"),
         "go" => ("go", "Go"),
-        "c" | "h" => ("plain", "C"),
-        "cpp" | "cc" | "cxx" | "hpp" | "hh" => ("plain", "C++"),
-        "java" => ("plain", "Java"),
-        "sql" => ("plain", "SQL"),
+        "c" | "h" => ("c", "C"),
+        "cpp" | "cc" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "ipp" | "inl" => ("cpp", "C++"),
+        "java" => ("java", "Java"),
+        "sql" => ("sql", "SQL"),
         _ => ("plain", "纯文本"),
     }
 }
@@ -90,6 +90,22 @@ pub const SAMPLES: &[(&str, &str)] = &[
     ),
     ("css", ".app { color: #333; margin: 0 auto; }\n"),
     (
+        "c",
+        "#include <stdio.h>\nstatic int add(int a, int b) { return a + b; }\nint main(void) { printf(\"%d\", add(1, 2)); }\n",
+    ),
+    (
+        "cpp",
+        "#include <vector>\nnamespace demo { class Box { public: int size() const { return 1; } }; }\nint main() { std::vector<int> v{1}; return v.size(); }\n",
+    ),
+    (
+        "java",
+        "package demo;\npublic class App { public static void main(String[] args) { int n = 1; System.out.println(\"hi\" + n); } }\n",
+    ),
+    (
+        "sql",
+        "SELECT id, name FROM users WHERE id = 1 AND name LIKE 'a%';\n",
+    ),
+    (
         "markdown",
         "# Title\n\n- item\n\n```rust\nfn main() {}\n```\n",
     ),
@@ -116,6 +132,11 @@ mod tests {
         assert_eq!(lang("Cargo.lock"), "toml");
         assert_eq!(lang("tsconfig.json"), "json");
         assert_eq!(lang("main.go"), "go");
+        assert_eq!(lang("x.h"), "c");
+        assert_eq!(lang("x.hpp"), "cpp");
+        assert_eq!(lang("x.cc"), "cpp");
+        assert_eq!(lang("App.java"), "java");
+        assert_eq!(lang("q.sql"), "sql");
         assert_eq!(lang("README"), "plain");
     }
 
