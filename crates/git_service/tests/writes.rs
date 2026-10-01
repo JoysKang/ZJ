@@ -283,3 +283,37 @@ fn stale_snapshot_identity_paths_and_rename() {
         "stage after rename\n"
     );
 }
+
+#[test]
+fn check_ignore_batches_directories_and_files() {
+    let fixture = fixture();
+    let root = fixture.0.join("a");
+    fs::write(root.join(".gitignore"), "target/\n*.log\n").unwrap();
+    fs::create_dir_all(root.join("target/debug")).unwrap();
+    let service = GitService::new(2, Duration::from_secs(10)).unwrap();
+    let cancel = AtomicBool::new(false);
+    let repo = service.identify(&root, &cancel).unwrap();
+    let ignored = service
+        .check_ignore(
+            &repo,
+            &[
+                "target/".into(),
+                "src/".into(),
+                "src/main.rs".into(),
+                "src/debug.log".into(),
+            ],
+            &cancel,
+        )
+        .unwrap();
+    assert_eq!(
+        ignored,
+        vec![PathBuf::from("target/"), PathBuf::from("src/debug.log")]
+    );
+    // Nothing ignored is exit status 1, not an error.
+    assert!(
+        service
+            .check_ignore(&repo, &["src/main.rs".into()], &cancel)
+            .unwrap()
+            .is_empty()
+    );
+}

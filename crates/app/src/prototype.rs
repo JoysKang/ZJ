@@ -226,7 +226,11 @@ pub struct Prototype {
     watch_task: Option<Task<()>>,
     watch_error: Option<String>,
     watch_debouncing: bool,
+    /// A full refresh (rediscovery, tree and index rebuild) is pending.
     workspace_refresh_pending: bool,
+    /// Partial refresh from file watching, applied when the window is not busy.
+    pending_plan: Option<crate::refresh_plan::Plan>,
+    ignore_cache: Arc<Mutex<crate::refresh_plan::IgnoreCache>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -265,8 +269,7 @@ impl Prototype {
         });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() && this.root.is_some() {
-                this.workspace_refresh_pending = true;
-                this.flush_workspace_refresh(window, cx);
+                this.refresh_on_activation(window, cx);
             }
         });
         let weak = cx.weak_entity();
@@ -387,6 +390,8 @@ impl Prototype {
             watch_error: None,
             watch_debouncing: false,
             workspace_refresh_pending: false,
+            pending_plan: None,
+            ignore_cache: Default::default(),
             _subscriptions: vec![search_subscription, appearance, activation],
         };
         this.start_watching(window, cx);
@@ -504,6 +509,29 @@ impl Prototype {
         }
         self.flush_workspace_refresh(window, cx);
         cx.notify();
+    }
+
+    /// Lists an expanded directory again (file watching), keeping expanded subdirectories.
+    fn reload_directory(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.tree.iter().position(|row| row.entry.path == path) else {
+            return;
+        };
+        let depth = self.tree[index].depth;
+        let end = self
+            .tree
+            .iter()
+            .enumerate()
+            .skip(index + 1)
+            .find(|(_, row)| row.depth <= depth)
+            .map(|(index, _)| index)
+            .unwrap_or(self.tree.len());
+        for row in self.tree.drain(index + 1..end) {
+            if self.expanded.remove(&row.entry.path) {
+                self.restore_expanded.insert(row.entry.path.clone());
+            }
+            self.tree_tasks.remove(&row.entry.path);
+        }
+        self.load_directory(path, window, cx);
     }
 
     /// Builds the quick-open index in the background; events and manual refresh rebuild it.
@@ -920,9 +948,31 @@ impl Prototype {
     }
 
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_repos(None, window, cx);
+    }
+
+    /// `targets` limits the refresh to a status query of these known repositories (file
+    /// watching); `None` rediscovers repositories under the root.
+    fn refresh_repos(
+        &mut self,
+        targets: Option<HashSet<RepoId>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(root) = self.root.clone() else {
             return;
         };
+        let full = targets.is_none();
+        let known: Option<Vec<Repository>> = targets.as_ref().map(|ids| {
+            self.groups
+                .iter()
+                .filter(|g| ids.contains(&g.repo.id))
+                .map(|g| g.repo.clone())
+                .collect()
+        });
+        if known.as_ref().is_some_and(Vec::is_empty) {
+            return;
+        }
         self.cancel.store(true, Ordering::Relaxed);
         self.cancel = Arc::new(AtomicBool::new(false));
         self.generation += 1;
@@ -933,37 +983,46 @@ impl Prototype {
         let (sender, receiver) = mpsc::sync_channel(64);
         self.loading = true;
         self.excluded = 0;
-        self.preview_stale = self.preview_diff.is_some();
+        self.preview_stale = self.preview_diff.as_ref().is_some_and(|diff| {
+            targets
+                .as_ref()
+                .is_none_or(|ids| ids.contains(&diff.request.repo.id))
+        });
         std::thread::spawn(move || {
             let started = Instant::now();
             let mut repos = Vec::new();
             let mut discovery_failed = false;
-            service.discover(&[root], &cancel, |event| match event {
-                Discovery::Repository(repo) => {
-                    // External Git metadata must be watched before its first status query.
-                    if let Some(watch) = &watch
-                        && let Err(error) = watch.add_repository(&repo)
-                    {
-                        let _ = sender.send(Event::Issue(format!("Git 目录监听失败：{error}")));
+            if let Some(known) = known {
+                repos = known;
+            } else {
+                service.discover(&[root], &cancel, |event| match event {
+                    Discovery::Repository(repo) => {
+                        // External Git metadata must be watched before its first status query.
+                        if let Some(watch) = &watch
+                            && let Err(error) = watch.add_repository(&repo)
+                        {
+                            let _ = sender.send(Event::Issue(format!("Git 目录监听失败：{error}")));
+                        }
+                        let _ = sender.send(Event::Repo(repo.clone()));
+                        repos.push(repo);
                     }
-                    let _ = sender.send(Event::Repo(repo.clone()));
-                    repos.push(repo);
+                    Discovery::Issue(path, e) => {
+                        discovery_failed = true;
+                        let _ = sender.send(Event::Issue(format!("{}: {e}", path.display())));
+                    }
+                    Discovery::Excluded(_) => {
+                        let _ = sender.send(Event::Excluded);
+                    }
+                    Discovery::Cancelled => {}
+                });
+                if !discovery_failed
+                    && !cancel.load(Ordering::Relaxed)
+                    && let Some(watch) = &watch
+                {
+                    watch.retain_repositories(&repos);
                 }
-                Discovery::Issue(path, e) => {
-                    discovery_failed = true;
-                    let _ = sender.send(Event::Issue(format!("{}: {e}", path.display())));
-                }
-                Discovery::Excluded(_) => {
-                    let _ = sender.send(Event::Excluded);
-                }
-                Discovery::Cancelled => {}
-            });
-            if !discovery_failed
-                && !cancel.load(Ordering::Relaxed)
-                && let Some(watch) = &watch
-            {
-                watch.retain_repositories(&repos);
             }
+            let count = repos.len();
             let queue = Mutex::new(repos.into_iter());
             std::thread::scope(|scope| {
                 for _ in 0..2 {
@@ -991,7 +1050,7 @@ impl Prototype {
             });
             let _ = sender.send(Event::Done);
             eprintln!(
-                "event=refresh_finished generation={generation} seconds={:.3}",
+                "event=refresh_finished generation={generation} full={full} repos={count} seconds={:.3}",
                 started.elapsed().as_secs_f64()
             );
         });
@@ -1074,7 +1133,10 @@ impl Prototype {
                                 }
                                 Event::Excluded => this.excluded += 1,
                                 Event::Done => {
-                                    if issues.is_empty() && !this.cancel.load(Ordering::Relaxed) {
+                                    if full
+                                        && issues.is_empty()
+                                        && !this.cancel.load(Ordering::Relaxed)
+                                    {
                                         this.groups.retain(|g| {
                                             g.write_pending || seen.contains(&g.repo.id)
                                         });
@@ -1084,7 +1146,9 @@ impl Prototype {
                             }
                         }
                         if done {
-                            this.issues = std::mem::take(&mut issues);
+                            if full || !issues.is_empty() {
+                                this.issues = std::mem::take(&mut issues);
+                            }
                             this.loading = false;
                             this.refresh_completed = true;
                         }

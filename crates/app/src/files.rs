@@ -57,11 +57,24 @@ pub struct SearchResults {
     pub errors: usize,
 }
 
+#[derive(Clone)]
 struct IndexEntry {
     relative: PathBuf,
     /// Lowercased lossy display form, precomputed so matching allocates nothing per keystroke.
     key: Box<str>,
     name_start: usize,
+}
+
+impl IndexEntry {
+    fn new(relative: PathBuf) -> Self {
+        let key: Box<str> = relative.to_string_lossy().to_lowercase().into();
+        let name_start = key.rfind('/').map_or(0, |i| i + 1);
+        IndexEntry {
+            relative,
+            key,
+            name_start,
+        }
+    }
 }
 
 /// Every file path of a workspace, built once in the background and matched in memory.
@@ -96,11 +109,71 @@ impl PathIndex {
         if !builder.list_git(Path::new("")) {
             builder.walk(Path::new(""));
         }
-        builder.index
+        let mut index = builder.index;
+        index.sort();
+        index
+    }
+
+    /// Sorted by relative path so file watching can look entries up without a second set.
+    fn sort(&mut self) {
+        self.entries
+            .sort_unstable_by(|a, b| a.relative.cmp(&b.relative));
+        self.entries.dedup_by(|a, b| a.relative == b.relative);
     }
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    fn position(&self, relative: &Path) -> Result<usize, usize> {
+        self.entries
+            .binary_search_by(|entry| entry.relative.as_path().cmp(relative))
+    }
+
+    /// Whether `path` (absolute) is an indexed file, or a directory containing indexed files.
+    pub fn covers(&self, path: &Path) -> bool {
+        let Ok(relative) = path.strip_prefix(&self.root) else {
+            return false;
+        };
+        match self.position(relative) {
+            Ok(_) => true,
+            Err(next) => self
+                .entries
+                .get(next)
+                .is_some_and(|entry| entry.relative.starts_with(relative)),
+        }
+    }
+
+    /// A copy with files added and paths (files or whole directories) removed; used for
+    /// watch events instead of rebuilding the index.
+    pub fn with_changes(&self, added: &[PathBuf], removed: &[PathBuf]) -> PathIndex {
+        let mut next = PathIndex {
+            root: self.root.clone(),
+            entries: Vec::with_capacity(self.entries.len() + added.len()),
+            incomplete: self.incomplete,
+            errors: self.errors,
+        };
+        let removed: Vec<&Path> = removed
+            .iter()
+            .filter_map(|path| path.strip_prefix(&self.root).ok())
+            .collect();
+        next.entries.extend(
+            self.entries
+                .iter()
+                .filter(|entry| !removed.iter().any(|gone| entry.relative.starts_with(gone)))
+                .cloned(),
+        );
+        for path in added {
+            if let Ok(relative) = path.strip_prefix(&self.root)
+                && !relative
+                    .components()
+                    .any(|c| is_excluded_dir(c.as_os_str()))
+            {
+                next.entries.push(IndexEntry::new(relative.to_path_buf()));
+            }
+        }
+        next.sort();
+        next
     }
 
     /// Ranks all entries against `query` and returns the best [`MAX_RESULTS`] as absolute paths.
@@ -164,13 +237,7 @@ impl Builder<'_> {
         {
             return;
         }
-        let key: Box<str> = relative.to_string_lossy().to_lowercase().into();
-        let name_start = key.rfind('/').map_or(0, |i| i + 1);
-        self.index.entries.push(IndexEntry {
-            relative,
-            key,
-            name_start,
-        });
+        self.index.entries.push(IndexEntry::new(relative));
     }
 
     /// Returns false when `relative` is not inside a Git worktree (or Git failed).
@@ -360,6 +427,14 @@ mod tests {
         assert_eq!(result.paths, vec![path.clone()]);
         assert!(!result.incomplete);
         assert!(PathIndex::build(&root, &AtomicBool::new(true), &not_git).incomplete);
+        // Incremental updates from file watching.
+        assert!(index.covers(&path) && index.covers(&root.join("src")));
+        assert!(!index.covers(&root.join("target/main.rs")));
+        let added = root.join("src/added.rs");
+        let next = index.with_changes(&[added.clone(), root.join("target/x.rs")], &[]);
+        assert!(next.covers(&added) && !next.covers(&root.join("target/x.rs")));
+        let gone = next.with_changes(&[], &[root.join("src")]);
+        assert!(!gone.covers(&path) && !gone.covers(&added));
         let loaded = text_file(Some(&root), &path).unwrap();
         assert_eq!(loaded.text, "hello\r\n");
         assert!(loaded.crlf && loaded.bom);

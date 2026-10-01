@@ -9,10 +9,17 @@ use std::{
 };
 use workspace_editor_core::{Repository, is_excluded_dir};
 
+/// Changed paths kept per wakeup; beyond this the window falls back to a full refresh.
+const MAX_PATHS: usize = 4_096;
+
 #[derive(Default)]
 pub struct Notice {
     pub changed: bool,
     pub error: Option<String>,
+    /// Paths that matched this subscriber, so the window can refresh only what they touch.
+    pub paths: Vec<PathBuf>,
+    /// A rescan, a watcher error or too many paths: the paths are not the whole story.
+    pub overflow: bool,
 }
 
 impl Notice {
@@ -20,6 +27,22 @@ impl Notice {
         self.changed |= next.changed;
         if next.error.is_some() {
             self.error = next.error;
+        }
+        self.overflow |= next.overflow;
+        self.add_paths(next.paths);
+    }
+
+    fn add_paths(&mut self, paths: impl IntoIterator<Item = PathBuf>) {
+        for path in paths {
+            if self.overflow {
+                break;
+            }
+            if self.paths.len() >= MAX_PATHS {
+                self.overflow = true;
+                self.paths.clear();
+                break;
+            }
+            self.paths.push(path);
         }
     }
 }
@@ -46,19 +69,29 @@ impl Subscribers {
         for subscriber in self.entries.values() {
             let notice = match &result {
                 Ok(event) => {
-                    if !event.need_rescan()
-                        && !event.paths.iter().any(|path| subscriber.matches(path))
-                    {
+                    let rescan = event.need_rescan();
+                    let paths: Vec<PathBuf> = event
+                        .paths
+                        .iter()
+                        .filter(|path| subscriber.matches(path))
+                        .cloned()
+                        .collect();
+                    if !rescan && paths.is_empty() {
                         continue;
                     }
-                    Notice {
+                    let mut notice = Notice {
                         changed: true,
-                        error: None,
-                    }
+                        overflow: rescan,
+                        ..Default::default()
+                    };
+                    notice.add_paths(paths);
+                    notice
                 }
                 Err(error) => Notice {
                     changed: true,
                     error: Some(error.to_string().chars().take(512).collect()),
+                    overflow: true,
+                    ..Default::default()
                 },
             };
             subscriber.pending.lock().unwrap().merge(notice);
@@ -239,7 +272,10 @@ impl Subscription {
             // Indexing may have started before discovery broadened the event filter.
             let subscribers = self.service.0.subscribers.lock().unwrap();
             let subscriber = subscribers.entries.get(&self.id).unwrap();
-            subscriber.pending.lock().unwrap().changed = true;
+            let mut pending = subscriber.pending.lock().unwrap();
+            pending.changed = true;
+            pending.overflow = true;
+            drop(pending);
             let _ = subscriber.sender.try_send(());
         }
         Ok(())

@@ -6,6 +6,7 @@ mod files;
 mod fuzzy;
 mod languages;
 mod prototype;
+mod refresh_plan;
 mod theme;
 mod watch;
 use gpui_kit::*;

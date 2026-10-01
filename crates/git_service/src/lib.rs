@@ -457,6 +457,37 @@ impl GitService {
     /// Lists tracked and non-ignored untracked files below `dir`, relative to `dir`.
     ///
     /// Fails outside a Git worktree; callers fall back to a bounded directory walk.
+    /// Which of `paths` (relative to the worktree; directories end with `/`) Git ignores.
+    /// One process for the whole batch, so file watching never spawns Git per event.
+    pub fn check_ignore(
+        &self,
+        repo: &Repository,
+        paths: &[PathBuf],
+        cancel: &AtomicBool,
+    ) -> io::Result<Vec<PathBuf>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut input = Vec::new();
+        for path in paths {
+            validate_relative_path(path)?;
+            input.extend_from_slice(path.as_os_str().as_encoded_bytes());
+            input.push(0);
+        }
+        let output = self.run_with_input(
+            &repo.worktree,
+            &["check-ignore".into(), "--stdin".into(), "-z".into()],
+            cancel,
+            true,
+            Some(&input),
+        )?;
+        Ok(output
+            .split(|b| *b == 0)
+            .filter(|item| !item.is_empty())
+            .map(|item| PathBuf::from(OsString::from_vec(item.to_vec())))
+            .collect())
+    }
+
     pub fn list_files(&self, dir: &Path, cancel: &AtomicBool) -> io::Result<Vec<u8>> {
         self.run(
             dir,

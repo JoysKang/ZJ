@@ -41,7 +41,8 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `theme.rs`：唯一允许写字面尺寸和颜色的地方。
   - `assets.rs`：内嵌资源；`file_icons.rs`：文件类型到图标的映射。
   - `files.rs`：受限的只读文件访问与快速打开路径索引；`fuzzy.rs`：模糊匹配打分。
-  - `watch.rs`：共用原生文件监听、路径引用回收和有界事件信号；不持有界面实体。
+  - `watch.rs`：共用原生文件监听、路径引用回收和有界事件信号（带变更路径，超出上限退化为全量刷新）；不持有界面实体。
+  - `refresh_plan.rs`：把一批变更路径算成最小刷新（只刷受影响仓库的状态、只重列变化的目录、增量更新索引）；被 Git 忽略的路径（target/、node_modules）按目录缓存判定后丢弃，构建期间不刷新。
   - `prototype.rs`：工作台的状态和逻辑；`prototype/` 下是各区域的渲染（`chrome` 标题栏与状态栏、`sidebar` 侧栏与资源管理器、`scm`、`editor_area`、`quick_open`），以及 `workspace_refresh` 的事件刷新编排。
   - `diff_syntax.rs`：重新注册 diff 语法，让新增 / 删除有独立的颜色。
   - `languages.rs`：文件名 / 扩展名到语法的映射；新增语法要同时打开 Kit 的 feature 并在 `SAMPLES` 里加样例。
