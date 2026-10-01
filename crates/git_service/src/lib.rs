@@ -67,7 +67,7 @@ struct Shared {
     active: Mutex<usize>,
     available: Condvar,
     limit: usize,
-    repo_locks: Mutex<HashMap<RepoId, std::sync::Weak<Mutex<()>>>>,
+    repo_locks: Mutex<HashMap<RepoId, std::sync::Weak<RepoLock>>>,
 }
 
 #[derive(Clone)]
@@ -75,6 +75,25 @@ pub struct GitService {
     shared: Arc<Shared>,
     timeout: Duration,
 }
+
+/// Serializes operations on one repository. Waiters sleep on the condvar and wake as soon as
+/// the holder releases; the timeout only bounds how late a cancellation is noticed.
+#[derive(Default)]
+struct RepoLock {
+    busy: Mutex<bool>,
+    released: Condvar,
+}
+
+struct RepoGuard<'a>(&'a RepoLock);
+impl Drop for RepoGuard<'_> {
+    fn drop(&mut self) {
+        *self.0.busy.lock().unwrap() = false;
+        self.0.released.notify_one();
+    }
+}
+
+/// How often a waiter re-checks its cancellation flag while another operation holds the lock.
+const CANCEL_CHECK: Duration = Duration::from_millis(100);
 
 struct Permit<'a>(&'a Shared);
 impl Drop for Permit<'_> {
@@ -274,33 +293,29 @@ impl GitService {
         self.execute_locked(request, cancel)
     }
 
-    fn repo_lock(&self, id: &RepoId) -> Arc<Mutex<()>> {
-        {
-            let mut locks = self.shared.repo_locks.lock().unwrap();
-            locks.retain(|_, lock| lock.strong_count() > 0);
-            let lock = locks
-                .get(id)
-                .and_then(|l| l.upgrade())
-                .unwrap_or_else(|| Arc::new(Mutex::new(())));
-            locks.insert(id.clone(), Arc::downgrade(&lock));
-            lock
-        }
+    fn repo_lock(&self, id: &RepoId) -> Arc<RepoLock> {
+        let mut locks = self.shared.repo_locks.lock().unwrap();
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        let lock = locks.get(id).and_then(|l| l.upgrade()).unwrap_or_default();
+        locks.insert(id.clone(), Arc::downgrade(&lock));
+        lock
     }
 
-    fn lock_repo<'a>(
-        &self,
-        lock: &'a Mutex<()>,
-        cancel: &AtomicBool,
-    ) -> io::Result<std::sync::MutexGuard<'a, ()>> {
-        loop {
+    /// Waits for the repository without holding a concurrency permit (permits are taken per
+    /// Git process, after this lock).
+    fn lock_repo<'a>(&self, lock: &'a RepoLock, cancel: &AtomicBool) -> io::Result<RepoGuard<'a>> {
+        let mut busy = lock.busy.lock().unwrap();
+        while *busy {
             if cancel.load(Ordering::Relaxed) {
                 return Err(cancelled());
             }
-            if let Ok(guard) = lock.try_lock() {
-                return Ok(guard);
-            }
-            thread::sleep(Duration::from_millis(10));
+            busy = lock.released.wait_timeout(busy, CANCEL_CHECK).unwrap().0;
         }
+        if cancel.load(Ordering::Relaxed) {
+            return Err(cancelled());
+        }
+        *busy = true;
+        Ok(RepoGuard(lock))
     }
 
     fn execute_locked(&self, request: &Request, cancel: &AtomicBool) -> io::Result<Reply> {
@@ -586,5 +601,37 @@ impl Output {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[test]
+    fn waiter_wakes_on_release_and_honours_cancel() {
+        let service = GitService::new(1, Duration::from_secs(5)).unwrap();
+        let lock = Arc::new(RepoLock::default());
+        let guard = service.lock_repo(&lock, &AtomicBool::new(false)).unwrap();
+        let waiter = {
+            let (service, lock) = (service.clone(), lock.clone());
+            thread::spawn(move || {
+                let started = Instant::now();
+                let _guard = service.lock_repo(&lock, &AtomicBool::new(false)).unwrap();
+                started.elapsed()
+            })
+        };
+        thread::sleep(Duration::from_millis(150));
+        drop(guard);
+        let waited = waiter.join().unwrap();
+        // Woken by the release, not by a polling interval after it.
+        assert!(waited < Duration::from_millis(400), "{waited:?}");
+
+        let _held = service.lock_repo(&lock, &AtomicBool::new(false)).unwrap();
+        let cancel = AtomicBool::new(true);
+        assert_eq!(
+            service.lock_repo(&lock, &cancel).err().unwrap().kind(),
+            io::ErrorKind::Interrupted
+        );
     }
 }
