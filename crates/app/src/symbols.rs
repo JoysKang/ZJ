@@ -70,10 +70,42 @@ pub struct Symbol {
     pub column: u32,
 }
 
+/// Compiled lazily and separately: the workspace index needs only `tags`, and a language's
+/// `locals` is compiled the first time a file of it is navigated in.
 struct Queries {
+    name: String,
     language: Language,
-    tags: Option<Query>,
-    locals: Option<Query>,
+    tag_sources: Vec<&'static str>,
+    local_sources: Vec<&'static str>,
+    tags: OnceLock<Option<Query>>,
+    locals: OnceLock<Option<Query>>,
+}
+
+impl Queries {
+    fn compile(&self, parts: &[&str]) -> Option<Query> {
+        match Query::new(&self.language, &parts.concat()) {
+            Ok(query) => Some(query),
+            Err(error) => {
+                eprintln!(
+                    "event=nav_query_invalid language={} error={error}",
+                    self.name
+                );
+                None
+            }
+        }
+    }
+
+    fn tags(&self) -> Option<&Query> {
+        self.tags
+            .get_or_init(|| self.compile(&self.tag_sources))
+            .as_ref()
+    }
+
+    fn locals(&self) -> Option<&Query> {
+        self.locals
+            .get_or_init(|| self.compile(&self.local_sources))
+            .as_ref()
+    }
 }
 
 macro_rules! query {
@@ -156,18 +188,14 @@ fn queries(language: &str) -> Option<&'static Queries> {
     let built = (|| {
         let (tags, locals) = sources(language)?;
         let grammar = LanguageRegistry::singleton().language(language)?.language?;
-        let compile = |parts: Vec<&str>| match Query::new(&grammar, &parts.concat()) {
-            Ok(query) => Some(query),
-            Err(error) => {
-                eprintln!("event=nav_query_invalid language={language} error={error}");
-                None
-            }
-        };
         // Leaked once per language for the process lifetime: compiled queries are immutable.
         Some(&*Box::leak(Box::new(Queries {
-            tags: compile(tags),
-            locals: compile(locals),
+            name: language.to_string(),
             language: grammar,
+            tag_sources: tags,
+            local_sources: locals,
+            tags: OnceLock::new(),
+            locals: OnceLock::new(),
         })))
     })();
     cache.lock().unwrap().insert(language.to_string(), built);
@@ -205,7 +233,7 @@ pub struct FileSymbols {
 
 fn tags_in(queries: &Queries, tree: &Tree, text: &str) -> FileSymbols {
     let mut result = FileSymbols::default();
-    let Some(query) = &queries.tags else {
+    let Some(query) = queries.tags() else {
         return result;
     };
     let names = query.capture_names();
@@ -326,7 +354,7 @@ fn local_binding(
     name: &str,
     at: Range<usize>,
 ) -> Option<Symbol> {
-    let query = queries.locals.as_ref()?;
+    let query = queries.locals()?;
     let names = query.capture_names();
     let mut scopes: Vec<Range<usize>> = std::iter::once(0..text.len()).collect();
     let mut definitions: Vec<Node> = Vec::new();
@@ -480,8 +508,11 @@ pub(crate) mod tests {
     fn queries_compile_and_outline_lists_definitions() {
         for language in LANGUAGES {
             let queries = queries(language).unwrap_or_else(|| panic!("{language}: no grammar"));
-            assert!(queries.tags.is_some(), "{language}: tags query failed");
-            assert!(queries.locals.is_some(), "{language}: locals query failed");
+            assert!(queries.tags().is_some(), "{language}: tags query failed");
+            assert!(
+                queries.locals().is_some(),
+                "{language}: locals query failed"
+            );
         }
         let outline = outline(
             "rust",
