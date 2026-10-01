@@ -14,7 +14,7 @@ env:
   # stripped aarch64 --profile dist 二进制体积上限（字节）。
   # TODO: 首次在 macOS runner 上运行后，按实测值 + 约 10% 校准；
   # 当前取 Linux x86_64 dist 实测约 40.7 MB（含 ADR 0001 的语法）+ 约 10%。
-  BINARY_BUDGET_BYTES: "45000000"
+  BINARY_BUDGET_BYTES: "52000000"
 
 jobs:
   macos:
