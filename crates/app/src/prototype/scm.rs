@@ -214,14 +214,9 @@ impl Prototype {
             })
             .child(self.scm_controls(cx))
             .child(
-                uniform_list(
-                    "changes",
-                    self.rows.len(),
-                    cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                        range
-                            .map(|index| this.scm_row(index, cx))
-                            .collect::<Vec<_>>()
-                    }),
+                list(
+                    self.scm_list.clone(),
+                    cx.processor(|this, index: usize, _, cx| this.scm_row(index, cx)),
                 )
                 .flex_1()
                 .w_full(),
@@ -232,6 +227,17 @@ impl Prototype {
     fn scm_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
         let hover: SharedString = format!("scm-row-{index}").into();
+        // The list can ask for a row while `rows` is being rebuilt.
+        let Some(&row) = self.rows.get(index) else {
+            return div().into_any_element();
+        };
+        if let Row::Group(g) = row {
+            return div()
+                .w_full()
+                .px(theme::ROW_INSET)
+                .child(self.scm_repo_row(index, g, hover, cx))
+                .into_any_element();
+        }
         let base = h_flex()
             .id(("scm-row", index))
             .group(hover.clone())
@@ -244,8 +250,8 @@ impl Prototype {
             .text_size(theme::TEXT_BODY)
             .cursor_pointer()
             .hover(|row| row.bg(colors.hover));
-        let row = match self.rows[index] {
-            Row::Group(g) => self.scm_repo_row(g, base, hover, cx),
+        let row = match row {
+            Row::Group(_) => unreachable!("repository rows return above"),
             Row::Heading(g, side, count) => self.scm_heading_row(g, side, count, base, hover, cx),
             Row::File(g, i, side) => self.scm_file_row(index, g, i, side, base, hover, cx),
         };
@@ -258,146 +264,202 @@ impl Prototype {
 
     fn scm_repo_row(
         &self,
+        index: usize,
         g: usize,
-        base: Stateful<Div>,
         hover: SharedString,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = theme::colors(cx);
         let group = &self.groups[g];
-        // Nested repositories show their own folder name; the parent path goes in the tooltip.
-        let name = group
-            .repo
-            .worktree
+        let worktree = &group.repo.worktree;
+        // Line 1: the repository's own folder name, then (dim) where it sits in the workspace.
+        let name = worktree
             .file_name()
-            .unwrap_or(group.repo.worktree.as_os_str())
+            .unwrap_or(worktree.as_os_str())
             .to_string_lossy()
             .replace(SINGLE_LINE, "⏎");
-        let (branch, error, count) = match &group.status {
-            None => (None, None, None),
-            Some(Err(error)) => (None, Some(format!("错误：{error}")), None),
-            Some(Ok(status)) => (
-                Some(status.branch.as_deref().unwrap_or("未知分支").to_string()),
-                None,
-                Some(status.changes.len()),
-            ),
+        let parent = self
+            .root
+            .as_deref()
+            .and_then(|root| worktree.parent()?.strip_prefix(root).ok())
+            .map(|path| path.to_string_lossy().replace(SINGLE_LINE, "⏎"))
+            .filter(|path| !path.is_empty());
+        // The branch (with ↑N / ↓M when non-zero against its upstream), or the error.
+        let (detail, error, count) = match &group.status {
+            None => (None, false, None),
+            Some(Err(error)) => (Some(format!("错误：{error}")), true, None),
+            Some(Ok(status)) => {
+                let mut branch = status.branch.as_deref().unwrap_or("未知分支").to_string();
+                if status.upstream.is_some() {
+                    if status.ahead > 0 {
+                        branch.push_str(&format!("\u{a0}\u{a0}↑{}", status.ahead));
+                    }
+                    if status.behind > 0 {
+                        branch.push_str(&format!("\u{a0}\u{a0}↓{}", status.behind));
+                    }
+                }
+                (Some(branch), false, Some(status.changes.len()))
+            }
         };
-        let tooltip = format!(
-            "{}{}{}",
-            group.repo.worktree.display(),
-            branch
-                .as_deref()
-                .map(|b| format!("\n分支：{b}"))
-                .unwrap_or_default(),
-            error
-                .as_deref()
-                .map(|e| format!("\n{e}"))
-                .unwrap_or_default()
-        );
+        let label = format!("仓库 {name} · {}", detail.as_deref().unwrap_or_default());
+        let mut title = soft_breaks(&name);
+        let name_len = title.len();
+        if let Some(parent) = &parent {
+            title.push_str("  ");
+            title.push_str(&soft_breaks(parent));
+        }
+        let dim = HighlightStyle {
+            color: Some(colors.muted),
+            font_weight: Some(FontWeight::NORMAL),
+            ..Default::default()
+        };
+        let title_text = StyledText::new(title.clone())
+            .with_highlights((name_len < title.len()).then_some((name_len..title.len(), dim)));
+        let tooltip = worktree.display().to_string();
         let selected = self.groups.len() > 1 && self.selected_group() == Some(g);
         let id = group.repo.id.clone();
         let weak = cx.weak_entity();
-        // Hovering highlights the row; the overlay sits on the same color so it hides what
-        // it covers instead of pushing it aside.
+        // The actions cover the end of the first line without moving it; their background matches the
+        // hovered (or selected) row and fades in from the left.
         let overlay_bg = if selected {
             colors.selected
         } else {
             colors.hover
         };
-        base.pl(theme::ROW_INSET)
+        v_flex()
+            .id(("scm-row", index))
+            .group(hover.clone())
             .relative()
-            .role(Role::TreeItem)
-            .aria_label(format!(
-                "仓库 {name} · {}",
-                branch.as_deref().or(error.as_deref()).unwrap_or_default()
-            ))
+            .w_full()
+            .pl(theme::ROW_INSET)
+            .pr_1()
+            .rounded(theme::RADIUS)
+            .overflow_hidden()
+            .cursor_pointer()
+            .hover(|row| row.bg(colors.hover))
             .when(selected, |row| row.bg(colors.selected))
-            .child(chevron(group.expanded, colors.muted))
+            .role(Role::TreeItem)
+            .aria_label(label)
+            // One line (name, then the dim branch) when both fit; otherwise flex-wrap drops the
+            // branch onto its own line under the name, and either one wraps further at `/` `-`
+            // `_` if it is still too long. The list re-lays rows out when its width changes.
             .child(
-                div()
-                    .min_w_0()
-                    .flex_shrink(1.)
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(name),
+                h_flex()
+                    .w_full()
+                    .items_start()
+                    .gap_1()
+                    .child(
+                        div()
+                            .h(theme::ROW_HEIGHT)
+                            .flex()
+                            .items_center()
+                            .flex_shrink_0()
+                            .child(chevron(group.expanded, colors.muted)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_x_1p5()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    // 18 px lines inside a 22 px first line.
+                                    .py(px(2.))
+                                    .text_size(theme::TEXT_BODY)
+                                    .line_height(theme::SCM_DETAIL_LINE)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(title_text),
+                            )
+                            .when_some(detail, |line, detail| {
+                                line.child(
+                                    h_flex()
+                                        .min_w_0()
+                                        .items_start()
+                                        .gap_1()
+                                        .text_size(theme::TEXT_SECTION)
+                                        .line_height(theme::SCM_DETAIL_LINE)
+                                        .text_color(if error {
+                                            colors.deleted
+                                        } else {
+                                            colors.muted
+                                        })
+                                        .when(!error, |line| {
+                                            line.child(
+                                                div()
+                                                    .h(theme::SCM_DETAIL_LINE)
+                                                    .flex()
+                                                    .items_center()
+                                                    .flex_shrink_0()
+                                                    .child(
+                                                        Icon::new(IconName::GitBranch)
+                                                            .size(theme::SMALL_ICON_SIZE)
+                                                            .text_color(colors.muted),
+                                                    ),
+                                            )
+                                        })
+                                        .child(div().min_w_0().child(soft_breaks(&detail))),
+                                )
+                            }),
+                    )
+                    .when_some(count.filter(|count| *count > 0), |row, count| {
+                        row.child(
+                            div()
+                                .h(theme::ROW_HEIGHT)
+                                .flex()
+                                .items_center()
+                                .flex_shrink_0()
+                                .child(count_badge(count, colors)),
+                        )
+                    }),
             )
-            .when_some(branch, |row, branch| {
-                row.child(
-                    Icon::new(IconName::GitBranch)
-                        .flex_shrink_0()
-                        .size(theme::SMALL_ICON_SIZE)
-                        .text_color(colors.muted),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .max_w(theme::BRANCH_MAX_WIDTH)
-                        // The repository name gives way first; the branch is already shortened.
-                        .flex_shrink_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_size(theme::TEXT_CAPTION)
-                        .text_color(colors.muted)
-                        .child(middle_ellipsis(&branch, theme::BRANCH_MAX_CHARS)),
-                )
-            })
-            .when_some(error, |row, error| {
-                row.child(
-                    div()
-                        .min_w_0()
-                        .flex_shrink(1.)
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_size(theme::TEXT_CAPTION)
-                        .text_color(colors.deleted)
-                        .child(error),
-                )
-            })
-            .child(div().flex_1().min_w_0())
-            .when_some(count.filter(|count| *count > 0), |row, count| {
-                row.child(count_badge(count, colors))
-            })
             .child(
-                hover_actions(hover)
+                h_flex()
                     .absolute()
                     .top_0()
-                    .bottom_0()
                     .right_0()
-                    .pl_1()
-                    .pr_1()
-                    .items_center()
-                    .rounded(theme::RADIUS)
-                    .bg(overlay_bg)
+                    .h(theme::ROW_HEIGHT)
+                    .opacity(0.)
+                    .group_hover(hover.clone(), |actions| actions.opacity(1.))
+                    .child(div().w(theme::ACTION_FADE).h_full().bg(linear_gradient(
+                        90.,
+                        linear_color_stop(overlay_bg.opacity(0.), 0.),
+                        linear_color_stop(overlay_bg, 1.),
+                    )))
                     .child(
-                        action(("scm-repo-commit", g), IconName::Check, "提交")
-                            .disabled(group.write_pending)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.scm_commit(id.clone(), false, window, cx)
-                            })),
-                    )
-                    .child(
-                        action(("scm-repo-refresh", g), IconName::RefreshCw, "刷新").on_click(
-                            cx.listener(|this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.refresh(window, cx)
-                            }),
-                        ),
-                    )
-                    .child(
-                        action(("scm-repo-more", g), IconName::Ellipsis, "更多操作").dropdown_menu(
-                            move |menu, _, cx| {
-                                let view = weak.clone();
-                                match weak.upgrade() {
-                                    Some(this) => this.read(cx).scm_menu(g, menu, view),
-                                    None => menu,
-                                }
-                            },
-                        ),
+                        hover_actions(hover)
+                            .h_full()
+                            .pr_1()
+                            .items_center()
+                            .bg(overlay_bg)
+                            .child(
+                                action(("scm-repo-commit", g), IconName::Check, "提交")
+                                    .disabled(group.write_pending)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.scm_commit(id.clone(), false, window, cx)
+                                    })),
+                            )
+                            .child(
+                                action(("scm-repo-refresh", g), IconName::RefreshCw, "刷新")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.refresh(window, cx)
+                                    })),
+                            )
+                            .child(
+                                action(("scm-repo-more", g), IconName::Ellipsis, "更多操作")
+                                    .dropdown_menu(move |menu, _, cx| {
+                                        let view = weak.clone();
+                                        match weak.upgrade() {
+                                            Some(this) => this.read(cx).scm_menu(g, menu, view),
+                                            None => menu,
+                                        }
+                                    }),
+                            ),
                     ),
             )
             .tooltip(move |window, cx| {
@@ -672,50 +734,30 @@ fn git_menu_item(label: &str, request: WriteRequest, view: WeakEntity<Prototype>
     })
 }
 
-/// Shortens a long branch name in the middle, keeping its first and last segments
-/// (`feature/…/long-name`), so the repository name next to it stays readable.
-fn middle_ellipsis(text: &str, max: usize) -> String {
-    let count = text.chars().count();
-    if count <= max {
-        return text.to_string();
-    }
-    let parts: Vec<&str> = text.split('/').collect();
-    if parts.len() >= 3 {
-        let candidate = format!("{}/…/{}", parts[0], parts[parts.len() - 1]);
-        if candidate.chars().count() <= max {
-            return candidate;
+/// Lets a long name wrap after `/`, `-` and `_` (gpui keeps `a-b` and `a_b` together and
+/// otherwise breaks before `/`), so branch and repository names wrap instead of being cut.
+fn soft_breaks(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    for c in text.chars() {
+        out.push(c);
+        if matches!(c, '/' | '-' | '_') {
+            out.push('\u{200B}');
         }
     }
-    let chars: Vec<char> = text.chars().collect();
-    let keep = max.saturating_sub(1);
-    let head = keep / 2;
-    let tail = keep - head;
-    format!(
-        "{}…{}",
-        chars[..head].iter().collect::<String>(),
-        chars[count - tail..].iter().collect::<String>()
-    )
+    out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::middle_ellipsis;
+    use super::soft_breaks;
 
     #[test]
-    fn long_branch_names_keep_both_ends() {
-        assert_eq!(middle_ellipsis("main", 24), "main");
+    fn long_names_wrap_after_separators() {
+        assert_eq!(soft_breaks("main"), "main");
         assert_eq!(
-            middle_ellipsis("feature/payments/2026-q4/very-long-name", 24),
-            "feature/…/very-long-name"
+            soft_breaks("feature/pay-q4_x"),
+            "feature/\u{200B}pay-\u{200B}q4_\u{200B}x"
         );
-        let short = middle_ellipsis("release-candidate-for-the-autumn-launch", 15);
-        assert_eq!(short.chars().count(), 15);
-        assert!(short.starts_with("release") && short.ends_with("launch"));
-        assert_eq!(
-            middle_ellipsis("功能/很长很长很长很长的分支名称", 9)
-                .chars()
-                .count(),
-            9
-        );
+        assert_eq!(soft_breaks("功能/分支"), "功能/\u{200B}分支");
     }
 }

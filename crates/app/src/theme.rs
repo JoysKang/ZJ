@@ -80,9 +80,10 @@ pub const DIFF_HATCH: (f32, f32) = (1., 4.);
 pub const DIFF_RULER: Pixels = px(14.);
 pub const DIFF_RULER_MIN: Pixels = px(3.);
 pub const SCM_NOTICE_MAX: Pixels = px(100.);
-/// Source Control repository rows: the branch never takes more than this.
-pub const BRANCH_MAX_WIDTH: Pixels = px(120.);
-pub const BRANCH_MAX_CHARS: usize = 14;
+/// Source Control repository rows: the branch line under the name (VS Code's 22 + ~18).
+pub const SCM_DETAIL_LINE: Pixels = px(18.);
+/// Width of the fade in front of a row's hover actions.
+pub const ACTION_FADE: Pixels = px(16.);
 pub const COMMIT_HEIGHT: Pixels = px(60.);
 
 // Window geometry.

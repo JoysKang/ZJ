@@ -184,6 +184,9 @@ pub struct Prototype {
     explorer_collapsed: bool,
     decorations: HashMap<PathBuf, Decoration>,
     tree_scroll: UniformListScrollHandle,
+    /// Source Control rows vary in height (repository rows wrap long branch names), so they
+    /// use a measured list instead of `uniform_list`.
+    scm_list: ListState,
     reveal_pending: bool,
     expanded: HashSet<PathBuf>,
     restore_expanded: HashSet<PathBuf>,
@@ -366,6 +369,7 @@ impl Prototype {
             explorer_collapsed: false,
             decorations: HashMap::new(),
             tree_scroll: UniformListScrollHandle::new(),
+            scm_list: ListState::new(0, ListAlignment::Top, px(200.)),
             reveal_pending: false,
             expanded: HashSet::new(),
             restore_expanded: HashSet::new(),
@@ -1213,6 +1217,15 @@ impl Prototype {
 
     fn rebuild_rows(&mut self) {
         self.rebuild_decorations();
+        self.fill_rows();
+        // Keep the scroll position: resize at the tail, then remeasure every row in place.
+        let (old, new) = (self.scm_list.item_count(), self.rows.len());
+        let kept = old.min(new);
+        self.scm_list.splice(kept..old, new - kept);
+        self.scm_list.remeasure_items(0..new);
+    }
+
+    fn fill_rows(&mut self) {
         self.rows.clear();
         for (g, group) in self.groups.iter().enumerate() {
             self.rows.push(Row::Group(g));
