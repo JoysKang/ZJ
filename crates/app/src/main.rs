@@ -5,6 +5,7 @@ mod file_icons;
 mod files;
 mod fuzzy;
 mod languages;
+mod partial_patch;
 mod prototype;
 mod refresh_plan;
 mod symbol_index;
@@ -109,6 +110,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 ),
                 KeyBinding::new("f12", GoToDefinition, Some("Input")),
                 KeyBinding::new("shift-f12", nav::FindReferences, Some("WorkspaceEditor")),
+                KeyBinding::new("secondary-c", prototype::CopyDiff, Some("DiffEditor")),
+                KeyBinding::new("secondary-a", prototype::SelectAllDiff, Some("DiffEditor")),
                 KeyBinding::new("ctrl--", nav::NavigateBack, Some("WorkspaceEditor")),
                 KeyBinding::new(
                     "ctrl-shift--",

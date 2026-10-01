@@ -76,6 +76,9 @@ pub const DIFF_ROW_HEIGHT: Pixels = px(20.);
 /// Filler stripes: (line width, gap) in pixels; their sum divides `DIFF_ROW_HEIGHT` so the
 /// pattern continues across rows.
 pub const DIFF_HATCH: (f32, f32) = (1., 4.);
+/// Overview ruler at the right edge of the diff editor, and its smallest marker.
+pub const DIFF_RULER: Pixels = px(14.);
+pub const DIFF_RULER_MIN: Pixels = px(3.);
 pub const SCM_NOTICE_MAX: Pixels = px(100.);
 /// Source Control repository rows: the branch never takes more than this.
 pub const BRANCH_MAX_WIDTH: Pixels = px(120.);
@@ -351,6 +354,8 @@ pub struct Colors {
     pub code: Hsla,
     pub command_bg: Hsla,
     pub command_border: Hsla,
+    /// Editor text selection (also selected diff lines).
+    pub selection: Hsla,
 }
 
 fn hsla(hex: u32) -> Hsla {
@@ -389,6 +394,7 @@ impl Palette {
             code: hsla(self.code),
             command_bg: hsla(self.foreground).opacity(0.05),
             command_border: hsla(self.foreground).opacity(0.2),
+            selection: hsla(self.selection),
         }
     }
 }

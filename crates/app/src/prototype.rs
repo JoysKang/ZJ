@@ -27,6 +27,8 @@ use workspace_editor_git::{
 };
 
 mod chrome;
+mod diff_ops;
+pub use diff_ops::{CopyDiff, SelectAllDiff};
 mod diff_view;
 mod editor_area;
 pub mod navigation;
@@ -218,6 +220,11 @@ pub struct Prototype {
     pending_place: Option<(PathBuf, navigation::Placement)>,
     /// The parsed diff editor document; `preview` is only Git's raw text when parsing fails.
     diff_doc: Option<Arc<crate::diff_doc::DiffDoc>>,
+    /// Git's own patch lines, for copying exact text and staging selected lines.
+    diff_raw: Option<Arc<crate::partial_patch::RawPatch>>,
+    diff_selection: Option<diff_ops::DiffSelection>,
+    diff_dragging: bool,
+    diff_focus: FocusHandle,
     /// Patch text and dark mode the document was built from; equal reloads keep the view.
     diff_source: Option<(Arc<str>, bool)>,
     diff_change: Option<usize>,
@@ -392,6 +399,10 @@ impl Prototype {
             nav_task: None,
             pending_place: None,
             diff_doc: None,
+            diff_raw: None,
+            diff_selection: None,
+            diff_dragging: false,
+            diff_focus: cx.focus_handle(),
             diff_source: None,
             diff_change: None,
             diff_inline: false,
@@ -675,6 +686,8 @@ impl Prototype {
     fn focus_active_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(editor) = self.active_editor() {
             editor.update(cx, |editor, cx| editor.focus(window, cx));
+        } else if self.active == Pane::Diff {
+            self.diff_focus.focus(window, cx);
         } else {
             self.focus_handle.focus(window, cx);
         }
@@ -1289,6 +1302,8 @@ impl Prototype {
         self.preview_task = None;
         self.preview = None;
         self.diff_doc = None;
+        self.diff_raw = None;
+        self.diff_selection = None;
         self.diff_source = None;
         self.diff_change = None;
         self.diff_scroll = UniformListScrollHandle::new();
@@ -1400,7 +1415,8 @@ impl Prototype {
                 .into();
             let doc = crate::diff_doc::DiffDoc::parse(&text, language, &highlight, change_colors)
                 .map(Arc::new);
-            Ok::<_, std::io::Error>((text, doc))
+            let raw = crate::partial_patch::parse(&text).map(Arc::new);
+            Ok::<_, std::io::Error>((text, doc, raw))
         });
         self.preview_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = job.await;
@@ -1417,13 +1433,13 @@ impl Prototype {
                                 .contains_focused(window, cx)
                         }));
                 match result {
-                    Ok((text, _)) if text.is_empty() => {
+                    Ok((text, ..)) if text.is_empty() => {
                         this.preview = None;
                         this.diff_doc = None;
                         this.diff_source = None;
                         this.preview_title = "当前没有差异".into();
                     }
-                    Ok((text, doc)) => {
+                    Ok((text, doc, raw)) => {
                         // Equal patches keep the scroll position through a refresh.
                         if this
                             .diff_source
@@ -1436,6 +1452,8 @@ impl Prototype {
                         }
                         let fresh = this.diff_source.is_none();
                         this.diff_source = Some((text.clone(), dark));
+                        this.diff_raw = raw;
+                        this.diff_selection = None;
                         this.preview_title = title;
                         match doc {
                             Some(doc) => {

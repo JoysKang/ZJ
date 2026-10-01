@@ -7,11 +7,26 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub enum WriteOperation {
-    Stage { paths: Vec<PathBuf> },
-    Unstage { paths: Vec<PathBuf> },
-    Discard { paths: Vec<PathBuf> },
-    Commit { message: String },
+    Stage {
+        paths: Vec<PathBuf>,
+    },
+    Unstage {
+        paths: Vec<PathBuf>,
+    },
+    Discard {
+        paths: Vec<PathBuf>,
+    },
+    Commit {
+        message: String,
+    },
     Push,
+    /// Applies a generated partial patch for one changed file: to the index (`cached`, stage /
+    /// unstage selected lines) or to the worktree (revert selected lines).
+    ApplyPatch {
+        path: PathBuf,
+        patch: String,
+        cached: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -157,6 +172,32 @@ impl GitService {
                 }
                 args.extend(["commit".into(), "--file=-".into()]);
                 input = Some(message.as_bytes());
+            }
+            WriteOperation::ApplyPatch {
+                path,
+                patch,
+                cached,
+            } => {
+                validate_relative_path(path)?;
+                if patch.is_empty() || patch.len() > OUTPUT_LIMIT || patch.contains('\0') {
+                    return Err(error("补丁为空或过大"));
+                }
+                let change = current
+                    .changes
+                    .iter()
+                    .find(|c| &c.path == path)
+                    .ok_or_else(|| error("文件已不在当前更改列表"))?;
+                if change.kind == ChangeKind::Conflict {
+                    return Err(error("冲突文件不能按行暂存"));
+                }
+                // Context lines carry the whole file, so a stale patch fails instead of
+                // applying to text that changed since the diff was shown.
+                args.extend(["apply".into(), "--whitespace=nowarn".into()]);
+                if *cached {
+                    args.push("--cached".into());
+                }
+                args.push("-".into());
+                input = Some(patch.as_bytes());
             }
             WriteOperation::Push => {
                 if current.upstream.is_none() {

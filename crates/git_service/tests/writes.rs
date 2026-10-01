@@ -317,3 +317,31 @@ fn check_ignore_batches_directories_and_files() {
             .is_empty()
     );
 }
+
+#[test]
+fn apply_patch_stages_and_rejects_stale_patches() {
+    let fixture = fixture();
+    let root = fixture.0.join("a");
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-qm", "init"]);
+    fs::write(root.join("src/main.rs"), "changed\n").unwrap();
+    let service = GitService::new(2, Duration::from_secs(10)).unwrap();
+    let patch = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,1 +1,1 @@\n-original\n+changed\n";
+    let apply = |patch: &str| {
+        write(
+            &service,
+            &root,
+            WriteOperation::ApplyPatch {
+                path: "src/main.rs".into(),
+                patch: patch.into(),
+                cached: true,
+            },
+        )
+    };
+    apply(patch).unwrap();
+    assert_eq!(git(&root, &["show", ":src/main.rs"]), "changed\n");
+    // The index no longer has "original": the same patch must fail, not half-apply.
+    fs::write(root.join("src/main.rs"), "again\n").unwrap();
+    assert!(apply(patch).is_err());
+    assert_eq!(git(&root, &["show", ":src/main.rs"]), "changed\n");
+}

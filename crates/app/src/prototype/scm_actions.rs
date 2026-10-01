@@ -146,6 +146,14 @@ impl Prototype {
                     },
                 ))
             }
+            WriteOperation::ApplyPatch { cached: false, .. } => Some((
+                "还原所选更改？".to_string(),
+                format!(
+                    "仓库：{}\n工作区文件里的所选更改将恢复为暂存区版本，无法撤销；编辑缓冲区不会写回磁盘。",
+                    request.repo.worktree.display()
+                ),
+                "还原",
+            )),
             WriteOperation::Push => Some((
                 "推送当前分支？".to_string(),
                 format!(
