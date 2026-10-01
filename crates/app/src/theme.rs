@@ -77,6 +77,9 @@ pub const DIFF_ROW_HEIGHT: Pixels = px(20.);
 /// pattern continues across rows.
 pub const DIFF_HATCH: (f32, f32) = (1., 4.);
 pub const SCM_NOTICE_MAX: Pixels = px(100.);
+/// Source Control repository rows: the branch never takes more than this.
+pub const BRANCH_MAX_WIDTH: Pixels = px(120.);
+pub const BRANCH_MAX_CHARS: usize = 14;
 pub const COMMIT_HEIGHT: Pixels = px(60.);
 
 // Window geometry.

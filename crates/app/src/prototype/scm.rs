@@ -11,7 +11,7 @@ use gpui_kit::{
         Disableable, Icon, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
-        input::Textarea,
+        input::{Enter, Textarea},
         menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
         v_flex,
     },
@@ -143,10 +143,23 @@ impl Prototype {
             .pb_2()
             .gap_2()
             .child(
-                Textarea::new(&group.commit_input)
-                    .h(theme::COMMIT_HEIGHT)
-                    .disabled(group.write_pending)
-                    .aria_label(format!("{target} 的提交消息")),
+                // ⌘Enter commits; capture it before the textarea inserts a line break.
+                div()
+                    .capture_action(cx.listener({
+                        let id = id.clone();
+                        move |this, action: &Enter, window, cx| {
+                            if action.secondary {
+                                cx.stop_propagation();
+                                this.scm_commit(id.clone(), false, window, cx);
+                            }
+                        }
+                    }))
+                    .child(
+                        Textarea::new(&group.commit_input)
+                            .h(theme::COMMIT_HEIGHT)
+                            .disabled(group.write_pending)
+                            .aria_label(format!("{target} 的提交消息")),
+                    ),
             )
             .child(
                 Button::new("scm-commit")
@@ -252,58 +265,113 @@ impl Prototype {
     ) -> AnyElement {
         let colors = theme::colors(cx);
         let group = &self.groups[g];
-        let path = self
-            .root
-            .as_ref()
-            .and_then(|root| group.repo.worktree.strip_prefix(root).ok())
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| {
-                std::path::Path::new(group.repo.worktree.file_name().unwrap_or_default())
-            });
-        let name = path.to_string_lossy().replace(SINGLE_LINE, "⏎");
-        let (detail, detail_color, count) = match &group.status {
-            None => (String::new(), colors.muted, None),
-            Some(Err(error)) => (format!("错误：{error}"), colors.deleted, None),
+        // Nested repositories show their own folder name; the parent path goes in the tooltip.
+        let name = group
+            .repo
+            .worktree
+            .file_name()
+            .unwrap_or(group.repo.worktree.as_os_str())
+            .to_string_lossy()
+            .replace(SINGLE_LINE, "⏎");
+        let (branch, error, count) = match &group.status {
+            None => (None, None, None),
+            Some(Err(error)) => (None, Some(format!("错误：{error}")), None),
             Some(Ok(status)) => (
-                status.branch.as_deref().unwrap_or("未知分支").to_string(),
-                colors.muted,
+                Some(status.branch.as_deref().unwrap_or("未知分支").to_string()),
+                None,
                 Some(status.changes.len()),
             ),
         };
+        let tooltip = format!(
+            "{}{}{}",
+            group.repo.worktree.display(),
+            branch
+                .as_deref()
+                .map(|b| format!("\n分支：{b}"))
+                .unwrap_or_default(),
+            error
+                .as_deref()
+                .map(|e| format!("\n{e}"))
+                .unwrap_or_default()
+        );
         let selected = self.groups.len() > 1 && self.selected_group() == Some(g);
         let id = group.repo.id.clone();
         let weak = cx.weak_entity();
+        // Hovering highlights the row; the overlay sits on the same color so it hides what
+        // it covers instead of pushing it aside.
+        let overlay_bg = if selected {
+            colors.selected
+        } else {
+            colors.hover
+        };
         base.pl(theme::ROW_INSET)
+            .relative()
             .role(Role::TreeItem)
-            .aria_label(format!("仓库 {name} · {detail}"))
+            .aria_label(format!(
+                "仓库 {name} · {}",
+                branch.as_deref().or(error.as_deref()).unwrap_or_default()
+            ))
             .when(selected, |row| row.bg(colors.selected))
             .child(chevron(group.expanded, colors.muted))
             .child(
                 div()
-                    .flex_shrink_0()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(name),
-            )
-            .when(!detail.is_empty(), |row| {
-                row.child(
-                    Icon::new(IconName::GitBranch)
-                        .size(theme::SMALL_ICON_SIZE)
-                        .text_color(colors.muted),
-                )
-            })
-            .child(
-                div()
-                    .flex_1()
                     .min_w_0()
+                    .flex_shrink(1.)
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .text_size(theme::TEXT_CAPTION)
-                    .text_color(detail_color)
-                    .child(detail),
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(name),
             )
+            .when_some(branch, |row, branch| {
+                row.child(
+                    Icon::new(IconName::GitBranch)
+                        .flex_shrink_0()
+                        .size(theme::SMALL_ICON_SIZE)
+                        .text_color(colors.muted),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .max_w(theme::BRANCH_MAX_WIDTH)
+                        // The repository name gives way first; the branch is already shortened.
+                        .flex_shrink_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(theme::TEXT_CAPTION)
+                        .text_color(colors.muted)
+                        .child(middle_ellipsis(&branch, theme::BRANCH_MAX_CHARS)),
+                )
+            })
+            .when_some(error, |row, error| {
+                row.child(
+                    div()
+                        .min_w_0()
+                        .flex_shrink(1.)
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(theme::TEXT_CAPTION)
+                        .text_color(colors.deleted)
+                        .child(error),
+                )
+            })
+            .child(div().flex_1().min_w_0())
+            .when_some(count.filter(|count| *count > 0), |row, count| {
+                row.child(count_badge(count, colors))
+            })
             .child(
                 hover_actions(hover)
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right_0()
+                    .pl_1()
+                    .pr_1()
+                    .items_center()
+                    .rounded(theme::RADIUS)
+                    .bg(overlay_bg)
                     .child(
                         action(("scm-repo-commit", g), IconName::Check, "提交")
                             .disabled(group.write_pending)
@@ -332,8 +400,8 @@ impl Prototype {
                         ),
                     ),
             )
-            .when_some(count.filter(|count| *count > 0), |row, count| {
-                row.child(count_badge(count, colors))
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.scm_repo.as_ref() == Some(&this.groups[g].repo.id) {
@@ -360,12 +428,27 @@ impl Prototype {
         let discard = matches!(side, DiffSide::Worktree)
             .then(|| self.scm_discard(g, None))
             .flatten();
-        base.pl(theme::TREE_BASE + theme::TREE_STEP)
+        let collapsed = match side {
+            DiffSide::Staged => self.groups[g].staged_collapsed,
+            DiffSide::Worktree => self.groups[g].changes_collapsed,
+        };
+        base.pl(theme::TREE_BASE)
             .text_color(colors.foreground)
-            .child(div().flex_1().min_w_0().child(match side {
-                DiffSide::Staged => "暂存的更改",
-                DiffSide::Worktree => "更改",
-            }))
+            .role(Role::TreeItem)
+            .aria_expanded(!collapsed)
+            .child(chevron(!collapsed, colors.muted))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(match side {
+                        DiffSide::Staged => "暂存的更改",
+                        DiffSide::Worktree => "更改",
+                    }),
+            )
             .child(
                 hover_actions(hover)
                     .when_some(discard, |actions, request| {
@@ -393,6 +476,15 @@ impl Prototype {
                     }),
             )
             .child(count_badge(count, colors))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let group = &mut this.groups[g];
+                match side {
+                    DiffSide::Staged => group.staged_collapsed = !group.staged_collapsed,
+                    DiffSide::Worktree => group.changes_collapsed = !group.changes_collapsed,
+                }
+                this.rebuild_rows();
+                cx.notify();
+            }))
             .into_any_element()
     }
 
@@ -578,4 +670,52 @@ fn git_menu_item(label: &str, request: WriteRequest, view: WeakEntity<Prototype>
             this.request_git_write(request.clone(), window, cx)
         });
     })
+}
+
+/// Shortens a long branch name in the middle, keeping its first and last segments
+/// (`feature/…/long-name`), so the repository name next to it stays readable.
+fn middle_ellipsis(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    let parts: Vec<&str> = text.split('/').collect();
+    if parts.len() >= 3 {
+        let candidate = format!("{}/…/{}", parts[0], parts[parts.len() - 1]);
+        if candidate.chars().count() <= max {
+            return candidate;
+        }
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let keep = max.saturating_sub(1);
+    let head = keep / 2;
+    let tail = keep - head;
+    format!(
+        "{}…{}",
+        chars[..head].iter().collect::<String>(),
+        chars[count - tail..].iter().collect::<String>()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::middle_ellipsis;
+
+    #[test]
+    fn long_branch_names_keep_both_ends() {
+        assert_eq!(middle_ellipsis("main", 24), "main");
+        assert_eq!(
+            middle_ellipsis("feature/payments/2026-q4/very-long-name", 24),
+            "feature/…/very-long-name"
+        );
+        let short = middle_ellipsis("release-candidate-for-the-autumn-launch", 15);
+        assert_eq!(short.chars().count(), 15);
+        assert!(short.starts_with("release") && short.ends_with("launch"));
+        assert_eq!(
+            middle_ellipsis("功能/很长很长很长很长的分支名称", 9)
+                .chars()
+                .count(),
+            9
+        );
+    }
 }

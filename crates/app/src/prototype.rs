@@ -99,6 +99,9 @@ struct Group {
     repo: Repository,
     status: Option<Result<Arc<Status>, String>>,
     expanded: bool,
+    /// Collapsed resource groups ("暂存的更改" / "更改"), as in VS Code.
+    staged_collapsed: bool,
+    changes_collapsed: bool,
     commit_input: Entity<TextareaState>,
     _commit_subscription: Subscription,
     write_task: Option<Task<()>>,
@@ -1089,20 +1092,10 @@ impl Prototype {
                                                 .rows(2)
                                                 .placeholder("消息（⌘Enter 提交）")
                                         });
-                                        let id = repo.id.clone();
                                         let subscription = cx.subscribe_in(
                                             &commit_input,
                                             window,
-                                            move |this, _, event: &InputEvent, window, cx| {
-                                                if let InputEvent::PressEnter {
-                                                    secondary: true,
-                                                    ..
-                                                } = event
-                                                {
-                                                    this.scm_commit(id.clone(), false, window, cx);
-                                                }
-                                                cx.notify();
-                                            },
+                                            move |_, _, _: &InputEvent, _, cx| cx.notify(),
                                         );
                                         if this.scm_repo.is_none() {
                                             this.scm_repo = Some(repo.id.clone());
@@ -1111,6 +1104,8 @@ impl Prototype {
                                             repo,
                                             status: None,
                                             expanded: true,
+                                            staged_collapsed: false,
+                                            changes_collapsed: false,
                                             commit_input,
                                             _commit_subscription: subscription,
                                             write_task: None,
@@ -1194,8 +1189,14 @@ impl Prototype {
                     if !changes.is_empty() {
                         self.rows.push(Row::Heading(g, side, changes.len()));
                     }
-                    self.rows
-                        .extend(changes.into_iter().map(|i| Row::File(g, i, side)));
+                    let collapsed = match side {
+                        DiffSide::Staged => group.staged_collapsed,
+                        DiffSide::Worktree => group.changes_collapsed,
+                    };
+                    if !collapsed {
+                        self.rows
+                            .extend(changes.into_iter().map(|i| Row::File(g, i, side)));
+                    }
                 }
             }
         }
