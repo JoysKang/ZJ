@@ -10,6 +10,7 @@ use gpui_kit::{
         button::{Button, ButtonVariants},
         h_flex,
         input::Input,
+        menu::{DropdownMenu, PopupMenuItem},
         v_flex,
     },
     prelude::FluentBuilder,
@@ -268,7 +269,8 @@ impl Prototype {
                                 cx.stop_propagation();
                                 this.collapse_tree(window, cx)
                             })),
-                    ),
+                    )
+                    .child(self.explorer_more()),
             )
             .on_click(cx.listener(|this, _, _, cx| {
                 this.explorer_collapsed = !this.explorer_collapsed;
@@ -301,6 +303,25 @@ impl Prototype {
                     .track_scroll(&self.tree_scroll)
                     .flex_1()
                     .w_full(),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The Explorer header's "···" menu.
+    fn explorer_more(&self) -> AnyElement {
+        let show_hidden = self.show_hidden;
+        let focus = self.focus_handle.clone();
+        Button::new("explorer-more")
+            .xsmall()
+            .ghost()
+            .icon(IconName::Ellipsis)
+            .tooltip("更多操作")
+            .dropdown_menu(move |menu, _, _| {
+                menu.action_context(focus.clone()).item(
+                    PopupMenuItem::new("显示隐藏文件")
+                        .checked(show_hidden)
+                        .action(Box::new(super::ToggleHiddenFiles)),
                 )
             })
             .into_any_element()

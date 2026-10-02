@@ -49,7 +49,8 @@ gpui_kit::actions!(
         ToggleSidebar,
         ZoomIn,
         ZoomOut,
-        ZoomReset
+        ZoomReset,
+        ToggleHiddenFiles
     ]
 );
 
@@ -187,6 +188,8 @@ pub struct Prototype {
     explorer_collapsed: bool,
     decorations: HashMap<PathBuf, Decoration>,
     tree_scroll: UniformListScrollHandle,
+    /// The Explorer and quick open show dot entries hidden by default (settings, ⌘⇧.).
+    show_hidden: bool,
     /// Source Control rows vary in height (repository rows wrap long branch names), so they
     /// use a measured list instead of `uniform_list`.
     scm_list: ListState,
@@ -295,6 +298,17 @@ impl Prototype {
                 this.load_diff(window, cx);
             }
         });
+        // Another window (or this one) changed a setting that changes what is listed.
+        let settings =
+            cx.observe_global_in::<crate::settings::Settings>(window, |this, window, cx| {
+                let show_hidden = cx.global::<crate::settings::Settings>().show_hidden;
+                if show_hidden != this.show_hidden {
+                    this.show_hidden = show_hidden;
+                    this.reload_tree(window, cx);
+                    this.search_files(window, cx);
+                    this.update_quick_open(window, cx);
+                }
+            });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() && this.root.is_some() {
                 this.refresh_on_activation(window, cx);
@@ -372,6 +386,7 @@ impl Prototype {
             explorer_collapsed: false,
             decorations: HashMap::new(),
             tree_scroll: UniformListScrollHandle::new(),
+            show_hidden: cx.global::<crate::settings::Settings>().show_hidden,
             scm_list: ListState::new(0, ListAlignment::Top, px(200.)),
             reveal_pending: false,
             expanded: HashSet::new(),
@@ -436,7 +451,7 @@ impl Prototype {
             workspace_refresh_pending: false,
             pending_plan: None,
             ignore_cache: Default::default(),
-            _subscriptions: vec![search_subscription, appearance, activation],
+            _subscriptions: vec![search_subscription, appearance, activation, settings],
         };
         this.start_watching(window, cx);
         this.refresh_tree(window, cx);
@@ -447,6 +462,14 @@ impl Prototype {
     }
 
     fn refresh_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reload_tree(window, cx);
+        if let Some(root) = self.root.clone() {
+            self.build_index(root, window, cx);
+        }
+    }
+
+    /// Lists the root and every expanded folder again, keeping what is expanded.
+    fn reload_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reveal_pending = matches!(self.active, Pane::Document(_));
         self.tree_generation += 1;
         self.tree_tasks.clear();
@@ -461,8 +484,7 @@ impl Prototype {
                 },
                 depth: 0,
             });
-            self.load_directory(root.clone(), window, cx);
-            self.build_index(root, window, cx);
+            self.load_directory(root, window, cx);
         } else {
             self.tree_message = "点击顶部“打开文件夹”选择工作区；也可单独打开文件".into();
         }
@@ -474,7 +496,8 @@ impl Prototype {
         self.tree_message = "正在读取目录…".into();
         let generation = self.tree_generation;
         let directory = path.clone();
-        let job = cx.background_spawn(async move { files::directory(&directory) });
+        let show_hidden = self.show_hidden;
+        let job = cx.background_spawn(async move { files::directory(&directory, show_hidden) });
         let key = path.clone();
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = job.await;
@@ -490,7 +513,7 @@ impl Prototype {
                     return;
                 };
                 match result {
-                    Ok(entries) => {
+                    Ok((entries, _hidden)) => {
                         let restore: Vec<_> = entries
                             .iter()
                             .filter(|entry| {
@@ -636,13 +659,14 @@ impl Prototype {
             return;
         };
         let generation = self.search_generation;
+        let show_hidden = self.show_hidden;
         self.search_task = Some(cx.spawn_in(window, async move |this, cx| {
             // Coalesce bursts of typing; matching itself is in memory and cheap.
             cx.background_executor()
                 .timer(Duration::from_millis(30))
                 .await;
             let result = cx
-                .background_spawn(async move { index.search(&query) })
+                .background_spawn(async move { index.search(&query, show_hidden) })
                 .await;
             let _ = this.update_in(cx, |this, _, cx| {
                 if this.search_generation == generation {
@@ -672,6 +696,18 @@ impl Prototype {
             }
         })
         .detach();
+    }
+
+    /// Shows or hides dot files in every window's Explorer and quick open (⌘⇧.).
+    fn toggle_hidden_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let show = !self.show_hidden;
+        self.change_settings(window, cx, |settings| settings.show_hidden = show);
+        self.message = if show {
+            "已显示隐藏文件".into()
+        } else {
+            "已隐藏点文件和点文件夹".into()
+        };
+        cx.notify();
     }
 
     /// Editor font size: one pixel per step, `None` resets (⌘= / ⌘- / ⌘0).
@@ -1590,6 +1626,9 @@ impl Render for Prototype {
                 cx.listener(|this, _: &ZoomOut, window, cx| this.zoom(Some(-1.), window, cx)),
             )
             .on_action(cx.listener(|this, _: &ZoomReset, window, cx| this.zoom(None, window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleHiddenFiles, window, cx| {
+                this.toggle_hidden_files(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &navigation::GoToSymbol, window, cx| {
                 this.go_to_symbol(window, cx)
             }))

@@ -134,6 +134,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 KeyBinding::new("cmd-+", prototype::ZoomIn, Some("WorkspaceEditor")),
                 KeyBinding::new("cmd--", prototype::ZoomOut, Some("WorkspaceEditor")),
                 KeyBinding::new("cmd-0", prototype::ZoomReset, Some("WorkspaceEditor")),
+                // Finder's shortcut for hidden files.
+                KeyBinding::new(
+                    "cmd-shift-.",
+                    prototype::ToggleHiddenFiles,
+                    Some("WorkspaceEditor"),
+                ),
             ]);
             cx.set_menus([
                 Menu::new("ZJ").items([MenuItem::os_submenu("服务", SystemMenuType::Services)]),
@@ -147,6 +153,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     MenuItem::action("放大", prototype::ZoomIn),
                     MenuItem::action("缩小", prototype::ZoomOut),
                     MenuItem::action("重置缩放", prototype::ZoomReset),
+                    MenuItem::separator(),
+                    MenuItem::action("显示 / 隐藏点文件", prototype::ToggleHiddenFiles),
                 ]),
                 Menu::new("转到").items([
                     MenuItem::action("返回", nav::NavigateBack),

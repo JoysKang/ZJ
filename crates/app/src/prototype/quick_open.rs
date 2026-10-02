@@ -147,6 +147,7 @@ impl Prototype {
             .map(|doc| doc.path.clone())
             .collect();
         let index = self.index.clone();
+        let show_hidden = self.show_hidden;
         let Some(quick) = self.quick_open.as_mut() else {
             return;
         };
@@ -171,7 +172,7 @@ impl Prototype {
                 .timer(Duration::from_millis(16))
                 .await;
             let result = cx
-                .background_spawn(async move { index.search(&query) })
+                .background_spawn(async move { index.search(&query, show_hidden) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if let Some(quick) = this.quick_open.as_mut()

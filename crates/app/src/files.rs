@@ -29,11 +29,50 @@ pub struct Entry {
     pub symlink: bool,
 }
 
-pub fn directory(path: &Path) -> io::Result<Vec<Entry>> {
+/// Dot files and folders that stay visible while hidden files are hidden: project
+/// configuration people edit, as opposed to tool state (`.venv`, `.pytest_cache`, `.claude`).
+const VISIBLE_DOT_NAMES: &[&str] = &[
+    ".github",
+    ".gitlab",
+    ".cargo",
+    ".gitignore",
+    ".gitattributes",
+    ".gitmodules",
+    ".gitlab-ci.yml",
+    ".editorconfig",
+    ".dockerignore",
+];
+const VISIBLE_DOT_PREFIXES: &[&str] = &[".env", ".prettierrc", ".eslintrc"];
+
+/// Whether a file or folder name is hidden unless the user shows hidden files.
+pub fn hidden_by_default(name: &std::ffi::OsStr) -> bool {
+    let name = name.as_bytes();
+    name.first() == Some(&b'.')
+        && !VISIBLE_DOT_NAMES.iter().any(|v| name == v.as_bytes())
+        && !VISIBLE_DOT_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix.as_bytes()))
+}
+
+/// Whether any component of a relative path is hidden by default.
+pub fn path_hidden_by_default(relative: &Path) -> bool {
+    relative
+        .components()
+        .any(|c| hidden_by_default(c.as_os_str()))
+}
+
+/// Lists a directory for the Explorer: folders first, then files, by name. Hidden dot
+/// entries are left out unless `show_hidden`; the second value counts them.
+pub fn directory(path: &Path, show_hidden: bool) -> io::Result<(Vec<Entry>, usize)> {
     let mut entries = Vec::new();
+    let mut hidden = 0;
     for item in fs::read_dir(path)? {
         let item = item?;
         if item.file_name() == ".git" {
+            continue;
+        }
+        if !show_hidden && hidden_by_default(&item.file_name()) {
+            hidden += 1;
             continue;
         }
         if entries.len() == MAX_DIRECTORY_ENTRIES {
@@ -47,7 +86,7 @@ pub fn directory(path: &Path) -> io::Result<Vec<Entry>> {
         });
     }
     entries.sort_by(|a, b| b.directory.cmp(&a.directory).then(a.path.cmp(&b.path)));
-    Ok(entries)
+    Ok((entries, hidden))
 }
 
 #[derive(Default)]
@@ -251,7 +290,8 @@ impl PathIndex {
     }
 
     /// Ranks all entries against `query` and returns the best [`MAX_RESULTS`] as absolute paths.
-    pub fn search(&self, query: &str) -> SearchResults {
+    /// Paths through hidden dot folders are skipped unless `show_hidden`.
+    pub fn search(&self, query: &str, show_hidden: bool) -> SearchResults {
         let query = fuzzy::query_chars(query);
         let mut result = SearchResults {
             errors: self.errors,
@@ -264,7 +304,9 @@ impl PathIndex {
         let mut scored: Vec<(i32, usize)> = (0..self.slots.len())
             .filter_map(|i| {
                 let (key, name_start) = self.key(i);
-                fuzzy::score(&query, key, name_start).map(|s| (s, i))
+                fuzzy::score(&query, key, name_start)
+                    .filter(|_| show_hidden || !path_hidden_by_default(self.relative(i)))
+                    .map(|s| (s, i))
             })
             .collect();
         let order = |a: &(i32, usize), b: &(i32, usize)| {
@@ -492,7 +534,7 @@ mod tests {
         fs::write(root.join("binary"), [0, 1, 2]).unwrap();
         std::os::unix::fs::symlink("src", root.join("alias")).unwrap();
         std::os::unix::fs::symlink("/etc/hosts", root.join("outside")).unwrap();
-        let entries = directory(&root).unwrap();
+        let (entries, _) = directory(&root, true).unwrap();
         assert!(entries[0].directory);
         assert!(
             !entries
@@ -501,7 +543,7 @@ mod tests {
         );
         let not_git = |_: &Path, _: &AtomicBool| Err(io::Error::other("not a worktree"));
         let index = PathIndex::build(&root, &AtomicBool::new(false), &not_git);
-        let result = index.search("MAIN.RS");
+        let result = index.search("MAIN.RS", true);
         assert_eq!(result.paths, vec![path.clone()]);
         assert!(!result.incomplete);
         assert!(PathIndex::build(&root, &AtomicBool::new(true), &not_git).incomplete);
@@ -557,6 +599,68 @@ mod tests {
     }
 
     #[test]
+    fn dot_entries_hide_except_project_configuration() {
+        use std::ffi::OsStr;
+        for hidden in [
+            ".venv",
+            ".claude",
+            ".pytest_cache",
+            ".vscode",
+            ".DS_Store",
+            ".ruff_cache",
+        ] {
+            assert!(hidden_by_default(OsStr::new(hidden)), "{hidden}");
+        }
+        for shown in [
+            ".github",
+            ".gitignore",
+            ".env",
+            ".env.local",
+            ".eslintrc.json",
+            ".cargo",
+            "src",
+        ] {
+            assert!(!hidden_by_default(OsStr::new(shown)), "{shown}");
+        }
+        assert!(path_hidden_by_default(Path::new("a/.claude/settings.json")));
+        assert!(!path_hidden_by_default(Path::new(
+            ".github/workflows/ci.yml"
+        )));
+        let root = std::env::temp_dir().join(format!("zj-hidden-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for dir in [".venv", ".github", "src"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        fs::write(root.join(".gitignore"), "").unwrap();
+        fs::write(root.join(".DS_Store"), "").unwrap();
+        let names = |show| {
+            let (entries, hidden) = directory(&root, show).unwrap();
+            let names: Vec<String> = entries
+                .iter()
+                .map(|e| e.path.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            (names, hidden)
+        };
+        assert_eq!(
+            names(false),
+            (vec![".github".into(), "src".into(), ".gitignore".into()], 2)
+        );
+        assert_eq!(names(true).0.len(), 5);
+        let index = PathIndex::pack(
+            root.clone(),
+            vec![".venv/lib/site.py".into(), "src/site.py".into()],
+            false,
+            0,
+        );
+        assert_eq!(
+            index.search("site", false).paths,
+            vec![root.join("src/site.py")]
+        );
+        assert_eq!(index.search("site", true).paths.len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn packed_index_matches_mixed_case_and_stays_small() {
         let paths: Vec<PathBuf> = (0..1000)
             .map(|i| PathBuf::from(format!("src/m{:02}/file_{i:04}.rs", i / 40)))
@@ -567,7 +671,7 @@ mod tests {
         // Lowercase paths share their bytes with the key: ~23 bytes + 12 per entry.
         assert!(index.heap_bytes() < 1003 * 40, "{}", index.heap_bytes());
         assert_eq!(
-            index.search("readme").paths,
+            index.search("readme", true).paths,
             vec![PathBuf::from("/w/Docs/README.md")]
         );
         assert_eq!(index.key(0).0, "Docs/README.md".to_lowercase());
@@ -626,7 +730,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            index.search("main").paths,
+            index.search("main", true).paths,
             vec![root.join("outer/src/main.rs")]
         );
         fs::remove_dir_all(root).unwrap();
