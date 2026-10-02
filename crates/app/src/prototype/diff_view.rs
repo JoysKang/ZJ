@@ -48,7 +48,7 @@ impl Prototype {
         })
     }
 
-    fn diff_change_starts(&self) -> &[usize] {
+    pub(super) fn diff_change_starts(&self) -> &[usize] {
         match &self.diff_doc {
             Some(doc) if self.diff_is_inline() => &doc.inline_changes,
             Some(doc) => &doc.changes,
@@ -66,7 +66,7 @@ impl Prototype {
         }
     }
 
-    fn step_change(&mut self, forward: bool, cx: &mut Context<Self>) {
+    pub(super) fn step_change(&mut self, forward: bool, cx: &mut Context<Self>) {
         let starts = self.diff_change_starts();
         let count = starts.len();
         if count == 0 {
@@ -85,7 +85,7 @@ impl Prototype {
         cx.notify();
     }
 
-    fn toggle_diff_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn toggle_diff_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.diff_inline = !self.diff_inline;
         let inline = self.diff_inline;
         self.change_settings(window, cx, |settings| settings.diff_inline = inline);
@@ -260,6 +260,16 @@ impl Prototype {
             .track_focus(&self.diff_focus)
             .on_action(cx.listener(|this, _: &CopyDiff, _, cx| this.copy_diff_selection(cx)))
             .on_action(cx.listener(|this, _: &SelectAllDiff, _, cx| this.diff_select_all(cx)))
+            .on_action(cx.listener(
+                |this, _: &super::agent_review::AcceptAgentChange, window, cx| {
+                    this.agent_review_current(true, window, cx)
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &super::agent_review::RejectAgentChange, window, cx| {
+                    this.agent_review_current(false, window, cx)
+                },
+            ))
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| this.diff_dragging = false),
@@ -345,6 +355,8 @@ impl Prototype {
         );
         // Block actions sit in the gutter of the list that shows the new text.
         let actions = kind != DiffList::Original && self.diff_partial_ok();
+        // Agent reviews: 接受 / 拒绝 instead of staging (the right list in side-by-side).
+        let agent_actions = kind != DiffList::Original && self.diff_is_agent_review();
         let staged = self.diff_staged();
         let list = uniform_list(
             id,
@@ -395,14 +407,15 @@ impl Prototype {
                             }),
                         }?;
                         let group: SharedString = format!("{id}-{index}").into();
-                        let block = actions
+                        let block = (actions || agent_actions)
                             .then(|| {
                                 blocks
                                     .binary_search_by_key(&index, |b| b.start)
                                     .ok()
-                                    .map(|i| blocks[i])
+                                    .map(|i| (i, blocks[i]))
                             })
                             .flatten();
+                        let current_change = this.diff_change;
                         Some(
                             row.id((id, index))
                                 .relative()
@@ -430,8 +443,22 @@ impl Prototype {
                                     MouseButton::Left,
                                     cx.listener(|this, _, _, _| this.diff_dragging = false),
                                 )
-                                .when_some(block, |row, block| {
-                                    row.child(block_actions(id, block, staged, group, colors, cx))
+                                .when_some(block, |row, (i, block)| {
+                                    if agent_actions {
+                                        row.child(super::agent_review::agent_block_actions(
+                                            id,
+                                            i,
+                                            block.start,
+                                            current_change == Some(i),
+                                            kind == DiffList::Inline,
+                                            colors,
+                                            cx,
+                                        ))
+                                    } else {
+                                        row.child(block_actions(
+                                            id, block, staged, group, colors, cx,
+                                        ))
+                                    }
                                 })
                                 .into_any_element(),
                         )

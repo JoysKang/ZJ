@@ -26,6 +26,16 @@ use workspace_editor_git::{
     WriteRequest,
 };
 
+mod agent;
+pub use agent::{
+    AddSelectionToAgent, NewAgentSession, NextApproval, SearchSessions, ToggleAgentPanel,
+    init_store as init_agent_store,
+};
+mod agent_history;
+mod agent_panel;
+mod agent_review;
+pub use agent_review::{AcceptAgentChange, RejectAgentChange};
+mod agent_search;
 mod chrome;
 mod diff_ops;
 pub use diff_ops::{CopyDiff, SelectAllDiff};
@@ -117,6 +127,8 @@ enum DiffSource {
     Git(Request),
     /// A full-context patch built in the app (the Search view's replace preview).
     Local(Arc<str>),
+    /// An agent's changes to review (built from the client's snapshot or proposal).
+    Agent(agent_review::AgentDiff),
 }
 
 impl DiffTab {
@@ -124,7 +136,14 @@ impl DiffTab {
     fn request(&self) -> Option<&Request> {
         match &self.source {
             DiffSource::Git(request) => Some(request),
-            DiffSource::Local(_) => None,
+            DiffSource::Local(_) | DiffSource::Agent(_) => None,
+        }
+    }
+
+    fn agent(&self) -> Option<&agent_review::AgentDiff> {
+        match &self.source {
+            DiffSource::Agent(diff) => Some(diff),
+            _ => None,
         }
     }
 }
@@ -315,6 +334,8 @@ pub struct Prototype {
     /// Partial refresh from file watching, applied when the window is not busy.
     pending_plan: Option<crate::refresh_plan::Plan>,
     ignore_cache: Arc<Mutex<crate::refresh_plan::IgnoreCache>>,
+    /// The agent panel: sessions, thread view, history and the ⌘J search.
+    agent: agent::AgentPanel,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -350,6 +371,7 @@ impl Prototype {
             if this.preview_diff.is_some() {
                 this.load_diff(window, cx);
             }
+            this.agent_rehighlight(cx);
         });
         // Another window (or this one) changed a setting that changes what is listed.
         let settings =
@@ -369,9 +391,11 @@ impl Prototype {
                     }
                     this.update_quick_open(window, cx);
                 }
+                this.agent_follow_settings(cx);
             });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.update_welcome_blink(window, cx);
+            this.agent_update_spin(window, cx);
             if window.is_window_active() && this.root.is_some() {
                 this.refresh_on_activation(window, cx);
             }
@@ -421,6 +445,7 @@ impl Prototype {
         window.set_window_title(&format!("ZJ · {name}"));
         let search = search_view::SearchState::new(window, cx);
         let find = find_widget::FindState::new(window, cx);
+        let agent = agent::AgentPanel::new(window, cx);
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             root,
@@ -508,6 +533,7 @@ impl Prototype {
             workspace_refresh_pending: false,
             pending_plan: None,
             ignore_cache: Default::default(),
+            agent,
             _subscriptions: vec![appearance, activation, settings],
         };
         this.start_watching(window, cx);
@@ -515,6 +541,9 @@ impl Prototype {
         this.focus_handle.focus(window, cx);
         this.refresh(window, cx);
         this.update_welcome_blink(window, cx);
+        if this.agent.visible {
+            this.agent_ensure_session();
+        }
         eprintln!("event=window_opened number={number}");
         this
     }
@@ -1562,6 +1591,10 @@ impl Prototype {
         let Some(diff) = &self.preview_diff else {
             return;
         };
+        if diff.agent().is_some() {
+            self.load_agent_diff(window, cx);
+            return;
+        }
         let mut source = diff.source.clone();
         let title = diff.label.clone();
         self.preview_cancel.store(true, Ordering::Relaxed);
@@ -1600,6 +1633,8 @@ impl Prototype {
                         .into()
                 }
                 DiffSource::Local(patch) => patch,
+                // Agent reviews load in `load_agent_diff`.
+                DiffSource::Agent(_) => return Err(std::io::Error::other("Agent 审阅不经过 Git")),
             };
             let doc = crate::diff_doc::DiffDoc::parse(&text, language, &highlight, change_colors)
                 .map(Arc::new);
@@ -1685,20 +1720,45 @@ impl Render for Prototype {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = theme::colors(cx);
         let editor = self.render_editor_area(cx);
-        let workbench = if self.sidebar_visible {
-            h_resizable("workbench-panels")
-                .child(
+        let agent_panel = self.agent.visible.then(|| self.render_agent_panel(cx));
+        let workbench = if self.sidebar_visible || agent_panel.is_some() {
+            // One layout per combination, so a hidden panel does not leave its size behind.
+            let id = match (self.sidebar_visible, agent_panel.is_some()) {
+                (true, true) => "workbench-panels-agent",
+                (false, true) => "workbench-editor-agent",
+                _ => "workbench-panels",
+            };
+            let mut group = h_resizable(id);
+            if self.sidebar_visible {
+                group = group.child(
                     resizable_panel()
                         .size(theme::SIDEBAR_WIDTH)
                         .size_range(theme::SIDEBAR_MIN..theme::SIDEBAR_MAX)
                         .child(self.render_sidebar(cx)),
-                )
-                .child(
-                    resizable_panel()
-                        .size_range(theme::EDITOR_MIN..theme::EDITOR_MAX)
-                        .child(editor),
-                )
-                .into_any_element()
+                );
+            }
+            group = group.child(
+                resizable_panel()
+                    .size_range(theme::EDITOR_MIN..theme::EDITOR_MAX)
+                    .child(editor),
+            );
+            if let Some(panel) = agent_panel {
+                let weak = cx.weak_entity();
+                group = group
+                    .child(
+                        resizable_panel()
+                            .size(self.agent.width)
+                            .size_range(theme::AGENT_PANEL_MIN..theme::AGENT_PANEL_MAX)
+                            .child(panel),
+                    )
+                    .on_resize(move |state, window, cx| {
+                        let Some(width) = state.read(cx).sizes().last().copied() else {
+                            return;
+                        };
+                        let _ = weak.update(cx, |this, cx| this.agent_resized(width, window, cx));
+                    });
+            }
+            group.into_any_element()
         } else {
             editor
         };
@@ -1770,11 +1830,24 @@ impl Render for Prototype {
                     this.navigate_forward(window, cx)
                 }),
             )
+            .on_action(cx.listener(|this, _: &ToggleAgentPanel, window, cx| {
+                this.toggle_agent_panel(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SearchSessions, window, cx| {
+                this.agent_open_search(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &AddSelectionToAgent, window, cx| {
+                this.agent_add_selection(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NextApproval, window, cx| {
+                this.agent_next_approval(window, cx)
+            }))
             .bg(colors.editor)
             .text_color(colors.foreground)
             .child(self.render_title_bar(cx))
             .child(div().flex_1().min_h_0().w_full().child(workbench))
             .child(self.render_status_bar(cx))
             .children(self.render_quick_open(cx))
+            .children(self.render_agent_search(cx))
     }
 }

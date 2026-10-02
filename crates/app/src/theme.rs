@@ -129,6 +129,51 @@ pub const SCM_DETAIL_LINE: Pixels = px(20.);
 /// Centers a `SCM_DETAIL_LINE` line inside a `ROW_HEIGHT` row.
 pub const SCM_LINE_PAD: Pixels = px(2.);
 
+// Agent panel (docs/adr/0004, design in ZJ-agent-ui-design.md).
+/// Below this width the panel switches to the compact density (direction C).
+pub const AGENT_COMPACT_WIDTH: Pixels = px(360.);
+pub const AGENT_PANEL_MIN: Pixels = px(crate::settings::AGENT_PANEL_WIDTH_MIN);
+pub const AGENT_PANEL_MAX: Pixels = px(crate::settings::AGENT_PANEL_WIDTH_MAX);
+pub const AGENT_GLYPH: Pixels = px(18.);
+pub const AGENT_GLYPH_SMALL: Pixels = px(16.);
+pub const AGENT_GLYPH_ICON: Pixels = px(12.);
+pub const AGENT_GLYPH_RADIUS: Pixels = px(5.);
+pub const STATUS_DOT: Pixels = px(8.);
+/// The pale halo around the waiting-for-approval dot.
+pub const STATUS_HALO: Pixels = px(14.);
+pub const AGENT_TOOL_ROW: Pixels = px(30.);
+pub const AGENT_CARD_HEAD: Pixels = px(32.);
+pub const AGENT_FILE_ROW: Pixels = px(26.);
+pub const AGENT_FILE_INDENT: Pixels = px(26.);
+pub const AGENT_CHIP: Pixels = px(20.);
+pub const AGENT_COMPOSER_BAR: Pixels = px(34.);
+pub const AGENT_COMPOSER_MIN: Pixels = px(44.);
+pub const AGENT_RING: Pixels = px(16.);
+pub const AGENT_RING_STROKE: Pixels = px(2.5);
+pub const AGENT_PLAN_BAR: Pixels = px(3.);
+pub const AGENT_PLAN_BAR_WIDTH: Pixels = px(160.);
+pub const AGENT_LINE: Pixels = px(22.);
+pub const AGENT_FILTER_CHIP: Pixels = px(22.);
+pub const AGENT_SEARCH_INPUT: Pixels = px(28.);
+/// Two-line session rows in the history list.
+pub const AGENT_HISTORY_ROW: Pixels = px(52.);
+pub const AGENT_HISTORY_ROW_COMPACT: Pixels = px(32.);
+pub const AGENT_STRIP_ROW: Pixels = px(32.);
+pub const AGENT_GROUP_HEADER: Pixels = px(28.);
+pub const AGENT_MENTION_ROWS: usize = 8;
+/// Thread bubbles and cards never get wider than this, whatever the panel width.
+pub const AGENT_THREAD_MAX: Pixels = px(760.);
+/// ⌘J search overlay.
+pub const AGENT_OVERLAY_WIDTH: Pixels = px(680.);
+pub const AGENT_OVERLAY_TOP: Pixels = px(6.);
+pub const AGENT_OVERLAY_INPUT: Pixels = px(44.);
+pub const AGENT_OVERLAY_ROW: Pixels = px(80.);
+pub const AGENT_OVERLAY_ROWS: usize = 7;
+pub const RADIUS_OVERLAY: Pixels = px(8.);
+pub const TEXT_OVERLAY_INPUT: Pixels = px(15.);
+/// The diff editor's agent toolbar ("Claude Code 建议的修改 … 接受此文件").
+pub const AGENT_REVIEW_BAR: Pixels = px(32.);
+
 // Window geometry.
 pub const WINDOW_WIDTH: Pixels = px(1280.);
 pub const WINDOW_HEIGHT: Pixels = px(800.);
@@ -196,6 +241,25 @@ pub struct Palette {
     pub diff_red: u32,
     pub diff_line_alpha: f32,
     pub diff_text_alpha: f32,
+    /// Agent panel: waiting for approval (yellow), done but unread (blue), running spinner.
+    pub attention: u32,
+    pub attention_halo: u32,
+    pub unread: u32,
+    pub running: u32,
+    /// Cards inside the agent panel and their borders; `strong_border` frames inputs.
+    pub card: u32,
+    pub card_border: u32,
+    pub strong_border: u32,
+    /// Search hit highlight in the session search (background color and alpha, text).
+    pub mark: u32,
+    pub mark_alpha: f32,
+    pub mark_fg: u32,
+    /// Monochrome agent glyphs: Claude, Codex, DeepSeek, Gemini, user-defined.
+    pub glyph_claude: u32,
+    pub glyph_codex: u32,
+    pub glyph_deepseek: u32,
+    pub glyph_gemini: u32,
+    pub glyph_generic: u32,
 }
 
 /// Solarized Dark, mapped like VS Code's built-in theme (sidebar #00212B, editor #002B36,
@@ -242,6 +306,21 @@ pub const DARK: Palette = Palette {
     diff_red: 0xdc322f,
     diff_line_alpha: 0.16,
     diff_text_alpha: 0.38,
+    attention: 0xb58900,
+    attention_halo: 0xb58900,
+    unread: 0x268bd2,
+    running: 0x2aa198,
+    card: 0x002b36,
+    card_border: 0x0a3c49,
+    strong_border: 0x0e4250,
+    mark: 0xb58900,
+    mark_alpha: 0.30,
+    mark_fg: 0xf0d78c,
+    glyph_claude: 0xcb4b16,
+    glyph_codex: 0x268bd2,
+    glyph_deepseek: 0x6c71c4,
+    glyph_gemini: 0xd33682,
+    glyph_generic: 0x93a1a1,
 };
 
 /// Nord Light: snow storm backgrounds, polar night text, frost accents. Aurora colors are
@@ -285,6 +364,21 @@ pub const LIGHT: Palette = Palette {
     diff_red: 0xbf616a,
     diff_line_alpha: 0.26,
     diff_text_alpha: 0.5,
+    attention: 0x8a5226,
+    attention_halo: 0xd08770,
+    unread: 0x4c6a94,
+    running: 0x4c6a94,
+    card: 0xeceff4,
+    card_border: 0xd3d9e4,
+    strong_border: 0xc9d1de,
+    mark: 0xebcb8b,
+    mark_alpha: 0.55,
+    mark_fg: 0x2e3440,
+    glyph_claude: 0x96593a,
+    glyph_codex: 0x4c6a94,
+    glyph_deepseek: 0x81587a,
+    glyph_gemini: 0x2f6f6d,
+    glyph_generic: 0x4c566a,
 };
 
 /// Syntax colors (tree-sitter capture → color, style) in the same Kit JSON shape as its theme
@@ -440,6 +534,21 @@ pub struct Colors {
     pub find_match: Hsla,
     pub find_current: Hsla,
     pub shadow: Hsla,
+    pub attention: Hsla,
+    pub attention_bg: Hsla,
+    pub attention_border: Hsla,
+    pub unread: Hsla,
+    pub running: Hsla,
+    pub card: Hsla,
+    pub card_border: Hsla,
+    pub strong_border: Hsla,
+    pub mark_bg: Hsla,
+    pub mark_fg: Hsla,
+    /// Selected filter chips: accent tint and border.
+    pub chip_on: Hsla,
+    pub chip_on_border: Hsla,
+    /// Glyph color and its tinted tile, indexed like [`Glyph`](workspace_editor_agent::Glyph).
+    pub glyphs: [(Hsla, Hsla); 5],
 }
 
 fn hsla(hex: u32) -> Hsla {
@@ -486,6 +595,26 @@ impl Palette {
             find_match: hsla(self.accent).opacity(0.3),
             find_current: hsla(self.find_current).opacity(self.find_current_alpha),
             shadow: hsla(0x000000).opacity(self.shadow_alpha),
+            attention: hsla(self.attention),
+            attention_bg: hsla(self.attention_halo).opacity(0.14),
+            attention_border: hsla(self.attention).opacity(0.45),
+            unread: hsla(self.unread),
+            running: hsla(self.running),
+            card: hsla(self.card),
+            card_border: hsla(self.card_border),
+            strong_border: hsla(self.strong_border),
+            mark_bg: hsla(self.mark).opacity(self.mark_alpha),
+            mark_fg: hsla(self.mark_fg),
+            chip_on: hsla(self.accent).opacity(0.16),
+            chip_on_border: hsla(self.accent).opacity(0.45),
+            glyphs: [
+                self.glyph_claude,
+                self.glyph_codex,
+                self.glyph_deepseek,
+                self.glyph_gemini,
+                self.glyph_generic,
+            ]
+            .map(|c| (hsla(c), hsla(c).opacity(0.18))),
         }
     }
 }
@@ -676,6 +805,34 @@ mod tests {
                     assert!(ratio >= 4.5, "{name} {status} on {surface}: {ratio:.2}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn agent_colors_are_readable() {
+        for (name, p) in [("dark", DARK), ("light", LIGHT)] {
+            for (what, color) in [
+                ("attention", p.attention),
+                ("unread", p.unread),
+                ("running", p.running),
+                ("claude", p.glyph_claude),
+                ("codex", p.glyph_codex),
+                ("deepseek", p.glyph_deepseek),
+                ("gemini", p.glyph_gemini),
+                ("generic", p.glyph_generic),
+            ] {
+                for (surface, bg) in [("panel", p.panel), ("card", p.card)] {
+                    let ratio = contrast(color, bg);
+                    // Glyphs and dots are non-text UI: WCAG 1.4.11 asks for 3:1.
+                    assert!(ratio >= 3.0, "{name} {what} on {surface}: {ratio:.2}");
+                }
+            }
+            let fg = contrast(p.foreground, p.card);
+            let muted = contrast(p.muted, p.card);
+            assert!(fg >= 7.0, "{name} foreground on card: {fg:.2}");
+            assert!(muted >= 4.5, "{name} muted on card: {muted:.2}");
+            let attention = contrast(p.attention, p.panel);
+            assert!(attention >= 4.5, "{name} 待批准 text: {attention:.2}");
         }
     }
 

@@ -1,3 +1,4 @@
+mod agent_model;
 mod assets;
 mod diff_doc;
 mod diff_syntax;
@@ -6,11 +7,13 @@ mod file_ops;
 mod files;
 mod fuzzy;
 mod languages;
+mod markdown;
 mod partial_patch;
 mod platform;
 mod prototype;
 mod refresh_plan;
 mod replace;
+mod secrets;
 mod settings;
 mod symbol_index;
 mod symbols;
@@ -97,6 +100,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             gpui_kit::init(cx);
             cx.set_global(settings::Settings::load());
             cx.set_global(watch::WatchService::default());
+            prototype::init_agent_store(cx);
             diff_syntax::register();
             platform::DockBlink::apply(cx);
             cx.observe_global::<settings::Settings>(platform::DockBlink::apply)
@@ -121,6 +125,17 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 KeyBinding::new("shift-f12", nav::FindReferences, Some("WorkspaceEditor")),
                 KeyBinding::new("secondary-c", prototype::CopyDiff, Some("DiffEditor")),
                 KeyBinding::new("secondary-a", prototype::SelectAllDiff, Some("DiffEditor")),
+                // Agent reviews (design): accept / reject the current change.
+                KeyBinding::new(
+                    "secondary-y",
+                    prototype::AcceptAgentChange,
+                    Some("DiffEditor"),
+                ),
+                KeyBinding::new(
+                    "secondary-backspace",
+                    prototype::RejectAgentChange,
+                    Some("DiffEditor"),
+                ),
                 KeyBinding::new("ctrl--", nav::NavigateBack, Some("WorkspaceEditor")),
                 KeyBinding::new(
                     "ctrl-shift--",
@@ -224,6 +239,33 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 KeyBinding::new("cmd-+", prototype::ZoomIn, Some("WorkspaceEditor")),
                 KeyBinding::new("cmd--", prototype::ZoomOut, Some("WorkspaceEditor")),
                 KeyBinding::new("cmd-0", prototype::ZoomReset, Some("WorkspaceEditor")),
+                // Agent panel: ⌥⌘B as VS Code's secondary side bar; ⌘J / ⌘L / ⌘⇧A as in the
+                // design (session search, add the selection, next approval).
+                KeyBinding::new(
+                    "alt-cmd-b",
+                    prototype::ToggleAgentPanel,
+                    Some("WorkspaceEditor"),
+                ),
+                KeyBinding::new(
+                    "secondary-j",
+                    prototype::SearchSessions,
+                    Some("WorkspaceEditor"),
+                ),
+                KeyBinding::new(
+                    "secondary-l",
+                    prototype::AddSelectionToAgent,
+                    Some("WorkspaceEditor"),
+                ),
+                KeyBinding::new(
+                    "secondary-shift-a",
+                    prototype::NextApproval,
+                    Some("WorkspaceEditor"),
+                ),
+                KeyBinding::new(
+                    "secondary-n",
+                    prototype::NewAgentSession,
+                    Some("AgentPanel"),
+                ),
                 // Finder's shortcut for hidden files.
                 KeyBinding::new(
                     "cmd-shift-.",
@@ -245,6 +287,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     MenuItem::action("重置缩放", prototype::ZoomReset),
                     MenuItem::separator(),
                     MenuItem::action("显示 / 隐藏点文件", prototype::ToggleHiddenFiles),
+                    MenuItem::separator(),
+                    MenuItem::action("Agent 面板", prototype::ToggleAgentPanel),
+                    MenuItem::action("搜索 Agent 会话…", prototype::SearchSessions),
                 ]),
                 Menu::new("转到").items([
                     MenuItem::action("返回", nav::NavigateBack),

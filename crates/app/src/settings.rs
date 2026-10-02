@@ -8,9 +8,151 @@
 use gpui_kit::AppContext as _;
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
 };
+use workspace_editor_agent::registry::UserAgentConfig;
+
+pub const AGENT_PANEL_WIDTH_DEFAULT: f32 = 420.;
+pub const AGENT_PANEL_WIDTH_MIN: f32 = 300.;
+pub const AGENT_PANEL_WIDTH_MAX: f32 = 900.;
+pub const AGENT_IDLE_DEFAULT: u32 = 10;
+
+/// Agent settings. API keys are never stored here: env values are `$NAME` (copied from ZJ's
+/// environment) or `keychain:ACCOUNT` (macOS Keychain, service "ZJ Agent").
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentSettings {
+    pub panel_visible: bool,
+    pub panel_width: f32,
+    /// Preset id for new sessions.
+    pub default_agent: String,
+    /// `false`: write directly (default); `true`: accept before writing.
+    pub accept_first: bool,
+    pub idle_minutes: u32,
+    /// agent id → variable → `$NAME` | `keychain:ACCOUNT`.
+    pub env: BTreeMap<String, BTreeMap<String, String>>,
+    pub custom: Vec<UserAgentConfig>,
+    /// Workspace root → "始终允许" command prefixes.
+    pub allow: BTreeMap<String, Vec<String>>,
+}
+
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self {
+            panel_visible: false,
+            panel_width: AGENT_PANEL_WIDTH_DEFAULT,
+            default_agent: "claude-code".into(),
+            accept_first: false,
+            idle_minutes: AGENT_IDLE_DEFAULT,
+            env: BTreeMap::new(),
+            custom: Vec::new(),
+            allow: BTreeMap::new(),
+        }
+    }
+}
+
+impl AgentSettings {
+    fn from_json(value: Option<&Value>) -> Self {
+        let defaults = Self::default();
+        let Some(value) = value else {
+            return defaults;
+        };
+        let string_map = |v: &Value| -> BTreeMap<String, String> {
+            v.as_object()
+                .map(|o| {
+                    o.iter()
+                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Self {
+            panel_visible: value
+                .get("panel_visible")
+                .and_then(Value::as_bool)
+                .unwrap_or(defaults.panel_visible),
+            panel_width: value
+                .get("panel_width")
+                .and_then(Value::as_f64)
+                .map(|w| (w as f32).clamp(AGENT_PANEL_WIDTH_MIN, AGENT_PANEL_WIDTH_MAX))
+                .unwrap_or(defaults.panel_width),
+            default_agent: value
+                .get("default_agent")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or(defaults.default_agent),
+            accept_first: value
+                .get("write_mode")
+                .and_then(Value::as_str)
+                .map(|m| m == "accept_first")
+                .unwrap_or(defaults.accept_first),
+            idle_minutes: value
+                .get("idle_minutes")
+                .and_then(Value::as_u64)
+                .map(|m| (m as u32).clamp(1, 240))
+                .unwrap_or(defaults.idle_minutes),
+            env: value
+                .get("env")
+                .and_then(Value::as_object)
+                .map(|o| o.iter().map(|(k, v)| (k.clone(), string_map(v))).collect())
+                .unwrap_or_default(),
+            custom: value
+                .get("custom")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|v| match serde_json::from_value(v.clone()) {
+                            Ok(agent) => Some(agent),
+                            Err(error) => {
+                                eprintln!("event=settings_agent_invalid error={error}");
+                                None
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            allow: value
+                .get("allow")
+                .and_then(Value::as_object)
+                .map(|o| {
+                    o.iter()
+                        .map(|(k, v)| {
+                            let rules = v
+                                .as_array()
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|r| r.as_str().map(str::to_string))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            (k.clone(), rules)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "panel_visible": self.panel_visible,
+            "panel_width": self.panel_width,
+            "default_agent": self.default_agent,
+            "write_mode": if self.accept_first { "accept_first" } else { "direct" },
+            "idle_minutes": self.idle_minutes,
+            "env": self.env,
+            "custom": self.custom.iter().map(|agent| json!({
+                "id": agent.id,
+                "name": agent.name,
+                "command": agent.command,
+                "args": agent.args,
+                "env": agent.env,
+            })).collect::<Vec<_>>(),
+            "allow": self.allow,
+        })
+    }
+}
 
 pub const EDITOR_FONT_DEFAULT: f32 = 14.;
 pub const EDITOR_FONT_MIN: f32 = 10.;
@@ -31,6 +173,7 @@ pub struct Settings {
     /// macOS: the Dock icon's cursor blinks while the app runs (off by default; never with
     /// 减少动态效果).
     pub dock_icon_blink: bool,
+    pub agent: AgentSettings,
 }
 
 impl Default for Settings {
@@ -42,6 +185,7 @@ impl Default for Settings {
             hide_clean_repos: false,
             search_use_excludes: true,
             dock_icon_blink: false,
+            agent: AgentSettings::default(),
         }
     }
 }
@@ -105,6 +249,7 @@ impl Settings {
             hide_clean_repos: flag("hide_clean_repos", defaults.hide_clean_repos),
             search_use_excludes: flag("search_use_excludes", defaults.search_use_excludes),
             dock_icon_blink: flag("dock_icon_blink", defaults.dock_icon_blink),
+            agent: AgentSettings::from_json(value.get("agent")),
         }
     }
 
@@ -116,6 +261,7 @@ impl Settings {
             "hide_clean_repos": self.hide_clean_repos,
             "search_use_excludes": self.search_use_excludes,
             "dock_icon_blink": self.dock_icon_blink,
+            "agent": self.agent.to_json(),
         })
     }
 
@@ -167,6 +313,25 @@ mod tests {
             hide_clean_repos: true,
             search_use_excludes: false,
             dock_icon_blink: true,
+            agent: AgentSettings {
+                panel_visible: true,
+                panel_width: 380.,
+                default_agent: "codex".into(),
+                accept_first: true,
+                idle_minutes: 30,
+                env: BTreeMap::from([(
+                    "claude-code-deepseek".into(),
+                    BTreeMap::from([("ANTHROPIC_AUTH_TOKEN".into(), "keychain:deepseek".into())]),
+                )]),
+                custom: vec![UserAgentConfig {
+                    id: "opencode".into(),
+                    name: Some("OpenCode".into()),
+                    command: "opencode".into(),
+                    args: vec!["acp".into()],
+                    env: BTreeMap::new(),
+                }],
+                allow: BTreeMap::from([("/w".into(), vec!["cargo test".into()])]),
+            },
         };
         changed.save_to(&path).unwrap();
         assert_eq!(Settings::load_from(&path), changed);

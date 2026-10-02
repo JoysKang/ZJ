@@ -18,10 +18,12 @@ struct TabSpec {
     label: String,
     tooltip: String,
     dirty: bool,
+    /// Muted text after the label ("Agent 建议").
+    note: Option<&'static str>,
 }
 
 impl Prototype {
-    fn relative<'a>(&self, path: &'a Path) -> &'a Path {
+    pub(super) fn relative<'a>(&self, path: &'a Path) -> &'a Path {
         self.root
             .as_ref()
             .and_then(|root| path.strip_prefix(root).ok())
@@ -120,6 +122,14 @@ impl Prototype {
             })
             .child(file_icons::icon(spec.icon))
             .child(div().pl_1().child(spec.label))
+            .when_some(spec.note, |tab, note| {
+                tab.child(
+                    div()
+                        .text_size(theme::TEXT_SECTION)
+                        .text_color(colors.muted)
+                        .child(note),
+                )
+            })
             .child(close)
             .tooltip({
                 let tooltip = spec.tooltip.clone();
@@ -151,6 +161,7 @@ impl Prototype {
                     label: name,
                     tooltip: doc.path.to_string_lossy().into_owned(),
                     dirty: doc.dirty,
+                    note: None,
                 }
             })
             .collect();
@@ -164,6 +175,10 @@ impl Prototype {
                 label: diff.label.clone(),
                 tooltip: diff.tooltip.clone(),
                 dirty: false,
+                note: diff.agent().map(|agent| match agent.origin {
+                    workspace_editor_agent::thread::ChangeOrigin::Proposed => "Agent 建议",
+                    workspace_editor_agent::thread::ChangeOrigin::Written => "Agent 修改",
+                }),
             });
         }
         let tabs: Vec<AnyElement> = specs.into_iter().map(|spec| self.tab(spec, cx)).collect();
@@ -181,9 +196,10 @@ impl Prototype {
             .flex_shrink_0()
             .bg(colors.tabs)
             .child(strip)
-            .when(self.active == Pane::Diff, |bar| {
-                bar.child(self.render_diff_actions(cx))
-            })
+            .when(
+                self.active == Pane::Diff && !self.diff_is_agent_review(),
+                |bar| bar.child(self.render_diff_actions(cx)),
+            )
             .into_any_element()
     }
 
@@ -199,7 +215,11 @@ impl Prototype {
             },
             Pane::Diff => (
                 self.preview_diff.as_ref().map(|diff| diff.path.clone()),
-                Some("Diff · 只读"),
+                Some(if self.diff_is_agent_review() {
+                    "Agent 修改审阅"
+                } else {
+                    "Diff · 只读"
+                }),
             ),
             Pane::Welcome => (None, None),
         };
@@ -374,6 +394,9 @@ impl Prototype {
             .bg(colors.editor)
             .child(self.render_tabs(cx))
             .child(self.render_breadcrumbs(cx))
+            .when(self.active == Pane::Diff, |area| {
+                area.children(self.render_agent_review_bar(cx))
+            })
             .child(
                 div()
                     .relative()

@@ -8953,6 +8953,8 @@ dependencies = [
  "serde_json",
  "tree-sitter",
  "tree-sitter-diff",
+ "workspace-editor-agent",
+ "workspace-editor-agent-history",
  "workspace-editor-core",
  "workspace-editor-git",
 ]
