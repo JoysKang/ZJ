@@ -21,5 +21,9 @@ async-channel = "=2.5.0"
 # Already in GPUI Kit's tree (its editor speaks LSP types); go to definition answers in them.
 lsp-types = "=0.97.0"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Already in GPUI's macOS tree; NSFileManager moves deleted files to the Trash.
+objc2 = "0.6"
+
 [lints]
 workspace = true

@@ -29,6 +29,8 @@ pub const EXTRA: &[(&str, &[u8])] = &[
     embed!("icons/type.svg"),
     embed!("icons/variable.svg"),
     embed!("icons/hash.svg"),
+    embed!("icons/file-plus.svg"),
+    embed!("icons/folder-plus.svg"),
     embed!("file-icons/default_folder.svg"),
     embed!("file-icons/default_folder_opened.svg"),
     embed!("file-icons/default_file.svg"),

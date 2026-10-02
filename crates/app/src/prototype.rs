@@ -31,6 +31,11 @@ mod diff_ops;
 pub use diff_ops::{CopyDiff, SelectAllDiff};
 mod diff_view;
 mod editor_area;
+mod explorer_ops;
+pub use explorer_ops::{
+    CopyFiles, CopyPath, CopyRelativePath, CutFiles, Delete as DeleteFile, NewFile, NewFolder,
+    PasteFiles, Rename as RenameFile, RevealInFinder,
+};
 pub mod navigation;
 mod quick_open;
 mod scm;
@@ -100,6 +105,8 @@ struct DiffTab {
 struct TreeRow {
     entry: Entry,
     depth: usize,
+    /// The inline name field of a new file or folder (`entry.path` is its parent).
+    pending: bool,
 }
 
 struct Group {
@@ -190,6 +197,12 @@ pub struct Prototype {
     tree_scroll: UniformListScrollHandle,
     /// The Explorer and quick open show dot entries hidden by default (settings, ⌘⇧.).
     show_hidden: bool,
+    /// The Explorer row file operations act on (clicked or right-clicked).
+    tree_selection: Option<PathBuf>,
+    explorer_focus: FocusHandle,
+    tree_edit: Option<explorer_ops::TreeEdit>,
+    /// A single click in the Explorer opens the file but keeps the focus in the tree.
+    focus_tree_on_open: bool,
     /// Source Control rows vary in height (repository rows wrap long branch names), so they
     /// use a measured list instead of `uniform_list`.
     scm_list: ListState,
@@ -387,6 +400,10 @@ impl Prototype {
             decorations: HashMap::new(),
             tree_scroll: UniformListScrollHandle::new(),
             show_hidden: cx.global::<crate::settings::Settings>().show_hidden,
+            tree_selection: None,
+            explorer_focus: cx.focus_handle(),
+            tree_edit: None,
+            focus_tree_on_open: false,
             scm_list: ListState::new(0, ListAlignment::Top, px(200.)),
             reveal_pending: false,
             expanded: HashSet::new(),
@@ -475,6 +492,7 @@ impl Prototype {
         self.tree_tasks.clear();
         self.restore_expanded = std::mem::take(&mut self.expanded);
         self.tree.clear();
+        self.tree_edit = None;
         if let Some(root) = self.root.clone() {
             self.tree.push(TreeRow {
                 entry: Entry {
@@ -483,6 +501,7 @@ impl Prototype {
                     symlink: false,
                 },
                 depth: 0,
+                pending: false,
             });
             self.load_directory(root, window, cx);
         } else {
@@ -522,9 +541,17 @@ impl Prototype {
                             .map(|entry| entry.path.clone())
                             .collect();
                         let depth = this.tree[index].depth + 1;
+                        // A new-entry field opened before the listing arrived stays on top.
+                        let at = index
+                            + 1
+                            + usize::from(this.tree.get(index + 1).is_some_and(|row| row.pending));
                         this.tree.splice(
-                            index + 1..index + 1,
-                            entries.into_iter().map(|entry| TreeRow { entry, depth }),
+                            at..at,
+                            entries.into_iter().map(|entry| TreeRow {
+                                entry,
+                                depth,
+                                pending: false,
+                            }),
                         );
                         this.tree_message.clear();
                         this.reveal_current_file(window, cx);
@@ -592,11 +619,19 @@ impl Prototype {
             .find(|(_, row)| row.depth <= depth)
             .map(|(index, _)| index)
             .unwrap_or(self.tree.len());
+        let mut pending = None;
         for row in self.tree.drain(index + 1..end) {
+            if row.pending {
+                pending = Some(row);
+                continue;
+            }
             if self.expanded.remove(&row.entry.path) {
                 self.restore_expanded.insert(row.entry.path.clone());
             }
             self.tree_tasks.remove(&row.entry.path);
+        }
+        if let Some(row) = pending {
+            self.tree.insert(index + 1, row);
         }
         self.load_directory(path, window, cx);
     }
@@ -776,7 +811,12 @@ impl Prototype {
         self.file_task = None;
         self.active = pane;
         self.reveal_pending = matches!(pane, Pane::Document(_));
-        self.focus_active_editor(window, cx);
+        self.clear_tree_selection_for(pane);
+        if std::mem::take(&mut self.focus_tree_on_open) {
+            self.explorer_focus.focus(window, cx);
+        } else {
+            self.focus_active_editor(window, cx);
+        }
         self.observe_cursor(cx);
         self.reveal_current_file(window, cx);
         cx.notify();

@@ -2,6 +2,7 @@ mod assets;
 mod diff_doc;
 mod diff_syntax;
 mod file_icons;
+mod file_ops;
 mod files;
 mod fuzzy;
 mod languages;
@@ -130,6 +131,21 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     prototype::ToggleSidebar,
                     Some("WorkspaceEditor"),
                 ),
+                // Explorer (VS Code's macOS bindings), acting on the selected row.
+                KeyBinding::new("f2", prototype::RenameFile, Some("Explorer")),
+                KeyBinding::new("enter", prototype::RenameFile, Some("Explorer")),
+                KeyBinding::new("delete", prototype::DeleteFile, Some("Explorer")),
+                KeyBinding::new("cmd-backspace", prototype::DeleteFile, Some("Explorer")),
+                KeyBinding::new("secondary-c", prototype::CopyFiles, Some("Explorer")),
+                KeyBinding::new("secondary-x", prototype::CutFiles, Some("Explorer")),
+                KeyBinding::new("secondary-v", prototype::PasteFiles, Some("Explorer")),
+                KeyBinding::new("alt-cmd-c", prototype::CopyPath, Some("Explorer")),
+                KeyBinding::new(
+                    "alt-shift-cmd-c",
+                    prototype::CopyRelativePath,
+                    Some("Explorer"),
+                ),
+                KeyBinding::new("alt-cmd-r", prototype::RevealInFinder, Some("Explorer")),
                 KeyBinding::new("cmd-=", prototype::ZoomIn, Some("WorkspaceEditor")),
                 KeyBinding::new("cmd-+", prototype::ZoomIn, Some("WorkspaceEditor")),
                 KeyBinding::new("cmd--", prototype::ZoomOut, Some("WorkspaceEditor")),

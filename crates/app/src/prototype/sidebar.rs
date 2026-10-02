@@ -1,6 +1,7 @@
 //! The sidebar: VS Code-style view switcher on top, then Explorer / Search / Source Control.
 
 use super::SINGLE_LINE;
+use super::explorer_ops::{EditKind, FileClipboard};
 use super::{Decoration, DecorationKind, Prototype, Sidebar};
 use crate::{file_icons, theme};
 use gpui_kit::{
@@ -10,7 +11,7 @@ use gpui_kit::{
         button::{Button, ButtonVariants},
         h_flex,
         input::Input,
-        menu::{DropdownMenu, PopupMenuItem},
+        menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
         v_flex,
     },
     prelude::FluentBuilder,
@@ -249,6 +250,30 @@ impl Prototype {
                     .opacity(0.)
                     .group_hover("explorer-section", |actions| actions.opacity(1.))
                     .child(
+                        Button::new("explorer-new-file")
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::FilePlus)
+                            .tooltip("新建文件…")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                cx.stop_propagation();
+                                window.dispatch_action(Box::new(super::NewFile), cx);
+                                this.explorer_focus.focus(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("explorer-new-folder")
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::FolderPlus)
+                            .tooltip("新建文件夹…")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                cx.stop_propagation();
+                                window.dispatch_action(Box::new(super::NewFolder), cx);
+                                this.explorer_focus.focus(window, cx);
+                            })),
+                    )
+                    .child(
                         Button::new("refresh-tree")
                             .xsmall()
                             .ghost()
@@ -275,10 +300,31 @@ impl Prototype {
             .on_click(cx.listener(|this, _, _, cx| {
                 this.explorer_collapsed = !this.explorer_collapsed;
                 cx.notify();
-            }));
-        v_flex()
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, window, cx| {
+                    this.tree_selection = this.root.clone();
+                    this.explorer_focus.focus(window, cx);
+                    cx.notify();
+                }),
+            );
+        let weak = cx.weak_entity();
+        let root_path = root.entry.path.clone();
+        let header = header.context_menu(move |menu, _, cx| {
+            let can_paste = cx
+                .try_global::<FileClipboard>()
+                .is_some_and(|c| !c.paths.is_empty());
+            match weak.upgrade() {
+                Some(this) => this.read(cx).explorer_menu(&root_path, can_paste, menu),
+                None => menu,
+            }
+        });
+        let explorer = v_flex()
             .size_full()
             .min_h_0()
+            .track_focus(&self.explorer_focus);
+        self.explorer_actions(explorer, cx)
             .child(header)
             .when(!self.tree_message.is_empty(), |list| {
                 list.child(
@@ -327,9 +373,73 @@ impl Prototype {
             .into_any_element()
     }
 
+    /// The inline name field for a new file or folder, indented like its future row.
+    fn pending_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let colors = theme::colors(cx);
+        let row = &self.tree[index];
+        let level = row.depth.saturating_sub(1);
+        let Some(edit) = &self.tree_edit else {
+            return div().h(theme::ROW_HEIGHT).into_any_element();
+        };
+        let folder = matches!(edit.kind, EditKind::NewFolder(_));
+        div()
+            .w_full()
+            .px(theme::ROW_INSET)
+            .child(
+                h_flex()
+                    .id(("tree-row", index))
+                    .w_full()
+                    .h(theme::ROW_HEIGHT)
+                    .pl(theme::TREE_BASE - theme::ROW_INSET + theme::TREE_STEP * level as f32)
+                    .pr_2()
+                    .rounded(theme::RADIUS)
+                    .bg(colors.hover)
+                    .child(div().w(theme::TWISTY_WIDTH).flex_shrink_0())
+                    .child(
+                        div()
+                            .pl_1()
+                            .pr(theme::ROW_INSET * 3.)
+                            .child(file_icons::icon(if folder {
+                                file_icons::FOLDER
+                            } else {
+                                file_icons::for_file("")
+                            })),
+                    )
+                    .child(div().flex_1().min_w_0().child(self.edit_field(cx))),
+            )
+            .into_any_element()
+    }
+
+    fn edit_field(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(edit) = &self.tree_edit else {
+            return div().into_any_element();
+        };
+        div()
+            .key_context("ExplorerEdit")
+            // The field reports Enter as `PressEnter` and lets the action bubble; stop it here
+            // so the Explorer's own Enter (rename) does not start a new edit.
+            .on_action(|_: &gpui_kit::component::input::Enter, _, _| {})
+            .on_action(cx.listener(
+                |this, _: &gpui_kit::component::input::Escape, window, cx| {
+                    this.cancel_tree_edit(cx);
+                    this.explorer_focus.focus(window, cx);
+                },
+            ))
+            .child(
+                Input::new(&edit.input)
+                    .xsmall()
+                    .text_size(theme::TEXT_BODY)
+                    .h(theme::ROW_HEIGHT - theme::ROW_INSET * 2.),
+            )
+            .into_any_element()
+    }
+
     fn tree_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
         let row = &self.tree[index];
+        if row.pending {
+            return self.pending_row(index, cx);
+        }
         let entry = &row.entry;
         let path = entry.path.clone();
         let name = path
@@ -339,10 +449,17 @@ impl Prototype {
             .replace(SINGLE_LINE, "⏎");
         let directory = entry.directory;
         let expanded = self.expanded.contains(&path);
-        let selected = self
-            .documents
-            .iter()
-            .any(|doc| self.active == super::Pane::Document(doc.id) && doc.path == path);
+        let selected = match &self.tree_selection {
+            Some(selection) => *selection == path,
+            None => self
+                .documents
+                .iter()
+                .any(|doc| self.active == super::Pane::Document(doc.id) && doc.path == path),
+        };
+        let editing = self
+            .tree_edit
+            .as_ref()
+            .is_some_and(|edit| edit.kind == EditKind::Rename(path.clone()));
         let level = row.depth.saturating_sub(1);
         let decoration: Option<Decoration> = self.decorations.get(&path).copied();
         let name_color = match decoration {
@@ -413,7 +530,13 @@ impl Prototype {
                         file_icons::for_file(&name)
                     })),
             )
-            .child(
+            .child(if editing {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(self.edit_field(cx))
+                    .into_any_element()
+            } else {
                 div()
                     .flex_1()
                     .min_w_0()
@@ -421,8 +544,9 @@ impl Prototype {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_color(name_color)
-                    .child(format!("{name}{}", if entry.symlink { " ↗" } else { "" })),
-            )
+                    .child(format!("{name}{}", if entry.symlink { " ↗" } else { "" }))
+                    .into_any_element()
+            })
             .when_some(decoration, |row, decoration| {
                 let color = colors.decoration(decoration.kind);
                 row.child(
@@ -447,13 +571,39 @@ impl Prototype {
                         }),
                 )
             })
-            .on_click(cx.listener(move |this, _, window, cx| {
-                if directory {
-                    this.toggle_directory(index, window, cx);
-                } else {
-                    this.open_file(path.clone(), this.root.clone(), window, cx);
-                }
-            }));
+            .on_mouse_down(MouseButton::Right, {
+                let path = path.clone();
+                cx.listener(move |this, _, window, cx| {
+                    this.select_tree_path(path.clone(), window, cx)
+                })
+            })
+            .on_click({
+                let path = path.clone();
+                cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    if this.tree_edit.is_some() {
+                        return;
+                    }
+                    this.select_tree_path(path.clone(), window, cx);
+                    if directory {
+                        this.toggle_directory(index, window, cx);
+                    } else {
+                        // One click previews and keeps the tree focused (arrow keys, ⌘C, F2);
+                        // a double click moves into the editor, as in VS Code.
+                        this.focus_tree_on_open = event.click_count() < 2;
+                        this.open_file(path.clone(), this.root.clone(), window, cx);
+                    }
+                })
+            });
+        let weak = cx.weak_entity();
+        let row = row.context_menu(move |menu, _, cx| {
+            let can_paste = cx
+                .try_global::<FileClipboard>()
+                .is_some_and(|c| !c.paths.is_empty());
+            match weak.upgrade() {
+                Some(this) => this.read(cx).explorer_menu(&path, can_paste, menu),
+                None => menu,
+            }
+        });
         div()
             .w_full()
             .px(theme::ROW_INSET)
