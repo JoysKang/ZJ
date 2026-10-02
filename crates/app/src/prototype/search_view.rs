@@ -2,13 +2,16 @@
 //! the query with Aa / ab / .* toggles, collapsible "包含的文件" / "排除的文件" globs with the
 //! "使用排除设置和忽略文件" switch, then matches grouped by file. File-name search stays on ⌘P.
 
-use super::{Prototype, SINGLE_LINE, navigation::Placement, sidebar::chevron};
+use super::{
+    Prototype, SINGLE_LINE, navigation::Placement, search_replace::ReplaceState, sidebar::chevron,
+};
+use crate::replace::{Finder, Query};
 use crate::text_search::{self, FileMatches, Matcher, Options, Progress};
 use crate::{file_icons, theme};
 use gpui_kit::{
     assets::IconName,
     component::{
-        Selectable, Sizable,
+        Disableable, Selectable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         input::{Input, InputEvent, InputState},
@@ -42,14 +45,14 @@ pub(super) struct SearchState {
     pub query: Entity<InputState>,
     include: Entity<InputState>,
     exclude: Entity<InputState>,
-    case_sensitive: bool,
-    whole_word: bool,
-    regex: bool,
+    pub case_sensitive: bool,
+    pub whole_word: bool,
+    pub regex: bool,
     details: bool,
-    results: Vec<FileMatches>,
-    collapsed: HashSet<PathBuf>,
+    pub results: Vec<FileMatches>,
+    pub collapsed: HashSet<PathBuf>,
     rows: Vec<SearchRow>,
-    matches: usize,
+    pub matches: usize,
     truncated: bool,
     error: Option<String>,
     running: bool,
@@ -59,6 +62,11 @@ pub(super) struct SearchState {
     cancel: Arc<AtomicBool>,
     task: Option<Task<()>>,
     scroll: UniformListScrollHandle,
+    pub replace: ReplaceState,
+    /// The running search compiled for replacing (`finder`) and for searching a rewritten
+    /// file again (`matcher`).
+    pub finder: Option<Arc<Finder>>,
+    pub matcher: Option<Arc<Matcher>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -74,7 +82,10 @@ impl SearchState {
                      window: &mut Window,
                      cx: &mut Context<Prototype>| {
             match event {
-                InputEvent::Change => this.schedule_search(DEBOUNCE, window, cx),
+                InputEvent::Change => {
+                    this.search.replace.summary = None;
+                    this.schedule_search(DEBOUNCE, window, cx)
+                }
                 InputEvent::PressEnter { .. } => this.schedule_search(Duration::ZERO, window, cx),
                 _ => {}
             }
@@ -104,11 +115,14 @@ impl SearchState {
             cancel: Arc::new(AtomicBool::new(false)),
             task: None,
             scroll: UniformListScrollHandle::new(),
+            replace: ReplaceState::new(window, cx),
+            finder: None,
+            matcher: None,
             _subscriptions: subscriptions,
         }
     }
 
-    fn rebuild_rows(&mut self) {
+    pub fn rebuild_rows(&mut self) {
         self.rows.clear();
         for (f, file) in self.results.iter().enumerate() {
             self.rows.push(SearchRow::File(f));
@@ -189,7 +203,7 @@ impl Prototype {
             return;
         }
         let matcher = match Matcher::new(&options) {
-            Ok(matcher) => matcher,
+            Ok(matcher) => Arc::new(matcher),
             Err(error) => {
                 self.search.error = Some(error);
                 self.search.running = false;
@@ -197,6 +211,15 @@ impl Prototype {
                 return;
             }
         };
+        self.search.matcher = Some(matcher.clone());
+        self.search.finder = Finder::new(&Query {
+            pattern: options.pattern.clone(),
+            case_sensitive: options.case_sensitive,
+            whole_word: options.whole_word,
+            regex: options.regex,
+        })
+        .ok()
+        .map(Arc::new);
         let index = self.index.clone();
         if options.use_excludes && index.is_none() {
             // build_index starts the search once the file list exists.
@@ -273,7 +296,7 @@ impl Prototype {
         }
     }
 
-    fn open_match(
+    pub(super) fn open_match(
         &mut self,
         file: usize,
         line: usize,
@@ -369,6 +392,9 @@ impl Prototype {
             None
         } else if search.running && search.results.is_empty() {
             Some(("正在搜索…".into(), colors.muted))
+        } else if search.results.is_empty() && search.replace.summary.is_some() {
+            // Everything was replaced; the replace summary says so.
+            None
         } else if search.results.is_empty() {
             Some(("未找到结果。请检查排除设置和忽略文件".into(), colors.muted))
         } else {
@@ -388,6 +414,81 @@ impl Prototype {
                 colors.muted,
             ))
         };
+        let replace = &search.replace;
+        let replace_toggle = Button::new("search-toggle-replace")
+            .xsmall()
+            .ghost()
+            .icon(if replace.open {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
+            .tooltip("切换替换")
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_search_replace(window, cx)));
+        let preserve_case = Button::new("search-preserve-case")
+            .small()
+            .ghost()
+            .icon(IconName::CaseUpper)
+            .selected(replace.preserve_case)
+            .tooltip("保留大小写")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.search.replace.preserve_case = !this.search.replace.preserve_case;
+                cx.notify();
+            }));
+        let replace_all = Button::new("search-replace-all")
+            .small()
+            .ghost()
+            .icon(IconName::ReplaceAll)
+            .tooltip("全部替换")
+            .disabled(search.results.is_empty() || replace.running)
+            .on_click(cx.listener(|this, _, window, cx| this.confirm_replace_all(window, cx)));
+        let inputs = h_flex()
+            .ml(theme::SEARCH_CHEVRON_OUTDENT)
+            .gap_0p5()
+            .items_start()
+            .child(div().pt_1().child(replace_toggle))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
+                    .child(Input::new(&search.query).small().suffix(query_options))
+                    .when(replace.open, |inputs| {
+                        inputs.child(
+                            h_flex()
+                                .gap_0p5()
+                                .child(div().flex_1().min_w_0().child(
+                                    Input::new(&replace.input).small().suffix(preserve_case),
+                                ))
+                                .child(replace_all),
+                        )
+                    }),
+            );
+        let replace_summary = replace.summary.clone().map(|(text, warn)| {
+            h_flex()
+                .gap_1()
+                .pt_1()
+                .text_size(theme::TEXT_CAPTION)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_color(if warn { colors.deleted } else { colors.muted })
+                        .child(text),
+                )
+                .when(replace.has_undo(), |row| {
+                    row.child(
+                        Button::new("search-undo-replace")
+                            .xsmall()
+                            .ghost()
+                            .label("撤销")
+                            .disabled(replace.running)
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.undo_replace(window, cx)),
+                            ),
+                    )
+                })
+        });
         v_flex()
             .size_full()
             .min_h_0()
@@ -397,7 +498,7 @@ impl Prototype {
                     .pb_1()
                     .gap_1()
                     .flex_shrink_0()
-                    .child(Input::new(&search.query).small().suffix(query_options))
+                    .child(inputs)
                     .child(
                         h_flex().justify_end().child(
                             Button::new("search-details")
@@ -445,7 +546,8 @@ impl Prototype {
                                 .text_color(color)
                                 .child(text),
                         )
-                    }),
+                    })
+                    .children(replace_summary),
             )
             .child(
                 uniform_list(
@@ -462,10 +564,36 @@ impl Prototype {
             .into_any_element()
     }
 
+    /// Buttons shown while a row is hovered (VS Code's inline actions).
+    fn row_actions(&self, group: SharedString, buttons: Vec<Button>) -> AnyElement {
+        h_flex()
+            .flex_shrink_0()
+            .gap_0p5()
+            .invisible()
+            .group_hover(group, |actions| actions.visible())
+            // The row's own click must not fire under the buttons.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .children(buttons)
+            .into_any_element()
+    }
+
+    fn row_button(id: (&'static str, usize), icon: IconName, label: &'static str) -> Button {
+        Button::new(id)
+            .xsmall()
+            .ghost()
+            .icon(icon)
+            .tooltip(label)
+            .accessibility_label(label)
+    }
+
     fn search_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
+        let group: SharedString = format!("search-row-{index}").into();
+        let replacing = self.search.replace.open;
+        let busy = self.search.replace.running;
         let base = h_flex()
             .id(("search-row", index))
+            .group(group.clone())
             .w_full()
             .h(theme::ROW_HEIGHT)
             .pr_2()
@@ -492,6 +620,26 @@ impl Prototype {
                     .unwrap_or_default();
                 let expanded = !self.search.collapsed.contains(&file.path);
                 let path = file.path.clone();
+                let mut buttons = Vec::new();
+                if replacing {
+                    buttons.push(
+                        Self::row_button(
+                            ("search-file-replace", f),
+                            IconName::ReplaceAll,
+                            "全部替换",
+                        )
+                        .disabled(busy)
+                        .on_click(
+                            cx.listener(move |this, _, window, cx| {
+                                this.replace_file(f, window, cx)
+                            }),
+                        ),
+                    );
+                }
+                buttons.push(
+                    Self::row_button(("search-file-ignore", f), IconName::Close, "忽略")
+                        .on_click(cx.listener(move |this, _, _, cx| this.ignore_file(f, cx))),
+                );
                 base.pl(theme::ROW_INSET)
                     .role(Role::TreeItem)
                     .aria_label(format!(
@@ -512,6 +660,7 @@ impl Prototype {
                             .text_color(colors.muted)
                             .child(folder),
                     )
+                    .child(self.row_actions(group, buttons))
                     .child(super::scm::count_badge(file.count, colors))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.search.collapsed.remove(&path) {
@@ -523,12 +672,56 @@ impl Prototype {
             }
             SearchRow::Line(f, l) => {
                 let line = &self.search.results[f].lines[l];
-                let highlight = HighlightStyle {
+                let found = HighlightStyle {
                     background_color: Some(colors.find_match),
                     ..Default::default()
                 };
-                let text = StyledText::new(line.preview.clone())
-                    .with_highlights(line.ranges.iter().map(|r| (r.clone(), highlight)));
+                let text = if replacing {
+                    // The match struck through in red, then the replacement in green.
+                    let (text, removed, added) =
+                        self.replace_preview(&line.preview, &line.ranges, cx);
+                    let removed_style = HighlightStyle {
+                        background_color: Some(colors.diff_deleted_text),
+                        strikethrough: Some(StrikethroughStyle {
+                            thickness: theme::STRIKE,
+                            color: Some(colors.foreground),
+                        }),
+                        ..Default::default()
+                    };
+                    let added_style = HighlightStyle {
+                        background_color: Some(colors.diff_added_text),
+                        ..Default::default()
+                    };
+                    let mut runs: Vec<(std::ops::Range<usize>, HighlightStyle)> = removed
+                        .into_iter()
+                        .map(|r| (r, removed_style))
+                        .chain(added.into_iter().map(|r| (r, added_style)))
+                        .filter(|(r, _)| r.start < r.end)
+                        .collect();
+                    runs.sort_by_key(|(r, _)| r.start);
+                    StyledText::new(text).with_highlights(runs)
+                } else {
+                    StyledText::new(line.preview.clone()).with_highlights(
+                        line.ranges
+                            .iter()
+                            .filter(|r| r.start < r.end)
+                            .map(|r| (r.clone(), found)),
+                    )
+                };
+                let mut buttons = Vec::new();
+                if replacing {
+                    buttons.push(
+                        Self::row_button(("search-line-replace", index), IconName::Replace, "替换")
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.replace_line(f, l, window, cx)
+                            })),
+                    );
+                }
+                buttons.push(
+                    Self::row_button(("search-line-ignore", index), IconName::Close, "忽略")
+                        .on_click(cx.listener(move |this, _, _, cx| this.ignore_line(f, l, cx))),
+                );
                 base.pl(theme::TREE_BASE + theme::TREE_STEP * 3.)
                     .role(Role::Button)
                     .aria_label(format!("第 {} 行：{}", line.line + 1, line.preview))
@@ -540,9 +733,14 @@ impl Prototype {
                             .text_ellipsis()
                             .child(text),
                     )
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.open_match(f, l, window, cx)),
-                    )
+                    .child(self.row_actions(group, buttons))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.search.replace.open {
+                            this.preview_replace(f, window, cx)
+                        } else {
+                            this.open_match(f, l, window, cx)
+                        }
+                    }))
             }
         };
         div()

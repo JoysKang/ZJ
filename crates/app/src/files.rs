@@ -428,6 +428,31 @@ impl Builder<'_> {
     }
 }
 
+/// What a file looked like when it was read: a later write checks it is still the same
+/// file, unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FileStamp {
+    pub device: u64,
+    pub inode: u64,
+    pub len: u64,
+    pub modified_ns: i128,
+}
+
+impl FileStamp {
+    pub fn of(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            len: metadata.len(),
+            modified_ns: metadata.mtime() as i128 * 1_000_000_000 + metadata.mtime_nsec() as i128,
+        }
+    }
+
+    pub fn read(path: &Path) -> io::Result<Self> {
+        Ok(Self::of(&fs::metadata(path)?))
+    }
+}
+
 pub struct TextFile {
     pub id: DocumentId,
     pub path: PathBuf,

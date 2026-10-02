@@ -45,6 +45,7 @@ pub mod navigation;
 mod quick_open;
 mod scm;
 mod scm_actions;
+mod search_replace;
 mod search_view;
 mod sidebar;
 mod welcome;
@@ -107,7 +108,25 @@ struct DiffTab {
     label: String,
     tooltip: String,
     path: PathBuf,
-    request: Request,
+    source: DiffSource,
+}
+
+/// Where a diff tab's patch comes from.
+#[derive(Clone)]
+enum DiffSource {
+    Git(Request),
+    /// A full-context patch built in the app (the Search view's replace preview).
+    Local(Arc<str>),
+}
+
+impl DiffTab {
+    /// The Git comparison, if this tab shows one (only those can be staged or reverted).
+    fn request(&self) -> Option<&Request> {
+        match &self.source {
+            DiffSource::Git(request) => Some(request),
+            DiffSource::Local(_) => None,
+        }
+    }
 }
 
 struct TreeRow {
@@ -235,6 +254,9 @@ pub struct Prototype {
     tree_message: String,
     search: search_view::SearchState,
     find: find_widget::FindState,
+    /// Buffers being reloaded after a replace in the Search view: their next change event
+    /// does not mark them edited.
+    reloading: std::collections::HashSet<DocumentId>,
     index: Option<Arc<PathIndex>>,
     index_task: Option<Task<()>>,
     index_cancel: Arc<AtomicBool>,
@@ -433,6 +455,7 @@ impl Prototype {
             tree_message: String::new(),
             search,
             find,
+            reloading: Default::default(),
             index: None,
             index_task: None,
             index_cancel: Arc::new(AtomicBool::new(false)),
@@ -1027,8 +1050,9 @@ impl Prototype {
                     &editor,
                     move |this: &mut Self, _, event: &InputEvent, cx| {
                         if matches!(event, InputEvent::Change) {
+                            let reloaded = this.reloading.remove(&id);
                             if let Some(doc) = this.documents.iter_mut().find(|doc| doc.id == id) {
-                                doc.dirty = true;
+                                doc.dirty |= !reloaded;
                             }
                             if this.active == Pane::Document(id) {
                                 this.find_update(false, cx);
@@ -1145,9 +1169,11 @@ impl Prototype {
         self.loading = true;
         self.excluded = 0;
         self.preview_stale = self.preview_diff.as_ref().is_some_and(|diff| {
-            targets
-                .as_ref()
-                .is_none_or(|ids| ids.contains(&diff.request.repo.id))
+            diff.request().is_some_and(|request| {
+                targets
+                    .as_ref()
+                    .is_none_or(|ids| ids.contains(&request.repo.id))
+            })
         });
         std::thread::spawn(move || {
             let started = Instant::now();
@@ -1520,7 +1546,7 @@ impl Prototype {
             ),
             tooltip: g.repo.worktree.join(&change.path).display().to_string(),
             path: g.repo.worktree.join(&change.path),
-            request,
+            source: DiffSource::Git(request),
         };
         self.close_preview(window, cx);
         self.message.clear();
@@ -1536,18 +1562,18 @@ impl Prototype {
         let Some(diff) = &self.preview_diff else {
             return;
         };
-        let mut request = diff.request.clone();
+        let mut source = diff.source.clone();
         let title = diff.label.clone();
         self.preview_cancel.store(true, Ordering::Relaxed);
         self.preview_generation += 1;
-        request.generation = self.preview_generation;
+        if let DiffSource::Git(request) = &mut source {
+            request.generation = self.preview_generation;
+        }
         self.preview_stale = false;
         self.preview_cancel = Arc::new(AtomicBool::new(false));
         let cancel = self.preview_cancel.clone();
         let service = self.service.clone();
         let version = self.preview_generation;
-        let repo_id = request.repo.id.clone();
-        let generation = request.generation;
         self.preview_title = format!("正在加载 {title}");
         let highlight = gpui_kit::component::Theme::global(cx)
             .highlight_theme
@@ -1563,13 +1589,18 @@ impl Prototype {
             language => Some(language),
         };
         let job = cx.background_spawn(async move {
-            let reply = service.execute(&request, &cancel)?;
-            if reply.repo != repo_id || reply.generation != generation {
-                return Err(std::io::Error::other("Diff 结果的仓库或版本不匹配"));
-            }
-            let text: Arc<str> = String::from_utf8(reply.output)
-                .map_err(std::io::Error::other)?
-                .into();
+            let text: Arc<str> = match source {
+                DiffSource::Git(request) => {
+                    let reply = service.execute(&request, &cancel)?;
+                    if reply.repo != request.repo.id || reply.generation != request.generation {
+                        return Err(std::io::Error::other("Diff 结果的仓库或版本不匹配"));
+                    }
+                    String::from_utf8(reply.output)
+                        .map_err(std::io::Error::other)?
+                        .into()
+                }
+                DiffSource::Local(patch) => patch,
+            };
             let doc = crate::diff_doc::DiffDoc::parse(&text, language, &highlight, change_colors)
                 .map(Arc::new);
             let raw = crate::partial_patch::parse(&text).map(Arc::new);

@@ -43,6 +43,8 @@ pub const SECTION_HEIGHT: Pixels = px(24.);
 pub const TREE_BASE: Pixels = px(12.);
 pub const TREE_STEP: Pixels = px(8.);
 pub const ROW_INSET: Pixels = px(2.);
+/// The Search view's replace chevron sits in the left margin, outside the inputs' edge.
+pub const SEARCH_CHEVRON_OUTDENT: Pixels = px(-10.);
 pub const GUIDE_WIDTH: Pixels = px(1.);
 pub const DECORATION_DOT: Pixels = px(6.);
 pub const DECORATION_WIDTH: Pixels = px(16.);
@@ -65,6 +67,8 @@ pub const FIND_COUNT_WIDTH: Pixels = px(112.);
 pub const FIND_BUTTON: Pixels = px(22.);
 pub const FIND_TOGGLE: Pixels = px(20.);
 pub const FIND_SHADOW_BLUR: Pixels = px(8.);
+/// Strikethrough on replaced text in the Search view's previews.
+pub const STRIKE: Pixels = px(1.);
 pub const FIND_SHADOW_Y: Pixels = px(2.);
 pub const STATUS_HEIGHT: Pixels = px(24.);
 /// Active tab indicator thickness (VS Code's tab.activeBorderTop).

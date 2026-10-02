@@ -136,15 +136,18 @@ pub fn changed_lines(
 
 impl Prototype {
     pub(super) fn diff_staged(&self) -> bool {
-        self.preview_diff.as_ref().is_some_and(|tab| {
-            matches!(
-                tab.request.operation,
-                Operation::Diff {
-                    side: DiffSide::Staged,
-                    ..
-                }
-            )
-        })
+        self.preview_diff
+            .as_ref()
+            .and_then(|tab| tab.request())
+            .is_some_and(|request| {
+                matches!(
+                    request.operation,
+                    Operation::Diff {
+                        side: DiffSide::Staged,
+                        ..
+                    }
+                )
+            })
     }
 
     /// Whether lines of this diff can be staged, unstaged or reverted on their own.
@@ -156,11 +159,8 @@ impl Prototype {
             && !self
                 .preview_diff
                 .as_ref()
-                .and_then(|tab| {
-                    self.groups
-                        .iter()
-                        .find(|g| g.repo.id == tab.request.repo.id)
-                })
+                .and_then(|tab| tab.request())
+                .and_then(|request| self.groups.iter().find(|g| g.repo.id == request.repo.id))
                 .is_none_or(|g| g.write_pending)
     }
 
@@ -282,14 +282,17 @@ impl Prototype {
         let Some(patch) = raw.select(&selected, direction) else {
             return;
         };
-        let path = match &tab.request.operation {
+        let Some(tab_request) = tab.request() else {
+            return;
+        };
+        let path = match &tab_request.operation {
             Operation::Diff { path, .. } | Operation::UntrackedDiff { path } => path.clone(),
             Operation::Status => return,
         };
         let Some(group) = self
             .groups
             .iter()
-            .find(|g| g.repo.id == tab.request.repo.id)
+            .find(|g| g.repo.id == tab_request.repo.id)
         else {
             return;
         };

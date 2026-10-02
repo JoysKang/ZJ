@@ -23,8 +23,9 @@ pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_WALK_FILES: usize = 200_000;
 /// Bytes checked for NUL before a file counts as binary.
 const BINARY_PROBE: usize = 8 * 1024;
-/// A preview keeps this many characters before the first match on its line.
-const PREVIEW_LEAD: usize = 40;
+/// A preview keeps this many characters before the first match on its line (VS Code keeps
+/// a few words; more pushes the match out of a narrow sidebar, especially in CJK text).
+const PREVIEW_LEAD: usize = 12;
 const PREVIEW_MAX: usize = 240;
 /// Folders that are never worth searching, also excluded by default (like VS Code's
 /// `search.exclude`), on top of `.gitignore` and [`EXCLUDED_DIRS`](workspace_editor_core::EXCLUDED_DIRS).
@@ -50,9 +51,12 @@ pub struct LineMatch {
     pub line: u32,
     pub column: u32,
     pub len: u32,
-    /// The line, shortened around the first match, and the matches inside it.
+    /// The line, shortened around the first match, and the matches inside it. `ranges[i]`
+    /// is `spans[i]` moved into the preview (empty when that match was cut off).
     pub preview: String,
     pub ranges: Vec<Range<usize>>,
+    /// Byte ranges of the matches in the file, for replacing exactly these.
+    pub spans: Vec<Range<usize>>,
 }
 
 #[derive(Clone, Debug)]
@@ -61,6 +65,8 @@ pub struct FileMatches {
     pub relative: PathBuf,
     pub lines: Vec<LineMatch>,
     pub count: usize,
+    /// The file as it was searched; a replace skips the file if it changed since.
+    pub stamp: Option<crate::files::FileStamp>,
 }
 
 #[derive(Default)]
@@ -264,6 +270,7 @@ impl Matcher {
             if bounds.last() == Some(&(start, end)) {
                 if let Some(last) = lines.last_mut() {
                     last.ranges.push(range);
+                    last.spans.push(found.range());
                 }
                 continue;
             }
@@ -274,6 +281,7 @@ impl Matcher {
                 len: (range.end - range.start) as u32,
                 preview: String::new(),
                 ranges: vec![range],
+                spans: vec![found.range()],
             });
         }
         for (found, (start, end)) in lines.iter_mut().zip(bounds) {
@@ -317,12 +325,22 @@ fn preview_line(text: &[u8], matches: &[Range<usize>]) -> (String, Vec<Range<usi
         };
         offset.saturating_sub(cut) + prefix
     };
+    // One range per match, kept in step with the spans; a match that was cut off is empty.
     let ranges = matches
         .iter()
-        .filter(|r| r.start >= cut && lossy.is_char_boundary(r.start.min(lossy.len())))
-        .map(|r| shift(r.start)..shift(r.end).min(preview.len()))
-        .filter(|r| {
-            r.start < r.end && preview.is_char_boundary(r.start) && preview.is_char_boundary(r.end)
+        .map(|r| {
+            if r.start < cut || !lossy.is_char_boundary(r.start.min(lossy.len())) {
+                return 0..0;
+            }
+            let range = shift(r.start)..shift(r.end).min(preview.len());
+            if range.start < range.end
+                && preview.is_char_boundary(range.start)
+                && preview.is_char_boundary(range.end)
+            {
+                range
+            } else {
+                0..0
+            }
         })
         .collect();
     (preview, ranges)
@@ -356,12 +374,14 @@ pub fn run(
                     let Ok(file) = fs::File::open(&path) else {
                         continue;
                     };
-                    if file
-                        .metadata()
-                        .is_ok_and(|m| !m.is_file() || m.len() > MAX_FILE_BYTES)
+                    let metadata = file.metadata().ok();
+                    if metadata
+                        .as_ref()
+                        .is_some_and(|m| !m.is_file() || m.len() > MAX_FILE_BYTES)
                     {
                         continue;
                     }
+                    let stamp = metadata.as_ref().map(crate::files::FileStamp::of);
                     if file
                         .take(MAX_FILE_BYTES + 1)
                         .read_to_end(&mut buffer)
@@ -386,6 +406,7 @@ pub fn run(
                         relative,
                         lines,
                         count,
+                        stamp,
                     });
                 }
             });

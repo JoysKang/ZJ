@@ -1,15 +1,109 @@
-//! Explorer file operations: create, rename, copy, move and move to the Trash.
+//! Explorer file operations: create, rename, copy, move and move to the Trash; and the
+//! Search view's replace, which rewrites files atomically and only if they are unchanged.
 //!
 //! Every function takes absolute paths chosen in the Explorer and works on the filesystem
 //! directly; names typed by the user are validated as a single path component first. Symlinks
 //! are copied as links, never followed.
 
+use crate::files::FileStamp;
+use crate::replace::{self, Finder, Replacement};
 use std::{
     ffi::{OsStr, OsString},
-    fs, io,
+    fs,
+    io::{self, Write},
+    ops::Range,
     os::unix::ffi::{OsStrExt, OsStringExt},
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
+
+/// Why a replace left a file alone.
+pub const STALE: &str = "文件在搜索后已修改";
+
+/// Replaces `path`'s contents with `bytes` through a temporary file in the same folder and a
+/// rename, keeping its permissions, only if it is still the file `expected` describes.
+/// Symlinks and files with several hard links are refused (a rename would detach them).
+pub fn rewrite(path: &Path, expected: &FileStamp, bytes: &[u8]) -> io::Result<FileStamp> {
+    let check = || -> io::Result<fs::Metadata> {
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(io::Error::other("是符号链接，未替换"));
+        }
+        if metadata.nlink() > 1 {
+            return Err(io::Error::other("有多个硬链接，未替换"));
+        }
+        if FileStamp::of(&metadata) != *expected {
+            return Err(io::Error::other(STALE));
+        }
+        Ok(metadata)
+    };
+    let metadata = check()?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other("文件没有父目录"))?;
+    let mut name = OsString::from(".");
+    name.push(path.file_name().unwrap_or_default());
+    name.push(format!(".zj-replace-{}", std::process::id()));
+    let temporary = dir.join(name);
+    let result = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.set_permissions(fs::Permissions::from_mode(metadata.permissions().mode()))?;
+        file.sync_data()?;
+        // The file may have changed while the new contents were written.
+        check()?;
+        fs::rename(&temporary, path)
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    FileStamp::read(path)
+}
+
+/// A file the Search view rewrote: enough to undo it while nobody else touched it.
+pub struct Rewritten {
+    pub path: PathBuf,
+    pub count: usize,
+    pub original: Vec<u8>,
+    pub written: FileStamp,
+    pub text: String,
+}
+
+/// Replaces the matches an earlier search found at `spans` in `path`, if the file is still
+/// as it was then (`stamp`) and every span is still a match. A `\n` in the replacement
+/// becomes the file's line ending; a byte order mark is kept.
+pub fn replace_in_file(
+    path: &Path,
+    stamp: Option<&FileStamp>,
+    finder: &Finder,
+    spans: &[Range<usize>],
+    replacement: &Replacement,
+) -> io::Result<Rewritten> {
+    let stamp = stamp.ok_or_else(|| io::Error::other(STALE))?;
+    if FileStamp::read(path)? != *stamp {
+        return Err(io::Error::other(STALE));
+    }
+    let original = fs::read(path)?;
+    let text =
+        std::str::from_utf8(&original).map_err(|_| io::Error::other("不是 UTF-8 文本，未替换"))?;
+    let replacement = replacement.clone().with_eol(replace::eol_of(text));
+    let edits = finder
+        .edits_at(text, spans, &replacement)
+        .ok_or_else(|| io::Error::other(STALE))?;
+    let new = replace::apply(text, &edits);
+    let written = rewrite(path, stamp, new.as_bytes())?;
+    Ok(Rewritten {
+        path: path.to_path_buf(),
+        count: edits.len(),
+        original,
+        written,
+        text: new,
+    })
+}
 
 /// A name typed into the Explorer: one component, not `.` / `..`, no `/` or NUL.
 pub fn validate_name(name: &str) -> io::Result<&OsStr> {
@@ -289,6 +383,66 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replace_in_files_keeps_line_endings_and_refuses_stale_files() {
+        let root = std::env::temp_dir().join(format!("zj-replace-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("中文.txt");
+        fs::write(&path, "\u{feff}one foo\r\nfoo two\r\n").unwrap();
+        let finder = Finder::new(&replace::Query {
+            pattern: "foo".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        let spans = finder.find_all(&text, 99);
+        let stamp = FileStamp::read(&path).unwrap();
+        // Only the second match, with a line break in the replacement.
+        let regex = Finder::new(&replace::Query {
+            pattern: "foo".into(),
+            regex: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let done = replace_in_file(
+            &path,
+            Some(&stamp),
+            &regex,
+            &spans[1..],
+            &Replacement::new(r"bar\nbaz", true, false),
+        )
+        .unwrap();
+        assert_eq!(done.count, 1);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "\u{feff}one foo\r\nbar\r\nbaz two\r\n"
+        );
+        // The old stamp no longer matches: the file is skipped and left alone.
+        let error = replace_in_file(
+            &path,
+            Some(&stamp),
+            &finder,
+            &spans,
+            &Replacement::new("x", false, false),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), STALE);
+        // Undo while nobody touched it.
+        rewrite(&path, &done.written, &done.original).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        // Symlinks and changed files are refused.
+        let link = root.join("link.txt");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        let now = FileStamp::read(&path).unwrap();
+        assert!(rewrite(&link, &now, b"x").is_err());
+        fs::write(&path, "changed").unwrap();
+        assert_eq!(rewrite(&path, &now, b"x").unwrap_err().to_string(), STALE);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "changed");
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn create_rename_copy_move_and_trash_in_a_temporary_folder() {

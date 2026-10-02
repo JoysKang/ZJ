@@ -234,7 +234,8 @@ impl Prototype {
             if self
                 .preview_diff
                 .as_ref()
-                .is_some_and(|diff| plan.repos.contains(&diff.request.repo.id))
+                .and_then(|diff| diff.request())
+                .is_some_and(|request| plan.repos.contains(&request.repo.id))
             {
                 self.invalidate_preview(cx);
             }

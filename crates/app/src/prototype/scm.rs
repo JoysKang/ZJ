@@ -651,15 +651,15 @@ impl Prototype {
         // The row whose diff is open is selected, as in VS Code.
         let selected = self.preview_diff.as_ref().is_some_and(|diff| {
             diff.path == file_path
-                && match &diff.request.operation {
-                    workspace_editor_git::Operation::Diff { side: open, .. } => {
+                && match diff.request().map(|request| &request.operation) {
+                    Some(workspace_editor_git::Operation::Diff { side: open, .. }) => {
                         matches!(
                             (open, side),
                             (DiffSide::Staged, DiffSide::Staged)
                                 | (DiffSide::Worktree, DiffSide::Worktree)
                         )
                     }
-                    workspace_editor_git::Operation::UntrackedDiff { .. } => true,
+                    Some(workspace_editor_git::Operation::UntrackedDiff { .. }) => true,
                     _ => false,
                 }
         });
