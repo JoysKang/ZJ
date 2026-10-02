@@ -36,6 +36,7 @@ enum Fill {
 struct Paint {
     colors: theme::Colors,
     font: SharedString,
+    metrics: theme::DiffMetrics,
     width: Pixels,
 }
 
@@ -237,12 +238,14 @@ impl Prototype {
             };
         };
         let font = Theme::global(cx).mono_font_family.clone();
+        let metrics = theme::diff_metrics(Theme::global(cx).mono_font_size);
         let paint = |gutters: f32| Paint {
             colors,
             font: font.clone(),
+            metrics,
             width: theme::DIFF_GUTTER * gutters
                 + theme::DIFF_INDICATOR
-                + theme::DIFF_COLUMN_WIDTH * doc.columns as f32
+                + metrics.column * doc.columns as f32
                 + theme::DIFF_TEXT_END,
         };
         let inline = self.diff_is_inline();
@@ -507,15 +510,15 @@ fn line_row(
         Fill::Plain | Fill::Filler => "",
     };
     h_flex()
-        .h(theme::DIFF_ROW_HEIGHT)
+        .h(paint.metrics.row)
         .w(paint.width)
         .min_w_full()
         .flex_shrink_0()
         .overflow_hidden()
         .whitespace_nowrap()
         .font_family(paint.font.clone())
-        .text_size(theme::DIFF_TEXT)
-        .line_height(theme::DIFF_ROW_HEIGHT)
+        .text_size(paint.metrics.text)
+        .line_height(paint.metrics.row)
         .map(|row| match fill {
             _ if selected => row.bg(colors.selection),
             Fill::Plain => row,

@@ -8,6 +8,7 @@ mod languages;
 mod partial_patch;
 mod prototype;
 mod refresh_plan;
+mod settings;
 mod symbol_index;
 mod symbols;
 mod theme;
@@ -90,6 +91,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .with_assets(assets::AppAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
+            cx.set_global(settings::Settings::load());
             cx.set_global(watch::WatchService::default());
             diff_syntax::register();
             theme::follow_appearance(None, cx);
@@ -128,6 +130,10 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     prototype::ToggleSidebar,
                     Some("WorkspaceEditor"),
                 ),
+                KeyBinding::new("cmd-=", prototype::ZoomIn, Some("WorkspaceEditor")),
+                KeyBinding::new("cmd-+", prototype::ZoomIn, Some("WorkspaceEditor")),
+                KeyBinding::new("cmd--", prototype::ZoomOut, Some("WorkspaceEditor")),
+                KeyBinding::new("cmd-0", prototype::ZoomReset, Some("WorkspaceEditor")),
             ]);
             cx.set_menus([
                 Menu::new("ZJ").items([MenuItem::os_submenu("服务", SystemMenuType::Services)]),
@@ -136,6 +142,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     MenuItem::separator(),
                     MenuItem::action("打开文件…", prototype::OpenFile),
                     MenuItem::action("打开文件夹…", prototype::OpenFolder),
+                ]),
+                Menu::new("查看").items([
+                    MenuItem::action("放大", prototype::ZoomIn),
+                    MenuItem::action("缩小", prototype::ZoomOut),
+                    MenuItem::action("重置缩放", prototype::ZoomReset),
                 ]),
                 Menu::new("转到").items([
                     MenuItem::action("返回", nav::NavigateBack),

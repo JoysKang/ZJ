@@ -15,30 +15,31 @@ use serde_json::{Value, json};
 // Spacing (4 px grid). Kit's Tailwind-style helpers (`gap_1` = 4, `px_2` = 8, `px_3` = 12,
 // `p_4` = 16) are already on the grid; constants exist only where arithmetic is needed.
 
-// Heights: every list row shares one height; every bar shares another.
-pub const ROW_HEIGHT: Pixels = px(22.);
-pub const TAB_HEIGHT: Pixels = px(35.);
-pub const BREADCRUMB_HEIGHT: Pixels = px(22.);
+// Heights: every list row shares one height; every bar shares another. The owner asked for
+// text one step larger than VS Code's 13 px, so rows grow from 22 to 24 on the same grid.
+pub const ROW_HEIGHT: Pixels = px(24.);
+pub const TAB_HEIGHT: Pixels = px(36.);
+pub const BREADCRUMB_HEIGHT: Pixels = px(24.);
 pub const TAB_CLOSE: Pixels = px(20.);
 pub const DIRTY_DOT: Pixels = px(8.);
 pub const KEYCAP: Pixels = px(20.);
 pub const WELCOME_WIDTH: Pixels = px(340.);
 pub const LOGO_TEXT: Pixels = px(180.);
 pub const TITLE_HEIGHT: Pixels = px(38.);
-pub const ACTIVITY_HEIGHT: Pixels = px(35.);
+pub const ACTIVITY_HEIGHT: Pixels = px(36.);
 pub const ACTIVITY_ITEM: Pixels = px(28.);
-pub const SIDEBAR_TITLE_HEIGHT: Pixels = px(35.);
-pub const SECTION_HEIGHT: Pixels = px(22.);
-/// Explorer tree geometry, measured from the owner's VS Code screenshot (rows are 22).
+pub const SIDEBAR_TITLE_HEIGHT: Pixels = px(36.);
+pub const SECTION_HEIGHT: Pixels = px(24.);
+/// Explorer tree geometry, measured from the owner's VS Code screenshot.
 pub const TREE_BASE: Pixels = px(12.);
 pub const TREE_STEP: Pixels = px(8.);
 pub const ROW_INSET: Pixels = px(2.);
 pub const GUIDE_WIDTH: Pixels = px(1.);
 pub const DECORATION_DOT: Pixels = px(6.);
 pub const DECORATION_WIDTH: Pixels = px(16.);
-pub const BADGE_SIZE: Pixels = px(15.);
+pub const BADGE_SIZE: Pixels = px(16.);
 pub const BADGE_OFFSET: Pixels = px(-3.);
-pub const COMMAND_CENTER_HEIGHT: Pixels = px(22.);
+pub const COMMAND_CENTER_HEIGHT: Pixels = px(24.);
 pub const COMMAND_CENTER_WIDTH: Pixels = px(600.);
 pub const QUICK_OPEN_WIDTH: Pixels = px(600.);
 pub const QUICK_OPEN_TOP: Pixels = px(6.);
@@ -51,37 +52,56 @@ pub const INDICATOR: Pixels = px(1.);
 
 // Widths.
 pub const TWISTY_WIDTH: Pixels = px(16.);
-pub const SIDEBAR_WIDTH: Pixels = px(280.);
+pub const SIDEBAR_WIDTH: Pixels = px(300.);
 pub const SIDEBAR_MIN: Pixels = px(200.);
 pub const SIDEBAR_MAX: Pixels = px(520.);
 pub const EDITOR_MIN: Pixels = px(320.);
 pub const EDITOR_MAX: Pixels = px(4000.);
 
 // Icons and text.
-pub const ICON_SIZE: Pixels = px(14.);
-pub const SMALL_ICON_SIZE: Pixels = px(12.);
+pub const ICON_SIZE: Pixels = px(16.);
+pub const SMALL_ICON_SIZE: Pixels = px(14.);
 pub const FILE_ICON_SIZE: Pixels = px(16.);
-pub const TEXT_BODY: Pixels = px(13.);
-pub const TEXT_CAPTION: Pixels = px(12.);
-pub const TEXT_SECTION: Pixels = px(11.);
-pub const TEXT_BADGE: Pixels = px(9.);
+pub const TEXT_BODY: Pixels = px(14.);
+pub const TEXT_CAPTION: Pixels = px(13.);
+pub const TEXT_SECTION: Pixels = px(12.);
+pub const TEXT_BADGE: Pixels = px(10.);
 
-// Diff editor (VS Code: 13 px font, ~20 px lines, 5-digit line numbers, +/- indicators).
-pub const DIFF_COLUMN_WIDTH: Pixels = px(7.8);
+// Diff editor (VS Code: 5-digit line numbers, +/- indicators). Text and rows follow the
+// editor font size, see [`diff_metrics`].
 pub const DIFF_GUTTER: Pixels = px(48.);
 pub const DIFF_INDICATOR: Pixels = px(20.);
 pub const DIFF_TEXT_END: Pixels = px(32.);
-pub const DIFF_TEXT: Pixels = px(13.);
-pub const DIFF_ROW_HEIGHT: Pixels = px(20.);
-/// Filler stripes: (line width, gap) in pixels; their sum divides `DIFF_ROW_HEIGHT` so the
+/// Filler stripes: (line width, gap) in pixels; their sum divides every diff row height so the
 /// pattern continues across rows.
 pub const DIFF_HATCH: (f32, f32) = (1., 4.);
+/// Monospace advance as a fraction of the font size (Menlo, SF Mono, DejaVu Sans Mono).
+const MONO_ADVANCE: f32 = 0.6;
+
+/// Diff editor text size, row height and character width for an editor font size. Rows are
+/// about 1.5× the font, rounded to the hatch period so filler stripes line up.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DiffMetrics {
+    pub text: Pixels,
+    pub row: Pixels,
+    pub column: Pixels,
+}
+
+pub fn diff_metrics(font: Pixels) -> DiffMetrics {
+    let font = f32::from(font);
+    let period = DIFF_HATCH.0 + DIFF_HATCH.1;
+    DiffMetrics {
+        text: px(font),
+        row: px(((font * 1.5 / period).round() * period).max(3. * period)),
+        column: px(font * MONO_ADVANCE),
+    }
+}
 /// Overview ruler at the right edge of the diff editor, and its smallest marker.
 pub const DIFF_RULER: Pixels = px(14.);
 pub const DIFF_RULER_MIN: Pixels = px(3.);
 pub const SCM_NOTICE_MAX: Pixels = px(100.);
-/// Source Control repository rows: the branch line under the name (VS Code's 22 + ~18).
-pub const SCM_DETAIL_LINE: Pixels = px(18.);
+/// Source Control repository rows: the branch line under the name, and wrapped lines.
+pub const SCM_DETAIL_LINE: Pixels = px(20.);
 /// Width of the fade in front of a row's hover actions.
 pub const ACTION_FADE: Pixels = px(16.);
 pub const COMMIT_HEIGHT: Pixels = px(60.);
@@ -437,7 +457,11 @@ pub fn follow_appearance(window: Option<&mut Window>, cx: &mut App) {
         (LIGHT, NORD_LIGHT_SYNTAX)
     };
     let syntax = serde_json::from_value(syntax_json(syntax));
+    let editor_font = cx
+        .try_global::<crate::settings::Settings>()
+        .map_or(crate::settings::EDITOR_FONT_DEFAULT, |s| s.editor_font_size);
     Theme::update(cx, |theme| {
+        theme.mono_font_size = px(editor_font);
         apply(&palette, &mut theme.colors);
         // The Editor paints from the syntax theme's own style block, not from ThemeColor.
         let style = &mut std::sync::Arc::make_mut(&mut theme.highlight_theme).style;
@@ -451,6 +475,11 @@ pub fn follow_appearance(window: Option<&mut Window>, cx: &mut App) {
             Err(error) => eprintln!("event=syntax_theme_invalid error={error}"),
         }
     });
+}
+
+/// The code editor's font size (Kit's editor reads `mono_font_size`).
+pub fn apply_editor_font(size: f32, cx: &mut App) {
+    Theme::update(cx, |theme| theme.mono_font_size = px(size));
 }
 
 fn apply(palette: &Palette, theme: &mut ThemeColor) {
@@ -574,6 +603,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn diff_rows_follow_the_font_and_keep_the_hatch_period() {
+        let period = DIFF_HATCH.0 + DIFF_HATCH.1;
+        for size in 10..=24 {
+            let m = diff_metrics(px(size as f32));
+            let row = f32::from(m.row);
+            assert_eq!(row % period, 0., "{size}");
+            assert!(row >= size as f32 * 1.25, "{size}: {row}");
+        }
+        assert_eq!(diff_metrics(px(14.)).row, px(20.));
     }
 
     #[test]

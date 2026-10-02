@@ -46,7 +46,10 @@ gpui_kit::actions!(
         OpenFile,
         OpenFolder,
         QuickOpenFile,
-        ToggleSidebar
+        ToggleSidebar,
+        ZoomIn,
+        ZoomOut,
+        ZoomReset
     ]
 );
 
@@ -648,6 +651,39 @@ impl Prototype {
                 }
             });
         }));
+        cx.notify();
+    }
+
+    /// Changes the settings for every window and reports a failed write in this one.
+    fn change_settings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut crate::settings::Settings),
+    ) {
+        let saved = crate::settings::update(cx, change);
+        cx.spawn_in(window, async move |this, cx| {
+            if let Err(error) = saved.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.message = format!("设置未能保存：{error}");
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Editor font size: one pixel per step, `None` resets (⌘= / ⌘- / ⌘0).
+    fn zoom(&mut self, step: Option<f32>, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::settings::{EDITOR_FONT_DEFAULT, EDITOR_FONT_MAX, EDITOR_FONT_MIN};
+        let current = cx.global::<crate::settings::Settings>().editor_font_size;
+        let next = step.map_or(EDITOR_FONT_DEFAULT, |step| {
+            (current + step).clamp(EDITOR_FONT_MIN, EDITOR_FONT_MAX)
+        });
+        if next != current {
+            self.change_settings(window, cx, |settings| settings.editor_font_size = next);
+            self.message = format!("编辑器字号 {next} px");
+        }
         cx.notify();
     }
 
@@ -1548,6 +1584,11 @@ impl Render for Prototype {
                 this.open_quick_open(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &ZoomIn, window, cx| this.zoom(Some(1.), window, cx)))
+            .on_action(
+                cx.listener(|this, _: &ZoomOut, window, cx| this.zoom(Some(-1.), window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ZoomReset, window, cx| this.zoom(None, window, cx)))
             .on_action(cx.listener(|this, _: &navigation::GoToSymbol, window, cx| {
                 this.go_to_symbol(window, cx)
             }))
