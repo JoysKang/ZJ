@@ -70,8 +70,8 @@ cargo check --target aarch64-apple-darwin -p gpui-pre-macos
 ```
 
 For clippy, run the same check with `RUSTC_WRAPPER=$(rustup which clippy-driver)` and
-`CLIPPY_ARGS=-Wclippy::all__CLIPPY_HACKERY__`, and compare the warnings with the unpatched
-commit. The patch adds only `cocoa` deprecation warnings of the kind upstream already has.
+`CLIPPY_ARGS=-Wclippy::all__CLIPPY_HACKERY__-Wwarnings__CLIPPY_HACKERY__` (the second flag
+undoes the lint override above), and compare the warnings with the unpatched commit. The patch adds only `cocoa` deprecation warnings of the kind upstream already has.
 
 ## Upgrading GPUI
 

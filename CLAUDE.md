@@ -46,7 +46,8 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `settings.rs`：所有窗口共用的设置文件（字号、显示隐藏文件、Diff 布局、隐藏无变更仓库、搜索排除、Dock 图标闪烁）。
   - `platform.rs`：少量 macOS 系统接口（“减少动态效果”、Dock 图标替换与闪烁），其他平台为空实现；`prototype/welcome.rs`：欢迎页 logo 上单独绘制的闪烁光标。
   - `file_ops.rs`：资源管理器的新建、重命名、复制、移动和移到废纸篓；`prototype/explorer_ops.rs`：右键菜单、快捷键和行内改名。
-  - `text_search.rs`：全文搜索（glob 包含 / 排除、默认排除、二进制与大文件跳过、结果上限）；`prototype/search_view.rs`：搜索视图。
+  - `text_search.rs`：全文搜索（glob 包含 / 排除、默认排除、二进制与大文件跳过、结果上限）；`prototype/search_view.rs`：搜索视图；`prototype/search_replace.rs`：搜索视图里的替换（行内预览、替换前 Diff、原子写入、跳过搜索后改过的文件、撤销）。
+  - `replace.rs`：查找替换的共同规则（Aa / ab / .*、`$1` 与大小写转义、保留大小写、CRLF、不跨行）；`prototype/find_widget.rs`：编辑器右上角的查找替换浮层（⌘F / ⌥⌘F）。
   - `watch.rs`：共用原生文件监听、路径引用回收和有界事件信号（带变更路径，超出上限退化为全量刷新）；不持有界面实体。
   - `refresh_plan.rs`：把一批变更路径算成最小刷新（只刷受影响仓库的状态、只重列变化的目录、增量更新索引）；被 Git 忽略的路径（target/、node_modules）按目录缓存判定后丢弃，构建期间不刷新。
   - `prototype.rs`：工作台的状态和逻辑；`prototype/` 下是各区域的渲染（`chrome` 标题栏与状态栏、`sidebar` 侧栏与资源管理器、`scm`、`editor_area`、`quick_open`），以及 `workspace_refresh` 的事件刷新编排。
@@ -55,6 +56,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `diff_doc.rs`：在后台把全上下文补丁还原成两侧全文，做行对齐、语法高亮和字符级差异；`prototype/diff_view.rs`：只切片现成数据的虚拟化左右 / 内联 Diff 编辑器；`prototype/diff_ops.rs`：行选择、复制、概览标尺和块 / 行级暂存；`partial_patch.rs`：从全上下文补丁生成只含所选行的补丁。
   - `prototype/scm_actions.rs`：Git 写操作确认与结果展示；`git_service/src/write.rs`：仓库锁内校验及有界执行。
   - `symbols.rs`：tree-sitter tags / locals 查询做定义、引用和文件大纲（查询在 `crates/app/queries/`）；`symbol_index.rs`：首次跳转时后台建立的工作区符号索引；`prototype/navigation.rs`：转到定义、符号列表、查找引用和前进后退。不跑语言服务器，见 docs/adr/0002。
+- `vendor/`：打过补丁的 GPUI macOS 渲染器和窗口层（`gpui-pre-apple` / `gpui-pre-macos`，用 `[patch.crates-io]` 指向）。改动都标 `ZJ patch`，说明在 `vendor/README.md`，理由和测量方法在 docs/adr/0005；`ZJ_GPU_LOWMEM=0` 恢复上游行为。升级 GPUI 时要先处理这里。
 - UI 的 render 回调里不做 IO、不跑 Git 命令、不做全文解析；这些都通过 `background_spawn` 执行，结果带 generation 校验。
 
 ## 视觉规则
