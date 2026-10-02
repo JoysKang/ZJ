@@ -54,6 +54,9 @@ pub struct ClientOptions {
     pub buffers: Option<Arc<dyn BufferProvider>>,
     /// Defaults to [`SearchPath::from_env`].
     pub search_path: Option<SearchPath>,
+    /// An ACP session id from an earlier run (history); restored with `session/load` when the
+    /// agent supports it, otherwise a new session starts.
+    pub resume_session: Option<String>,
 }
 
 impl ClientOptions {
@@ -67,6 +70,7 @@ impl ClientOptions {
             env_overrides: BTreeMap::new(),
             buffers: None,
             search_path: None,
+            resume_session: None,
         }
     }
 }
@@ -128,6 +132,7 @@ struct Shared {
     workspace: Workspace,
     idle_timeout: Duration,
     handshake_timeout: Duration,
+    resume_session: Option<String>,
     env_overrides: BTreeMap<String, String>,
     buffers: Option<Arc<dyn BufferProvider>>,
     search: SearchPath,
@@ -229,6 +234,7 @@ impl AgentClient {
             workspace,
             idle_timeout: options.idle_timeout,
             handshake_timeout: options.handshake_timeout,
+            resume_session: options.resume_session,
             env_overrides: options.env_overrides,
             buffers: options.buffers,
             search: options.search_path.unwrap_or_else(SearchPath::from_env),
@@ -335,6 +341,20 @@ impl AgentClient {
         self.shared.snapshots.lock().unwrap().get(path).cloned()
     }
 
+    /// Replaces a file's "before" version after a partial review (`None` forgets the file:
+    /// everything the agent changed in it was accepted or reverted).
+    pub fn set_snapshot(&self, path: &Path, before: Option<Option<String>>) {
+        let mut snapshots = self.shared.snapshots.lock().unwrap();
+        match before {
+            Some(before) => {
+                snapshots.insert(path.to_path_buf(), before);
+            }
+            None => {
+                snapshots.remove(path);
+            }
+        }
+    }
+
     /// Forgets the "before" versions (after the user reviewed them, or for a new session).
     pub fn clear_snapshots(&self) {
         self.shared.snapshots.lock().unwrap().clear();
@@ -401,7 +421,7 @@ async fn supervise(
     turn_done: async_channel::Receiver<()>,
 ) {
     // Kept across restarts so a crashed or idle-stopped agent can `session/load` it.
-    let mut resume: Option<acp::SessionId> = None;
+    let mut resume: Option<acp::SessionId> = shared.resume_session.clone().map(acp::SessionId::new);
     while let Ok(command) = commands.recv().await {
         let first = match command {
             Command::Shutdown => return,

@@ -53,6 +53,11 @@ pub(crate) enum Op {
         session: SessionId,
         path: String,
     },
+    SetLineCounts {
+        session: SessionId,
+        added: i64,
+        removed: i64,
+    },
     Pin(SessionId),
     Unpin(SessionId),
     MovePin {
@@ -180,6 +185,18 @@ fn apply(
             .and_then(|_| reindex_meta(tx, session.0)),
         ),
         Op::TouchFile { session, path } => record(errors, touch_file(tx, session, &path)),
+        Op::SetLineCounts {
+            session,
+            added,
+            removed,
+        } => record(
+            errors,
+            exec(
+                tx,
+                "UPDATE sessions SET lines_added = ?2, lines_removed = ?3 WHERE id = ?1",
+                params![session.0, added, removed],
+            ),
+        ),
         Op::Pin(session) => record(errors, pin_top(tx, session)),
         Op::Unpin(session) => record(
             errors,

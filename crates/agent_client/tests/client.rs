@@ -743,3 +743,32 @@ fn direct_writes_remember_the_file_before_the_agent() {
     client.clear_snapshots();
     assert!(client.snapshot_paths().is_empty());
 }
+
+#[test]
+fn a_session_from_history_is_resumed_with_load() {
+    let ws = Workspace::new("resume");
+    let mut opts = options(&ws, &[("FAKE_LOAD_SESSION", "1")]);
+    opts.resume_session = Some("s-old-7".into());
+    let client = AgentClient::start(opts).unwrap();
+    let events = Events::of(&client);
+    client.prompt(text("echo hi")).unwrap();
+    let seen = events.turn();
+    assert!(seen.iter().any(|e| matches!(
+        e,
+        AgentEvent::SessionStarted { session_id, resumed: true, .. } if session_id == "s-old-7"
+    )));
+    // The replayed history is not shown again.
+    assert_eq!(message(&seen), "hi");
+    // Without loadSession support the id is ignored and a new session starts.
+    let mut opts = options(&ws, &[]);
+    opts.resume_session = Some("s-old-7".into());
+    let client = AgentClient::start(opts).unwrap();
+    let events = Events::of(&client);
+    client.prompt(text("echo hi")).unwrap();
+    assert!(
+        events
+            .turn()
+            .iter()
+            .any(|e| matches!(e, AgentEvent::SessionStarted { resumed: false, .. }))
+    );
+}

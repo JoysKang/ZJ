@@ -69,6 +69,11 @@ const MIGRATIONS: &[&str] = &[
         body, tokenize = 'unicode61', content = '', contentless_delete = 1
     );
     "#,
+    // 2: lines the agent added / removed, for the session list.
+    r#"
+    ALTER TABLE sessions ADD COLUMN lines_added INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE sessions ADD COLUMN lines_removed INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

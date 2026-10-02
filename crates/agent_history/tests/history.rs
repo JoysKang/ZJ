@@ -385,6 +385,20 @@ fn auto_title_never_overrides_a_user_title() {
 }
 
 #[test]
+fn line_counts_are_stored_per_session() {
+    let dir = TempDir::new("lines");
+    let h = History::new(dir.db());
+    let id = session(&h, "/w", "codex", "改一下");
+    h.flush().unwrap();
+    let s = h.session(id).unwrap().unwrap();
+    assert_eq!((s.lines_added, s.lines_removed), (0, 0));
+    h.set_line_counts(id, 76, 4);
+    h.flush().unwrap();
+    let s = h.session(id).unwrap().unwrap();
+    assert_eq!((s.lines_added, s.lines_removed), (76, 4));
+}
+
+#[test]
 fn messages_can_be_rewritten_in_place() {
     let dir = TempDir::new("put");
     let h = History::new(dir.db());

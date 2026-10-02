@@ -161,6 +161,9 @@ pub struct SessionSummary {
     pub pinned_rank: Option<f64>,
     pub archived: bool,
     pub status: SessionStatus,
+    /// Lines the agent added / removed (as last reported by the panel).
+    pub lines_added: i64,
+    pub lines_removed: i64,
 }
 
 impl SessionSummary {
@@ -383,6 +386,15 @@ impl History {
         });
     }
 
+    /// Lines added / removed by the session's changes (shown in the list).
+    pub fn set_line_counts(&self, session: SessionId, added: i64, removed: i64) {
+        self.queue_op(Op::SetLineCounts {
+            session,
+            added,
+            removed,
+        });
+    }
+
     /// Pins at the top of the pinned group.
     pub fn pin(&self, session: SessionId) {
         self.queue_op(Op::Pin(session));
@@ -560,7 +572,7 @@ impl History {
 
 pub(crate) const SUMMARY_SELECT: &str = "SELECT s.id, w.root, s.agent_id, s.acp_session_id, \
      s.title, s.title_source, s.repo, s.branch, s.created_at, s.updated_at, s.pinned_rank, \
-     s.archived, s.status FROM sessions s JOIN workspaces w ON w.id = s.workspace_id";
+     s.archived, s.status, s.lines_added, s.lines_removed FROM sessions s JOIN workspaces w ON w.id = s.workspace_id";
 
 pub(crate) fn summary_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSummary> {
     Ok(SessionSummary {
@@ -581,6 +593,8 @@ pub(crate) fn summary_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Sessio
         pinned_rank: r.get(10)?,
         archived: r.get::<_, i64>(11)? != 0,
         status: SessionStatus::parse(&r.get::<_, String>(12)?),
+        lines_added: r.get(13)?,
+        lines_removed: r.get(14)?,
     })
 }
 

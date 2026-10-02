@@ -18,6 +18,7 @@ mod events;
 pub mod fs;
 mod process;
 pub mod registry;
+pub mod review;
 pub mod shadow;
 pub mod thread;
 
