@@ -178,3 +178,45 @@ dist 二进制为 17,055,072 字节，比前批少 16 字节；独立 ICNS 资�
 最终包为 `target/ZJ.app`，ARM64 dist 二进制 17,402,864 字节；SHA-256 为 `3999039f49fb24a643ceea8539aa9b5c7faab9da99b1c7d3f09cca7cc84d0aa6`。无依赖或 feature 变化，normal tree 去重行数保持 568。增加 331,216 字节，按约定记录体积决策；相同前台空窗口的 12 秒短测 footprint 中位数为 69,239,960 → 66,733,160 字节。详细实现、测试、原始样本和限制见 [scm-vscode.md](reports/scm-vscode.md)，不将空窗口短测当作 G1 或内存优化收益。
 
 保存、异常恢复、首次发布、fetch / pull / sync、行级暂存及三方合并编辑器仍未实现；不宣称与 VS Code 完整等价。当前编辑缓冲区仅在内存中，不能作为可靠的日常保存工具。
+
+## 2026 年 10 月 2 日追加：第 6 批（仓库发现、内存、资源管理器、搜索、源码管理、新图标）
+
+本批按用户的 8 条反馈和新图标要求实现，基于第 5 批（`5108c9d`），每条一个提交。测试只用临时夹具；Linux（Xvfb、llvmpipe / lavapipe 软件渲染）上测量，macOS 的数值需在本机复测。
+
+仓库发现（4 个工作区 / 60 个仓库的夹具）：
+
+| | 之前 | 之后 |
+| --- | ---: | ---: |
+| 发现的仓库 | 61（含 build/ 里的检出）| 60 |
+| 错误（invalid gitfile 等）| 12 | 0 |
+| 用时 | 2.34 s | 1.55 s |
+
+内存（同一夹具，4 个窗口，`/proc/PID/smaps` 汇总，三次取中）：
+
+| | 第 5 批 | 第 6 批 |
+| --- | ---: | ---: |
+| RSS | 301.7 MB | 297.4 MB |
+| 堆（匿名 + [heap]）| 100.9 MB | 约 93 MB |
+| 其中快速打开索引 | 11.7 MB | 3.7 MB |
+| GPU memfd | 84.6 MB | 84.5 MB |
+
+空窗口基线：1 个窗口 148.3 MB（堆 23.9 MB），4 个窗口 207.0 MB（堆 54.6 MB）。heaptrack 显示剩下的大头是 GPUI 每个窗口的渲染器（Linux 上堆约 25 MB、显存约 21 MB 每窗口，外加 libLLVM 映射），不是应用数据。用户在 macOS 上看到的约 600 MB 推测来自每个窗口的 Metal 表面：3 个 drawable 加一张按窗口大小预先分配的路径中间纹理（`gpui-pre-apple` 的 `update_path_intermediate_textures`），全屏 Retina 下每张约 30 MB、每窗口约 118 MB；改为按需分配和 2 个 drawable 需要给 GPUI 打补丁，Linux 上无法验证，留作后续。
+
+Linux 上启动时仍会再全量刷新一次：notify 的 inotify 监听带 OPEN 掩码，建索引的大量读取让队列溢出（Q_OVERFLOW），属于 notify 的选择，本批未改。macOS 上因 `add_repository` 引起的第二次全量刷新已去掉。
+
+全文搜索：2 万个文件的工作区列文件 0.11 s，搜到 1 万个结果（上限）0.40 s。
+
+欢迎页光标闪烁（Linux / Xvfb / lavapipe，1600×1000 窗口，10 秒 CPU tick，100 Hz）：
+
+| 状态 | tick |
+| --- | ---: |
+| 欢迎页、窗口在前台（闪烁）| 694（之前的二进制 7）|
+| 欢迎页、窗口在后台 | 3–6 |
+| 欢迎页、`ZJ_REDUCE_MOTION=1` | 6 |
+| 打开文件（编辑器光标闪烁，新旧二进制相同）| 406–409 |
+
+软件渲染下每帧整窗重画很贵，所以数值偏大；在 Metal 上同样是每秒约 6 帧小改动，应接近编辑器光标的开销。Dock 图标闪烁默认关，开启后每 530 ms 一次 `setApplicationIconImage`，Linux 上无法测量。
+
+体积：Linux x86_64 dist 二进制 48,701,552 → 49,185,392 字节（+483,840），超过 200 KB，见 [ADR 0003](adr/0003-batch-6-size.md)。`Cargo.lock` 没有新增包，normal 依赖树去重行数 582 → 582；`cargo deny` 的 bans / licenses / sources 通过，advisories 仍是 GPUI 依赖带来的 4 个 unmaintained 和 1 个 yanked，与第 5 批相同。
+
+未做：搜索替换、Diff 字符级选择、Mac 渲染器补丁、Linux 上 inotify 引起的第二次刷新、“N 个隐藏项”提示行、资源管理器方向键导航、分支名很长时提交框占位文字被截断。

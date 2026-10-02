@@ -23,6 +23,8 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 内存看 physical footprint（`footprint -p PID` 或 `tools/sample_resources.py`），并把 Git 子进程算在内。
 
+表中“光标不闪”指编辑器光标和欢迎页 logo 光标都不闪。logo 光标只在欢迎页可见、窗口在前台、系统未开启“减少动态效果”时闪烁（亮 530 ms、灭 530 ms，边缘 120 ms 分 3 步淡入淡出，每秒约 6 帧；只有光标视图重新 render，但每帧仍是整窗重画），其余时候没有定时器。Dock 图标闪烁（设置 `dock_icon_blink`，默认关）是每 530 ms 一次 `setApplicationIconImage`，一个 App 级定时器；开启“减少动态效果”时停止并恢复完整图标。两者都不计入空闲 CPU 预算，但不要再加别的常驻动画。
+
 ## 依赖准入
 
 新增依赖、或给已有依赖打开新 feature 时，PR 描述里必须写明：
@@ -35,12 +37,16 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 ## 模块边界
 
-- `crates/core`：身份模型与共享常量（`RepoId`、`DocumentId`、`EXCLUDED_DIRS`），**不依赖 GPUI**。
-- `crates/git_service`：调用系统 git，负责有界输出、超时、取消、全局限流，**不依赖 GPUI**。
+- `crates/core`：身份模型与共享常量（`RepoId`、`DocumentId`、`EXCLUDED_DIRS`、按 Git 规则校验 `.git` 的 `git_marker`），**不依赖 GPUI**。
+- `crates/git_service`：调用系统 git，负责有界输出、超时、取消、全局限流，**不依赖 GPUI**。仓库发现最多向下 4 层，跳过 `EXCLUDED_DIRS` 和上层仓库忽略的目录，无效的 `.git` 静默跳过。
 - `crates/app`：GPUI 界面。
   - `theme.rs`：唯一允许写字面尺寸和颜色的地方。
   - `assets.rs`：内嵌资源；`file_icons.rs`：文件类型到图标的映射。
-  - `files.rs`：受限的只读文件访问与快速打开路径索引；`fuzzy.rs`：模糊匹配打分。
+  - `files.rs`：受限的只读文件访问、紧凑存储的快速打开路径索引和点文件默认隐藏规则；`fuzzy.rs`：模糊匹配打分。
+  - `settings.rs`：所有窗口共用的设置文件（字号、显示隐藏文件、Diff 布局、隐藏无变更仓库、搜索排除、Dock 图标闪烁）。
+  - `platform.rs`：少量 macOS 系统接口（“减少动态效果”、Dock 图标替换与闪烁），其他平台为空实现；`prototype/welcome.rs`：欢迎页 logo 上单独绘制的闪烁光标。
+  - `file_ops.rs`：资源管理器的新建、重命名、复制、移动和移到废纸篓；`prototype/explorer_ops.rs`：右键菜单、快捷键和行内改名。
+  - `text_search.rs`：全文搜索（glob 包含 / 排除、默认排除、二进制与大文件跳过、结果上限）；`prototype/search_view.rs`：搜索视图。
   - `watch.rs`：共用原生文件监听、路径引用回收和有界事件信号（带变更路径，超出上限退化为全量刷新）；不持有界面实体。
   - `refresh_plan.rs`：把一批变更路径算成最小刷新（只刷受影响仓库的状态、只重列变化的目录、增量更新索引）；被 Git 忽略的路径（target/、node_modules）按目录缓存判定后丢弃，构建期间不刷新。
   - `prototype.rs`：工作台的状态和逻辑；`prototype/` 下是各区域的渲染（`chrome` 标题栏与状态栏、`sidebar` 侧栏与资源管理器、`scm`、`editor_area`、`quick_open`），以及 `workspace_refresh` 的事件刷新编排。
@@ -54,7 +60,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 ## 视觉规则
 
 - 尺寸、间距、行高、颜色都从 `crates/app/src/theme.rs` 的 token 取，不要在 UI 代码里新写 `px(数字)` 或色值。
-- 布局参照 VS Code 工作台的尺寸：标题栏 `TITLE_HEIGHT` 38、标签栏 `TAB_HEIGHT` 35、列表行 `ROW_HEIGHT` 22、状态栏 `STATUS_HEIGHT` 22；间距用 4 px 网格。
+- 布局参照 VS Code 工作台的尺寸，按用户要求字号大一号：正文 `TEXT_BODY` 14、标题栏 `TITLE_HEIGHT` 38、标签栏 `TAB_HEIGHT` 36、列表行 `ROW_HEIGHT` 24、状态栏 `STATUS_HEIGHT` 24；间距用 4 px 网格。编辑器字号默认 14，可缩放，Diff 行高随之计算（`theme::diff_metrics`）。
 - 配色：暗色是 Solarized Dark（按 VS Code 内置主题的映射），亮色是 Nord Light。只改 `theme.rs` 的 `DARK` / `LIGHT` / 语法表，不要在界面代码里写颜色。
 - 界面图标只用 Lucide（`IconName`），不要用文本符号充当图标。Kit 默认只内嵌 101 个图标；需要额外的图标时，把 SVG 放进 `crates/app/assets/icons/`，并登记到 `assets.rs` 的 `EXTRA`。
 - 文件类型图标用 vscode-icons 的一个子集（`crates/app/assets/file-icons/`，MIT 许可），映射写在 `file_icons.rs`。这些是彩色 SVG，用 `img()` 绘制：每个窗口第一次画彩色图片时，GPUI 会分配一张 1024² 的 polychrome 图集（约 4 MiB）。新增图标前先看体积（当前合计约 58 KB）。
