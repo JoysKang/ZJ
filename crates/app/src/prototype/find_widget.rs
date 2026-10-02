@@ -139,7 +139,7 @@ impl Prototype {
         self.documents
             .iter()
             .find(|doc| doc.id == id)
-            .map(|doc| (doc.id, doc.editor.clone(), doc.readonly))
+            .map(|doc| (doc.id, doc.editor.clone(), false))
     }
 
     /// ⌘F (`replace` false) / ⌥⌘F: open the widget, seeded with the selection if it is one

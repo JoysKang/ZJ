@@ -90,6 +90,8 @@ pub const TEXT_BODY: Pixels = px(14.);
 pub const TEXT_CAPTION: Pixels = px(13.);
 pub const TEXT_SECTION: Pixels = px(12.);
 pub const TEXT_BADGE: Pixels = px(10.);
+/// The editor's "file changed on disk" banner.
+pub const BANNER_HEIGHT: Pixels = px(30.);
 
 // Diff editor (VS Code: 5-digit line numbers, +/- indicators). Text and rows follow the
 // editor font size, see [`diff_metrics`].
@@ -549,6 +551,8 @@ pub struct Colors {
     pub chip_on_border: Hsla,
     /// Glyph color and its tinted tile, indexed like [`Glyph`](workspace_editor_agent::Glyph).
     pub glyphs: [(Hsla, Hsla); 5],
+    /// The editor's "file changed on disk" banner: the git-modified hue, faint.
+    pub banner: Hsla,
 }
 
 fn hsla(hex: u32) -> Hsla {
@@ -615,6 +619,7 @@ impl Palette {
                 self.glyph_generic,
             ]
             .map(|c| (hsla(c), hsla(c).opacity(0.18))),
+            banner: hsla(self.modified).opacity(0.16),
         }
     }
 }

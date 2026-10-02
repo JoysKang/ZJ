@@ -3,7 +3,7 @@ use crate::fuzzy;
 use std::{
     fs::{self, OpenOptions},
     io::{self, Read},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::ffi::OsStrExt,
@@ -458,7 +458,10 @@ pub struct TextFile {
     pub path: PathBuf,
     pub text: String,
     pub bytes: usize,
+    /// No write permission (saving needs 另存为); editing is still allowed, as in VS Code.
     pub readonly: bool,
+    /// What the file looked like when it was read, for detecting external changes.
+    pub disk: crate::save::DiskState,
     /// The file uses CRLF line endings (first line ending decides).
     pub crlf: bool,
     /// A UTF-8 byte order mark was present and stripped for editing.
@@ -519,6 +522,7 @@ pub fn text_file(root: Option<&Path>, path: &Path) -> io::Result<TextFile> {
         return Err(io::Error::other("文件过大或包含二进制内容，未打开"));
     }
     let size = bytes.len();
+    let disk = crate::save::DiskState::of(FileStamp::of(&metadata), &bytes);
     let text =
         String::from_utf8(bytes).map_err(|_| io::Error::other("文件不是 UTF-8 文本，未打开"))?;
     if text.split('\n').any(|line| line.len() > 256 * 1024) {
@@ -536,7 +540,8 @@ pub fn text_file(root: Option<&Path>, path: &Path) -> io::Result<TextFile> {
         bom: text.starts_with('\u{feff}'),
         text: text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned(),
         bytes: size,
-        readonly: metadata.nlink() > 1,
+        readonly: metadata.permissions().mode() & 0o222 == 0,
+        disk,
     })
 }
 
@@ -582,8 +587,13 @@ mod tests {
         assert_eq!(loaded.text, "hello\r\n");
         assert!(loaded.crlf && loaded.bom);
         assert!(!loaded.readonly);
+        // Hard links can be edited and saved in place now; only missing write permission
+        // marks a file read-only.
         fs::hard_link(&path, root.join("hard")).unwrap();
+        assert!(!text_file(Some(&root), &path).unwrap().readonly);
+        fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o444)).unwrap();
         assert!(text_file(Some(&root), &path).unwrap().readonly);
+        fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
         assert!(text_file(Some(&root), &root.join("outside")).is_err());
         let outside = root.with_extension("selected.txt");
         fs::write(&outside, "explicitly selected\n").unwrap();

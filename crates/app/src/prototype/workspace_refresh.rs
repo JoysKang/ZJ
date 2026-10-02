@@ -214,6 +214,7 @@ impl Prototype {
             self.refresh_tree(window, cx);
             self.reveal_pending = reveal_pending;
             self.refresh(window, cx);
+            self.check_disk(None, window, cx);
             return;
         }
         let Some(plan) = self.pending_plan.take() else {
@@ -245,8 +246,10 @@ impl Prototype {
     }
 
     /// Hook for per-file consumers (the symbol index) of a partial refresh.
-    fn apply_files_changed(&mut self, plan: &Plan, _window: &mut Window, cx: &mut Context<Self>) {
+    fn apply_files_changed(&mut self, plan: &Plan, window: &mut Window, cx: &mut Context<Self>) {
         self.update_symbol_index(plan.files.iter().cloned().collect(), cx);
+        // Open tabs follow their files (our own saves record their state and do not count).
+        self.check_disk(Some(&plan.files), window, cx);
     }
 
     pub(super) fn invalidate_preview(&mut self, cx: &mut Context<Self>) {

@@ -16,7 +16,6 @@ use crate::files::FileStamp;
 use crate::replace::{self, Replacement};
 use crate::text_search::{FileMatches, MAX_MATCHES, Matcher};
 use gpui_kit::{
-    EntityInputHandler,
     component::input::{InputEvent, InputState},
     *,
 };
@@ -355,7 +354,8 @@ impl Prototype {
             found.count = count;
             found.stamp = Some(done.written);
         }
-        self.reload_everywhere(&done.path, &done.text, window, cx);
+        let state = crate::save::DiskState::of(done.written, done.text.as_bytes());
+        self.reload_everywhere(&done.path, &done.text, state, window, cx);
     }
 
     /// Puts `text` into every open, unedited buffer of `path`, in all windows.
@@ -363,10 +363,11 @@ impl Prototype {
         &mut self,
         path: &std::path::Path,
         text: &str,
+        state: crate::save::DiskState,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.reload_clean_document(path, text, window, cx);
+        self.reload_clean_document(path, text, state, window, cx);
         let others: Vec<_> = self
             .owners
             .borrow()
@@ -380,54 +381,35 @@ impl Prototype {
             let text = text.to_string();
             let _ = handle.update(cx, |_, window, cx| {
                 view.update(cx, |this, cx| {
-                    this.reload_clean_document(&path, &text, window, cx)
+                    this.reload_clean_document(&path, &text, state, window, cx)
                 });
             });
         }
     }
 
     /// The file changed on disk because of a replace: an unedited buffer takes the new text
-    /// as one edit (so ⌘Z still works) and stays clean.
+    /// as one edit (so ⌘Z still works), stays clean and records the file's new state.
     pub(super) fn reload_clean_document(
         &mut self,
         path: &std::path::Path,
         text: &str,
+        state: crate::save::DiskState,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(doc) = self
+        let Some(id) = self
             .documents
             .iter()
             .find(|doc| doc.path == path && !doc.dirty)
+            .map(|doc| doc.id)
         else {
             return;
         };
-        let (id, editor) = (doc.id, doc.editor.clone());
-        // The buffer may lack the BOM the file has (it is stripped for editing).
+        // The buffer lacks the BOM the file may have (it is stripped for editing).
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-        let changed = editor.update(cx, |state, cx| {
-            let old = state.text().to_string();
-            if old == text {
-                return false;
-            }
-            // Replace only the part that differs, then put the cursor back, so the view does
-            // not jump to the end of the file.
-            let (start, end, new_end) = replace::changed_span(&old, text);
-            let selection = state.selected_range();
-            let utf16 = replace::utf16_offset(&old, start)..replace::utf16_offset(&old, end);
-            state.replace_text_in_range(Some(utf16), &text[start..new_end], window, cx);
-            let keep = |offset: usize| {
-                let offset = offset.min(text.len());
-                (0..=offset)
-                    .rev()
-                    .find(|i| text.is_char_boundary(*i))
-                    .unwrap_or(0)
-            };
-            state.set_selected_range(keep(selection.start)..keep(selection.end), cx);
-            true
-        });
-        if changed {
-            self.reloading.insert(id);
+        self.set_buffer_text(id, text, window, cx);
+        if let Some(doc) = self.documents.iter_mut().find(|doc| doc.id == id) {
+            doc.disk = Some(state);
         }
     }
 
@@ -454,10 +436,11 @@ impl Prototype {
                 let mut skipped = Vec::new();
                 for (path, original, result) in outcomes {
                     match result {
-                        Ok(_) => {
+                        Ok(stamp) => {
                             restored += 1;
+                            let state = crate::save::DiskState::of(stamp, &original);
                             let text = String::from_utf8_lossy(&original).into_owned();
-                            this.reload_everywhere(&path, &text, window, cx);
+                            this.reload_everywhere(&path, &text, state, window, cx);
                         }
                         Err(error) => skipped.push((path, error.to_string())),
                     }

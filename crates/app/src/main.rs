@@ -13,6 +13,7 @@ mod platform;
 mod prototype;
 mod refresh_plan;
 mod replace;
+mod save;
 mod secrets;
 mod settings;
 mod symbol_index;
@@ -78,7 +79,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             windows = Some(count);
         } else if arg == "--help" {
             println!(
-                "ZJ [--windows 1..5] [工作区根目录 ...]\n轻量代码编辑器：多仓库源代码管理、并排 Diff、临时文件编辑。编辑不写磁盘，退出不保留。"
+                "ZJ [--windows 1..5] [工作区根目录 ...]\n轻量代码编辑器：多仓库源代码管理、并排 / 内联 Diff、文件编辑与保存。"
             );
             return Ok(());
         } else {
@@ -108,7 +109,28 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             theme::follow_appearance(None, cx);
             cx.bind_keys([
                 KeyBinding::new("cmd-shift-n", prototype::NewWindow, Some("WorkspaceEditor")),
-                KeyBinding::new("cmd-s", prototype::SaveUnavailable, Some("WorkspaceEditor")),
+                KeyBinding::new("secondary-s", prototype::Save, Some("WorkspaceEditor")),
+                KeyBinding::new(
+                    "secondary-shift-s",
+                    prototype::SaveAs,
+                    Some("WorkspaceEditor"),
+                ),
+                KeyBinding::new(
+                    "alt-secondary-s",
+                    prototype::SaveAll,
+                    Some("WorkspaceEditor"),
+                ),
+                KeyBinding::new(
+                    "secondary-n",
+                    prototype::NewUntitled,
+                    Some("WorkspaceEditor"),
+                ),
+                KeyBinding::new(
+                    "secondary-w",
+                    prototype::CloseEditor,
+                    Some("WorkspaceEditor"),
+                ),
+                KeyBinding::new("secondary-q", prototype::Quit, None),
                 KeyBinding::new("cmd-o", prototype::OpenFile, Some("WorkspaceEditor")),
                 // VS Code: ⌘⇧O is go to symbol; open folder moves to ⌘K ⌘O.
                 KeyBinding::new(
@@ -274,12 +296,29 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 ),
             ]);
             cx.set_menus([
-                Menu::new("ZJ").items([MenuItem::os_submenu("服务", SystemMenuType::Services)]),
+                Menu::new("ZJ").items([
+                    MenuItem::os_submenu("服务", SystemMenuType::Services),
+                    MenuItem::separator(),
+                    MenuItem::action("退出 ZJ", prototype::Quit),
+                ]),
                 Menu::new("文件").items([
+                    MenuItem::action("新建文件", prototype::NewUntitled),
                     MenuItem::action("新建窗口", prototype::NewWindow),
                     MenuItem::separator(),
                     MenuItem::action("打开文件…", prototype::OpenFile),
                     MenuItem::action("打开文件夹…", prototype::OpenFolder),
+                    MenuItem::separator(),
+                    MenuItem::action("保存", prototype::Save),
+                    MenuItem::action("另存为…", prototype::SaveAs),
+                    MenuItem::action("全部保存", prototype::SaveAll),
+                    MenuItem::separator(),
+                    MenuItem::action("关闭编辑器", prototype::CloseEditor),
+                    MenuItem::separator(),
+                    MenuItem::submenu(Menu::new("自动保存").items([
+                        MenuItem::action("关闭", prototype::AutoSaveOff),
+                        MenuItem::action("编辑后 1 秒", prototype::AutoSaveAfterDelay),
+                        MenuItem::action("失去焦点时", prototype::AutoSaveOnFocusChange),
+                    ])),
                 ]),
                 Menu::new("查看").items([
                     MenuItem::action("放大", prototype::ZoomIn),
@@ -301,6 +340,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 ]),
             ]);
             let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
+            cx.set_global(prototype::OpenDocuments(documents.clone()));
+            // ⌘Q asks about unsaved changes window by window before quitting.
+            cx.on_action(|_: &prototype::Quit, cx| prototype::quit(cx));
             for index in 0..count {
                 let root = roots.get(index).cloned();
                 let service = service.clone();

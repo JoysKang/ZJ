@@ -172,7 +172,6 @@ impl Prototype {
                 .map(|diff| super::language_for(&diff.path).1),
             _ => document.map(|doc| doc.language),
         };
-        let any_dirty = self.documents.iter().any(|doc| doc.dirty);
         let icon = |name: IconName| {
             Icon::new(name)
                 .size(theme::SMALL_ICON_SIZE)
@@ -279,19 +278,6 @@ impl Prototype {
                         })),
                 )
             })
-            .when(any_dirty, |bar| {
-                bar.child(
-                    status_item("status-unsaved", colors)
-                        .child(icon(IconName::CircleAlert))
-                        .child("仅内存")
-                        .tooltip(|window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(
-                                "保存尚未实现：修改只在内存中，关闭后丢失",
-                            )
-                            .build(window, cx)
-                        }),
-                )
-            })
             .when_some(self.cursor, |bar, (line, column)| {
                 bar.child(status_item("status-cursor", colors).child(format!(
                     "行 {}，列 {}",
@@ -305,11 +291,18 @@ impl Prototype {
                 } else {
                     "UTF-8"
                 }))
-                .child(status_item("status-eol", colors).child(if doc.crlf {
-                    "CRLF"
-                } else {
-                    "LF"
-                }))
+                .child(
+                    status_item("status-eol", colors)
+                        .cursor_pointer()
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new("切换行尾序列（LF / CRLF）")
+                                .build(window, cx)
+                        })
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.toggle_line_ending(window, cx)),
+                        )
+                        .child(if doc.crlf { "CRLF" } else { "LF" }),
+                )
             })
             .when_some(language, |bar, language| {
                 bar.child(status_item("status-language", colors).child(language))

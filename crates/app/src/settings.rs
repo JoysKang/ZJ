@@ -174,6 +174,9 @@ pub struct Settings {
     /// 减少动态效果).
     pub dock_icon_blink: bool,
     pub agent: AgentSettings,
+    /// files.autoSave: "off" (default), "afterDelay" (1 s after the last edit) or
+    /// "onFocusChange" (when the window loses focus or another tab is chosen).
+    pub auto_save: crate::save::AutoSave,
 }
 
 impl Default for Settings {
@@ -186,6 +189,7 @@ impl Default for Settings {
             search_use_excludes: true,
             dock_icon_blink: false,
             agent: AgentSettings::default(),
+            auto_save: crate::save::AutoSave::Off,
         }
     }
 }
@@ -250,6 +254,11 @@ impl Settings {
             search_use_excludes: flag("search_use_excludes", defaults.search_use_excludes),
             dock_icon_blink: flag("dock_icon_blink", defaults.dock_icon_blink),
             agent: AgentSettings::from_json(value.get("agent")),
+            auto_save: value
+                .get("auto_save")
+                .and_then(Value::as_str)
+                .map(crate::save::AutoSave::parse)
+                .unwrap_or(defaults.auto_save),
         }
     }
 
@@ -262,6 +271,7 @@ impl Settings {
             "search_use_excludes": self.search_use_excludes,
             "dock_icon_blink": self.dock_icon_blink,
             "agent": self.agent.to_json(),
+            "auto_save": self.auto_save.as_str(),
         })
     }
 
@@ -332,6 +342,7 @@ mod tests {
                 }],
                 allow: BTreeMap::from([("/w".into(), vec!["cargo test".into()])]),
             },
+            auto_save: crate::save::AutoSave::AfterDelay,
         };
         changed.save_to(&path).unwrap();
         assert_eq!(Settings::load_from(&path), changed);

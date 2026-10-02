@@ -20,6 +20,8 @@ struct TabSpec {
     dirty: bool,
     /// Muted text after the label ("Agent 建议").
     note: Option<&'static str>,
+    /// The file was deleted on disk (VS Code strikes the name through).
+    deleted: bool,
 }
 
 impl Prototype {
@@ -121,13 +123,27 @@ impl Prototype {
                 }
             })
             .child(file_icons::icon(spec.icon))
-            .child(div().pl_1().child(spec.label))
+            .child(
+                div()
+                    .pl_1()
+                    .when(spec.deleted, |label| label.line_through())
+                    .child(spec.label),
+            )
             .when_some(spec.note, |tab, note| {
                 tab.child(
                     div()
                         .text_size(theme::TEXT_SECTION)
                         .text_color(colors.muted)
                         .child(note),
+                )
+            })
+            .when(spec.deleted, |tab| {
+                tab.child(
+                    div()
+                        .pl_1()
+                        .text_size(theme::TEXT_CAPTION)
+                        .text_color(colors.muted)
+                        .child("已删除"),
                 )
             })
             .child(close)
@@ -162,6 +178,7 @@ impl Prototype {
                     tooltip: doc.path.to_string_lossy().into_owned(),
                     dirty: doc.dirty,
                     note: None,
+                    deleted: doc.deleted,
                 }
             })
             .collect();
@@ -179,6 +196,7 @@ impl Prototype {
                     workspace_editor_agent::thread::ChangeOrigin::Proposed => "Agent 建议",
                     workspace_editor_agent::thread::ChangeOrigin::Written => "Agent 修改",
                 }),
+                deleted: false,
             });
         }
         let tabs: Vec<AnyElement> = specs.into_iter().map(|spec| self.tab(spec, cx)).collect();
@@ -209,7 +227,7 @@ impl Prototype {
             Pane::Document(id) => match self.documents.iter().find(|doc| doc.id == id) {
                 Some(doc) => (
                     Some(doc.path.clone()),
-                    doc.readonly.then_some("只读（多重硬链接）"),
+                    doc.readonly.then_some("只读文件（保存时需另存为）"),
                 ),
                 None => (None, None),
             },
@@ -380,7 +398,6 @@ impl Prototype {
             Pane::Diff => self.render_diff(cx),
             Pane::Document(id) => match self.documents.iter().find(|doc| doc.id == id) {
                 Some(doc) => Editor::new(&doc.editor)
-                    .readonly(doc.readonly)
                     .bordered(false)
                     .size_full()
                     .into_any_element(),
@@ -397,6 +414,7 @@ impl Prototype {
             .when(self.active == Pane::Diff, |area| {
                 area.children(self.render_agent_review_bar(cx))
             })
+            .children(self.render_disk_banner(cx))
             .child(
                 div()
                     .relative()

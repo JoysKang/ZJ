@@ -1603,38 +1603,15 @@ impl Prototype {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(doc) = self.documents.iter().find(|d| d.path == path) else {
-            return;
-        };
-        if doc.dirty {
-            self.message = format!(
-                "{} 已被 Agent 修改；编辑器里有未保存的修改，没有重新载入",
-                agent_model::file_name(path)
+        // The same path as any external change, so the recorded disk state stays current and
+        // an edited buffer gets the 重新加载 / 比较 / 保留我的 banner.
+        if self.documents.iter().any(|d| d.path == path) {
+            self.check_disk(
+                Some(&std::collections::BTreeSet::from([path.to_path_buf()])),
+                window,
+                cx,
             );
-            return;
         }
-        let id = doc.id;
-        let root = self.root.clone();
-        let path = path.to_path_buf();
-        let job = cx.background_spawn(async move { files::text_file(root.as_deref(), &path) });
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(loaded) = job.await else { return };
-            let _ = this.update_in(cx, |this, window, cx| {
-                if let Some(doc) = this.documents.iter_mut().find(|d| d.id == id)
-                    && !doc.dirty
-                {
-                    let editor = doc.editor.clone();
-                    doc.bytes = loaded.bytes;
-                    editor.update(cx, |editor, cx| editor.set_value(loaded.text, window, cx));
-                    // set_value emits Change; the buffer equals the disk again.
-                    if let Some(doc) = this.documents.iter_mut().find(|d| d.id == id) {
-                        doc.dirty = false;
-                    }
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     // ----- history ------------------------------------------------------------------------

@@ -40,6 +40,11 @@ mod chrome;
 mod diff_ops;
 pub use diff_ops::{CopyDiff, SelectAllDiff};
 mod diff_view;
+mod documents;
+pub use documents::{
+    AutoSaveAfterDelay, AutoSaveOff, AutoSaveOnFocusChange, CloseEditor, NewUntitled,
+    OpenDocuments, Quit, Save, SaveAll, SaveAs, ToggleLineEnding, quit,
+};
 mod editor_area;
 mod explorer_ops;
 mod find_widget;
@@ -64,7 +69,6 @@ mod workspace_refresh;
 gpui_kit::actions!(
     workspace,
     [
-        SaveUnavailable,
         NewWindow,
         OpenFile,
         OpenFolder,
@@ -111,6 +115,22 @@ struct Document {
     language: &'static str,
     crlf: bool,
     bom: bool,
+    /// The file as last loaded or saved (`None` for untitled buffers).
+    disk: Option<crate::save::DiskState>,
+    /// Untitled-N: saving asks for a path.
+    untitled: bool,
+    /// Counts edits, so a save that finishes after more typing keeps the tab edited.
+    version: u64,
+    saving: bool,
+    /// The file was deleted on disk; the buffer is kept (and counts as edited).
+    deleted: bool,
+    /// The buffer's version when its file was deleted, if it had no edits then: a file that
+    /// comes back (a branch switch) reloads silently.
+    unedited_when_deleted: Option<u64>,
+    /// The file changed on disk while the buffer had edits.
+    banner: Option<documents::Banner>,
+    auto_save: crate::save::Debounce,
+    auto_save_task: Option<Task<()>>,
     _subscription: Subscription,
 }
 
@@ -284,6 +304,8 @@ pub struct Prototype {
     file_generation: u64,
     path_prompt_open: bool,
     closing: bool,
+    /// What the window's "edited" mark currently shows.
+    window_edited: bool,
     /// Cursor (line, column) of the active editor, 0-based, for the status bar.
     cursor: Option<(u32, u32)>,
     _cursor_observer: Option<Subscription>,
@@ -396,8 +418,14 @@ impl Prototype {
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.update_welcome_blink(window, cx);
             this.agent_update_spin(window, cx);
-            if window.is_window_active() && this.root.is_some() {
-                this.refresh_on_activation(window, cx);
+            if window.is_window_active() {
+                // Files opened from outside the workspace are not watched: look on activation.
+                this.check_disk(None, window, cx);
+                if this.root.is_some() {
+                    this.refresh_on_activation(window, cx);
+                }
+            } else {
+                this.auto_save_on_focus_change(None, window, cx);
             }
         });
         let weak = cx.weak_entity();
@@ -411,28 +439,8 @@ impl Prototype {
                 if !this.documents.iter().any(|document| document.dirty) {
                     return true;
                 }
-                if this.closing {
-                    return false;
-                }
-                this.closing = true;
-                let answer = window.prompt(
-                    PromptLevel::Warning,
-                    "放弃未保存的编辑内容？",
-                    Some("此原型的编辑不会写入磁盘，关闭后不保留。选择继续编辑可保留当前缓冲区。"),
-                    &["继续编辑", "放弃并关闭"],
-                    cx,
-                );
-                cx.spawn_in(window, async move |this, cx| {
-                    let discard = answer.await == Ok(1);
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        this.closing = false;
-                        if discard {
-                            window.remove_window();
-                        }
-                        cx.notify();
-                    });
-                })
-                .detach();
+                // 「要保存对 X 的更改吗？」, then the window closes itself.
+                this.close_window_after_confirm(window, cx);
                 false
             })
             .unwrap_or(true)
@@ -489,6 +497,7 @@ impl Prototype {
             file_generation: 0,
             path_prompt_open: false,
             closing: false,
+            window_edited: false,
             cursor: None,
             _cursor_observer: None,
             preview: None,
@@ -847,6 +856,11 @@ impl Prototype {
     }
 
     fn select_pane(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+        if let Pane::Document(previous) = self.active
+            && pane != self.active
+        {
+            self.auto_save_on_focus_change(Some(previous), window, cx);
+        }
         self.file_generation += 1;
         self.file_task = None;
         self.active = pane;
@@ -1063,44 +1077,19 @@ impl Prototype {
                     cx.notify();
                     return;
                 }
-                let (language, language_name) = language_for(&loaded.path);
+                let (_, language_name) = language_for(&loaded.path);
                 let path = loaded.path.clone();
-                let view = cx.weak_entity();
-                let editor = cx.new(|cx| {
-                    // The workbench's own find widget takes ⌘F (find_widget.rs).
-                    let mut state = EditorState::new(window, cx)
-                        .language(language)
-                        .searchable(false)
-                        .default_value(loaded.text);
-                    navigation::attach(&mut state, &path, view);
-                    state
-                });
-                let subscription = cx.subscribe(
-                    &editor,
-                    move |this: &mut Self, _, event: &InputEvent, cx| {
-                        if matches!(event, InputEvent::Change) {
-                            let reloaded = this.reloading.remove(&id);
-                            if let Some(doc) = this.documents.iter_mut().find(|doc| doc.id == id) {
-                                doc.dirty |= !reloaded;
-                            }
-                            if this.active == Pane::Document(id) {
-                                this.find_update(false, cx);
-                            }
-                            cx.notify();
-                        }
-                    },
-                );
+                let (editor, subscription) =
+                    this.document_editor(id, &path, loaded.text, window, cx);
                 this.documents.push(Document {
-                    id,
-                    path: loaded.path.clone(),
-                    editor,
-                    dirty: false,
                     readonly: loaded.readonly,
                     bytes: loaded.bytes,
                     language: language_name,
                     crlf: loaded.crlf,
                     bom: loaded.bom,
-                    _subscription: subscription,
+                    disk: Some(loaded.disk),
+                    untitled: false,
+                    ..Document::new(id, path, editor, subscription)
                 });
                 this.owners.borrow_mut().insert(
                     id,
@@ -1132,33 +1121,9 @@ impl Prototype {
         cx.notify();
     }
 
+    /// The tab's ×: asks 「要保存对 X 的更改吗？」 for an edited buffer.
     fn close_document(&mut self, id: DocumentId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(document) = self.documents.iter().find(|doc| doc.id == id) else {
-            return;
-        };
-        if !document.dirty {
-            self.remove_document(id, window, cx);
-            return;
-        }
-        let name = document
-            .path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            &format!("放弃「{name}」的未保存修改？"),
-            Some("原文件未改动；关闭标签会丢弃当前缓冲区。"),
-            &["继续编辑", "放弃并关闭"],
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            if answer.await == Ok(1) {
-                let _ = this.update_in(cx, |this, window, cx| this.remove_document(id, window, cx));
-            }
-        })
-        .detach();
+        self.confirm_close(vec![id], true, window, cx).detach();
     }
 
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1717,8 +1682,14 @@ impl Prototype {
 }
 
 impl Render for Prototype {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = theme::colors(cx);
+        // macOS: the dot in the window's close button.
+        let edited = self.documents.iter().any(|doc| doc.dirty);
+        if edited != self.window_edited {
+            self.window_edited = edited;
+            window.set_window_edited(edited);
+        }
         let editor = self.render_editor_area(cx);
         let agent_panel = self.agent.visible.then(|| self.render_agent_panel(cx));
         let workbench = if self.sidebar_visible || agent_panel.is_some() {
@@ -1774,9 +1745,24 @@ impl Render for Prototype {
             .on_action(cx.listener(|this, _: &OpenFolder, window, cx| {
                 this.choose_path(true, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &SaveUnavailable, _, cx| {
-                this.message = "尚未支持保存：修改只在内存中，原文件未改动".into();
-                cx.notify();
+            .on_action(cx.listener(|this, _: &Save, window, cx| this.save_active(window, cx)))
+            .on_action(cx.listener(|this, _: &SaveAs, window, cx| this.save_active_as(window, cx)))
+            .on_action(cx.listener(|this, _: &SaveAll, window, cx| {
+                this.save_all(window, cx).detach()
+            }))
+            .on_action(cx.listener(|this, _: &NewUntitled, window, cx| this.new_untitled(window, cx)))
+            .on_action(cx.listener(|this, _: &CloseEditor, window, cx| this.close_editor(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleLineEnding, window, cx| {
+                this.toggle_line_ending(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &AutoSaveOff, window, cx| {
+                this.set_auto_save(crate::save::AutoSave::Off, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &AutoSaveAfterDelay, window, cx| {
+                this.set_auto_save(crate::save::AutoSave::AfterDelay, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &AutoSaveOnFocusChange, window, cx| {
+                this.set_auto_save(crate::save::AutoSave::OnFocusChange, window, cx)
             }))
             .on_action(cx.listener(|this, _: &QuickOpenFile, window, cx| {
                 this.open_quick_open(window, cx);
