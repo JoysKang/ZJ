@@ -1,0 +1,27 @@
+[package]
+name = "workspace-editor-agent"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# ACP client over stdio, no tokio; see docs/adr/0004.
+agent-client-protocol = { version = "=2.2.0", default-features = false }
+# Already in the tree through GPUI Kit / the ACP crate.
+async-channel = "=2.5.0"
+async-io = "2"
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Test-only fake ACP agent used by tests/client.rs; never shipped (the app does not build it).
+[[bin]]
+name = "zj-fake-acp-agent"
+path = "src/bin/fake_acp_agent.rs"
+test = false
+bench = false
+doc = false
+
+[lints]
+workspace = true
