@@ -588,9 +588,10 @@ impl Prototype {
             let list = |dir: &std::path::Path, cancel: &AtomicBool| service.list_files(dir, cancel);
             let index = PathIndex::build(&root, &cancel, &list);
             eprintln!(
-                "event=index_built entries={} incomplete={} seconds={:.3}",
+                "event=index_built entries={} incomplete={} heap_kb={} seconds={:.3}",
                 index.len(),
                 index.incomplete,
+                index.heap_bytes() / 1024,
                 started.elapsed().as_secs_f64()
             );
             index

@@ -57,35 +57,33 @@ pub struct SearchResults {
     pub errors: usize,
 }
 
-#[derive(Clone)]
-struct IndexEntry {
-    relative: PathBuf,
-    /// Lowercased lossy display form, precomputed so matching allocates nothing per keystroke.
-    key: Box<str>,
-    name_start: usize,
-}
-
-impl IndexEntry {
-    fn new(relative: PathBuf) -> Self {
-        let key: Box<str> = relative.to_string_lossy().to_lowercase().into();
-        let name_start = key.rfind('/').map_or(0, |i| i + 1);
-        IndexEntry {
-            relative,
-            key,
-            name_start,
-        }
-    }
-}
-
 /// Every file path of a workspace, built once in the background and matched in memory.
 ///
 /// Git worktrees contribute `git ls-files` output (tracked plus non-ignored untracked files);
 /// other directories use a bounded walk that skips [`EXCLUDED_DIRS`] and directory symlinks.
+///
+/// Paths are packed into one arena of raw bytes with 12 bytes of offsets per file, instead of
+/// two heap allocations per file; only paths that are not already lowercase UTF-8 keep a
+/// separate lowercased key for matching. A workspace of 20,000 files takes about 0.8 MB
+/// instead of 4.5 MB.
 pub struct PathIndex {
     root: PathBuf,
-    entries: Vec<IndexEntry>,
+    /// Relative paths' raw bytes, concatenated in sorted order.
+    paths: Vec<u8>,
+    /// Lowercased lossy display forms, concatenated in the same order.
+    keys: String,
+    /// End offsets into `paths` and `keys`; each entry starts where the previous one ends.
+    slots: Vec<Slot>,
     pub incomplete: bool,
     pub errors: usize,
+}
+
+#[derive(Clone, Copy)]
+struct Slot {
+    path_end: u32,
+    key_end: u32,
+    /// Byte offset of the file name inside the key.
+    name_start: u32,
 }
 
 type ListFiles<'a> = dyn Fn(&Path, &AtomicBool) -> io::Result<Vec<u8>> + 'a;
@@ -98,44 +96,123 @@ impl PathIndex {
             cancel,
             list_files,
             started: Instant::now(),
-            index: PathIndex {
-                root: root.to_path_buf(),
-                entries: Vec::new(),
-                incomplete: false,
-                errors: 0,
-            },
+            found: Vec::new(),
+            incomplete: false,
+            errors: 0,
         };
         // The root may sit inside a worktree without its own `.git`, so always try Git first.
         if !builder.list_git(Path::new("")) {
             builder.walk(Path::new(""));
         }
-        let mut index = builder.index;
-        index.sort();
+        let Builder {
+            found,
+            incomplete,
+            errors,
+            ..
+        } = builder;
+        Self::pack(root.to_path_buf(), found, incomplete, errors)
+    }
+
+    /// Sorted by relative path (component order, so a directory's files are contiguous) so
+    /// file watching can look entries up without a second set.
+    fn pack(root: PathBuf, mut found: Vec<PathBuf>, incomplete: bool, errors: usize) -> Self {
+        found.sort_unstable();
+        found.dedup();
+        let bytes: usize = found.iter().map(|p| p.as_os_str().len()).sum();
+        let mut index = PathIndex {
+            root,
+            paths: Vec::with_capacity(bytes),
+            keys: String::new(),
+            slots: Vec::with_capacity(found.len()),
+            incomplete,
+            errors,
+        };
+        for relative in found {
+            index.push(relative.as_path());
+        }
         index
     }
 
-    /// Sorted by relative path so file watching can look entries up without a second set.
-    fn sort(&mut self) {
-        self.entries
-            .sort_unstable_by(|a, b| a.relative.cmp(&b.relative));
-        self.entries.dedup_by(|a, b| a.relative == b.relative);
+    fn push(&mut self, relative: &Path) {
+        let key_start = self.keys.len();
+        let bytes = relative.as_os_str().as_bytes();
+        self.paths.extend_from_slice(bytes);
+        // Most paths are already lowercase UTF-8; those share their bytes with the key.
+        let same = std::str::from_utf8(bytes).is_ok_and(|text| {
+            !text
+                .chars()
+                .any(|c| c.to_lowercase().ne(std::iter::once(c)))
+        });
+        let key = if same {
+            std::str::from_utf8(bytes).unwrap_or_default()
+        } else {
+            for c in relative.to_string_lossy().chars() {
+                self.keys.extend(c.to_lowercase());
+            }
+            &self.keys[key_start..]
+        };
+        let name_start = key.rfind('/').map_or(0, |i| i + 1);
+        self.slots.push(Slot {
+            path_end: self.paths.len() as u32,
+            key_end: self.keys.len() as u32,
+            name_start: name_start as u32,
+        });
+    }
+
+    fn relative(&self, index: usize) -> &Path {
+        let start = index
+            .checked_sub(1)
+            .map_or(0, |prev| self.slots[prev].path_end as usize);
+        let end = self.slots[index].path_end as usize;
+        Path::new(std::ffi::OsStr::from_bytes(&self.paths[start..end]))
+    }
+
+    /// The lowercased display form; an empty key range means the path itself is the key.
+    fn key(&self, index: usize) -> (&str, usize) {
+        let start = index
+            .checked_sub(1)
+            .map_or(0, |prev| self.slots[prev].key_end as usize);
+        let slot = self.slots[index];
+        let key = match &self.keys[start..slot.key_end as usize] {
+            "" => {
+                std::str::from_utf8(self.relative(index).as_os_str().as_bytes()).unwrap_or_default()
+            }
+            key => key,
+        };
+        (key, slot.name_start as usize)
+    }
+
+    fn relatives(&self) -> impl Iterator<Item = &Path> {
+        (0..self.slots.len()).map(|i| self.relative(i))
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.slots.len()
+    }
+
+    /// Bytes held by the index, for resource reports.
+    pub fn heap_bytes(&self) -> usize {
+        self.paths.capacity()
+            + self.keys.capacity()
+            + self.slots.capacity() * std::mem::size_of::<Slot>()
     }
 
     /// Absolute paths of all indexed files.
     pub fn paths(&self) -> Vec<PathBuf> {
-        self.entries
-            .iter()
-            .map(|entry| self.root.join(&entry.relative))
-            .collect()
+        self.relatives().map(|r| self.root.join(r)).collect()
     }
 
     fn position(&self, relative: &Path) -> Result<usize, usize> {
-        self.entries
-            .binary_search_by(|entry| entry.relative.as_path().cmp(relative))
+        let (mut low, mut high) = (0, self.slots.len());
+        while low < high {
+            let mid = (low + high) / 2;
+            match self.relative(mid).cmp(relative) {
+                std::cmp::Ordering::Less => low = mid + 1,
+                std::cmp::Ordering::Greater => high = mid,
+                std::cmp::Ordering::Equal => return Ok(mid),
+            }
+        }
+        Err(low)
     }
 
     /// Whether `path` (absolute) is an indexed file, or a directory containing indexed files.
@@ -145,43 +222,32 @@ impl PathIndex {
         };
         match self.position(relative) {
             Ok(_) => true,
-            Err(next) => self
-                .entries
-                .get(next)
-                .is_some_and(|entry| entry.relative.starts_with(relative)),
+            Err(next) => next < self.slots.len() && self.relative(next).starts_with(relative),
         }
     }
 
     /// A copy with files added and paths (files or whole directories) removed; used for
     /// watch events instead of rebuilding the index.
     pub fn with_changes(&self, added: &[PathBuf], removed: &[PathBuf]) -> PathIndex {
-        let mut next = PathIndex {
-            root: self.root.clone(),
-            entries: Vec::with_capacity(self.entries.len() + added.len()),
-            incomplete: self.incomplete,
-            errors: self.errors,
-        };
         let removed: Vec<&Path> = removed
             .iter()
             .filter_map(|path| path.strip_prefix(&self.root).ok())
             .collect();
-        next.entries.extend(
-            self.entries
-                .iter()
-                .filter(|entry| !removed.iter().any(|gone| entry.relative.starts_with(gone)))
-                .cloned(),
-        );
+        let mut found: Vec<PathBuf> = self
+            .relatives()
+            .filter(|relative| !removed.iter().any(|gone| relative.starts_with(gone)))
+            .map(Path::to_path_buf)
+            .collect();
         for path in added {
             if let Ok(relative) = path.strip_prefix(&self.root)
                 && !relative
                     .components()
                     .any(|c| is_excluded_dir(c.as_os_str()))
             {
-                next.entries.push(IndexEntry::new(relative.to_path_buf()));
+                found.push(relative.to_path_buf());
             }
         }
-        next.sort();
-        next
+        Self::pack(self.root.clone(), found, self.incomplete, self.errors)
     }
 
     /// Ranks all entries against `query` and returns the best [`MAX_RESULTS`] as absolute paths.
@@ -195,15 +261,15 @@ impl PathIndex {
         if query.is_empty() {
             return result;
         }
-        let mut scored: Vec<(i32, &IndexEntry)> = self
-            .entries
-            .iter()
-            .filter_map(|e| fuzzy::score(&query, &e.key, e.name_start).map(|s| (s, e)))
+        let mut scored: Vec<(i32, usize)> = (0..self.slots.len())
+            .filter_map(|i| {
+                let (key, name_start) = self.key(i);
+                fuzzy::score(&query, key, name_start).map(|s| (s, i))
+            })
             .collect();
-        let order = |a: &(i32, &IndexEntry), b: &(i32, &IndexEntry)| {
-            b.0.cmp(&a.0)
-                .then(a.1.key.len().cmp(&b.1.key.len()))
-                .then(a.1.key.cmp(&b.1.key))
+        let order = |a: &(i32, usize), b: &(i32, usize)| {
+            let (ka, kb) = (self.key(a.1).0, self.key(b.1).0);
+            b.0.cmp(&a.0).then(ka.len().cmp(&kb.len())).then(ka.cmp(kb))
         };
         if scored.len() > MAX_RESULTS {
             scored.select_nth_unstable_by(MAX_RESULTS, order);
@@ -213,7 +279,7 @@ impl PathIndex {
         scored.sort_unstable_by(order);
         result.paths = scored
             .into_iter()
-            .map(|(_, e)| self.root.join(&e.relative))
+            .map(|(_, i)| self.root.join(self.relative(i)))
             .collect();
         result
     }
@@ -224,18 +290,20 @@ struct Builder<'a> {
     cancel: &'a AtomicBool,
     list_files: &'a ListFiles<'a>,
     started: Instant,
-    index: PathIndex,
+    found: Vec<PathBuf>,
+    incomplete: bool,
+    errors: usize,
 }
 
 impl Builder<'_> {
     fn stopped(&mut self) -> bool {
         if self.cancel.load(Ordering::Relaxed)
-            || self.index.entries.len() >= MAX_INDEX_ENTRIES
+            || self.found.len() >= MAX_INDEX_ENTRIES
             || self.started.elapsed() > INDEX_DEADLINE
         {
-            self.index.incomplete = true;
+            self.incomplete = true;
         }
-        self.index.incomplete
+        self.incomplete
     }
 
     fn push(&mut self, relative: PathBuf) {
@@ -245,7 +313,7 @@ impl Builder<'_> {
         {
             return;
         }
-        self.index.entries.push(IndexEntry::new(relative));
+        self.found.push(relative);
     }
 
     /// Returns false when `relative` is not inside a Git worktree (or Git failed).
@@ -269,7 +337,7 @@ impl Builder<'_> {
                             }
                         }
                         Ok(_) => {}
-                        Err(_) => self.index.errors += 1,
+                        Err(_) => self.errors += 1,
                     }
                 }
             }
@@ -286,17 +354,17 @@ impl Builder<'_> {
             let entries = match fs::read_dir(self.root.join(&dir)) {
                 Ok(entries) => entries,
                 Err(_) => {
-                    self.index.errors += 1;
+                    self.errors += 1;
                     continue;
                 }
             };
             for item in entries {
                 let Ok(item) = item else {
-                    self.index.errors += 1;
+                    self.errors += 1;
                     continue;
                 };
                 let Ok(kind) = item.file_type() else {
-                    self.index.errors += 1;
+                    self.errors += 1;
                     continue;
                 };
                 let path = dir.join(item.file_name());
@@ -489,6 +557,28 @@ mod tests {
     }
 
     #[test]
+    fn packed_index_matches_mixed_case_and_stays_small() {
+        let paths: Vec<PathBuf> = (0..1000)
+            .map(|i| PathBuf::from(format!("src/m{:02}/file_{i:04}.rs", i / 40)))
+            .chain(["Docs/README.md".into(), "a-b/x.rs".into(), "a/b.rs".into()])
+            .collect();
+        let index = PathIndex::pack(PathBuf::from("/w"), paths, false, 0);
+        assert_eq!(index.len(), 1003);
+        // Lowercase paths share their bytes with the key: ~23 bytes + 12 per entry.
+        assert!(index.heap_bytes() < 1003 * 40, "{}", index.heap_bytes());
+        assert_eq!(
+            index.search("readme").paths,
+            vec![PathBuf::from("/w/Docs/README.md")]
+        );
+        assert_eq!(index.key(0).0, "Docs/README.md".to_lowercase());
+        assert!(index.covers(Path::new("/w/a")) && index.covers(Path::new("/w/a-b/x.rs")));
+        assert!(index.covers(Path::new("/w/src/m03")) && !index.covers(Path::new("/w/src/m99")));
+        let next = index.with_changes(&[PathBuf::from("/w/a/c.rs")], &[PathBuf::from("/w/src")]);
+        assert_eq!(next.len(), 4);
+        assert!(next.covers(Path::new("/w/a/c.rs")) && !next.covers(Path::new("/w/src")));
+    }
+
+    #[test]
     fn git_index_follows_ignore_rules_and_nested_repositories() {
         let root = std::env::temp_dir().join(format!("zj-index-{}", std::process::id()));
         let git = |dir: &Path, args: &[&str]| {
@@ -521,7 +611,9 @@ mod tests {
         let service = workspace_editor_git::GitService::new(1, Duration::from_secs(10)).unwrap();
         let list = |dir: &Path, cancel: &AtomicBool| service.list_files(dir, cancel);
         let index = PathIndex::build(&root, &AtomicBool::new(false), &list);
-        let mut keys: Vec<_> = index.entries.iter().map(|e| e.key.to_string()).collect();
+        let mut keys: Vec<_> = (0..index.len())
+            .map(|i| index.key(i).0.to_string())
+            .collect();
         keys.sort();
         assert_eq!(
             keys,

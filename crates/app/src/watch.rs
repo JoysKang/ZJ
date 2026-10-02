@@ -53,6 +53,9 @@ struct Subscriber {
     repositories: HashSet<PathBuf>,
     pending: Arc<Mutex<Notice>>,
     sender: Sender<()>,
+    /// An event under the root was dropped by the excluded-directory filter; a repository
+    /// discovered later may track that path, so its registration forces a full refresh.
+    dropped: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -73,7 +76,15 @@ impl Subscribers {
                     let paths: Vec<PathBuf> = event
                         .paths
                         .iter()
-                        .filter(|path| subscriber.matches(path))
+                        .filter(|path| {
+                            let matches = subscriber.matches(path);
+                            if !matches && path.starts_with(&subscriber.root) {
+                                subscriber
+                                    .dropped
+                                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            matches
+                        })
                         .cloned()
                         .collect();
                     if !rescan && paths.is_empty() {
@@ -178,6 +189,7 @@ impl WatchService {
                     repositories: HashSet::new(),
                     pending: pending.clone(),
                     sender,
+                    dropped: Default::default(),
                 },
             );
             id
@@ -248,8 +260,9 @@ impl Subscription {
                 .paths
                 .retain(|registered| registered != path);
         }
-        if !matches!(result, Ok(false)) {
-            // FSEvents reconfigures its stream on watch/unwatch; close that gap with a recheck.
+        // FSEvents reconfigures its stream on watch/unwatch; close that gap with a recheck.
+        // inotify adds watches without restarting anything, so other windows keep their state.
+        if !matches!(result, Ok(false)) && cfg!(target_os = "macos") {
             self.service.0.subscribers.lock().unwrap().invalidate();
         }
         result.map(|_| ())
@@ -269,9 +282,17 @@ impl Subscription {
         self.add_path(&repo.common_dir)?;
         self.add_path(&repo.id.0)?;
         if added {
-            // Indexing may have started before discovery broadened the event filter.
+            // Indexing may have started before discovery broadened the event filter. Only an
+            // event the filter actually dropped can be missing, so a quiet startup does not
+            // pay for a second full refresh.
             let subscribers = self.service.0.subscribers.lock().unwrap();
             let subscriber = subscribers.entries.get(&self.id).unwrap();
+            if !subscriber
+                .dropped
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Ok(());
+            }
             let mut pending = subscriber.pending.lock().unwrap();
             pending.changed = true;
             pending.overflow = true;
@@ -358,7 +379,10 @@ impl Shared {
         }
         drop(native);
         let subscribers = self.subscribers.lock().unwrap();
-        subscribers.invalidate();
+        // Only FSEvents restarts its stream on unwatch (see `add_path`).
+        if cfg!(target_os = "macos") {
+            subscribers.invalidate();
+        }
         if let Some(error) = failure {
             subscribers.deliver(Err(error))
         }
@@ -387,6 +411,7 @@ mod tests {
                 repositories: HashSet::new(),
                 sender,
                 pending: pending.clone(),
+                dropped: Default::default(),
             },
         );
         for path in [
