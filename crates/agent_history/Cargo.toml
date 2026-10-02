@@ -1,0 +1,12 @@
+[package]
+name = "workspace-editor-agent-history"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# SQLite + FTS5 for local agent chat history; see docs/adr/0004. No statement cache (hashlink).
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
+
+[lints]
+workspace = true

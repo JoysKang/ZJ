@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/app", "crates/core", "crates/git_service"]
+members = ["crates/app", "crates/core", "crates/git_service", "crates/agent_history"]
 default-members = ["crates/app"]
 # 打过补丁的 GPUI macOS 渲染 / 窗口 crate，不作为工作区成员（不跑本项目的 fmt / clippy）。
 exclude = ["vendor"]
