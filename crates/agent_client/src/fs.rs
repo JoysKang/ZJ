@@ -109,7 +109,7 @@ pub(crate) fn window(text: String, line: Option<u32>, limit: Option<u32>) -> Str
 }
 
 /// Write to a temporary sibling, then rename; keeps the original file's permissions.
-pub(crate) fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
+pub fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("路径没有父目录"))?;

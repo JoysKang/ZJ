@@ -2,7 +2,18 @@
 //! change block per [`Hunk`], in the same order) and the Direct-mode decisions, which move
 //! the "before" snapshot (accept) or the file on disk (reject).
 
-use crate::shadow::{Hunk, apply_hunks, diff_hunks};
+use crate::{
+    AgentClient,
+    shadow::{Hunk, apply_hunks, diff_hunks},
+    thread::ChangeOrigin,
+};
+use std::path::Path;
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
 
 /// A unified patch with every line as context, so the diff editor can show the whole file.
 /// Change block `i` of the parsed patch is `hunks[i]`.
@@ -54,6 +65,95 @@ pub fn reject_written_hunk(before: &str, current: &str, index: usize) -> String 
     let count = diff_hunks(before, current).len();
     let keep: Vec<usize> = (0..count).filter(|i| *i != index).collect();
     apply_hunks(before, current, &keep)
+}
+
+/// The review base and current text of a changed file: (before, after, origin). `None` when
+/// nothing is pending for it.
+pub fn review_texts(
+    client: &AgentClient,
+    path: &Path,
+) -> Option<(Option<String>, String, ChangeOrigin)> {
+    if let Some(edit) = client.shadow().get(path) {
+        return Some((edit.base, edit.proposed, ChangeOrigin::Proposed));
+    }
+    let before = client.snapshot(path)?;
+    let after = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(_) => return None,
+    };
+    Some((before, after, ChangeOrigin::Written))
+}
+
+/// Accepts or rejects a whole file. Direct mode: accepting forgets the snapshot, rejecting
+/// restores it on disk (or removes a file the agent created).
+pub fn resolve_file(client: &AgentClient, path: &Path, accept: bool) -> Result<(), String> {
+    let name = file_name(path);
+    if client.shadow().get(path).is_some() {
+        if accept {
+            client
+                .shadow()
+                .accept_file(path)
+                .map(|_| ())
+                .map_err(|e| format!("{name}：{e}"))?;
+        } else {
+            client.shadow().reject_file(path);
+        }
+        return Ok(());
+    }
+    let Some(before) = client.snapshot(path) else {
+        return Ok(());
+    };
+    if !accept {
+        match &before {
+            Some(text) => crate::fs::write_atomic(path, text),
+            None => match std::fs::remove_file(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            },
+        }
+        .map_err(|e| format!("{name} 未能还原：{e}"))?;
+        eprintln!("event=agent_review_reverted_file");
+    }
+    client.set_snapshot(path, None);
+    Ok(())
+}
+
+/// Accepts or rejects one hunk (block `index` of the review diff).
+pub fn resolve_hunk(
+    client: &AgentClient,
+    path: &Path,
+    index: usize,
+    accept: bool,
+) -> Result<(), String> {
+    let name = file_name(path);
+    if client.shadow().get(path).is_some() {
+        return client
+            .shadow()
+            .resolve_hunk(path, index, accept)
+            .map(|_| ())
+            .map_err(|e| format!("{name}：{e}"));
+    }
+    let Some((before, current, _)) = review_texts(client, path) else {
+        return Ok(());
+    };
+    let base = before.clone().unwrap_or_default();
+    if accept {
+        let next = accept_written_hunk(&base, &current, index);
+        client.set_snapshot(path, (next != current).then_some(Some(next)));
+    } else {
+        let next = reject_written_hunk(&base, &current, index);
+        let result = if before.is_none() && next.is_empty() {
+            std::fs::remove_file(path)
+        } else {
+            crate::fs::write_atomic(path, &next)
+        };
+        result.map_err(|e| format!("{name} 未能还原这一处：{e}"))?;
+        if next == base {
+            client.set_snapshot(path, None);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -2,7 +2,9 @@
 //!
 //! The first word of the prompt text selects a script:
 //! `echo <text>` · `links` · `tool <path>` · `permission` · `read <path>` ·
-//! `write <path> <text>` · `slow` · `crash` · `pid` · `env <NAME>`.
+//! `write <path> <text>` · `slow` · `crash` · `pid` · `env <NAME>` · `demo` (a scripted
+//! turn for the panel's screenshots and e2e test: reads, a plan, edits from
+//! `$FAKE_DEMO/edits/<path with / as __>`, then a command that needs approval).
 //! `FAKE_LOAD_SESSION=1` advertises `loadSession` (history is replayed on load).
 
 use agent_client_protocol::{
@@ -23,6 +25,7 @@ struct State {
     /// `_meta` of the last session/new or session/load, and every mode the client asked for.
     meta: std::sync::Mutex<String>,
     mode_requests: std::sync::Mutex<Vec<String>>,
+    cwd: std::sync::Mutex<std::path::PathBuf>,
 }
 
 fn text(t: impl Into<String>) -> acp::ContentBlock {
@@ -239,6 +242,10 @@ async fn run_prompt(
             std::process::exit(3);
         }
         "pid" => say(&cx, &session, format!("pid:{}", std::process::id()))?,
+        "demo" => {
+            let cwd = state.cwd.lock().unwrap().clone();
+            stop = demo(&cx, &session, &cwd).await?;
+        }
         "modes" => say(
             &cx,
             &session,
@@ -259,6 +266,187 @@ async fn run_prompt(
         other => say(&cx, &session, format!("unknown:{other}"))?,
     }
     responder.respond(acp::PromptResponse::new(stop))
+}
+
+fn tool(
+    cx: &ConnectionTo<Client>,
+    session: &acp::SessionId,
+    id: &str,
+    title: &str,
+    kind: acp::ToolKind,
+    paths: &[std::path::PathBuf],
+    content: Vec<acp::ToolCallContent>,
+) -> sdk::Result<()> {
+    notify(
+        cx,
+        session,
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new(id.to_string(), title)
+                .kind(kind)
+                .status(acp::ToolCallStatus::Completed)
+                .locations(
+                    paths
+                        .iter()
+                        .map(|p| acp::ToolCallLocation::new(p.clone()))
+                        .collect(),
+                )
+                .content(content),
+        ),
+    )
+}
+
+async fn demo(
+    cx: &ConnectionTo<Client>,
+    session: &acp::SessionId,
+    cwd: &std::path::Path,
+) -> sdk::Result<acp::StopReason> {
+    let dir = std::path::PathBuf::from(std::env::var("FAKE_DEMO").unwrap_or_default());
+    let mut edits: Vec<(std::path::PathBuf, String)> = std::fs::read_dir(dir.join("edits"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().replace("__", "/");
+                    Some((cwd.join(name), std::fs::read_to_string(e.path()).ok()?))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    edits.sort();
+    let pause = || async_io::Timer::after(Duration::from_millis(30));
+    notify(
+        cx,
+        session,
+        acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(text(
+            "先看重连路径里 last_update_id 的处理。",
+        ))),
+    )?;
+    let reads: Vec<std::path::PathBuf> =
+        ["src/feed/binance.rs", "src/book/l2.rs", "src/feed/mod.rs"]
+            .iter()
+            .map(|p| cwd.join(p))
+            .collect();
+    tool(
+        cx,
+        session,
+        "d1",
+        "Read 3 files",
+        acp::ToolKind::Read,
+        &reads,
+        vec![],
+    )?;
+    tool(
+        cx,
+        session,
+        "d2",
+        "last_update_id · 7 处，2 个文件",
+        acp::ToolKind::Search,
+        &[],
+        vec![],
+    )?;
+    pause().await;
+    for chunk in [
+        "原因在 `on_reconnect`：它只重置了 WebSocket 的退避状态，",
+        "`last_update_id` 仍是断线前的值，所以重连后的第一批增量被当成连续数据直接应用。",
+    ] {
+        say(cx, session, chunk)?;
+        pause().await;
+    }
+    let plan = |done: usize| {
+        let steps = [
+            "定位重连路径里的序列号处理",
+            "重连后清空缓冲，拉取快照后按序回放",
+            "添加回归测试 tests/reconnect.rs",
+            "运行 cargo test 并确认通过",
+        ];
+        acp::SessionUpdate::Plan(acp::Plan::new(
+            steps
+                .iter()
+                .enumerate()
+                .map(|(i, step)| {
+                    acp::PlanEntry::new(
+                        *step,
+                        acp::PlanEntryPriority::Medium,
+                        if i < done {
+                            acp::PlanEntryStatus::Completed
+                        } else if i == done {
+                            acp::PlanEntryStatus::InProgress
+                        } else {
+                            acp::PlanEntryStatus::Pending
+                        },
+                    )
+                })
+                .collect(),
+        ))
+    };
+    notify(cx, session, plan(1))?;
+    for (n, (path, after)) in edits.iter().enumerate() {
+        let before = std::fs::read_to_string(path).ok();
+        let mut diff = acp::Diff::new(path.clone(), after.clone());
+        if let Some(before) = &before {
+            diff = diff.old_text(before.clone());
+        }
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        tool(
+            cx,
+            session,
+            &format!("e{n}"),
+            &format!("Edit {name}"),
+            acp::ToolKind::Edit,
+            std::slice::from_ref(path),
+            vec![acp::ToolCallContent::Diff(diff)],
+        )?;
+        cx.send_request(acp::WriteTextFileRequest::new(
+            session.clone(),
+            path.clone(),
+            after.clone(),
+        ))
+        .block_task()
+        .await?;
+    }
+    notify(cx, session, plan(2))?;
+    notify(
+        cx,
+        session,
+        acp::SessionUpdate::UsageUpdate(acp::UsageUpdate::new(76_000, 200_000)),
+    )?;
+    notify(
+        cx,
+        session,
+        acp::SessionUpdate::SessionInfoUpdate(
+            acp::SessionInfoUpdate::new().title("修复重连后序列号缺口"),
+        ),
+    )?;
+    let request = acp::RequestPermissionRequest::new(
+        session.clone(),
+        acp::ToolCallUpdate::new(
+            "d9",
+            acp::ToolCallUpdateFields::new()
+                .title("cargo test --test reconnect -- --nocapture")
+                .kind(acp::ToolKind::Execute),
+        ),
+        vec![
+            acp::PermissionOption::new("allow", "Allow once", acp::PermissionOptionKind::AllowOnce),
+            acp::PermissionOption::new("reject", "Reject", acp::PermissionOptionKind::RejectOnce),
+        ],
+    );
+    let response = cx.send_request(request).block_task().await?;
+    Ok(match response.outcome {
+        acp::RequestPermissionOutcome::Selected(s) if s.option_id.to_string() == "allow" => {
+            notify(cx, session, plan(4))?;
+            say(
+                cx,
+                session,
+                "\n\n测试通过：`test reconnect_resyncs_snapshot ... ok`。",
+            )?;
+            acp::StopReason::EndTurn
+        }
+        acp::RequestPermissionOutcome::Selected(_) => {
+            say(cx, session, "\n\n好的，不运行测试。")?;
+            acp::StopReason::EndTurn
+        }
+        _ => acp::StopReason::Cancelled,
+    })
 }
 
 fn main() -> sdk::Result<()> {
@@ -300,6 +488,7 @@ fn main() -> sdk::Result<()> {
                     assert!(request.mcp_servers.is_empty());
                     *on_new.meta.lock().unwrap() = serde_json::to_string(&request.meta).unwrap();
                     let n = on_new.sessions.fetch_add(1, Ordering::SeqCst);
+                    *on_new.cwd.lock().unwrap() = request.cwd.clone();
                     let mut modes = vec![
                         acp::SessionMode::new("default", "Default"),
                         acp::SessionMode::new("plan", "Plan"),
