@@ -28,6 +28,9 @@ pub struct Settings {
     pub hide_clean_repos: bool,
     /// Full-text search applies `.gitignore` and the default excludes.
     pub search_use_excludes: bool,
+    /// macOS: the Dock icon's cursor blinks while the app runs (off by default; never with
+    /// 减少动态效果).
+    pub dock_icon_blink: bool,
 }
 
 impl Default for Settings {
@@ -38,6 +41,7 @@ impl Default for Settings {
             diff_inline: true,
             hide_clean_repos: false,
             search_use_excludes: true,
+            dock_icon_blink: false,
         }
     }
 }
@@ -100,6 +104,7 @@ impl Settings {
             diff_inline: flag("diff_inline", defaults.diff_inline),
             hide_clean_repos: flag("hide_clean_repos", defaults.hide_clean_repos),
             search_use_excludes: flag("search_use_excludes", defaults.search_use_excludes),
+            dock_icon_blink: flag("dock_icon_blink", defaults.dock_icon_blink),
         }
     }
 
@@ -110,6 +115,7 @@ impl Settings {
             "diff_inline": self.diff_inline,
             "hide_clean_repos": self.hide_clean_repos,
             "search_use_excludes": self.search_use_excludes,
+            "dock_icon_blink": self.dock_icon_blink,
         })
     }
 
@@ -160,6 +166,7 @@ mod tests {
             diff_inline: false,
             hide_clean_repos: true,
             search_use_excludes: false,
+            dock_icon_blink: true,
         };
         changed.save_to(&path).unwrap();
         assert_eq!(Settings::load_from(&path), changed);

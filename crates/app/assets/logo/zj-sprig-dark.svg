@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="600" viewBox="190 250 640 600">
+  <title>ZJ 竹简</title>
+  <desc>欢迎页 Logo 的竹叶部分；光标由界面单独绘制并闪烁（theme::LOGO_CURSOR）。</desc>
+  <defs>
+    <linearGradient id="ink" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#eceff4"/><stop offset=".55" stop-color="#d8dee9"/><stop offset="1" stop-color="#a7b1c2"/></linearGradient>
+    <filter id="dry" x="-5%" y="-5%" width="110%" height="110%"><feTurbulence type="fractalNoise" baseFrequency=".012 .08" numOctaves="2" seed="4"/><feDisplacementMap in="SourceGraphic" scale="5"/></filter>
+  </defs>
+  <g id="zj-sprig" filter="url(#dry)" transform="translate(-46 44)">
+      <path d="M560 236C548 270 530 300 508 330" fill="none" stroke="#d8dee9" stroke-width="11" stroke-linecap="round"/>
+      <path d="M538 272l22 10" stroke="#d8dee9" stroke-width="8" stroke-linecap="round"/>
+      <g transform="translate(508 330)"><path transform="rotate(34)" d="M0 0C41 -68 205 -54.400000000000006 410 0C225.50000000000003 20.4 57.400000000000006 30.6 0 0Z" fill="url(#ink)" opacity="1"/><path transform="rotate(102)" d="M0 0C30 -58 150 -46.400000000000006 300 0C165 17.4 42.00000000000001 26.1 0 0Z" fill="url(#ink)" opacity="0.92"/><path transform="rotate(150)" d="M0 0C27 -54 135 -43.2 270 0C148.5 16.2 37.800000000000004 24.3 0 0Z" fill="url(#ink)" opacity="0.82"/></g>
+    </g>
+</svg>

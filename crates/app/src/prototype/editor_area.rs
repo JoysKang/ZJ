@@ -295,10 +295,26 @@ impl Prototype {
             .bg(colors.editor)
             .child(
                 div()
-                    .text_size(theme::LOGO_TEXT)
-                    .font_weight(FontWeight::BLACK)
-                    .text_color(colors.logo)
-                    .child("ZJ"),
+                    .relative()
+                    .w(theme::LOGO_WIDTH)
+                    .h(theme::LOGO_HEIGHT)
+                    .child(
+                        img(if gpui_kit::component::Theme::global(cx).is_dark() {
+                            "logo/zj-sprig-dark.png"
+                        } else {
+                            "logo/zj-sprig.png"
+                        })
+                        .size_full(),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(theme::LOGO_CURSOR_LEFT)
+                            .top(theme::LOGO_CURSOR_TOP)
+                            .w(theme::LOGO_CURSOR_WIDTH)
+                            .h(theme::LOGO_CURSOR_HEIGHT)
+                            .child(self.welcome_cursor.clone()),
+                    ),
             )
             .child(
                 v_flex()

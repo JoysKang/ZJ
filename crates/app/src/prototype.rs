@@ -42,6 +42,7 @@ mod scm;
 mod scm_actions;
 mod search_view;
 mod sidebar;
+mod welcome;
 mod workspace_refresh;
 
 gpui_kit::actions!(
@@ -217,6 +218,7 @@ pub struct Prototype {
     hide_clean_repos: bool,
     /// A single click in the Explorer opens the file but keeps the focus in the tree.
     focus_tree_on_open: bool,
+    welcome_cursor: Entity<welcome::WelcomeCursor>,
     /// Source Control rows vary in height (repository rows wrap long branch names), so they
     /// use a measured list instead of `uniform_list`.
     scm_list: ListState,
@@ -341,6 +343,7 @@ impl Prototype {
                 }
             });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
+            this.update_welcome_blink(window, cx);
             if window.is_window_active() && this.root.is_some() {
                 this.refresh_on_activation(window, cx);
             }
@@ -413,6 +416,7 @@ impl Prototype {
             tree_edit: None,
             hide_clean_repos: cx.global::<crate::settings::Settings>().hide_clean_repos,
             focus_tree_on_open: false,
+            welcome_cursor: cx.new(|_| welcome::WelcomeCursor::new()),
             scm_list: ListState::new(0, ListAlignment::Top, px(200.)),
             reveal_pending: false,
             expanded: HashSet::new(),
@@ -479,6 +483,7 @@ impl Prototype {
         this.refresh_tree(window, cx);
         this.focus_handle.focus(window, cx);
         this.refresh(window, cx);
+        this.update_welcome_blink(window, cx);
         eprintln!("event=window_opened number={number}");
         this
     }
@@ -682,6 +687,13 @@ impl Prototype {
         }));
     }
 
+    /// The welcome cursor blinks only while the welcome page is shown in the focused window.
+    fn update_welcome_blink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let blinking = self.active == Pane::Welcome && window.is_window_active();
+        self.welcome_cursor
+            .update(cx, |cursor, cx| cursor.set_blinking(blinking, window, cx));
+    }
+
     /// Changes the settings for every window and reports a failed write in this one.
     fn change_settings(
         &mut self,
@@ -780,6 +792,7 @@ impl Prototype {
         self.active = pane;
         self.reveal_pending = matches!(pane, Pane::Document(_));
         self.clear_tree_selection_for(pane);
+        self.update_welcome_blink(window, cx);
         if std::mem::take(&mut self.focus_tree_on_open) {
             self.explorer_focus.focus(window, cx);
         } else {
@@ -1446,6 +1459,7 @@ impl Prototype {
                 .unwrap_or(Pane::Welcome);
             self.focus_active_editor(window, cx);
         }
+        self.update_welcome_blink(window, cx);
         cx.notify();
     }
 
@@ -1498,6 +1512,7 @@ impl Prototype {
         self.message.clear();
         self.preview_diff = Some(diff_tab);
         self.active = Pane::Diff;
+        self.update_welcome_blink(window, cx);
         self.focus_handle.focus(window, cx);
         self.load_diff(window, cx);
     }

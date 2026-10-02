@@ -24,7 +24,16 @@ pub const TAB_CLOSE: Pixels = px(20.);
 pub const DIRTY_DOT: Pixels = px(8.);
 pub const KEYCAP: Pixels = px(20.);
 pub const WELCOME_WIDTH: Pixels = px(340.);
-pub const LOGO_TEXT: Pixels = px(180.);
+/// Welcome page logo (`assets/logo/zj-sprig*.svg`, 640 × 600 artwork at a quarter scale) and
+/// its cursor, placed where the artwork's `#zj-cursor` rect was (x 678, y 612, 26 × 190, from
+/// the viewBox origin 190, 250).
+pub const LOGO_WIDTH: Pixels = px(160.);
+pub const LOGO_HEIGHT: Pixels = px(150.);
+pub const LOGO_CURSOR_LEFT: Pixels = px(122.);
+pub const LOGO_CURSOR_TOP: Pixels = px(90.5);
+pub const LOGO_CURSOR_WIDTH: Pixels = px(6.5);
+pub const LOGO_CURSOR_HEIGHT: Pixels = px(47.5);
+pub const LOGO_CURSOR_RADIUS: Pixels = px(3.25);
 pub const TITLE_HEIGHT: Pixels = px(38.);
 pub const ACTIVITY_HEIGHT: Pixels = px(36.);
 pub const ACTIVITY_ITEM: Pixels = px(28.);
@@ -151,6 +160,8 @@ pub struct Palette {
     pub keycap: u32,
     /// The faint welcome wordmark.
     pub logo: u32,
+    /// The welcome logo's cursor (Nord aurora red in both themes, as in the app icon).
+    pub logo_cursor: u32,
     pub indent_guide: u32,
     pub added: u32,
     pub modified: u32,
@@ -194,6 +205,7 @@ pub const DARK: Palette = Palette {
     commit_hover: 0x47731b,
     keycap: 0x103a44,
     logo: 0x00222b,
+    logo_cursor: 0xbf616a,
     indent_guide: 0x0e4250,
     added: 0x81b88b,
     modified: 0xe2c08d,
@@ -232,6 +244,7 @@ pub const LIGHT: Palette = Palette {
     commit_hover: 0x97b47e,
     keycap: 0xd8dee9,
     logo: 0xdfe4ec,
+    logo_cursor: 0xbf616a,
     indent_guide: 0xd0d6e0,
     added: 0x3f6b2d,
     modified: 0x8a5226,
@@ -372,6 +385,7 @@ pub struct Colors {
     pub commit_hover: Hsla,
     pub keycap: Hsla,
     pub logo: Hsla,
+    pub logo_cursor: Hsla,
     pub indent_guide: Hsla,
     pub added: Hsla,
     pub modified: Hsla,
@@ -422,6 +436,7 @@ impl Palette {
             commit_hover: hsla(self.commit_hover),
             keycap: hsla(self.keycap),
             logo: hsla(self.logo),
+            logo_cursor: hsla(self.logo_cursor),
             indent_guide: hsla(self.indent_guide),
             added: hsla(self.added),
             modified: hsla(self.modified),

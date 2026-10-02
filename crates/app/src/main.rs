@@ -7,6 +7,7 @@ mod files;
 mod fuzzy;
 mod languages;
 mod partial_patch;
+mod platform;
 mod prototype;
 mod refresh_plan;
 mod settings;
@@ -96,6 +97,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             cx.set_global(settings::Settings::load());
             cx.set_global(watch::WatchService::default());
             diff_syntax::register();
+            platform::DockBlink::apply(cx);
+            cx.observe_global::<settings::Settings>(platform::DockBlink::apply)
+                .detach();
             theme::follow_appearance(None, cx);
             cx.bind_keys([
                 KeyBinding::new("cmd-shift-n", prototype::NewWindow, Some("WorkspaceEditor")),

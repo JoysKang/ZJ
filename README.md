@@ -27,7 +27,7 @@ python3 tools/fixtures.py /tmp/zj-fixture-f
 
 本地 `.app` 原型包由 `tools/package.sh` 用 `dist` profile 生成，位置为 `target/ZJ.app`。这是本机开发用的应用包，未签名公证，也不是 v0.1 发布产物。
 
-应用图标为原创竹简设计，矢量源在 `crates/app/assets/app-icon/bamboo.svg`，macOS 多尺寸图标为同目录的 `bamboo.icns`，用于 Dock / Finder。打包直接复制已生成资源；设计时用 Node.js、sharp 与 macOS iconutil 运行 `node tools/generate_app_icon.cjs` 重建，未增加应用运行时依赖。
+应用图标为水墨“个”字竹叶加一枚朱红光标，矢量源在 `crates/app/assets/app-icon/zj.svg`（16 / 32 px 用简化版 `zj-small.svg`），多尺寸 PNG 在同目录的 `ZJ.iconset/`。打包时在 macOS 上用 `iconutil -c icns` 从 iconset 生成 `zj.icns`，没有 iconutil 时复制已提交的 `zj.icns`（由 `tools/make_icns.py` 用同一组 PNG 生成）。改了 SVG 后用 Node.js 与 sharp 运行 `node tools/generate_app_icon.cjs` 重建 iconset、icns 和 Dock 闪烁用的无光标帧，不增加应用运行时依赖。
 
 ## 已实现的交互
 

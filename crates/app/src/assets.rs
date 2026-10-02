@@ -34,6 +34,10 @@ pub const EXTRA: &[(&str, &[u8])] = &[
     embed!("icons/whole-word.svg"),
     embed!("icons/regex.svg"),
     embed!("icons/book-marked.svg"),
+    // Rendered at 3× from logo/zj-sprig*.svg: the dry-brush filter needs a browser-grade
+    // rasterizer at this size.
+    embed!("logo/zj-sprig.png"),
+    embed!("logo/zj-sprig-dark.png"),
     embed!("file-icons/default_folder.svg"),
     embed!("file-icons/default_folder_opened.svg"),
     embed!("file-icons/default_file.svg"),
@@ -100,10 +104,15 @@ mod tests {
     #[test]
     fn embedded_icons_are_svg() {
         for (name, bytes) in EXTRA {
-            assert!(bytes.starts_with(b"<svg"), "{name}");
+            if name.ends_with(".png") {
+                assert!(bytes.starts_with(b"\x89PNG"), "{name}");
+            } else {
+                assert!(bytes.starts_with(b"<svg"), "{name}");
+            }
         }
         let total: usize = EXTRA.iter().map(|(_, bytes)| bytes.len()).sum();
-        assert!(total < 100_000, "embedded icons grew to {total} bytes");
+        // ~70 KB of icons plus the ~50 KB welcome logo.
+        assert!(total < 160_000, "embedded assets grew to {total} bytes");
     }
 
     /// Icons the workbench uses that Kit already embeds; they must not be duplicated in EXTRA.
