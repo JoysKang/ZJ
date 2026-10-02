@@ -1,15 +1,76 @@
 //! Identities preserve filesystem semantics; display labels are never command arguments.
 
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
 use std::{fs, io, path::PathBuf};
 
-/// Generated or dependency directories that repository discovery and the non-Git file walk skip.
-/// Git-tracked listings additionally follow the repository's own ignore rules.
-pub const EXCLUDED_DIRS: &[&str] = &[".git", "node_modules", "target", ".venv", "__pycache__"];
+/// Generated, cache or dependency directories that repository discovery, the file index and
+/// the non-Git file walk skip. Git-tracked listings additionally follow the repository's own
+/// ignore rules (`dist/`, `build/` and the like are skipped only when ignored).
+pub const EXCLUDED_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".uv-cache",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".gradle",
+    "Pods",
+    ".cache",
+];
 
 /// Whether a directory entry name is one of [`EXCLUDED_DIRS`].
 pub fn is_excluded_dir(name: &std::ffi::OsStr) -> bool {
     EXCLUDED_DIRS.iter().any(|excluded| name == *excluded)
+}
+
+/// Why a directory's `.git` entry does not make it a repository.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitMarker {
+    /// No `.git` entry at all.
+    Missing,
+    /// A `.git` directory with `HEAD`, or a `gitdir: <path>` file pointing at a directory.
+    Valid,
+    /// A `.git` entry that Git itself would reject (tool caches leave such files behind).
+    Invalid,
+}
+
+/// Checks `dir/.git` the way Git does before running `git` there, without spawning a process.
+pub fn git_marker(dir: &std::path::Path) -> GitMarker {
+    let marker = dir.join(".git");
+    let Ok(metadata) = fs::symlink_metadata(&marker) else {
+        return GitMarker::Missing;
+    };
+    if metadata.is_dir() {
+        return if marker.join("HEAD").is_file() {
+            GitMarker::Valid
+        } else {
+            GitMarker::Invalid
+        };
+    }
+    if !metadata.is_file() || metadata.len() > 4096 {
+        return GitMarker::Invalid;
+    }
+    let Ok(text) = fs::read(&marker) else {
+        return GitMarker::Invalid;
+    };
+    let Some(target) = text
+        .strip_prefix(b"gitdir: ")
+        .map(|rest| rest.trim_ascii_end())
+        .filter(|rest| !rest.is_empty())
+    else {
+        return GitMarker::Invalid;
+    };
+    let target = std::path::Path::new(std::ffi::OsStr::from_bytes(target));
+    if dir.join(target).is_dir() {
+        GitMarker::Valid
+    } else {
+        GitMarker::Invalid
+    }
 }
 
 /// A linked worktree has its own private Git directory and therefore its own RepoId.
@@ -78,6 +139,37 @@ mod tests {
             DocumentIdentity::resolve(&root.join("hard")).unwrap().id
         );
         assert!(original.multiple_links);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn git_markers_follow_git_rules() {
+        let root = std::env::temp_dir().join(format!("zj-marker-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for dir in [
+            "none",
+            "repo/.git",
+            "empty/.git",
+            "bad",
+            "linked",
+            "dangling",
+            "gitdirs/wt",
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        fs::write(root.join("repo/.git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        // uv's cache leaves `.git` files like this behind.
+        fs::write(root.join("bad/.git"), "not a gitfile\n").unwrap();
+        fs::write(root.join("linked/.git"), "gitdir: ../gitdirs/wt\n").unwrap();
+        fs::write(root.join("dangling/.git"), "gitdir: /nonexistent/zj\n").unwrap();
+        assert_eq!(git_marker(&root.join("none")), GitMarker::Missing);
+        assert_eq!(git_marker(&root.join("repo")), GitMarker::Valid);
+        assert_eq!(git_marker(&root.join("empty")), GitMarker::Invalid);
+        assert_eq!(git_marker(&root.join("bad")), GitMarker::Invalid);
+        assert_eq!(git_marker(&root.join("linked")), GitMarker::Valid);
+        assert_eq!(git_marker(&root.join("dangling")), GitMarker::Invalid);
+        assert!(is_excluded_dir(std::ffi::OsStr::new(".uv-cache")));
+        assert!(!is_excluded_dir(std::ffi::OsStr::new("build")));
         fs::remove_dir_all(root).unwrap();
     }
 }

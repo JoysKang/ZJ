@@ -23,7 +23,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use workspace_editor_core::{RepoId, Repository, is_excluded_dir};
+use workspace_editor_core::{GitMarker, RepoId, Repository, git_marker, is_excluded_dir};
 
 const OUTPUT_LIMIT: usize = 16_000_000;
 /// Diffs carry the whole file so the diff editor can rebuild both sides.
@@ -265,25 +265,31 @@ impl GitService {
     }
 
     pub fn identify(&self, path: &Path, cancel: &AtomicBool) -> io::Result<Repository> {
-        let resolve = |flag: &str| -> io::Result<PathBuf> {
-            let mut bytes = self.run(
-                path,
-                &[
-                    "rev-parse".into(),
-                    "--path-format=absolute".into(),
-                    flag.into(),
-                ],
-                cancel,
-            )?;
-            if bytes.last() == Some(&b'\n') {
-                bytes.pop();
-            }
-            fs::canonicalize(PathBuf::from(OsString::from_vec(bytes)))
+        // One process answers all three; discovery runs this once per repository.
+        let bytes = self.run(
+            path,
+            &[
+                "rev-parse".into(),
+                "--path-format=absolute".into(),
+                "--git-dir".into(),
+                "--show-toplevel".into(),
+                "--git-common-dir".into(),
+            ],
+            cancel,
+        )?;
+        let mut lines = bytes
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| fs::canonicalize(PathBuf::from(OsString::from_vec(line.to_vec()))));
+        let mut next = || {
+            lines
+                .next()
+                .unwrap_or_else(|| Err(error("git rev-parse 输出不完整")))
         };
         Ok(Repository {
-            id: RepoId(resolve("--git-dir")?),
-            worktree: resolve("--show-toplevel")?,
-            common_dir: resolve("--git-common-dir")?,
+            id: RepoId(next()?),
+            worktree: next()?,
+            common_dir: next()?,
         })
     }
 
@@ -503,17 +509,51 @@ impl GitService {
         )
     }
 
-    /// Streaming discovery continues below repositories; ignore rules do not hide nested repos.
+    /// Directories (absolute) that `repo`'s ignore rules exclude, collapsed to the topmost
+    /// ignored directory, so discovery never walks `build/`, caches or virtualenvs.
+    pub fn ignored_dirs(&self, repo: &Repository, cancel: &AtomicBool) -> io::Result<Vec<PathBuf>> {
+        let output = self.run(
+            &repo.worktree,
+            &[
+                "ls-files".into(),
+                "-z".into(),
+                "--others".into(),
+                "--ignored".into(),
+                "--exclude-standard".into(),
+                "--directory".into(),
+                "--no-empty-directory".into(),
+            ],
+            cancel,
+        )?;
+        Ok(output
+            .split(|b| *b == 0)
+            .filter_map(|item| item.strip_suffix(b"/"))
+            .filter(|item| !item.is_empty())
+            .map(|item| repo.worktree.join(OsString::from_vec(item.to_vec())))
+            .collect())
+    }
+
+    /// Breadth-first, at most [`DISCOVERY_DEPTH`] levels below each root. Nested repositories are
+    /// found below repositories, but directories the enclosing repository ignores, and
+    /// [`EXCLUDED_DIRS`](workspace_editor_core::EXCLUDED_DIRS), are only checked for being a
+    /// repository themselves, never walked. A `.git` entry Git would reject (tool caches leave
+    /// such files) is skipped silently.
     pub fn discover(
         &self,
         roots: &[PathBuf],
         cancel: &AtomicBool,
         mut event: impl FnMut(Discovery),
     ) {
+        let started = Instant::now();
         let mut visited = HashSet::new();
         let mut repos = HashSet::new();
-        let mut queue = VecDeque::from(roots.to_vec());
-        while let Some(path) = queue.pop_front() {
+        let mut invalid = 0usize;
+        // (directory, depth, ignored directories of the enclosing repository)
+        let mut queue: VecDeque<(PathBuf, usize, Arc<HashSet<PathBuf>>)> = roots
+            .iter()
+            .map(|root| (root.clone(), 0, Arc::default()))
+            .collect();
+        while let Some((path, depth, ignored)) = queue.pop_front() {
             if cancel.load(Ordering::Relaxed) {
                 event(Discovery::Cancelled);
                 return;
@@ -528,42 +568,99 @@ impl GitService {
             if !visited.insert(path.clone()) {
                 continue;
             }
-            if path.join(".git").exists() {
-                match self.identify(&path, cancel) {
-                    Ok(repo) if repos.insert(repo.id.clone()) => event(Discovery::Repository(repo)),
-                    Ok(_) => {}
-                    Err(e) => event(Discovery::Issue(path.clone(), e.to_string())),
-                }
+            if visited.len() > DISCOVERY_DIRS {
+                event(Discovery::Issue(
+                    path,
+                    format!("扫描超过 {DISCOVERY_DIRS} 个目录，更深的仓库未发现"),
+                ));
+                break;
             }
-            match fs::read_dir(&path) {
-                Ok(entries) => {
-                    for entry in entries {
-                        let entry = match entry {
-                            Ok(e) => e,
-                            Err(e) => {
-                                event(Discovery::Issue(path.clone(), e.to_string()));
-                                continue;
-                            }
-                        };
-                        match entry.file_type() {
-                            Ok(t) if t.is_dir() => {
-                                let name = entry.file_name();
-                                if is_excluded_dir(&name) {
-                                    event(Discovery::Excluded(entry.path()));
-                                } else {
-                                    queue.push_back(entry.path());
-                                }
-                            }
-                            Ok(_) => {} // Do not follow directory symlinks.
-                            Err(e) => event(Discovery::Issue(entry.path(), e.to_string())),
+            let mut ignored = ignored;
+            let mut descend = true;
+            match git_marker(&path) {
+                GitMarker::Valid => match self.identify(&path, cancel) {
+                    Ok(repo) => {
+                        if repos.len() >= DISCOVERY_REPOS {
+                            event(Discovery::Issue(
+                                path,
+                                format!("仓库超过 {DISCOVERY_REPOS} 个，其余未显示"),
+                            ));
+                            break;
+                        }
+                        if repos.insert(repo.id.clone()) {
+                            // The repository's own ignore rules decide what is walked below it.
+                            ignored = Arc::new(
+                                self.ignored_dirs(&repo, cancel)
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .collect(),
+                            );
+                            event(Discovery::Repository(repo));
                         }
                     }
+                    Err(e) => event(Discovery::Issue(path.clone(), e.to_string())),
+                },
+                GitMarker::Invalid => {
+                    invalid += 1;
+                    // Not a repository; whatever left it there is not walked either.
+                    descend = false;
                 }
-                Err(e) => event(Discovery::Issue(path, e.to_string())),
+                GitMarker::Missing => {}
+            }
+            if !descend || depth >= DISCOVERY_DEPTH {
+                continue;
+            }
+            let entries = match fs::read_dir(&path) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    event(Discovery::Issue(path, e.to_string()));
+                    continue;
+                }
+            };
+            for entry in entries {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        event(Discovery::Issue(path.clone(), e.to_string()));
+                        continue;
+                    }
+                };
+                match entry.file_type() {
+                    Ok(t) if t.is_dir() => {
+                        let child = entry.path();
+                        if is_excluded_dir(&entry.file_name()) {
+                            event(Discovery::Excluded(child));
+                        } else if ignored.contains(&child) {
+                            // An ignored directory may itself be a repository (workspaces that
+                            // ignore their sub-repositories); it is checked but not walked.
+                            if git_marker(&child) == GitMarker::Valid {
+                                queue.push_back((child, depth + 1, Arc::default()));
+                            } else {
+                                event(Discovery::Excluded(child));
+                            }
+                        } else {
+                            queue.push_back((child, depth + 1, ignored.clone()));
+                        }
+                    }
+                    Ok(_) => {} // Do not follow directory symlinks.
+                    Err(e) => event(Discovery::Issue(entry.path(), e.to_string())),
+                }
             }
         }
+        eprintln!(
+            "event=discovery_finished repos={} dirs={} invalid_git={invalid} seconds={:.3}",
+            repos.len(),
+            visited.len(),
+            started.elapsed().as_secs_f64()
+        );
     }
 }
+
+/// Discovery walks at most this many levels below a workspace root.
+pub const DISCOVERY_DEPTH: usize = 4;
+/// Bounds on one discovery pass; reaching one is reported, not hidden.
+pub const DISCOVERY_DIRS: usize = 50_000;
+pub const DISCOVERY_REPOS: usize = 256;
 
 #[derive(Debug)]
 pub enum Discovery {

@@ -12,7 +12,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
-use workspace_editor_core::{DocumentId, is_excluded_dir};
+use workspace_editor_core::{DocumentId, GitMarker, git_marker, is_excluded_dir};
 use workspace_editor_git::{ListedKind, parse_ls_files};
 
 pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
@@ -307,7 +307,9 @@ impl Builder<'_> {
                         continue;
                     }
                     // A nested repository contributes its own Git listing and ignore rules.
-                    if !(self.root.join(&path).join(".git").exists() && self.list_git(&path)) {
+                    if !(git_marker(&self.root.join(&path)) == GitMarker::Valid
+                        && self.list_git(&path))
+                    {
                         pending.push(path);
                     }
                 } else {
