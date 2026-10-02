@@ -161,6 +161,31 @@ struct ZjLowMemory {
 /// freed with the last window.
 static ZJ_SHARED_ATLAS: Mutex<Option<(u64, Weak<MetalAtlas>)>> = parking_lot::const_mutex(None);
 
+/// ZJ patch: the runtime-compiled shader library, kept for the process (a window opened
+/// after the last one closed reuses it too).
+#[cfg(feature = "runtime_shaders")]
+fn zj_shader_library(device: &metal::Device) -> metal::Library {
+    static LIBRARY: Mutex<Option<(u64, metal::Library)>> = parking_lot::const_mutex(None);
+    let compile = || {
+        device
+            .new_library_with_source(&SHADERS_SOURCE_FILE, &metal::CompileOptions::new())
+            .expect("error building metal library")
+    };
+    if !zj_low_memory::enabled() {
+        return compile();
+    }
+    let mut cached = LIBRARY.lock();
+    let id = device.registry_id();
+    if let Some((cached_id, library)) = cached.as_ref()
+        && *cached_id == id
+    {
+        return library.clone();
+    }
+    let library = compile();
+    *cached = Some((id, library.clone()));
+    library
+}
+
 fn zj_shared_atlas(device: &metal::Device, is_apple_gpu: bool) -> Arc<MetalAtlas> {
     let mut shared = ZJ_SHARED_ATLAS.lock();
     let id = device.registry_id();
@@ -252,10 +277,10 @@ impl MetalRenderer {
     ) -> Self {
         // ZJ patch: the low-memory mode only applies to window renderers.
         let layer_present = layer.is_some();
+        // ZJ patch: GPUI Kit turns `runtime_shaders` on, so upstream compiles the shader
+        // source again for every window; compile it once per process instead.
         #[cfg(feature = "runtime_shaders")]
-        let library = device
-            .new_library_with_source(&SHADERS_SOURCE_FILE, &metal::CompileOptions::new())
-            .expect("error building metal library");
+        let library = zj_shader_library(&device);
         #[cfg(not(feature = "runtime_shaders"))]
         let library = device
             .new_library_with_data(SHADERS_METALLIB)

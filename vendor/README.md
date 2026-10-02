@@ -36,6 +36,8 @@ measure it are in [docs/adr/0005-gpu-memory.md](../docs/adr/0005-gpu-memory.md).
   - One sprite atlas is shared by all window renderers on the same device. It is held weakly,
     so it is freed with the last window.
   - Headless renderers keep upstream behaviour.
+  - The shader library is compiled once per process. GPUI Kit always enables
+    `runtime_shaders`, so upstream compiles the Metal source again for every window.
 - `src/gpui_apple.rs`: `pub mod zj_low_memory;`.
 - `Cargo.toml`: `[lints.rust] warnings = "allow"`. Path dependencies don't get `--cap-lints`, and
   upstream prints about 1200 deprecation warnings.

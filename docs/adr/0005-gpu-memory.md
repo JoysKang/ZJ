@@ -31,7 +31,8 @@
 2. **路径中间纹理按需分配**：第一帧画路径时按这一帧的大小分配，连续 10 秒没有路径就释放（在下一帧检查）。缩放窗口时只丢掉旧纹理，不再每次重建。
 3. **看不见时归还表面**：窗口被完全遮挡、在别的桌面、最小化或应用被隐藏时（`NSWindowOcclusionState` 不含 Visible，AppKit 对这几种情况都发同一个通知），把 layer 的 drawableSize 缩成 1 × 1，层会丢掉旧尺寸的 drawable 池，同时释放路径纹理，期间不绘制。最小化和隐藏应用时，再把 layer 的 contents 清空，连最后一帧也释放；只是被遮挡时保留最后一帧，免得切回来时先闪一下空白。重新可见时恢复尺寸，并让下一个 display-link 帧强制重新呈现上一帧的场景（`require_presentation`）。
 4. **所有窗口共用一个 sprite 图集**（同一 GPU 设备）。图集用 Weak 持有，最后一个窗口关闭后释放。GPUI 删除图片时会逐个窗口调用 `remove`，按 key 删除是幂等的，共用后不会出问题；字形和图标只栅格化一次。
-5. `ZJ_GPU_LOWMEM=0` 在启动时关闭以上全部改动，恢复上游行为，方便 A/B 对比。
+5. **着色器库只编译一次**：GPUI Kit 固定打开 `runtime_shaders`（不需要 Xcode 的 metal 编译器），上游每开一个窗口就把整份 Metal 源码重新编译一遍，现在每个进程只编译一次。省下每个新窗口的编译时间，以及编译器在进程内的分配。
+6. `ZJ_GPU_LOWMEM=0` 在启动时关闭以上全部改动，恢复上游行为，方便 A/B 对比。
 
 ## 预计节省（S 为一块窗口大小的表面）
 
@@ -50,6 +51,12 @@
 全屏窗口（S ≈ 31 MB）省得更多：每个可见窗口约 −62 MB。
 
 峰值（718 MB）主要来自缩放窗口时旧表面还没释放、新表面已经分配。路径纹理不再随缩放重建，峰值也会下降。
+
+## Malloc Small（1 个窗口 67 MB）
+
+在 Linux 上用 heaptrack 看同类工作区（15 个仓库、2,229 个文件、1 个窗口，空闲 40 秒）的常驻堆：合计 54 MB，其中 46.2 MB 是软件渲染（lavapipe / LLVM / wgpu），只在 Linux 上有。其余约 8 MB：应用自身 2.4 MB、libc / std 2.1 MB、tree-sitter 1.3 MB、字体与排版 0.9 MB、GPUI 窗口与布局 0.9 MB、快速打开索引 0.1 MB。可见 Mac 上的 Malloc Small 大头不在应用数据里，更可能是系统框架：Metal 的运行时着色器编译（已改为只编译一次）、CoreText 的字体与中文回退缓存、AppKit。应用侧没有便宜可省的大项，本批不再动。
+
+在 Mac 上定位的办法：`MallocStackLogging=1` 启动后执行 `heap $(pgrep -x ZJ) -s | head -60` 看各类大小，再用 `malloc_history $(pgrep -x ZJ) -allBySize | head -80` 看调用栈；或者用 Instruments 的 Allocations 模板按 Library 分组。
 
 ## 风险
 
