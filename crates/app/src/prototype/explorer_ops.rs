@@ -368,6 +368,13 @@ impl Prototype {
                         for id in closing {
                             this.remove_document(id, window, cx);
                         }
+                        // The edited ones are now the only copy: marked 已删除, saving recreates them.
+                        for doc in &mut this.documents {
+                            if doc.path.starts_with(&path) {
+                                doc.deleted = true;
+                                doc.banner = None;
+                            }
+                        }
                         if let Some(parent) = path.parent() {
                             this.relist(parent.to_path_buf(), window, cx);
                         }
