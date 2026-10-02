@@ -20,6 +20,9 @@ use std::{
 struct State {
     cancelled: AtomicBool,
     sessions: AtomicU64,
+    /// `_meta` of the last session/new or session/load, and every mode the client asked for.
+    meta: std::sync::Mutex<String>,
+    mode_requests: std::sync::Mutex<Vec<String>>,
 }
 
 fn text(t: impl Into<String>) -> acp::ContentBlock {
@@ -236,6 +239,15 @@ async fn run_prompt(
             std::process::exit(3);
         }
         "pid" => say(&cx, &session, format!("pid:{}", std::process::id()))?,
+        "modes" => say(
+            &cx,
+            &session,
+            format!(
+                "meta:{} modes:{}",
+                state.meta.lock().unwrap(),
+                state.mode_requests.lock().unwrap().join(",")
+            ),
+        )?,
         "env" => say(
             &cx,
             &session,
@@ -255,6 +267,10 @@ fn main() -> sdk::Result<()> {
     let on_new = state.clone();
     let on_cancel = state.clone();
     let on_prompt = state.clone();
+    let on_load = state.clone();
+    let on_mode = state.clone();
+    // FAKE_BYPASS_DEFAULT=1: like a user whose Claude settings default to bypassPermissions.
+    let bypass_default = std::env::var_os("FAKE_BYPASS_DEFAULT").is_some();
     async_io::block_on(
         Agent
             .builder()
@@ -282,16 +298,23 @@ fn main() -> sdk::Result<()> {
                             responder: Responder<acp::NewSessionResponse>,
                             _cx| {
                     assert!(request.mcp_servers.is_empty());
+                    *on_new.meta.lock().unwrap() = serde_json::to_string(&request.meta).unwrap();
                     let n = on_new.sessions.fetch_add(1, Ordering::SeqCst);
+                    let mut modes = vec![
+                        acp::SessionMode::new("default", "Default"),
+                        acp::SessionMode::new("plan", "Plan"),
+                    ];
+                    if bypass_default {
+                        modes.push(acp::SessionMode::new("bypassPermissions", "Bypass"));
+                    }
+                    let current = if bypass_default {
+                        "bypassPermissions"
+                    } else {
+                        "default"
+                    };
                     responder.respond(
                         acp::NewSessionResponse::new(format!("s-{}-{n}", std::process::id()))
-                            .modes(acp::SessionModeState::new(
-                                "default",
-                                vec![
-                                    acp::SessionMode::new("default", "Default"),
-                                    acp::SessionMode::new("plan", "Plan"),
-                                ],
-                            )),
+                            .modes(acp::SessionModeState::new(current, modes)),
                     )
                 },
                 sdk::on_receive_request!(),
@@ -300,6 +323,7 @@ fn main() -> sdk::Result<()> {
                 async move |request: acp::LoadSessionRequest,
                             responder: Responder<acp::LoadSessionResponse>,
                             cx: ConnectionTo<Client>| {
+                    *on_load.meta.lock().unwrap() = serde_json::to_string(&request.meta).unwrap();
                     // Replay: the client must not show these again.
                     notify(
                         &cx,
@@ -317,6 +341,11 @@ fn main() -> sdk::Result<()> {
                 async move |request: acp::SetSessionModeRequest,
                             responder: Responder<acp::SetSessionModeResponse>,
                             cx: ConnectionTo<Client>| {
+                    on_mode
+                        .mode_requests
+                        .lock()
+                        .unwrap()
+                        .push(request.mode_id.to_string());
                     notify(
                         &cx,
                         &request.session_id,

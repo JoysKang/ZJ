@@ -58,6 +58,8 @@ fn preset(env: &[(&str, &str)]) -> AgentPreset {
             .map(|(k, v)| (k.to_string(), EnvValue::Literal(v.to_string())))
             .collect(),
         install_hint: "test".into(),
+        modes: Default::default(),
+        session_meta: None,
     }
 }
 
@@ -668,4 +670,76 @@ fn group_rss_kib(pgid: u32) -> u64 {
             .unwrap_or(0);
     }
     total
+}
+
+#[test]
+fn sessions_start_in_ask_mode_and_never_request_bypass() {
+    let ws = Workspace::new("modes");
+    let mut opts = options(&ws, &[("FAKE_BYPASS_DEFAULT", "1")]);
+    let claude = AgentPreset::find_builtin("claude-code").unwrap();
+    opts.preset.modes = claude.modes.clone();
+    opts.preset.session_meta = claude.session_meta.clone();
+    let client = AgentClient::start(opts).unwrap();
+    let events = Events::of(&client);
+    client.prompt(text("modes")).unwrap();
+    let seen = events.turn();
+    // The forbidden mode is never offered to the UI.
+    let modes = seen
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::SessionStarted { modes, .. } => modes.clone(),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        modes
+            .available
+            .iter()
+            .all(|(id, _)| id != "bypassPermissions")
+    );
+    // The agent started in bypass (user settings); ZJ switched it to default first.
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, AgentEvent::ModeChanged { mode_id } if mode_id == "default"))
+    );
+    let reply = message(&seen);
+    assert!(
+        reply.contains(r#""allowDangerouslySkipPermissions":false"#),
+        "{reply}"
+    );
+    assert!(reply.ends_with("modes:default"), "{reply}");
+    // The UI cannot ask for it either.
+    assert!(!client.set_mode("bypassPermissions"));
+    assert!(client.set_mode("plan"));
+    events.until(|e| matches!(e, AgentEvent::ModeChanged { mode_id } if mode_id == "plan"));
+    client.prompt(text("modes")).unwrap();
+    let reply = message(&events.turn());
+    assert!(reply.ends_with("modes:default,plan"), "{reply}");
+    assert!(!reply.contains("modes:bypass") && !reply.contains(",bypass"));
+}
+
+#[test]
+fn direct_writes_remember_the_file_before_the_agent() {
+    let ws = Workspace::new("snapshot");
+    let client = AgentClient::start(options(&ws, &[])).unwrap();
+    let events = Events::of(&client);
+    let existing = ws.path("src/a.rs");
+    let created = ws.path("src/new.rs");
+    for (path, body) in [
+        (&existing, "first"),
+        (&existing, "second"),
+        (&created, "new"),
+    ] {
+        client
+            .prompt(text(&format!("write {} {body}", path.display())))
+            .unwrap();
+        events.turn();
+    }
+    assert_eq!(std::fs::read_to_string(&existing).unwrap(), "second");
+    // The original, not the intermediate version.
+    assert_eq!(client.snapshot(&existing), Some(Some("fn a() {}\n".into())));
+    assert_eq!(client.snapshot(&created), Some(None));
+    assert_eq!(client.snapshot_paths().len(), 2);
+    client.clear_snapshots();
+    assert!(client.snapshot_paths().is_empty());
 }

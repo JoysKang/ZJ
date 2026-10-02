@@ -119,6 +119,48 @@ impl ShadowStore {
         })
     }
 
+    /// Decides one hunk right away. Accepting writes just that hunk to disk (it becomes part
+    /// of the base); rejecting drops it from the proposal. Returns what is still pending for
+    /// the file, `None` once nothing is left.
+    pub fn resolve_hunk(
+        &self,
+        path: &Path,
+        index: usize,
+        accept: bool,
+    ) -> io::Result<Option<PendingEdit>> {
+        let mut edits = self.edits.lock().unwrap();
+        let edit = edits.get_mut(path).ok_or_else(|| not_pending(path))?;
+        let current = match std::fs::read_to_string(path) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        if current != edit.base {
+            return Err(conflict(path));
+        }
+        let base = edit.base.clone().unwrap_or_default();
+        let count = diff_hunks(&base, &edit.proposed).len();
+        if index >= count {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} 没有第 {} 处修改", path.display(), index + 1),
+            ));
+        }
+        if accept {
+            let text = apply_hunks(&base, &edit.proposed, &[index]);
+            write_atomic(path, &text)?;
+            edit.base = Some(text);
+        } else {
+            let keep: Vec<usize> = (0..count).filter(|i| *i != index).collect();
+            edit.proposed = apply_hunks(&base, &edit.proposed, &keep);
+        }
+        if edit.base.as_deref().unwrap_or("") == edit.proposed {
+            edits.remove(path);
+            return Ok(None);
+        }
+        Ok(Some(edit.clone()))
+    }
+
     fn resolve(
         &self,
         path: &Path,
@@ -370,6 +412,29 @@ mod tests {
             assert_eq!(apply_hunks(&a, &b, &all), b);
             assert_eq!(apply_hunks(&a, &b, &[]), a);
         }
+    }
+
+    #[test]
+    fn hunks_resolve_one_at_a_time() {
+        let dir = std::env::temp_dir().join(format!("zj-shadow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.txt");
+        std::fs::write(&path, "a\nb\nc\nd\ne\n").unwrap();
+        let store = ShadowStore::default();
+        store.propose(&path, "A\nb\nc\nd\nE\nf\n".into()).unwrap();
+        assert_eq!(store.hunks(&path).len(), 2);
+        // Accept the first: disk gets only that change.
+        let left = store.resolve_hunk(&path, 0, true).unwrap().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "A\nb\nc\nd\ne\n");
+        assert_eq!(left.base.as_deref(), Some("A\nb\nc\nd\ne\n"));
+        assert_eq!(store.hunks(&path).len(), 1);
+        // Reject the rest: nothing pending, disk unchanged.
+        assert!(store.resolve_hunk(&path, 0, false).unwrap().is_none());
+        assert!(store.pending_paths().is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "A\nb\nc\nd\ne\n");
+        assert!(store.resolve_hunk(&path, 0, true).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

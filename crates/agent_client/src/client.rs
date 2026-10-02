@@ -109,6 +109,8 @@ const EVENT_CAPACITY: usize = 512;
 const COMMAND_CAPACITY: usize = 64;
 /// One JSON-RPC line from the agent (a tool call can carry two copies of a large file).
 const MAX_LINE: usize = 32 * 1024 * 1024;
+/// Files remembered for Direct-mode reviews per client.
+const MAX_SNAPSHOTS: usize = 256;
 
 enum Command {
     Connect,
@@ -142,6 +144,28 @@ struct Shared {
     replaying: AtomicBool,
     embedded_context: AtomicBool,
     pid: Mutex<Option<u32>>,
+    /// Direct mode: each file's content before the agent first touched it in this client
+    /// (`None` = the file did not exist), for "working tree vs. before the agent" reviews.
+    snapshots: Mutex<BTreeMap<PathBuf, Option<String>>>,
+}
+
+impl Shared {
+    /// Records `path` as it is on disk now, once. Unreadable or oversized files are skipped.
+    fn snapshot(&self, path: &Path) {
+        let mut snapshots = self.snapshots.lock().unwrap();
+        if snapshots.contains_key(path) || snapshots.len() >= MAX_SNAPSHOTS {
+            return;
+        }
+        match read_disk(path) {
+            Ok(text) => {
+                snapshots.insert(path.to_path_buf(), Some(text));
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                snapshots.insert(path.to_path_buf(), None);
+            }
+            Err(_) => {}
+        }
+    }
 }
 
 impl Shared {
@@ -219,6 +243,7 @@ impl AgentClient {
             replaying: AtomicBool::new(false),
             embedded_context: AtomicBool::new(false),
             pid: Mutex::new(None),
+            snapshots: Mutex::new(BTreeMap::new()),
         });
         let supervisor_shared = shared.clone();
         let supervisor = thread::Builder::new()
@@ -282,8 +307,37 @@ impl AgentClient {
         }
     }
 
-    pub fn set_mode(&self, mode_id: impl Into<String>) {
-        let _ = self.commands.try_send(Command::SetMode(mode_id.into()));
+    /// Switches the session mode; modes the preset forbids (bypass / full access) are refused
+    /// and `false` is returned.
+    pub fn set_mode(&self, mode_id: impl Into<String>) -> bool {
+        let mode_id = mode_id.into();
+        if !self.shared.preset.modes.allows(&mode_id) {
+            eprintln!("event=agent_mode_refused agent={}", self.shared.preset.id);
+            return false;
+        }
+        self.commands.try_send(Command::SetMode(mode_id)).is_ok()
+    }
+
+    /// Paths the agent changed (or announced an edit for) in Direct mode, with their content
+    /// before that first change.
+    pub fn snapshot_paths(&self) -> Vec<PathBuf> {
+        self.shared
+            .snapshots
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// `Some(None)`: the file did not exist before the agent created it.
+    pub fn snapshot(&self, path: &Path) -> Option<Option<String>> {
+        self.shared.snapshots.lock().unwrap().get(path).cloned()
+    }
+
+    /// Forgets the "before" versions (after the user reviewed them, or for a new session).
+    pub fn clear_snapshots(&self) {
+        self.shared.snapshots.lock().unwrap().clear();
     }
 
     pub fn write_mode(&self) -> WriteMode {
@@ -646,30 +700,48 @@ async fn run_session(
     shared.emit(AgentEvent::Ready(info)).await;
 
     let root = shared.workspace.root().to_path_buf();
+    let policy = shared.preset.modes.clone();
+    // Forbidden modes never reach the UI.
     let modes = |m: Option<acp::SessionModeState>| {
         m.map(|m| Modes {
             current: m.current_mode_id.to_string(),
             available: m
                 .available_modes
                 .iter()
+                .filter(|mode| policy.allows(&mode.id.to_string()))
                 .map(|mode| (mode.id.to_string(), mode.name.clone()))
                 .collect(),
         })
     };
+    let meta = shared
+        .preset
+        .session_meta
+        .as_ref()
+        .and_then(|m| m.as_object().cloned());
+    let mut started_modes: Option<Modes> = None;
     let mut session = None;
     if let Some(previous) = resume.clone()
         && caps.load_session
     {
         shared.replaying.store(true, Ordering::Relaxed);
-        let request = acp::LoadSessionRequest::new(previous.clone(), root.clone());
+        let request =
+            acp::LoadSessionRequest::new(previous.clone(), root.clone()).meta(meta.clone());
         let loaded = with_timeout(cx.send_request(request).block_task(), timeout).await;
         shared.replaying.store(false, Ordering::Relaxed);
         if let Some(Ok(response)) = loaded {
+            let raw_current = response
+                .modes
+                .as_ref()
+                .map(|m| m.current_mode_id.to_string());
+            started_modes = modes(response.modes);
+            if let (Some(m), Some(current)) = (started_modes.as_mut(), raw_current) {
+                m.current = current;
+            }
             shared
                 .emit(AgentEvent::SessionStarted {
                     session_id: previous.to_string(),
                     resumed: true,
-                    modes: modes(response.modes),
+                    modes: started_modes.clone(),
                 })
                 .await;
             session = Some(previous);
@@ -680,14 +752,24 @@ async fn run_session(
     let session = match session {
         Some(session) => session,
         None => {
-            let request = acp::NewSessionRequest::new(root).mcp_servers(Vec::new());
+            let request = acp::NewSessionRequest::new(root)
+                .mcp_servers(Vec::new())
+                .meta(meta.clone());
             match with_timeout(cx.send_request(request).block_task(), timeout).await {
                 Some(Ok(response)) => {
+                    let raw_current = response
+                        .modes
+                        .as_ref()
+                        .map(|m| m.current_mode_id.to_string());
+                    started_modes = modes(response.modes);
+                    if let (Some(m), Some(current)) = (started_modes.as_mut(), raw_current) {
+                        m.current = current;
+                    }
                     shared
                         .emit(AgentEvent::SessionStarted {
                             session_id: response.session_id.to_string(),
                             resumed: false,
-                            modes: modes(response.modes),
+                            modes: started_modes.clone(),
                         })
                         .await;
                     response.session_id
@@ -704,6 +786,7 @@ async fn run_session(
         }
     };
     *resume = Some(session.clone());
+    enforce_mode(&shared, &cx, &session, started_modes.as_ref()).await;
 
     if let Some((turn, parts)) = first {
         start_prompt(&shared, &cx, &session, turn, parts)?;
@@ -771,10 +854,90 @@ fn start_prompt(
     })
 }
 
-async fn handle_update(shared: &Shared, notification: acp::SessionNotification) {
-    let Some(event) = events::from_update(&notification.update) else {
+/// Starts in the preset's asking mode, whatever the agent's own settings chose; a forbidden
+/// current mode with no allowed alternative is reported.
+async fn enforce_mode(
+    shared: &Arc<Shared>,
+    cx: &ConnectionTo<Agent>,
+    session: &acp::SessionId,
+    modes: Option<&Modes>,
+) {
+    let Some(modes) = modes else {
         return;
     };
+    let policy = &shared.preset.modes;
+    let target = match &policy.initial {
+        Some(initial) if modes.available.iter().any(|(id, _)| id == initial) => {
+            Some(initial.clone())
+        }
+        _ if !policy.allows(&modes.current) => modes.available.first().map(|(id, _)| id.clone()),
+        _ => None,
+    };
+    match target {
+        Some(target) if target != modes.current => {
+            let request = acp::SetSessionModeRequest::new(session.clone(), target.clone());
+            match with_timeout(
+                cx.send_request(request).block_task(),
+                shared.handshake_timeout,
+            )
+            .await
+            {
+                Some(Ok(_)) => {
+                    eprintln!(
+                        "event=agent_mode_set agent={} mode={target}",
+                        shared.preset.id
+                    );
+                    shared
+                        .emit(AgentEvent::ModeChanged { mode_id: target })
+                        .await;
+                }
+                _ => {
+                    shared
+                        .emit(AgentEvent::Error {
+                            message: format!("无法把 Agent 切换到询问模式（{target}）"),
+                        })
+                        .await;
+                }
+            }
+        }
+        None if !policy.allows(&modes.current) => {
+            shared
+                .emit(AgentEvent::Error {
+                    message: "Agent 处于跳过审批的模式，且没有可切换的询问模式".into(),
+                })
+                .await;
+        }
+        _ => {}
+    }
+}
+
+async fn handle_update(shared: &Shared, notification: acp::SessionNotification) {
+    let Some(mut event) = events::from_update(&notification.update) else {
+        return;
+    };
+    // Direct mode reviews diff against the file as it was before the first edit; an edit tool
+    // call announces its paths before it runs.
+    if let AgentEvent::ToolCall(call) = &event
+        && matches!(
+            call.kind,
+            events::ToolKind::Edit | events::ToolKind::Delete | events::ToolKind::Move
+        )
+        && *shared.write_mode.lock().unwrap() == WriteMode::Direct
+    {
+        for location in &call.locations {
+            if let Ok(path) = shared.workspace.resolve(&location.path) {
+                shared.snapshot(&path);
+            }
+        }
+    }
+    // A mode the preset forbids is never shown as current without a warning.
+    if let AgentEvent::ModeChanged { mode_id } = &event
+        && !shared.preset.modes.allows(mode_id)
+    {
+        event = AgentEvent::Error {
+            message: format!("Agent 切换到了跳过审批的模式（{mode_id}），请在模式菜单里改回询问"),
+        };
+    }
     let history = matches!(
         event,
         AgentEvent::UserMessageChunk { .. }
@@ -846,6 +1009,7 @@ async fn handle_write(
     let mode = *shared.write_mode.lock().unwrap();
     match mode {
         WriteMode::Direct => {
+            shared.snapshot(&path);
             write_atomic(&path, &request.content).map_err(fs_error)?;
             shared.emit(AgentEvent::FileWritten { path }).await;
         }

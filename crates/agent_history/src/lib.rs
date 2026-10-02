@@ -484,6 +484,47 @@ impl History {
         })
     }
 
+    /// The `limit` messages before `before_seq` (or the newest ones), oldest first, so a long
+    /// thread loads its tail and pages backwards.
+    pub fn messages_page(
+        &self,
+        id: SessionId,
+        before_seq: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT seq, role, text, created_at FROM messages WHERE session_id = ?1 \
+                 AND seq < ?2 ORDER BY seq DESC LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(
+                params![id.0, before_seq.unwrap_or(i64::MAX), limit as i64],
+                |r| {
+                    Ok(Message {
+                        seq: r.get(0)?,
+                        role: Role::parse(&r.get::<_, String>(1)?),
+                        text: r.get(2)?,
+                        created_at: r.get(3)?,
+                    })
+                },
+            )?;
+            let mut page: Vec<Message> = rows.collect::<rusqlite::Result<_>>()?;
+            page.reverse();
+            Ok(page)
+        })
+    }
+
+    pub fn message_count(&self, id: SessionId) -> Result<usize> {
+        self.read(|conn| {
+            let n: i64 = conn.query_row(
+                "SELECT count(*) FROM messages WHERE session_id = ?1",
+                [id.0],
+                |r| r.get(0),
+            )?;
+            Ok(n as usize)
+        })
+    }
+
     pub fn files(&self, id: SessionId) -> Result<Vec<String>> {
         self.read(|conn| {
             let mut stmt =

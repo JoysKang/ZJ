@@ -19,6 +19,7 @@ pub mod fs;
 mod process;
 pub mod registry;
 pub mod shadow;
+pub mod thread;
 
 pub use client::{AgentClient, ClientError, ClientOptions, PromptPart, WriteMode};
 pub use events::*;

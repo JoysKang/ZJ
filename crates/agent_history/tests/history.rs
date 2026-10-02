@@ -768,3 +768,21 @@ fn bundled_sqlite_has_fts5_without_the_trimmed_extras() {
     assert!(!options.iter().any(|o| o == "ENABLE_FTS3"), "{options:?}");
     assert!(!options.iter().any(|o| o == "ENABLE_RTREE"), "{options:?}");
 }
+
+#[test]
+fn long_threads_page_backwards() {
+    let dir = TempDir::new("page");
+    let h = History::new(dir.db());
+    let id = session(&h, "/w", "codex", "分页");
+    for i in 0..25 {
+        h.append_message(id, Role::Agent, format!("m{i}"));
+    }
+    h.flush().unwrap();
+    assert_eq!(h.message_count(id).unwrap(), 25);
+    let tail = h.messages_page(id, None, 10).unwrap();
+    assert_eq!(tail.first().unwrap().seq, 15);
+    assert_eq!(tail.last().unwrap().seq, 24);
+    let older = h.messages_page(id, Some(15), 10).unwrap();
+    assert_eq!((older[0].seq, older[9].seq), (5, 14));
+    assert_eq!(h.messages_page(id, Some(5), 10).unwrap().len(), 5);
+}

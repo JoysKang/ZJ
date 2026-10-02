@@ -68,6 +68,45 @@ pub struct AgentPreset {
     pub env: Vec<(String, EnvValue)>,
     /// Shown when no launch option is available.
     pub install_hint: String,
+    /// Which session modes ZJ starts in and never selects.
+    pub modes: ModePolicy,
+    /// `_meta` sent with `session/new` and `session/load` (agent-specific switches).
+    pub session_meta: Option<serde_json::Value>,
+}
+
+/// ZJ starts every session in an asking mode and never requests one that skips approvals,
+/// whatever the agent's own settings say.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ModePolicy {
+    /// Switched to right after the session starts when the agent offers it.
+    pub initial: Option<String>,
+    /// Hidden from the mode picker and refused by `set_mode`.
+    pub forbidden: Vec<String>,
+}
+
+impl ModePolicy {
+    fn new(initial: &str, forbidden: &[&str]) -> Self {
+        Self {
+            initial: Some(initial.to_string()),
+            forbidden: forbidden.iter().map(|m| m.to_string()).collect(),
+        }
+    }
+
+    pub fn allows(&self, mode: &str) -> bool {
+        !self.forbidden.iter().any(|f| f == mode)
+    }
+}
+
+/// claude-agent-acp: with this the adapter leaves `bypassPermissions` out of the mode list
+/// and ignores it as `permissions.defaultMode` from the user's Claude settings.
+fn claude_meta() -> Option<serde_json::Value> {
+    Some(serde_json::json!({
+        "claudeCode": { "options": { "allowDangerouslySkipPermissions": false } }
+    }))
+}
+
+fn claude_modes() -> ModePolicy {
+    ModePolicy::new("default", &["bypassPermissions"])
 }
 
 pub const CLAUDE_ACP_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@0.85.0";
@@ -102,6 +141,8 @@ pub fn builtin_presets() -> Vec<AgentPreset> {
             install_hint: s(
                 "安装 Node.js 18 或更新版本（例如 brew install node），然后在终端运行一次 claude 完成登录",
             ),
+            modes: claude_modes(),
+            session_meta: claude_meta(),
         },
         AgentPreset {
             id: s("codex"),
@@ -117,10 +158,13 @@ pub fn builtin_presets() -> Vec<AgentPreset> {
                     args: vec![],
                 },
             ],
-            env: vec![],
+            // codex-acp otherwise starts in "agent" (auto review).
+            env: vec![(s("INITIAL_AGENT_MODE"), EnvValue::Literal(s("read-only")))],
             install_hint: s(
                 "安装 Node.js 18 或更新版本（例如 brew install node），然后在终端运行 codex login",
             ),
+            modes: ModePolicy::new("read-only", &["agent-full-access"]),
+            session_meta: None,
         },
         AgentPreset {
             id: s("gemini"),
@@ -140,6 +184,8 @@ pub fn builtin_presets() -> Vec<AgentPreset> {
             install_hint: s(
                 "安装 Node.js 20 或更新版本，然后运行 npm install -g @google/gemini-cli 并登录",
             ),
+            modes: ModePolicy::new("default", &["yolo"]),
+            session_meta: None,
         },
         AgentPreset {
             id: s("claude-code-deepseek"),
@@ -176,6 +222,8 @@ pub fn builtin_presets() -> Vec<AgentPreset> {
             install_hint: s(
                 "安装 Node.js 18 或更新版本，并在设置或环境变量 DEEPSEEK_API_KEY 里提供 DeepSeek API Key",
             ),
+            modes: claude_modes(),
+            session_meta: claude_meta(),
         },
     ]
 }
@@ -215,6 +263,19 @@ impl UserAgentConfig {
             }],
             env,
             install_hint: "检查设置里的 command 是否正确".to_string(),
+            // Unknown agents: never pick a mode for them, but refuse the usual bypass names.
+            modes: ModePolicy {
+                initial: None,
+                forbidden: [
+                    "bypassPermissions",
+                    "yolo",
+                    "agent-full-access",
+                    "full-access",
+                ]
+                .map(String::from)
+                .to_vec(),
+            },
+            session_meta: None,
         }
     }
 }
@@ -544,6 +605,26 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(missing, LaunchError::NotFound { ref program, .. } if program == "opencode")
+        );
+    }
+
+    #[test]
+    fn presets_start_asking_and_forbid_bypass() {
+        for preset in builtin_presets() {
+            assert!(preset.modes.initial.is_some(), "{}", preset.id);
+            assert!(!preset.modes.forbidden.is_empty(), "{}", preset.id);
+            assert!(
+                preset
+                    .modes
+                    .allows(preset.modes.initial.as_deref().unwrap())
+            );
+        }
+        let claude = AgentPreset::find_builtin("claude-code").unwrap();
+        assert!(!claude.modes.allows("bypassPermissions"));
+        let meta = claude.session_meta.unwrap();
+        assert_eq!(
+            meta["claudeCode"]["options"]["allowDangerouslySkipPermissions"],
+            serde_json::json!(false)
         );
     }
 

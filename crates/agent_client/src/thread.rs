@@ -1,0 +1,822 @@
+//! The conversation as the panel shows it, built from [`AgentEvent`]s. No GPUI: the app keeps
+//! one [`Thread`] per session and renders its items.
+//!
+//! Bounded: at most [`MAX_ITEMS`] items stay in memory; older ones are dropped from the front
+//! (`dropped` counts them) and come back from the history database on demand.
+
+use crate::events::{
+    AgentCommand, AgentEvent, ExitReason, Modes, PermissionId, PermissionKind, PermissionRequest,
+    PlanEntry, ToolCall, ToolCallPatch, ToolContent, ToolKind, ToolStatus, TurnId, TurnOutcome,
+};
+use crate::shadow::diff_hunks;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    path::PathBuf,
+};
+
+pub const MAX_ITEMS: usize = 400;
+/// Tool output kept per card (the agent already has the full text).
+const MAX_TOOL_TEXT: usize = 16 * 1024;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Status {
+    #[default]
+    Idle,
+    Running,
+    /// A permission request is waiting for the user.
+    Awaiting,
+    Error,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolCard {
+    pub call: ToolCall,
+    /// Lines added / removed by the call's diffs.
+    pub added: usize,
+    pub removed: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PermissionState {
+    Pending,
+    /// Answered with this option (its kind decides the card's color).
+    Answered(PermissionKind, String),
+    /// Answered by a stored "always allow" rule.
+    Rule(String),
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PermissionCard {
+    pub request: PermissionRequest,
+    pub state: PermissionState,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Item {
+    User {
+        text: String,
+        /// File and selection chips shown above the message.
+        attachments: Vec<String>,
+    },
+    /// Markdown; `streaming` while chunks still arrive.
+    Agent {
+        text: String,
+        streaming: bool,
+    },
+    Thought {
+        text: String,
+        streaming: bool,
+    },
+    Tool(ToolCard),
+    Plan(Vec<PlanEntry>),
+    Permission(PermissionCard),
+    Notice {
+        text: String,
+        error: bool,
+    },
+}
+
+/// Where a changed file's pending state lives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChangeOrigin {
+    /// Written to disk (Direct); reviewed against the snapshot from before the agent.
+    Written,
+    /// Waiting in the shadow store (AcceptFirst).
+    Proposed,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileChange {
+    pub origin: ChangeOrigin,
+    pub added: usize,
+    pub removed: usize,
+    pub new_file: bool,
+}
+
+/// Something the caller persists to the history database.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Record {
+    Agent(String),
+    Tool(String),
+}
+
+#[derive(Default)]
+pub struct Thread {
+    pub items: VecDeque<Item>,
+    /// Older items not held in memory.
+    pub dropped: usize,
+    pub status: Status,
+    pub title: Option<String>,
+    pub session_id: Option<String>,
+    pub modes: Option<Modes>,
+    pub commands: Vec<AgentCommand>,
+    /// (used, size) tokens of the context window.
+    pub usage: Option<(u64, u64)>,
+    pub changed_files: BTreeMap<PathBuf, FileChange>,
+    pub turn: Option<TurnId>,
+    /// A turn ended while the user was looking elsewhere.
+    pub unread: bool,
+    pub last_error: Option<String>,
+    /// Bumped on every change; renderers cache per version.
+    pub version: u64,
+    /// Items appended since the last [`Thread::take_records`] that should be persisted.
+    records: Vec<Record>,
+}
+
+fn diff_stats(old: Option<&str>, new: &str) -> (usize, usize) {
+    let old = old.unwrap_or("");
+    diff_hunks(old, new)
+        .iter()
+        .fold((0, 0), |(a, r), h| (a + h.proposed.len(), r + h.base.len()))
+}
+
+fn clip(mut text: String) -> String {
+    if text.len() > MAX_TOOL_TEXT {
+        let mut cut = MAX_TOOL_TEXT;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push('…');
+    }
+    text
+}
+
+fn clip_content(content: Vec<ToolContent>) -> Vec<ToolContent> {
+    content
+        .into_iter()
+        .map(|c| match c {
+            ToolContent::Text(t) => ToolContent::Text(clip(t)),
+            other => other,
+        })
+        .collect()
+}
+
+impl ToolCard {
+    fn new(call: ToolCall) -> Self {
+        let mut card = Self {
+            call,
+            added: 0,
+            removed: 0,
+        };
+        card.call.content = clip_content(std::mem::take(&mut card.call.content));
+        card.recount();
+        card
+    }
+
+    fn recount(&mut self) {
+        let (mut added, mut removed) = (0, 0);
+        for content in &self.call.content {
+            if let ToolContent::Diff {
+                old_text, new_text, ..
+            } = content
+            {
+                let (a, r) = diff_stats(old_text.as_deref(), new_text);
+                added += a;
+                removed += r;
+            }
+        }
+        self.added = added;
+        self.removed = removed;
+    }
+
+    fn patch(&mut self, patch: &ToolCallPatch) {
+        if let Some(title) = &patch.title {
+            self.call.title = title.clone();
+        }
+        if let Some(kind) = patch.kind {
+            self.call.kind = kind;
+        }
+        if let Some(status) = patch.status {
+            self.call.status = status;
+        }
+        if let Some(locations) = &patch.locations {
+            self.call.locations = locations.clone();
+        }
+        if let Some(content) = &patch.content {
+            self.call.content = clip_content(content.clone());
+            self.recount();
+        }
+    }
+}
+
+/// The command a permission request is about: its title without decoration (Claude puts
+/// commands in backticks).
+pub fn permission_command(request: &PermissionRequest) -> Option<String> {
+    let title = request.tool_call.title.as_deref()?.trim();
+    let title = title.trim_matches('`').trim();
+    (!title.is_empty()).then(|| title.to_string())
+}
+
+/// The "始终允许" prefix for a command: its first two words (`cargo test`, `npm run`), or the
+/// first word when that is all there is.
+pub fn command_prefix(command: &str) -> String {
+    command
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Whether a stored rule covers this request. Only command executions can be allowed by rule;
+/// edits always ask.
+pub fn rule_matches(request: &PermissionRequest, rules: &[String]) -> bool {
+    if request.tool_call.kind != Some(ToolKind::Execute) {
+        return false;
+    }
+    let Some(command) = permission_command(request) else {
+        return false;
+    };
+    // Chained or substituted commands never match a prefix rule.
+    if ["&&", "||", ";", "|", "`", "$(", ">", "<", "\n"]
+        .iter()
+        .any(|s| command.contains(s))
+    {
+        return false;
+    }
+    let words: Vec<&str> = command.split_whitespace().collect();
+    rules.iter().any(|rule| {
+        let rule: Vec<&str> = rule.split_whitespace().collect();
+        !rule.is_empty() && words.len() >= rule.len() && words[..rule.len()] == rule[..]
+    })
+}
+
+impl Thread {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn push(&mut self, item: Item) {
+        self.items.push_back(item);
+        while self.items.len() > MAX_ITEMS {
+            self.items.pop_front();
+            self.dropped += 1;
+        }
+    }
+
+    fn end_streaming(&mut self) {
+        for item in self.items.iter_mut().rev().take(4) {
+            match item {
+                Item::Agent { streaming, text } if *streaming => {
+                    *streaming = false;
+                    self.records.push(Record::Agent(text.clone()));
+                }
+                Item::Thought { streaming, .. } => *streaming = false,
+                _ => {}
+            }
+        }
+    }
+
+    /// The user sent a prompt; the panel adds it before the agent answers.
+    pub fn push_user(&mut self, text: String, attachments: Vec<String>, turn: TurnId) {
+        self.end_streaming();
+        self.push(Item::User { text, attachments });
+        self.turn = Some(turn);
+        self.status = Status::Running;
+        self.last_error = None;
+        self.version += 1;
+    }
+
+    pub fn push_notice(&mut self, text: impl Into<String>, error: bool) {
+        self.push(Item::Notice {
+            text: text.into(),
+            error,
+        });
+        self.version += 1;
+    }
+
+    /// Restores items from the history database (oldest first), replacing what is shown.
+    pub fn load(&mut self, items: Vec<Item>, older: usize) {
+        self.items.clear();
+        self.dropped = older;
+        for item in items {
+            self.push(item);
+        }
+        self.version += 1;
+    }
+
+    /// Older items fetched from history go in front.
+    pub fn prepend(&mut self, items: Vec<Item>) {
+        let n = items.len();
+        for item in items.into_iter().rev() {
+            self.items.push_front(item);
+        }
+        self.dropped = self.dropped.saturating_sub(n);
+        while self.items.len() > MAX_ITEMS {
+            self.items.pop_back();
+        }
+        self.version += 1;
+    }
+
+    pub fn take_records(&mut self) -> Vec<Record> {
+        std::mem::take(&mut self.records)
+    }
+
+    pub fn pending_permissions(&self) -> impl Iterator<Item = &PermissionCard> {
+        self.items.iter().filter_map(|item| match item {
+            Item::Permission(card) if card.state == PermissionState::Pending => Some(card),
+            _ => None,
+        })
+    }
+
+    /// Marks a permission request as answered; returns `false` if it was not pending.
+    pub fn answer_permission(&mut self, id: PermissionId, state: PermissionState) -> bool {
+        let mut found = false;
+        for item in self.items.iter_mut().rev() {
+            if let Item::Permission(card) = item
+                && card.request.id == id
+                && card.state == PermissionState::Pending
+            {
+                card.state = state.clone();
+                found = true;
+                break;
+            }
+        }
+        if found {
+            if self.pending_permissions().next().is_none() && self.status == Status::Awaiting {
+                self.status = Status::Running;
+            }
+            self.version += 1;
+        }
+        found
+    }
+
+    fn cancel_permissions(&mut self) {
+        for item in self.items.iter_mut() {
+            if let Item::Permission(card) = item
+                && card.state == PermissionState::Pending
+            {
+                card.state = PermissionState::Cancelled;
+            }
+        }
+    }
+
+    fn tool_mut(&mut self, id: &str) -> Option<&mut ToolCard> {
+        self.items.iter_mut().rev().find_map(|item| match item {
+            Item::Tool(card) if card.call.id == id => Some(card),
+            _ => None,
+        })
+    }
+
+    fn note_tool_files(&mut self, card: &ToolCard) {
+        if card.call.kind != ToolKind::Edit {
+            return;
+        }
+        for content in &card.call.content {
+            if let ToolContent::Diff { path, old_text, .. } = content {
+                let entry = self
+                    .changed_files
+                    .entry(path.clone())
+                    .or_insert(FileChange {
+                        origin: ChangeOrigin::Written,
+                        added: 0,
+                        removed: 0,
+                        new_file: old_text.is_none(),
+                    });
+                // Until the app recomputes against the snapshot, show the call's own counts.
+                if entry.added == 0 && entry.removed == 0 {
+                    entry.added = card.added;
+                    entry.removed = card.removed;
+                }
+            }
+        }
+    }
+
+    /// Replaces a changed file's counts (computed by the app against the snapshot or shadow
+    /// base); `None` removes the file from the summary (accepted, rejected or reverted).
+    pub fn set_file_change(&mut self, path: PathBuf, change: Option<FileChange>) {
+        match change {
+            Some(change) => {
+                self.changed_files.insert(path, change);
+            }
+            None => {
+                self.changed_files.remove(&path);
+            }
+        }
+        self.version += 1;
+    }
+
+    /// Applies one event. `visible` tells whether the user is looking at this thread (a turn
+    /// that ends while it is hidden leaves it unread).
+    pub fn apply(&mut self, event: &AgentEvent, visible: bool) {
+        self.version += 1;
+        match event {
+            AgentEvent::Starting { .. } | AgentEvent::Ready(_) => {}
+            AgentEvent::SessionStarted {
+                session_id,
+                resumed,
+                modes,
+            } => {
+                let changed = self
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|old| old != session_id);
+                self.session_id = Some(session_id.clone());
+                self.modes = modes.clone();
+                if changed && !resumed {
+                    self.push(Item::Notice {
+                        text:
+                            "Agent 重启后无法恢复原会话，已开始新会话（之前的上下文不在 Agent 里）"
+                                .into(),
+                        error: false,
+                    });
+                }
+            }
+            AgentEvent::UserMessageChunk { .. } => {}
+            AgentEvent::MessageChunk { text } => match self.items.back_mut() {
+                Some(Item::Agent {
+                    text: last,
+                    streaming: true,
+                }) => last.push_str(text),
+                _ => {
+                    self.end_streaming();
+                    self.push(Item::Agent {
+                        text: text.clone(),
+                        streaming: true,
+                    });
+                }
+            },
+            AgentEvent::ThoughtChunk { text } => match self.items.back_mut() {
+                Some(Item::Thought {
+                    text: last,
+                    streaming: true,
+                }) => last.push_str(text),
+                _ => {
+                    self.end_streaming();
+                    self.push(Item::Thought {
+                        text: text.clone(),
+                        streaming: true,
+                    });
+                }
+            },
+            AgentEvent::ToolCall(call) => {
+                self.end_streaming();
+                let card = ToolCard::new(call.clone());
+                self.note_tool_files(&card);
+                self.records.push(Record::Tool(card.call.title.clone()));
+                self.push(Item::Tool(card));
+            }
+            AgentEvent::ToolCallUpdate(patch) => {
+                let mut updated = None;
+                if let Some(card) = self.tool_mut(&patch.id) {
+                    card.patch(patch);
+                    updated = Some(card.clone());
+                }
+                if let Some(card) = updated {
+                    self.note_tool_files(&card);
+                }
+            }
+            AgentEvent::Plan(entries) => {
+                // One plan per turn, updated in place.
+                let since_user = self
+                    .items
+                    .iter()
+                    .rposition(|item| matches!(item, Item::User { .. }))
+                    .map_or(0, |i| i + 1);
+                let existing = (since_user..self.items.len())
+                    .rev()
+                    .find(|&i| matches!(self.items[i], Item::Plan(_)));
+                match existing {
+                    Some(i) => self.items[i] = Item::Plan(entries.clone()),
+                    None => {
+                        self.end_streaming();
+                        self.push(Item::Plan(entries.clone()));
+                    }
+                }
+            }
+            AgentEvent::AvailableCommands(commands) => self.commands = commands.clone(),
+            AgentEvent::ModeChanged { mode_id } => {
+                if let Some(modes) = &mut self.modes {
+                    modes.current = mode_id.clone();
+                }
+            }
+            AgentEvent::Usage { used, size, .. } => self.usage = Some((*used, *size)),
+            AgentEvent::TitleChanged { title } => self.title = title.clone(),
+            AgentEvent::PermissionRequested(request) => {
+                self.end_streaming();
+                self.push(Item::Permission(PermissionCard {
+                    request: request.clone(),
+                    state: PermissionState::Pending,
+                }));
+                self.status = Status::Awaiting;
+            }
+            AgentEvent::FileWritten { path } => {
+                let entry = self
+                    .changed_files
+                    .entry(path.clone())
+                    .or_insert(FileChange {
+                        origin: ChangeOrigin::Written,
+                        added: 0,
+                        removed: 0,
+                        new_file: false,
+                    });
+                entry.origin = ChangeOrigin::Written;
+            }
+            AgentEvent::EditProposed { path } => {
+                let entry = self
+                    .changed_files
+                    .entry(path.clone())
+                    .or_insert(FileChange {
+                        origin: ChangeOrigin::Proposed,
+                        added: 0,
+                        removed: 0,
+                        new_file: false,
+                    });
+                entry.origin = ChangeOrigin::Proposed;
+            }
+            AgentEvent::TurnEnded { turn, outcome } => {
+                if self.turn != Some(*turn) {
+                    return;
+                }
+                self.turn = None;
+                self.end_streaming();
+                self.cancel_permissions();
+                for item in self.items.iter_mut() {
+                    if let Item::Tool(card) = item
+                        && matches!(
+                            card.call.status,
+                            ToolStatus::Pending | ToolStatus::InProgress
+                        )
+                        && !matches!(outcome, TurnOutcome::EndTurn)
+                    {
+                        card.call.status = ToolStatus::Failed;
+                    }
+                }
+                self.status = match outcome {
+                    TurnOutcome::Failed(message) => {
+                        self.last_error = Some(message.clone());
+                        self.push(Item::Notice {
+                            text: message.clone(),
+                            error: true,
+                        });
+                        Status::Error
+                    }
+                    TurnOutcome::Cancelled => {
+                        self.push(Item::Notice {
+                            text: "已中断".into(),
+                            error: false,
+                        });
+                        Status::Idle
+                    }
+                    TurnOutcome::MaxTokens | TurnOutcome::MaxTurnRequests => {
+                        self.push(Item::Notice {
+                            text: "Agent 达到了长度或轮次上限，回复可能不完整".into(),
+                            error: false,
+                        });
+                        Status::Idle
+                    }
+                    TurnOutcome::Refusal => {
+                        self.push(Item::Notice {
+                            text: "Agent 拒绝了这个请求".into(),
+                            error: true,
+                        });
+                        Status::Idle
+                    }
+                    TurnOutcome::EndTurn => Status::Idle,
+                };
+                if !visible {
+                    self.unread = true;
+                }
+            }
+            AgentEvent::Exited { reason } => {
+                if let ExitReason::Crashed { stderr_tail, .. } = reason {
+                    let tail: String = stderr_tail
+                        .lines()
+                        .rev()
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let text = if tail.is_empty() {
+                        "Agent 进程意外退出，下次发送时会重新启动".to_string()
+                    } else {
+                        format!("Agent 进程意外退出，下次发送时会重新启动：\n{tail}")
+                    };
+                    self.push(Item::Notice { text, error: true });
+                    self.status = Status::Error;
+                }
+            }
+            AgentEvent::Error { message } => {
+                self.last_error = Some(message.clone());
+                self.push(Item::Notice {
+                    text: message.clone(),
+                    error: true,
+                });
+            }
+        }
+    }
+
+    /// Whether the thread has something worth a badge: running, waiting or unread.
+    pub fn is_active(&self) -> bool {
+        matches!(self.status, Status::Running | Status::Awaiting) || self.unread
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::{Location, PermissionOption, PlanStatus};
+
+    fn request(id: u64, title: &str, kind: ToolKind) -> PermissionRequest {
+        PermissionRequest {
+            id,
+            tool_call: ToolCallPatch {
+                id: format!("t{id}"),
+                title: Some(title.into()),
+                kind: Some(kind),
+                ..Default::default()
+            },
+            options: vec![PermissionOption {
+                id: "allow".into(),
+                name: "Allow".into(),
+                kind: PermissionKind::AllowOnce,
+            }],
+        }
+    }
+
+    #[test]
+    fn chunks_merge_and_tools_split_messages() {
+        let mut t = Thread::new();
+        t.push_user("hi".into(), vec![], 1);
+        for chunk in ["Hel", "lo"] {
+            t.apply(&AgentEvent::ThoughtChunk { text: chunk.into() }, true);
+        }
+        for chunk in ["原因", "在这里"] {
+            t.apply(&AgentEvent::MessageChunk { text: chunk.into() }, true);
+        }
+        t.apply(
+            &AgentEvent::ToolCall(ToolCall {
+                id: "t1".into(),
+                title: "Edit a.rs".into(),
+                kind: ToolKind::Edit,
+                status: ToolStatus::Pending,
+                locations: vec![Location {
+                    path: "/w/a.rs".into(),
+                    line: Some(1),
+                }],
+                content: vec![ToolContent::Diff {
+                    path: "/w/a.rs".into(),
+                    old_text: Some("a\nb\n".into()),
+                    new_text: "a\nB\nc\n".into(),
+                }],
+            }),
+            true,
+        );
+        t.apply(
+            &AgentEvent::MessageChunk {
+                text: "完成".into(),
+            },
+            true,
+        );
+        t.apply(
+            &AgentEvent::ToolCallUpdate(ToolCallPatch {
+                id: "t1".into(),
+                status: Some(ToolStatus::Completed),
+                ..Default::default()
+            }),
+            true,
+        );
+        t.apply(
+            &AgentEvent::TurnEnded {
+                turn: 1,
+                outcome: TurnOutcome::EndTurn,
+            },
+            false,
+        );
+        let kinds: Vec<&str> = t
+            .items
+            .iter()
+            .map(|i| match i {
+                Item::User { .. } => "user",
+                Item::Thought { .. } => "thought",
+                Item::Agent { .. } => "agent",
+                Item::Tool(_) => "tool",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["user", "thought", "agent", "tool", "agent"]);
+        assert!(
+            matches!(&t.items[2], Item::Agent { text, streaming: false } if text == "原因在这里")
+        );
+        match &t.items[3] {
+            Item::Tool(card) => {
+                assert_eq!(card.call.status, ToolStatus::Completed);
+                assert_eq!((card.added, card.removed), (2, 1));
+            }
+            other => panic!("{other:?}"),
+        }
+        let change = &t.changed_files[&PathBuf::from("/w/a.rs")];
+        assert_eq!((change.added, change.removed), (2, 1));
+        assert_eq!(
+            t.take_records(),
+            vec![
+                Record::Agent("原因在这里".into()),
+                Record::Tool("Edit a.rs".into()),
+                Record::Agent("完成".into())
+            ]
+        );
+        assert!(t.unread);
+        assert_eq!(t.status, Status::Idle);
+    }
+
+    #[test]
+    fn plans_update_in_place_and_permissions_track_status() {
+        let mut t = Thread::new();
+        t.push_user("go".into(), vec![], 7);
+        let plan = |status| {
+            AgentEvent::Plan(vec![PlanEntry {
+                content: "step".into(),
+                status,
+            }])
+        };
+        t.apply(&plan(PlanStatus::Pending), true);
+        t.apply(&AgentEvent::MessageChunk { text: "…".into() }, true);
+        t.apply(&plan(PlanStatus::Completed), true);
+        assert_eq!(
+            t.items
+                .iter()
+                .filter(|i| matches!(i, Item::Plan(_)))
+                .count(),
+            1
+        );
+        t.apply(
+            &AgentEvent::PermissionRequested(request(3, "`cargo test`", ToolKind::Execute)),
+            true,
+        );
+        assert_eq!(t.status, Status::Awaiting);
+        assert!(t.answer_permission(
+            3,
+            PermissionState::Answered(PermissionKind::AllowOnce, "Allow".into())
+        ));
+        assert_eq!(t.status, Status::Running);
+        assert!(!t.answer_permission(3, PermissionState::Cancelled));
+        t.apply(
+            &AgentEvent::PermissionRequested(request(4, "rm -rf x", ToolKind::Execute)),
+            true,
+        );
+        t.apply(
+            &AgentEvent::TurnEnded {
+                turn: 7,
+                outcome: TurnOutcome::Cancelled,
+            },
+            true,
+        );
+        assert_eq!(t.pending_permissions().count(), 0);
+        assert!(matches!(t.items.back(), Some(Item::Notice { text, .. }) if text == "已中断"));
+        // A stale turn id is ignored.
+        t.apply(
+            &AgentEvent::TurnEnded {
+                turn: 7,
+                outcome: TurnOutcome::Failed("x".into()),
+            },
+            true,
+        );
+        assert_eq!(t.status, Status::Idle);
+    }
+
+    #[test]
+    fn memory_is_bounded() {
+        let mut t = Thread::new();
+        for turn in 0..(MAX_ITEMS as u64) {
+            t.push_user(format!("q{turn}"), vec![], turn);
+            t.apply(&AgentEvent::MessageChunk { text: "a".into() }, true);
+        }
+        assert_eq!(t.items.len(), MAX_ITEMS);
+        assert_eq!(t.dropped, MAX_ITEMS);
+        t.prepend(vec![Item::User {
+            text: "older".into(),
+            attachments: vec![],
+        }]);
+        assert_eq!(t.items.len(), MAX_ITEMS);
+        assert_eq!(t.dropped, MAX_ITEMS - 1);
+    }
+
+    #[test]
+    fn prefix_rules_only_cover_plain_commands() {
+        let rules = vec![command_prefix("cargo test --test reconnect")];
+        assert_eq!(rules[0], "cargo test");
+        let ok = request(1, "`cargo test -p zj`", ToolKind::Execute);
+        assert!(rule_matches(&ok, &rules));
+        for title in [
+            "cargo testing",
+            "cargo build",
+            "cargo test && rm -rf /",
+            "cargo test; curl x",
+            "cargo test $(whoami)",
+        ] {
+            assert!(
+                !rule_matches(&request(2, title, ToolKind::Execute), &rules),
+                "{title}"
+            );
+        }
+        // Edits never match a rule.
+        assert!(!rule_matches(
+            &request(3, "cargo test", ToolKind::Edit),
+            &rules
+        ));
+        assert!(!rule_matches(&request(4, "", ToolKind::Execute), &rules));
+    }
+}

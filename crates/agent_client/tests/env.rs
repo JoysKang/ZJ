@@ -27,6 +27,8 @@ fn inherited_git_and_claude_variables_are_removed() {
         }],
         env: vec![("PRESET_VALUE".into(), EnvValue::Literal("p".into()))],
         install_hint: String::new(),
+        modes: Default::default(),
+        session_meta: None,
     };
     let mut options = ClientOptions::new(preset, &root);
     options.search_path = Some(SearchPath::new(vec![]));
