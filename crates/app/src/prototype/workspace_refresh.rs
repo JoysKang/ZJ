@@ -168,7 +168,6 @@ impl Prototype {
             let current = self.index.as_ref();
             if base.is_some() && current.is_some_and(|c| Arc::ptr_eq(c, base.as_ref().unwrap())) {
                 self.index = Some(Arc::new(index));
-                self.search_files(window, cx);
                 self.update_quick_open(window, cx);
             } else {
                 plan.rebuild_index = true;

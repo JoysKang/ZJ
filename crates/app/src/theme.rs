@@ -377,6 +377,8 @@ pub struct Colors {
     pub command_border: Hsla,
     /// Editor text selection (also selected diff lines).
     pub selection: Hsla,
+    /// Search matches inside result previews (VS Code `editor.findMatchHighlightBackground`).
+    pub find_match: Hsla,
 }
 
 fn hsla(hex: u32) -> Hsla {
@@ -416,6 +418,7 @@ impl Palette {
             command_bg: hsla(self.foreground).opacity(0.05),
             command_border: hsla(self.foreground).opacity(0.2),
             selection: hsla(self.selection),
+            find_match: hsla(self.accent).opacity(0.3),
         }
     }
 }

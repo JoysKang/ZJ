@@ -443,7 +443,7 @@ impl Prototype {
         })
     }
 
-    fn remember(&mut self, cx: &App) {
+    pub(super) fn remember(&mut self, cx: &App) {
         if let Some(point) = self.here(cx) {
             if self.nav_back.last() != Some(&point) {
                 self.nav_back.push(point);
@@ -475,7 +475,13 @@ impl Prototype {
         self.go(target.path, place, window, cx);
     }
 
-    fn go(&mut self, path: PathBuf, place: Placement, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn go(
+        &mut self,
+        path: PathBuf,
+        place: Placement,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(doc) = self.documents.iter().find(|doc| doc.path == path) {
             let (id, editor) = (doc.id, doc.editor.clone());
             if self.active != Pane::Document(id) {

@@ -8639,6 +8639,7 @@ dependencies = [
  "lsp-types",
  "notify",
  "objc2 0.6.4",
+ "regex",
  "serde_json",
  "tree-sitter",
  "tree-sitter-diff",

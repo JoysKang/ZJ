@@ -110,7 +110,8 @@ impl Prototype {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.sidebar = view;
                 if view == Sidebar::Search {
-                    this.search_input
+                    this.search
+                        .query
                         .update(cx, |input, cx| input.focus(window, cx));
                 }
                 cx.notify();
@@ -604,115 +605,6 @@ impl Prototype {
                 None => menu,
             }
         });
-        div()
-            .w_full()
-            .px(theme::ROW_INSET)
-            .child(row)
-            .into_any_element()
-    }
-
-    fn render_search(&self, cx: &mut Context<Self>) -> AnyElement {
-        let colors = theme::colors(cx);
-        let query_empty = self.search_input.read(cx).value().trim().is_empty();
-        let summary = if self.searching && self.index.is_none() {
-            "正在建立文件索引…".to_string()
-        } else if self.searching {
-            "搜索中…".into()
-        } else if query_empty {
-            "按文件名或路径片段模糊匹配".into()
-        } else {
-            format!(
-                "{} 个文件{}{}",
-                self.search_results.paths.len(),
-                if self.search_results.incomplete {
-                    "（部分结果）"
-                } else {
-                    ""
-                },
-                if self.search_results.errors > 0 {
-                    format!(" · {} 项读取错误", self.search_results.errors)
-                } else {
-                    String::new()
-                }
-            )
-        };
-        v_flex()
-            .size_full()
-            .min_h_0()
-            .gap_1()
-            .child(
-                div()
-                    .px(theme::TREE_BASE)
-                    .child(Input::new(&self.search_input).small()),
-            )
-            .child(
-                div()
-                    .px(theme::TREE_BASE)
-                    .text_size(theme::TEXT_CAPTION)
-                    .text_color(colors.muted)
-                    .child(summary),
-            )
-            .child(
-                uniform_list(
-                    "file-search",
-                    self.search_results.paths.len(),
-                    cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                        range
-                            .map(|index| this.search_row(index, cx))
-                            .collect::<Vec<_>>()
-                    }),
-                )
-                .flex_1()
-                .w_full(),
-            )
-            .into_any_element()
-    }
-
-    fn search_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
-        let colors = theme::colors(cx);
-        let path = self.search_results.paths[index].clone();
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .replace(SINGLE_LINE, "⏎");
-        let directory = path
-            .parent()
-            .and_then(|parent| {
-                self.root
-                    .as_ref()
-                    .and_then(|root| parent.strip_prefix(root).ok())
-            })
-            .map(|parent| parent.to_string_lossy().replace(SINGLE_LINE, "⏎"))
-            .unwrap_or_default();
-        let row = h_flex()
-            .id(("search-row", index))
-            .w_full()
-            .h(theme::ROW_HEIGHT)
-            .pl(theme::TREE_BASE - theme::ROW_INSET)
-            .pr_2()
-            .gap_2()
-            .rounded(theme::RADIUS)
-            .overflow_hidden()
-            .text_size(theme::TEXT_BODY)
-            .role(Role::Button)
-            .aria_label(format!("打开文件 {}", path.display()))
-            .hover(|row| row.bg(colors.hover))
-            .child(file_icons::icon(file_icons::for_file(&name)))
-            .child(div().flex_shrink_0().child(name))
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(theme::TEXT_CAPTION)
-                    .text_color(colors.muted)
-                    .child(directory),
-            )
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.open_file(path.clone(), this.root.clone(), window, cx)
-            }));
         div()
             .w_full()
             .px(theme::ROW_INSET)

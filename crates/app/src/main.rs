@@ -12,6 +12,7 @@ mod refresh_plan;
 mod settings;
 mod symbol_index;
 mod symbols;
+mod text_search;
 mod theme;
 mod watch;
 use gpui_kit::component::input::GoToDefinition;
@@ -146,6 +147,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     Some("Explorer"),
                 ),
                 KeyBinding::new("alt-cmd-r", prototype::RevealInFinder, Some("Explorer")),
+                KeyBinding::new(
+                    "secondary-shift-f",
+                    prototype::FindInFiles,
+                    Some("WorkspaceEditor"),
+                ),
                 KeyBinding::new("cmd-=", prototype::ZoomIn, Some("WorkspaceEditor")),
                 KeyBinding::new("cmd-+", prototype::ZoomIn, Some("WorkspaceEditor")),
                 KeyBinding::new("cmd--", prototype::ZoomOut, Some("WorkspaceEditor")),

@@ -20,7 +20,7 @@ use gpui_kit::{
 };
 use workspace_editor_git::{ChangeKind, DiffSide, WriteOperation, WriteRequest};
 
-fn count_badge(count: usize, colors: theme::Colors) -> impl IntoElement {
+pub(super) fn count_badge(count: usize, colors: theme::Colors) -> impl IntoElement {
     div()
         .h(theme::BADGE_SIZE + theme::ROW_INSET)
         .min_w(theme::BADGE_SIZE + theme::ROW_INSET)

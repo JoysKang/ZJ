@@ -93,7 +93,6 @@ pub fn directory(path: &Path, show_hidden: bool) -> io::Result<(Vec<Entry>, usiz
 pub struct SearchResults {
     pub paths: Vec<PathBuf>,
     pub incomplete: bool,
-    pub errors: usize,
 }
 
 /// Every file path of a workspace, built once in the background and matched in memory.
@@ -294,7 +293,6 @@ impl PathIndex {
     pub fn search(&self, query: &str, show_hidden: bool) -> SearchResults {
         let query = fuzzy::query_chars(query);
         let mut result = SearchResults {
-            errors: self.errors,
             incomplete: self.incomplete,
             ..Default::default()
         };

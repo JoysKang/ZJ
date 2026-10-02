@@ -1,8 +1,8 @@
-use crate::files::{self, Entry, PathIndex, SearchResults};
+use crate::files::{self, Entry, PathIndex};
 use crate::{theme, watch};
 use gpui_kit::{
     component::{
-        input::{EditorState, InputEvent, InputState, TextareaState},
+        input::{EditorState, InputEvent, TextareaState},
         resizable::{h_resizable, resizable_panel},
         v_flex,
     },
@@ -40,6 +40,7 @@ pub mod navigation;
 mod quick_open;
 mod scm;
 mod scm_actions;
+mod search_view;
 mod sidebar;
 mod workspace_refresh;
 
@@ -55,7 +56,8 @@ gpui_kit::actions!(
         ZoomIn,
         ZoomOut,
         ZoomReset,
-        ToggleHiddenFiles
+        ToggleHiddenFiles,
+        FindInFiles
     ]
 );
 
@@ -212,11 +214,7 @@ pub struct Prototype {
     tree_tasks: HashMap<PathBuf, Task<()>>,
     tree_generation: u64,
     tree_message: String,
-    search_input: Entity<InputState>,
-    search_results: SearchResults,
-    search_task: Option<Task<()>>,
-    search_generation: u64,
-    searching: bool,
+    search: search_view::SearchState,
     index: Option<Arc<PathIndex>>,
     index_task: Option<Task<()>>,
     index_cancel: Arc<AtomicBool>,
@@ -318,7 +316,9 @@ impl Prototype {
                 if show_hidden != this.show_hidden {
                     this.show_hidden = show_hidden;
                     this.reload_tree(window, cx);
-                    this.search_files(window, cx);
+                    if !this.search.query.read(cx).value().is_empty() {
+                        this.schedule_search(Duration::ZERO, window, cx);
+                    }
                     this.update_quick_open(window, cx);
                 }
             });
@@ -370,17 +370,7 @@ impl Prototype {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| format!("新窗口 {number}"));
         window.set_window_title(&format!("ZJ · {name}"));
-        let search_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("按文件名或路径搜索"));
-        let search_subscription = cx.subscribe_in(
-            &search_input,
-            window,
-            |this: &mut Self, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.search_files(window, cx);
-                }
-            },
-        );
+        let search = search_view::SearchState::new(window, cx);
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             root,
@@ -411,11 +401,7 @@ impl Prototype {
             tree_tasks: HashMap::new(),
             tree_generation: 0,
             tree_message: String::new(),
-            search_input,
-            search_results: SearchResults::default(),
-            search_task: None,
-            search_generation: 0,
-            searching: false,
+            search,
             index: None,
             index_task: None,
             index_cancel: Arc::new(AtomicBool::new(false)),
@@ -468,7 +454,7 @@ impl Prototype {
             workspace_refresh_pending: false,
             pending_plan: None,
             ignore_cache: Default::default(),
-            _subscriptions: vec![search_subscription, appearance, activation, settings],
+            _subscriptions: vec![appearance, activation, settings],
         };
         this.start_watching(window, cx);
         this.refresh_tree(window, cx);
@@ -670,48 +656,11 @@ impl Prototype {
                 if this.symbols_requested {
                     this.build_symbol_index(cx);
                 }
-                this.search_files(window, cx);
+                this.resume_search(window, cx);
                 this.update_quick_open(window, cx);
                 this.flush_workspace_refresh(window, cx);
             });
         }));
-    }
-
-    fn search_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search_generation += 1;
-        self.search_task = None;
-        let query = self.search_input.read(cx).value().to_string();
-        self.searching = false;
-        if self.root.is_none() || query.trim().is_empty() {
-            self.search_results = SearchResults::default();
-            cx.notify();
-            return;
-        }
-        self.searching = true;
-        // Until the index is ready, keep the previous results; build_index re-runs the search.
-        let Some(index) = self.index.clone() else {
-            cx.notify();
-            return;
-        };
-        let generation = self.search_generation;
-        let show_hidden = self.show_hidden;
-        self.search_task = Some(cx.spawn_in(window, async move |this, cx| {
-            // Coalesce bursts of typing; matching itself is in memory and cheap.
-            cx.background_executor()
-                .timer(Duration::from_millis(30))
-                .await;
-            let result = cx
-                .background_spawn(async move { index.search(&query, show_hidden) })
-                .await;
-            let _ = this.update_in(cx, |this, _, cx| {
-                if this.search_generation == generation {
-                    this.searching = false;
-                    this.search_results = result;
-                    cx.notify();
-                }
-            });
-        }));
-        cx.notify();
     }
 
     /// Changes the settings for every window and reports a failed write in this one.
@@ -1666,6 +1615,9 @@ impl Render for Prototype {
                 cx.listener(|this, _: &ZoomOut, window, cx| this.zoom(Some(-1.), window, cx)),
             )
             .on_action(cx.listener(|this, _: &ZoomReset, window, cx| this.zoom(None, window, cx)))
+            .on_action(
+                cx.listener(|this, _: &FindInFiles, window, cx| this.find_in_files(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &ToggleHiddenFiles, window, cx| {
                 this.toggle_hidden_files(window, cx)
             }))
