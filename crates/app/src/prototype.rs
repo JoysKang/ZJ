@@ -412,7 +412,8 @@ impl Prototype {
             diff_focus: cx.focus_handle(),
             diff_source: None,
             diff_change: None,
-            diff_inline: false,
+            // Top / bottom by default: the right side of the window is kept for an agent panel.
+            diff_inline: cx.global::<crate::settings::Settings>().diff_inline,
             diff_scroll: UniformListScrollHandle::new(),
             preview_title: String::new(),
             preview_diff: None,

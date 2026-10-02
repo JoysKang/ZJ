@@ -85,8 +85,10 @@ impl Prototype {
         cx.notify();
     }
 
-    fn toggle_diff_layout(&mut self, cx: &mut Context<Self>) {
+    fn toggle_diff_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.diff_inline = !self.diff_inline;
+        let inline = self.diff_inline;
+        self.change_settings(window, cx, |settings| settings.diff_inline = inline);
         // Row indexes differ between the layouts; keep the current change in view.
         self.diff_scroll = UniformListScrollHandle::new();
         if let Some(index) = self.diff_change
@@ -205,7 +207,7 @@ impl Prototype {
                     },
                 )
                 .disabled(one_sided)
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_diff_layout(cx))),
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_diff_layout(window, cx))),
             )
             .child(
                 action("diff-open-file", IconName::File, "打开文件").on_click(cx.listener(
