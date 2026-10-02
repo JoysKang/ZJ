@@ -2,6 +2,14 @@
 use super::*;
 use std::path::Path;
 
+/// The 提交 button and its menu.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum CommitMode {
+    Commit,
+    CommitAndPush,
+    Amend,
+}
+
 impl Prototype {
     pub(super) fn scm_paths(
         &self,
@@ -154,6 +162,50 @@ impl Prototype {
                 ),
                 "还原",
             )),
+            WriteOperation::Commit {
+                all: true, push, ..
+            } => Some((
+                "没有暂存的更改。要暂存所有更改并直接提交吗？".to_string(),
+                format!(
+                    "仓库：{}\n{} 个文件（包括未跟踪文件）将全部暂存后提交{}。",
+                    request.repo.worktree.display(),
+                    request.expected.changes.len(),
+                    if *push {
+                        "，然后推送到上游"
+                    } else {
+                        ""
+                    }
+                ),
+                if *push {
+                    "全部暂存、提交并推送"
+                } else {
+                    "全部暂存并提交"
+                },
+            )),
+            WriteOperation::Commit { amend: true, .. } => Some((
+                "修改上次提交？".to_string(),
+                format!(
+                    "仓库：{}\n把暂存的更改并入上一个提交{}。如果上一个提交已经推送，之后需要强制推送。",
+                    request.repo.worktree.display(),
+                    if matches!(&request.operation, WriteOperation::Commit { message, .. } if message.trim().is_empty())
+                    {
+                        "，保留原提交信息"
+                    } else {
+                        "，并替换提交信息"
+                    }
+                ),
+                "修改上次提交",
+            )),
+            WriteOperation::Commit { push: true, .. } => Some((
+                "提交并推送？".to_string(),
+                format!(
+                    "仓库：{}\n提交后推送 {} → {}；仅推送当前 HEAD，不强制覆盖远程历史。",
+                    request.repo.worktree.display(),
+                    request.expected.branch.as_deref().unwrap_or("未知"),
+                    request.expected.upstream.as_deref().unwrap_or("未配置上游")
+                ),
+                "提交并推送",
+            )),
             WriteOperation::Push => Some((
                 "推送当前分支？".to_string(),
                 format!(
@@ -209,12 +261,12 @@ impl Prototype {
         let version = request.generation;
         let id = request.repo.id.clone();
         let submitted_message = match &request.operation {
-            WriteOperation::Commit { message } => Some(message.clone()),
+            WriteOperation::Commit { message, .. } => Some(message.clone()),
             _ => None,
         };
         // As in VS Code, a successful operation just shows up in the refreshed list.
         let success = match request.operation {
-            WriteOperation::Push => "已推送",
+            WriteOperation::Push | WriteOperation::Commit { push: true, .. } => "已推送",
             _ => "",
         };
         group.write_pending = true;
@@ -258,7 +310,7 @@ impl Prototype {
     pub(super) fn scm_commit(
         &mut self,
         id: RepoId,
-        push: bool,
+        mode: CommitMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -269,7 +321,8 @@ impl Prototype {
             return;
         };
         let message = group.commit_input.read(cx).value().to_string();
-        if !push && message.trim().is_empty() {
+        // Amending may keep the last message; a new commit needs one.
+        if mode != CommitMode::Amend && message.trim().is_empty() {
             let index = self.groups.iter().position(|g| g.repo.id == id);
             if let Some(group) = index.map(|index| &mut self.groups[index]) {
                 group.write_message = "请输入提交消息".into();
@@ -281,10 +334,12 @@ impl Prototype {
             repo: group.repo.clone(),
             generation: 0,
             expected: status.clone(),
-            operation: if push {
-                WriteOperation::Push
-            } else {
-                WriteOperation::Commit { message }
+            operation: WriteOperation::Commit {
+                message,
+                amend: mode == CommitMode::Amend,
+                push: mode == CommitMode::CommitAndPush,
+                // Nothing staged: commit everything, as VS Code's smart commit does.
+                all: mode != CommitMode::Amend && !status.changes.iter().any(|c| c.staged()),
             },
         };
         self.request_git_write(request, window, cx);

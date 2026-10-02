@@ -102,9 +102,8 @@ pub const DIFF_RULER_MIN: Pixels = px(3.);
 pub const SCM_NOTICE_MAX: Pixels = px(100.);
 /// Source Control repository rows: the branch line under the name, and wrapped lines.
 pub const SCM_DETAIL_LINE: Pixels = px(20.);
-/// Width of the fade in front of a row's hover actions.
-pub const ACTION_FADE: Pixels = px(16.);
-pub const COMMIT_HEIGHT: Pixels = px(60.);
+/// Centers a `SCM_DETAIL_LINE` line inside a `ROW_HEIGHT` row.
+pub const SCM_LINE_PAD: Pixels = px(2.);
 
 // Window geometry.
 pub const WINDOW_WIDTH: Pixels = px(1280.);
@@ -143,6 +142,11 @@ pub struct Palette {
     pub accent: u32,
     pub badge: u32,
     pub badge_fg: u32,
+    /// Source Control's 提交 button (green, as in VS Code's multi-repository view) and its
+    /// text; `commit_hover` is the hovered / pressed shade.
+    pub commit: u32,
+    pub commit_fg: u32,
+    pub commit_hover: u32,
     /// Keyboard shortcut key caps.
     pub keycap: u32,
     /// The faint welcome wordmark.
@@ -183,6 +187,11 @@ pub const DARK: Palette = Palette {
     accent: 0x2aa198,
     badge: 0x047aa6,
     badge_fg: 0xffffff,
+    // A leaf green darkened until white text reaches 4.5:1 (Solarized's #859900 reads as
+    // olive at this size).
+    commit: 0x4e7d1f,
+    commit_fg: 0xffffff,
+    commit_hover: 0x47731b,
     keycap: 0x103a44,
     logo: 0x00222b,
     indent_guide: 0x0e4250,
@@ -217,6 +226,10 @@ pub const LIGHT: Palette = Palette {
     accent: 0x5e81ac,
     badge: 0x4c6a94,
     badge_fg: 0xffffff,
+    // Nord aurora green with polar night text (white on it would be 2:1).
+    commit: 0xa3be8c,
+    commit_fg: 0x2e3440,
+    commit_hover: 0x97b47e,
     keycap: 0xd8dee9,
     logo: 0xdfe4ec,
     indent_guide: 0xd0d6e0,
@@ -354,6 +367,9 @@ pub struct Colors {
     pub accent: Hsla,
     pub badge: Hsla,
     pub badge_fg: Hsla,
+    pub commit: Hsla,
+    pub commit_fg: Hsla,
+    pub commit_hover: Hsla,
     pub keycap: Hsla,
     pub logo: Hsla,
     pub indent_guide: Hsla,
@@ -401,6 +417,9 @@ impl Palette {
             accent: hsla(self.accent),
             badge: hsla(self.badge),
             badge_fg: hsla(self.badge_fg),
+            commit: hsla(self.commit),
+            commit_fg: hsla(self.commit_fg),
+            commit_hover: hsla(self.commit_hover),
             keycap: hsla(self.keycap),
             logo: hsla(self.logo),
             indent_guide: hsla(self.indent_guide),
@@ -593,6 +612,10 @@ mod tests {
             assert!(selected >= 7.0, "{name} selected row: {selected:.2}");
             let badge = contrast(p.badge_fg, p.badge);
             assert!(badge >= 4.5, "{name} badge: {badge:.2}");
+            for bg in [p.commit, p.commit_hover] {
+                let commit = contrast(p.commit_fg, bg);
+                assert!(commit >= 4.5, "{name} commit button: {commit:.2}");
+            }
             for (status, color) in [
                 ("added", p.added),
                 ("modified", p.modified),

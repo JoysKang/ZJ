@@ -33,6 +33,7 @@ pub const EXTRA: &[(&str, &[u8])] = &[
     embed!("icons/folder-plus.svg"),
     embed!("icons/whole-word.svg"),
     embed!("icons/regex.svg"),
+    embed!("icons/book-marked.svg"),
     embed!("file-icons/default_folder.svg"),
     embed!("file-icons/default_folder_opened.svg"),
     embed!("file-icons/default_file.svg"),

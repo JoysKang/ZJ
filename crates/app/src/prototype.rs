@@ -124,6 +124,14 @@ struct Group {
     write_pending: bool,
     write_message: String,
 }
+impl Group {
+    /// A repository whose status loaded and has nothing to commit; it is listed compactly
+    /// after the others (or hidden), as in VS Code.
+    fn clean(&self) -> bool {
+        matches!(&self.status, Some(Ok(status)) if status.changes.is_empty())
+    }
+}
+
 /// Line breaks in file names would break single-line rows; they are shown as ⏎.
 const SINGLE_LINE: [char; 2] = ['\n', '\r'];
 
@@ -168,6 +176,8 @@ fn decoration(change: &workspace_editor_git::Change) -> Decoration {
 #[derive(Clone, Copy)]
 enum Row {
     Group(usize),
+    /// The repository's commit message box and 提交 button.
+    Commit(usize),
     Heading(usize, DiffSide, usize),
     File(usize, usize, DiffSide),
 }
@@ -203,6 +213,8 @@ pub struct Prototype {
     tree_selection: Option<PathBuf>,
     explorer_focus: FocusHandle,
     tree_edit: Option<explorer_ops::TreeEdit>,
+    /// Source Control lists only repositories with changes (settings).
+    hide_clean_repos: bool,
     /// A single click in the Explorer opens the file but keeps the focus in the tree.
     focus_tree_on_open: bool,
     /// Source Control rows vary in height (repository rows wrap long branch names), so they
@@ -312,6 +324,12 @@ impl Prototype {
         // Another window (or this one) changed a setting that changes what is listed.
         let settings =
             cx.observe_global_in::<crate::settings::Settings>(window, |this, window, cx| {
+                let hide_clean = cx.global::<crate::settings::Settings>().hide_clean_repos;
+                if hide_clean != this.hide_clean_repos {
+                    this.hide_clean_repos = hide_clean;
+                    this.rebuild_rows();
+                    cx.notify();
+                }
                 let show_hidden = cx.global::<crate::settings::Settings>().show_hidden;
                 if show_hidden != this.show_hidden {
                     this.show_hidden = show_hidden;
@@ -393,6 +411,7 @@ impl Prototype {
             tree_selection: None,
             explorer_focus: cx.focus_handle(),
             tree_edit: None,
+            hide_clean_repos: cx.global::<crate::settings::Settings>().hide_clean_repos,
             focus_tree_on_open: false,
             scm_list: ListState::new(0, ListAlignment::Top, px(200.)),
             reveal_pending: false,
@@ -1201,7 +1220,7 @@ impl Prototype {
                                     if !this.groups.iter().any(|g| g.repo.id == repo.id) {
                                         let commit_input = cx.new(|cx| {
                                             TextareaState::new(window, cx)
-                                                .rows(2)
+                                                .auto_grow(1, 6)
                                                 .placeholder("消息（⌘Enter 提交）")
                                         });
                                         let subscription = cx.subscribe_in(
@@ -1230,6 +1249,19 @@ impl Prototype {
                                     if let Some(group) =
                                         this.groups.iter_mut().find(|g| g.repo.id == id)
                                     {
+                                        if let Ok(status) = &status {
+                                            let branch = status
+                                                .branch
+                                                .clone()
+                                                .unwrap_or_else(|| "未知分支".into());
+                                            group.commit_input.update(cx, |input, cx| {
+                                                input.set_placeholder(
+                                                    format!("消息（⌘Enter 在“{branch}”提交）"),
+                                                    window,
+                                                    cx,
+                                                )
+                                            });
+                                        }
                                         group.status = Some(status.map(Arc::new));
                                     }
                                 }
@@ -1290,12 +1322,32 @@ impl Prototype {
 
     fn fill_rows(&mut self) {
         self.rows.clear();
-        for (g, group) in self.groups.iter().enumerate() {
+        let hide_clean = self.hide_clean_repos;
+        // Repositories with changes (or still loading, or failing) first, clean ones after;
+        // each part by path.
+        let mut active: Vec<usize> = (0..self.groups.len())
+            .filter(|g| !self.groups[*g].clean())
+            .collect();
+        let mut clean: Vec<usize> = (0..self.groups.len())
+            .filter(|g| self.groups[*g].clean() && !hide_clean)
+            .collect();
+        let by_path = |a: &usize, b: &usize| {
+            self.groups[*a]
+                .repo
+                .worktree
+                .cmp(&self.groups[*b].repo.worktree)
+        };
+        active.sort_by(by_path);
+        clean.sort_by(by_path);
+        let order: Vec<usize> = active.into_iter().chain(clean).collect();
+        for g in order {
+            let group = &self.groups[g];
             self.rows.push(Row::Group(g));
-            if !group.expanded {
+            if !group.expanded || group.clean() {
                 continue;
             }
             if let Some(Ok(status)) = &group.status {
+                self.rows.push(Row::Commit(g));
                 for side in [DiffSide::Staged, DiffSide::Worktree] {
                     let changes: Vec<_> = status
                         .changes

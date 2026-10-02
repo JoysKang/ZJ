@@ -100,7 +100,10 @@ fn disk_stage_unborn_unstage_commit_hook_discard_and_local_push() {
             &service,
             &root,
             WriteOperation::Commit {
-                message: "fixture commit".into()
+                message: "fixture commit".into(),
+                amend: false,
+                push: false,
+                all: false,
             }
         )
         .err()
@@ -114,6 +117,9 @@ fn disk_stage_unborn_unstage_commit_hook_discard_and_local_push() {
         &root,
         WriteOperation::Commit {
             message: "fixture commit\n\nonly staged".into(),
+            amend: false,
+            push: false,
+            all: false,
         },
     )
     .unwrap();
@@ -164,6 +170,9 @@ fn disk_stage_unborn_unstage_commit_hook_discard_and_local_push() {
         &root,
         WriteOperation::Commit {
             message: "push fixture".into(),
+            amend: false,
+            push: false,
+            all: false,
         },
     )
     .unwrap();
@@ -184,6 +193,9 @@ fn disk_stage_unborn_unstage_commit_hook_discard_and_local_push() {
         &root,
         WriteOperation::Commit {
             message: "divergent fixture".into(),
+            amend: false,
+            push: false,
+            all: false,
         },
     )
     .unwrap();
@@ -238,6 +250,9 @@ fn stale_snapshot_identity_paths_and_rename() {
         &root,
         WriteOperation::Commit {
             message: "base".into(),
+            amend: false,
+            push: false,
+            all: false,
         },
     )
     .unwrap();
@@ -344,4 +359,71 @@ fn apply_patch_stages_and_rejects_stale_patches() {
     fs::write(root.join("src/main.rs"), "again\n").unwrap();
     assert!(apply(patch).is_err());
     assert_eq!(git(&root, &["show", ":src/main.rs"]), "changed\n");
+}
+
+#[test]
+fn amend_keeps_or_replaces_the_message_and_commit_push_publishes() {
+    let fixture = fixture();
+    let root = fixture.0.join("a");
+    let service = GitService::new(2, Duration::from_secs(10)).unwrap();
+    let commit = |message: &str, amend: bool, push: bool| WriteOperation::Commit {
+        message: message.into(),
+        amend,
+        push,
+        all: false,
+    };
+    // Nothing to amend before the first commit.
+    assert!(write(&service, &root, commit("", true, false)).is_err());
+    write(&service, &root, WriteOperation::Stage { paths: paths() }).unwrap();
+    write(&service, &root, commit("first", false, false)).unwrap();
+    // Amend with an empty message keeps it and folds in what is staged.
+    fs::write(root.join("src/main.rs"), "amended\n").unwrap();
+    write(&service, &root, WriteOperation::Stage { paths: paths() }).unwrap();
+    write(&service, &root, commit("  ", true, false)).unwrap();
+    assert_eq!(git(&root, &["log", "-1", "--format=%s"]).trim(), "first");
+    assert_eq!(git(&root, &["show", "HEAD:src/main.rs"]), "amended\n");
+    assert_eq!(git(&root, &["rev-list", "--count", "HEAD"]).trim(), "1");
+    // Amend with a message rewrites it, even with nothing staged.
+    write(&service, &root, commit("renamed", true, false)).unwrap();
+    assert_eq!(git(&root, &["log", "-1", "--format=%s"]).trim(), "renamed");
+    // Commit and push: no upstream means nothing is committed.
+    fs::write(root.join("src/main.rs"), "pushed\n").unwrap();
+    write(&service, &root, WriteOperation::Stage { paths: paths() }).unwrap();
+    assert!(
+        write(&service, &root, commit("needs upstream", false, true))
+            .unwrap_err()
+            .to_string()
+            .contains("尚未配置上游")
+    );
+    assert_eq!(git(&root, &["rev-list", "--count", "HEAD"]).trim(), "1");
+    let bare = fixture.0.join("remote.git");
+    fs::create_dir(&bare).unwrap();
+    git(&bare, &["init", "--bare"]);
+    git(&root, &["remote", "add", "origin", bare.to_str().unwrap()]);
+    git(&root, &["push", "-u", "origin", "main"]);
+    write(&service, &root, commit("second", false, true)).unwrap();
+    assert_eq!(
+        git(&bare, &["log", "main", "-1", "--format=%s"]).trim(),
+        "second"
+    );
+    assert_eq!(git(&bare, &["show", "main:src/main.rs"]), "pushed\n");
+    // Amending and pushing would need a force push.
+    assert!(write(&service, &root, commit("x", true, true)).is_err());
+    // Smart commit: nothing staged, so everything (including untracked files) is staged first.
+    fs::write(root.join("src/main.rs"), "smart\n").unwrap();
+    fs::write(root.join("added.txt"), "new\n").unwrap();
+    assert!(write(&service, &root, commit("not staged", false, false)).is_err());
+    write(
+        &service,
+        &root,
+        WriteOperation::Commit {
+            message: "smart".into(),
+            amend: false,
+            push: false,
+            all: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(git(&root, &["show", "HEAD:added.txt"]), "new\n");
+    assert!(git(&root, &["status", "--porcelain"]).is_empty());
 }

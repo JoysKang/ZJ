@@ -1,15 +1,17 @@
-//! Source Control view, VS Code style: a commit box for the selected repository, then every
-//! repository of the workspace with its "暂存的更改" / "更改" groups. Row actions appear on hover;
-//! the status letter stays at the right edge.
+//! Source Control view, VS Code's multi-repository layout: every repository is a section with
+//! its branch and actions in the header, its own message box and 提交 button, then its
+//! "暂存的更改" / "更改" groups. Clean repositories are compact headers listed last (or hidden).
+//! File row actions appear on hover; the status letter stays at the right edge.
 
 use super::SINGLE_LINE;
+use super::scm_actions::CommitMode;
 use super::{Prototype, Row, sidebar::chevron};
 use crate::{file_icons, theme};
 use gpui_kit::{
     assets::IconName,
     component::{
         Disableable, Icon, Sizable,
-        button::{Button, ButtonVariants},
+        button::{Button, ButtonCustomVariant, ButtonVariants, DropdownButton},
         h_flex,
         input::{Enter, Textarea},
         menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
@@ -56,13 +58,6 @@ fn hover_actions(group: SharedString) -> Div {
 }
 
 impl Prototype {
-    fn selected_group(&self) -> Option<usize> {
-        self.scm_repo
-            .as_ref()
-            .and_then(|id| self.groups.iter().position(|g| &g.repo.id == id))
-            .or_else(|| (!self.groups.is_empty()).then_some(0))
-    }
-
     /// The "···" menu of a repository: push and whole-repository operations.
     fn scm_menu(&self, g: usize, menu: PopupMenu, view: WeakEntity<Self>) -> PopupMenu {
         let stage = self.scm_paths(g, None, DiffSide::Worktree);
@@ -99,101 +94,52 @@ impl Prototype {
         })
     }
 
+    /// The Source Control title bar's "···": options for the whole list.
     pub(super) fn scm_more(&self, cx: &mut Context<Self>) -> AnyElement {
         let weak = cx.weak_entity();
-        let Some(g) = self.selected_group() else {
-            return div().into_any_element();
-        };
+        let hide = self.hide_clean_repos;
         action("scm-more-button", IconName::Ellipsis, "更多操作")
-            .dropdown_menu(move |menu, _, cx| {
-                let view = weak.clone();
-                match weak.upgrade() {
-                    Some(this) => this.read(cx).scm_menu(g, menu, view),
-                    None => menu,
-                }
-            })
-            .into_any_element()
-    }
-
-    /// Commit box: message input and the primary 提交 button for the selected repository.
-    fn scm_controls(&self, cx: &mut Context<Self>) -> AnyElement {
-        let colors = theme::colors(cx);
-        let Some(group) = self.selected_group().map(|g| &self.groups[g]) else {
-            return div().into_any_element();
-        };
-        let id = group.repo.id.clone();
-        let status = group.status.as_ref().and_then(|s| s.as_ref().ok());
-        let can_commit = status.is_some_and(|s| {
-            s.changes.iter().any(|c| c.staged())
-                && !s.changes.iter().any(|c| c.kind == ChangeKind::Conflict)
-        });
-        let target = group
-            .repo
-            .worktree
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .replace(SINGLE_LINE, "⏎");
-        let branch = status
-            .and_then(|s| s.branch.as_deref())
-            .unwrap_or("未知分支");
-        v_flex()
-            .flex_shrink_0()
-            .px_2()
-            .pb_2()
-            .gap_2()
-            .child(
-                // ⌘Enter commits; capture it before the textarea inserts a line break.
-                div()
-                    .capture_action(cx.listener({
-                        let id = id.clone();
-                        move |this, action: &Enter, window, cx| {
-                            if action.secondary {
-                                cx.stop_propagation();
-                                this.scm_commit(id.clone(), false, window, cx);
-                            }
-                        }
-                    }))
-                    .child(
-                        Textarea::new(&group.commit_input)
-                            .h(theme::COMMIT_HEIGHT)
-                            .disabled(group.write_pending)
-                            .aria_label(format!("{target} 的提交消息")),
-                    ),
-            )
-            .child(
-                Button::new("scm-commit")
-                    .small()
-                    .primary()
-                    .w_full()
-                    .icon(IconName::Check)
-                    .label("提交")
-                    .tooltip(format!("提交到“{branch}”（{target}）"))
-                    .disabled(group.write_pending || !can_commit)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.scm_commit(id.clone(), false, window, cx)
-                    })),
-            )
-            .when(!group.write_message.is_empty(), |view| {
-                view.child(
-                    div()
-                        .id("git-operation-result")
-                        .max_h(theme::SCM_NOTICE_MAX)
-                        .overflow_y_scroll()
-                        .text_size(theme::TEXT_CAPTION)
-                        .text_color(colors.muted)
-                        .child(group.write_message.clone()),
+            .dropdown_menu(move |menu, _, _| {
+                let (toggle, collapse, refresh) = (weak.clone(), weak.clone(), weak.clone());
+                menu.item(
+                    PopupMenuItem::new("隐藏无变更的仓库")
+                        .checked(hide)
+                        .on_click(move |_, window, cx| {
+                            let _ = toggle.update(cx, |this, cx| {
+                                this.change_settings(window, cx, |s| s.hide_clean_repos = !hide)
+                            });
+                        }),
                 )
+                .separator()
+                .item(PopupMenuItem::new("全部折叠").on_click(move |_, _, cx| {
+                    let _ = collapse.update(cx, |this, cx| {
+                        for group in &mut this.groups {
+                            group.expanded = false;
+                        }
+                        this.rebuild_rows();
+                        cx.notify();
+                    });
+                }))
+                .item(PopupMenuItem::new("刷新").on_click(move |_, window, cx| {
+                    let _ = refresh.update(cx, |this, cx| this.refresh(window, cx));
+                }))
             })
             .into_any_element()
     }
 
     pub(super) fn render_scm(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
+        let hidden = if self.hide_clean_repos {
+            self.groups.iter().filter(|g| g.clean()).count()
+        } else {
+            0
+        };
         let status_line = if !self.issues.is_empty() {
             Some(format!("{} 项仓库错误", self.issues.len()))
         } else if self.refresh_completed && self.groups.is_empty() && self.root.is_some() {
             Some("未发现 Git 仓库".into())
+        } else if hidden > 0 {
+            Some(format!("已隐藏 {hidden} 个无变更的仓库"))
         } else {
             None
         };
@@ -212,7 +158,6 @@ impl Prototype {
                         .child(line),
                 )
             })
-            .child(self.scm_controls(cx))
             .child(
                 list(
                     self.scm_list.clone(),
@@ -231,11 +176,16 @@ impl Prototype {
         let Some(&row) = self.rows.get(index) else {
             return div().into_any_element();
         };
-        if let Row::Group(g) = row {
+        let special = match row {
+            Row::Group(g) => Some(self.scm_repo_row(index, g, hover.clone(), cx)),
+            Row::Commit(g) => Some(self.scm_commit_row(g, cx)),
+            _ => None,
+        };
+        if let Some(element) = special {
             return div()
                 .w_full()
                 .px(theme::ROW_INSET)
-                .child(self.scm_repo_row(index, g, hover, cx))
+                .child(element)
                 .into_any_element();
         }
         let base = h_flex()
@@ -251,7 +201,7 @@ impl Prototype {
             .cursor_pointer()
             .hover(|row| row.bg(colors.hover));
         let row = match row {
-            Row::Group(_) => unreachable!("repository rows return above"),
+            Row::Group(_) | Row::Commit(_) => unreachable!("handled above"),
             Row::Heading(g, side, count) => self.scm_heading_row(g, side, count, base, hover, cx),
             Row::File(g, i, side) => self.scm_file_row(index, g, i, side, base, hover, cx),
         };
@@ -262,6 +212,10 @@ impl Prototype {
             .into_any_element()
     }
 
+    /// A repository as a section header, VS Code's multi-repository layout: chevron, repository
+    /// icon and name on the left; branch, refresh, commit and "···" on the right. When the
+    /// sidebar is too narrow for one line, the right side moves under the name, and either
+    /// part wraps at `/` `-` `_` rather than being cut.
     fn scm_repo_row(
         &self,
         index: usize,
@@ -272,7 +226,6 @@ impl Prototype {
         let colors = theme::colors(cx);
         let group = &self.groups[g];
         let worktree = &group.repo.worktree;
-        // Line 1: the repository's own folder name, then (dim) where it sits in the workspace.
         let name = worktree
             .file_name()
             .unwrap_or(worktree.as_os_str())
@@ -285,9 +238,9 @@ impl Prototype {
             .map(|path| path.to_string_lossy().replace(SINGLE_LINE, "⏎"))
             .filter(|path| !path.is_empty());
         // The branch (with ↑N / ↓M when non-zero against its upstream), or the error.
-        let (detail, error, count) = match &group.status {
-            None => (None, false, None),
-            Some(Err(error)) => (Some(format!("错误：{error}")), true, None),
+        let (detail, error) = match &group.status {
+            None => (None, false),
+            Some(Err(error)) => (Some(format!("错误：{error}")), true),
             Some(Ok(status)) => {
                 let mut branch = status.branch.as_deref().unwrap_or("未知分支").to_string();
                 if status.upstream.is_some() {
@@ -298,9 +251,13 @@ impl Prototype {
                         branch.push_str(&format!("\u{a0}\u{a0}↓{}", status.behind));
                     }
                 }
-                (Some(branch), false, Some(status.changes.len()))
+                (Some(branch), false)
             }
         };
+        let can_commit = matches!(&group.status, Some(Ok(status))
+            if !status.changes.is_empty()
+                && !status.changes.iter().any(|c| c.kind == ChangeKind::Conflict));
+        let clean = group.clean();
         let label = format!("仓库 {name} · {}", detail.as_deref().unwrap_or_default());
         let mut title = soft_breaks(&name);
         let name_len = title.len();
@@ -316,163 +273,261 @@ impl Prototype {
         let title_text = StyledText::new(title.clone())
             .with_highlights((name_len < title.len()).then_some((name_len..title.len(), dim)));
         let tooltip = worktree.display().to_string();
-        let selected = self.groups.len() > 1 && self.selected_group() == Some(g);
         let id = group.repo.id.clone();
         let weak = cx.weak_entity();
-        // The actions cover the end of the first line without moving it; their background matches the
-        // hovered (or selected) row and fades in from the left.
-        let overlay_bg = if selected {
-            colors.selected
-        } else {
-            colors.hover
-        };
-        v_flex()
+        let expanded = group.expanded && !clean;
+        let left = h_flex()
+            .min_w_0()
+            .flex_shrink(1.)
+            .items_start()
+            .gap_1()
+            .child(
+                div()
+                    .h(theme::ROW_HEIGHT)
+                    .flex()
+                    .items_center()
+                    .flex_shrink_0()
+                    .child(chevron(expanded, colors.muted)),
+            )
+            .child(
+                div()
+                    .h(theme::ROW_HEIGHT)
+                    .flex()
+                    .items_center()
+                    .flex_shrink_0()
+                    .child(
+                        Icon::new(IconName::BookMarked)
+                            .size(theme::ICON_SIZE)
+                            .text_color(colors.muted),
+                    ),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .py(theme::SCM_LINE_PAD)
+                    .text_size(theme::TEXT_BODY)
+                    .line_height(theme::SCM_DETAIL_LINE)
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(title_text),
+            );
+        let actions = h_flex()
+            .flex_shrink_0()
+            .h(theme::ROW_HEIGHT)
+            .gap_0p5()
+            .child(
+                action(("scm-repo-refresh", g), IconName::RefreshCw, "刷新").on_click(cx.listener(
+                    |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.refresh(window, cx)
+                    },
+                )),
+            )
+            .child(
+                action(("scm-repo-commit", g), IconName::Check, "提交")
+                    .disabled(group.write_pending || !can_commit)
+                    .on_click(cx.listener({
+                        let id = id.clone();
+                        move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.scm_commit(id.clone(), CommitMode::Commit, window, cx)
+                        }
+                    })),
+            )
+            .child(
+                action(("scm-repo-more", g), IconName::Ellipsis, "更多操作").dropdown_menu(
+                    move |menu, _, cx| {
+                        let view = weak.clone();
+                        match weak.upgrade() {
+                            Some(this) => this.read(cx).scm_menu(g, menu, view),
+                            None => menu,
+                        }
+                    },
+                ),
+            );
+        let right = h_flex()
+            .ml_auto()
+            .min_w_0()
+            .flex_shrink(1.)
+            .items_start()
+            .gap_1()
+            .when_some(detail, |right, detail| {
+                right.child(
+                    h_flex()
+                        .min_w_0()
+                        .flex_shrink(1.)
+                        .items_start()
+                        .gap_1()
+                        .text_size(theme::TEXT_CAPTION)
+                        .line_height(theme::SCM_DETAIL_LINE)
+                        .py(theme::SCM_LINE_PAD)
+                        .text_color(if error { colors.deleted } else { colors.muted })
+                        .when(!error, |line| {
+                            line.child(
+                                div()
+                                    .h(theme::SCM_DETAIL_LINE)
+                                    .flex()
+                                    .items_center()
+                                    .flex_shrink_0()
+                                    .child(
+                                        Icon::new(IconName::GitBranch)
+                                            .size(theme::SMALL_ICON_SIZE)
+                                            .text_color(colors.muted),
+                                    ),
+                            )
+                        })
+                        .child(div().min_w_0().child(soft_breaks(&detail))),
+                )
+            })
+            .child(actions);
+        h_flex()
             .id(("scm-row", index))
-            .group(hover.clone())
-            .relative()
+            .group(hover)
             .w_full()
             .pl(theme::ROW_INSET)
             .pr_1()
+            .flex_wrap()
+            .items_start()
+            .gap_x_2()
             .rounded(theme::RADIUS)
-            .overflow_hidden()
             .cursor_pointer()
             .hover(|row| row.bg(colors.hover))
-            .when(selected, |row| row.bg(colors.selected))
             .role(Role::TreeItem)
             .aria_label(label)
-            // One line (name, then the dim branch) when both fit; otherwise flex-wrap drops the
-            // branch onto its own line under the name, and either one wraps further at `/` `-`
-            // `_` if it is still too long. The list re-lays rows out when its width changes.
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_start()
-                    .gap_1()
-                    .child(
-                        div()
-                            .h(theme::ROW_HEIGHT)
-                            .flex()
-                            .items_center()
-                            .flex_shrink_0()
-                            .child(chevron(group.expanded, colors.muted)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_x_1p5()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    // 18 px lines inside a 22 px first line.
-                                    .py(px(2.))
-                                    .text_size(theme::TEXT_BODY)
-                                    .line_height(theme::SCM_DETAIL_LINE)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(title_text),
-                            )
-                            .when_some(detail, |line, detail| {
-                                line.child(
-                                    h_flex()
-                                        .min_w_0()
-                                        .items_start()
-                                        .gap_1()
-                                        .text_size(theme::TEXT_SECTION)
-                                        .line_height(theme::SCM_DETAIL_LINE)
-                                        .text_color(if error {
-                                            colors.deleted
-                                        } else {
-                                            colors.muted
-                                        })
-                                        .when(!error, |line| {
-                                            line.child(
-                                                div()
-                                                    .h(theme::SCM_DETAIL_LINE)
-                                                    .flex()
-                                                    .items_center()
-                                                    .flex_shrink_0()
-                                                    .child(
-                                                        Icon::new(IconName::GitBranch)
-                                                            .size(theme::SMALL_ICON_SIZE)
-                                                            .text_color(colors.muted),
-                                                    ),
-                                            )
-                                        })
-                                        .child(div().min_w_0().child(soft_breaks(&detail))),
-                                )
-                            }),
-                    )
-                    .when_some(count.filter(|count| *count > 0), |row, count| {
-                        row.child(
-                            div()
-                                .h(theme::ROW_HEIGHT)
-                                .flex()
-                                .items_center()
-                                .flex_shrink_0()
-                                .child(count_badge(count, colors)),
-                        )
-                    }),
-            )
-            .child(
-                h_flex()
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .h(theme::ROW_HEIGHT)
-                    .opacity(0.)
-                    .group_hover(hover.clone(), |actions| actions.opacity(1.))
-                    .child(div().w(theme::ACTION_FADE).h_full().bg(linear_gradient(
-                        90.,
-                        linear_color_stop(overlay_bg.opacity(0.), 0.),
-                        linear_color_stop(overlay_bg, 1.),
-                    )))
-                    .child(
-                        hover_actions(hover)
-                            .h_full()
-                            .pr_1()
-                            .items_center()
-                            .bg(overlay_bg)
-                            .child(
-                                action(("scm-repo-commit", g), IconName::Check, "提交")
-                                    .disabled(group.write_pending)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.scm_commit(id.clone(), false, window, cx)
-                                    })),
-                            )
-                            .child(
-                                action(("scm-repo-refresh", g), IconName::RefreshCw, "刷新")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.refresh(window, cx)
-                                    })),
-                            )
-                            .child(
-                                action(("scm-repo-more", g), IconName::Ellipsis, "更多操作")
-                                    .dropdown_menu(move |menu, _, cx| {
-                                        let view = weak.clone();
-                                        match weak.upgrade() {
-                                            Some(this) => this.read(cx).scm_menu(g, menu, view),
-                                            None => menu,
-                                        }
-                                    }),
-                            ),
-                    ),
-            )
+            .aria_expanded(expanded)
+            .child(left)
+            .child(right)
             .tooltip(move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
             })
             .on_click(cx.listener(move |this, _, _, cx| {
-                if this.scm_repo.as_ref() == Some(&this.groups[g].repo.id) {
-                    this.groups[g].expanded = !this.groups[g].expanded;
+                let group = &mut this.groups[g];
+                if !group.clean() {
+                    group.expanded = !group.expanded;
                 }
-                this.scm_repo = Some(this.groups[g].repo.id.clone());
+                this.scm_repo = Some(group.repo.id.clone());
                 this.rebuild_rows();
                 cx.notify();
             }))
+            .into_any_element()
+    }
+
+    /// The repository's message box and the green 提交 button with its menu (提交 / 提交并推送 /
+    /// 修改上次提交), under the repository header.
+    fn scm_commit_row(&self, g: usize, cx: &mut Context<Self>) -> AnyElement {
+        let colors = theme::colors(cx);
+        let group = &self.groups[g];
+        let id = group.repo.id.clone();
+        let status = group.status.as_ref().and_then(|s| s.as_ref().ok());
+        // With nothing staged, 提交 offers to stage everything first (smart commit).
+        let can_commit = status.is_some_and(|s| {
+            !s.changes.is_empty() && !s.changes.iter().any(|c| c.kind == ChangeKind::Conflict)
+        });
+        let has_upstream = status.is_some_and(|s| s.upstream.is_some());
+        let has_head =
+            status.is_some_and(|s| !matches!(s.oid.as_deref(), None | Some("(initial)")));
+        let name = group
+            .repo
+            .worktree
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .replace(SINGLE_LINE, "⏎");
+        let branch = status
+            .and_then(|s| s.branch.as_deref())
+            .unwrap_or("未知分支")
+            .to_string();
+        let pending = group.write_pending;
+        let style = ButtonCustomVariant::new(cx)
+            .color(colors.commit)
+            .foreground(colors.commit_fg)
+            .hover(colors.commit_hover)
+            .active(colors.commit_hover);
+        let weak = cx.weak_entity();
+        let menu_id = id.clone();
+        v_flex()
+            .w_full()
+            .pl(theme::ROW_INSET + theme::ICON_SIZE * 2. + theme::SCM_LINE_PAD * 2.)
+            .pr_1()
+            .pt_0p5()
+            .pb_2()
+            .gap_1p5()
+            .child(
+                // ⌘Enter commits; capture it before the textarea inserts a line break.
+                div()
+                    .capture_action(cx.listener({
+                        let id = id.clone();
+                        move |this, action: &Enter, window, cx| {
+                            if action.secondary {
+                                cx.stop_propagation();
+                                this.scm_commit(id.clone(), CommitMode::Commit, window, cx);
+                            }
+                        }
+                    }))
+                    .child(
+                        Textarea::new(&group.commit_input)
+                            .small()
+                            .disabled(pending)
+                            .aria_label(format!("{name} 的提交消息")),
+                    ),
+            )
+            .child(
+                // Kit draws a custom button at rest with 20 % of its color; the solid surface
+                // underneath keeps it the full green, as in VS Code.
+                div()
+                    .w_full()
+                    .rounded(theme::RADIUS)
+                    .bg(colors.commit)
+                    .child(
+                        DropdownButton::new(("scm-commit", g))
+                            .small()
+                            .w_full()
+                            .custom(style)
+                            .disabled(pending)
+                            .button(
+                                Button::new(("scm-commit-main", g))
+                                    .flex_1()
+                                    .icon(IconName::Check)
+                                    .label("提交")
+                                    .tooltip(format!("提交到“{branch}”（{name}）"))
+                                    .disabled(pending || !can_commit)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.scm_commit(id.clone(), CommitMode::Commit, window, cx)
+                                    })),
+                            )
+                            .dropdown_menu(move |menu, _, _| {
+                                let item = |label: &str, mode: CommitMode, enabled: bool| {
+                                    let view = weak.clone();
+                                    let id = menu_id.clone();
+                                    PopupMenuItem::new(label.to_string())
+                                        .disabled(!enabled)
+                                        .on_click(move |_, window, cx| {
+                                            let _ = view.update(cx, |this, cx| {
+                                                this.scm_commit(id.clone(), mode, window, cx)
+                                            });
+                                        })
+                                };
+                                menu.item(item("提交", CommitMode::Commit, can_commit))
+                                    .item(item(
+                                        "提交并推送",
+                                        CommitMode::CommitAndPush,
+                                        can_commit && has_upstream,
+                                    ))
+                                    .separator()
+                                    .item(item("修改上次提交", CommitMode::Amend, has_head))
+                            }),
+                    ),
+            )
+            .when(!group.write_message.is_empty(), |view| {
+                view.child(
+                    div()
+                        .id(("git-operation-result", g))
+                        .max_h(theme::SCM_NOTICE_MAX)
+                        .overflow_y_scroll()
+                        .text_size(theme::TEXT_CAPTION)
+                        .text_color(colors.muted)
+                        .child(group.write_message.clone()),
+                )
+            })
             .into_any_element()
     }
 

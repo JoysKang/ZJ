@@ -16,8 +16,14 @@ pub enum WriteOperation {
     Discard {
         paths: Vec<PathBuf>,
     },
+    /// `amend` replaces the last commit (an empty message keeps its message); `push` pushes
+    /// the new commit to the configured upstream under the same lock, never forced; `all`
+    /// stages every change first (VS Code's smart commit when nothing is staged).
     Commit {
         message: String,
+        amend: bool,
+        push: bool,
+        all: bool,
     },
     Push,
     /// Applies a generated partial patch for one changed file: to the index (`cached`, stage /
@@ -156,12 +162,30 @@ impl GitService {
                         .map(|p| p.as_os_str().to_owned()),
                 );
             }
-            WriteOperation::Commit { message } => {
-                if message.trim().is_empty() || message.len() > 65_536 || message.contains('\0') {
+            WriteOperation::Commit {
+                message,
+                amend,
+                push,
+                all,
+            } => {
+                let keep_message = *amend && message.trim().is_empty();
+                if (!keep_message && message.trim().is_empty())
+                    || message.len() > 65_536
+                    || message.contains('\0')
+                {
                     return Err(error("提交信息不能为空，且不能超过 64 KiB"));
                 }
-                if !current.changes.iter().any(Change::staged) {
+                if *amend && *push {
+                    return Err(error("修改上次提交后需要强制推送，请在终端操作"));
+                }
+                if *amend && matches!(current.oid.as_deref(), None | Some("(initial)")) {
+                    return Err(error("还没有提交，无法修改上次提交"));
+                }
+                if !*amend && !*all && !current.changes.iter().any(Change::staged) {
                     return Err(error("暂存区没有更改"));
+                }
+                if *all && current.changes.is_empty() {
+                    return Err(error("没有可提交的更改"));
                 }
                 if current
                     .changes
@@ -170,8 +194,20 @@ impl GitService {
                 {
                     return Err(error("请先解决冲突"));
                 }
-                args.extend(["commit".into(), "--file=-".into()]);
-                input = Some(message.as_bytes());
+                if *push {
+                    // Checked before committing, so a missing upstream leaves nothing half done.
+                    self.push_args(&request.repo, &current, cancel)?;
+                }
+                args.push("commit".into());
+                if *amend {
+                    args.push("--amend".into());
+                }
+                if keep_message {
+                    args.push("--no-edit".into());
+                } else {
+                    args.push("--file=-".into());
+                    input = Some(message.as_bytes());
+                }
             }
             WriteOperation::ApplyPatch {
                 path,
@@ -200,60 +236,7 @@ impl GitService {
                 input = Some(patch.as_bytes());
             }
             WriteOperation::Push => {
-                if current.upstream.is_none() {
-                    return Err(error(
-                        "此分支尚未配置上游。请先在终端执行 git push -u，再刷新",
-                    ));
-                }
-                // Resolve the exact configured upstream, rather than inheriting push.default,
-                // pushRemote or remote.push (which may publish other branches).
-                let remote = self.run(
-                    &request.repo.worktree,
-                    &[
-                        "rev-parse".into(),
-                        "--symbolic-full-name".into(),
-                        "@{upstream}".into(),
-                    ],
-                    cancel,
-                )?;
-                let remote = String::from_utf8(remote).map_err(io::Error::other)?;
-                if !remote.trim().starts_with("refs/remotes/") {
-                    return Err(error("上游不是远程跟踪分支"));
-                }
-                let branch = current
-                    .branch
-                    .as_deref()
-                    .filter(|b| *b != "(detached)")
-                    .ok_or_else(|| error("detached HEAD 不能推送"))?;
-                let config = |key: String| {
-                    self.run(
-                        &request.repo.worktree,
-                        &["config".into(), "--get".into(), key.into()],
-                        cancel,
-                    )
-                };
-                let remote = config(format!("branch.{branch}.remote"))?;
-                let target = config(format!("branch.{branch}.merge"))?;
-                let remote = String::from_utf8(remote)
-                    .map_err(io::Error::other)?
-                    .trim()
-                    .to_owned();
-                let target = String::from_utf8(target)
-                    .map_err(io::Error::other)?
-                    .trim()
-                    .to_owned();
-                if remote == "." || remote.starts_with('-') || !target.starts_with("refs/heads/") {
-                    return Err(error("无效的推送目标"));
-                }
-                args.extend([
-                    "push".into(),
-                    "--porcelain".into(),
-                    "--no-force".into(),
-                    "--no-follow-tags".into(),
-                    "--".into(),
-                    remote.into(),
-                    format!("HEAD:{target}").into(),
-                ]);
+                args.extend(self.push_args(&request.repo, &current, cancel)?);
             }
         }
         // Hooks, signatures and network authentication need more time than status queries.
@@ -263,9 +246,29 @@ impl GitService {
         };
         let partial =
             |e: io::Error| error(format!("{e}。操作可能已经部分完成；请刷新检查仓库状态"));
+        if let WriteOperation::Commit { all: true, .. } = &request.operation {
+            writer
+                .run_with_input(
+                    &request.repo.worktree,
+                    &["add".into(), "-A".into()],
+                    cancel,
+                    false,
+                    None,
+                )
+                .map_err(partial)?;
+        }
         let mut output = writer
             .run_with_input(&request.repo.worktree, &args, cancel, false, input)
             .map_err(partial)?;
+        if let WriteOperation::Commit { push: true, .. } = &request.operation {
+            let mut push: Vec<OsString> = vec!["--literal-pathspecs".into()];
+            push.extend(self.push_args(&request.repo, &current, cancel)?);
+            output.extend(
+                writer
+                    .run_with_input(&request.repo.worktree, &push, cancel, false, None)
+                    .map_err(|e| error(format!("已提交，但推送失败：{e}")))?,
+            );
+        }
         if !untracked.is_empty() {
             let mut clean: Vec<OsString> = vec![
                 "--literal-pathspecs".into(),
@@ -286,5 +289,69 @@ impl GitService {
             generation: request.generation,
             output,
         })
+    }
+
+    /// `git push` arguments for the current branch to exactly its configured upstream branch,
+    /// never forced, ignoring push.default / pushRemote / remote.push.
+    fn push_args(
+        &self,
+        repo: &Repository,
+        current: &Status,
+        cancel: &AtomicBool,
+    ) -> io::Result<Vec<OsString>> {
+        if current.upstream.is_none() {
+            return Err(error(
+                "此分支尚未配置上游。请先在终端执行 git push -u，再刷新",
+            ));
+        }
+        // Resolve the exact configured upstream, rather than inheriting push.default,
+        // pushRemote or remote.push (which may publish other branches).
+        let remote = self.run(
+            &repo.worktree,
+            &[
+                "rev-parse".into(),
+                "--symbolic-full-name".into(),
+                "@{upstream}".into(),
+            ],
+            cancel,
+        )?;
+        let remote = String::from_utf8(remote).map_err(io::Error::other)?;
+        if !remote.trim().starts_with("refs/remotes/") {
+            return Err(error("上游不是远程跟踪分支"));
+        }
+        let branch = current
+            .branch
+            .as_deref()
+            .filter(|b| *b != "(detached)")
+            .ok_or_else(|| error("detached HEAD 不能推送"))?;
+        let config = |key: String| {
+            self.run(
+                &repo.worktree,
+                &["config".into(), "--get".into(), key.into()],
+                cancel,
+            )
+        };
+        let remote = config(format!("branch.{branch}.remote"))?;
+        let target = config(format!("branch.{branch}.merge"))?;
+        let remote = String::from_utf8(remote)
+            .map_err(io::Error::other)?
+            .trim()
+            .to_owned();
+        let target = String::from_utf8(target)
+            .map_err(io::Error::other)?
+            .trim()
+            .to_owned();
+        if remote == "." || remote.starts_with('-') || !target.starts_with("refs/heads/") {
+            return Err(error("无效的推送目标"));
+        }
+        Ok(vec![
+            "push".into(),
+            "--porcelain".into(),
+            "--no-force".into(),
+            "--no-follow-tags".into(),
+            "--".into(),
+            remote.into(),
+            format!("HEAD:{target}").into(),
+        ])
     }
 }
