@@ -1,0 +1,79 @@
+# vendor/
+
+Patched copies of two GPUI crates that only build on macOS. The root `Cargo.toml` points
+crates.io at them with `[patch.crates-io]`. They are not workspace members, so this project's
+fmt / clippy settings don't apply to them.
+
+| Directory | Upstream | Source |
+| --- | --- | --- |
+| `gpui-pre-apple/` | `gpui-pre-apple 0.3.7` (Zed's `gpui_apple`, zed@1a28cff) | Metal renderer and sprite atlas |
+| `gpui-pre-macos/` | `gpui-pre-macos 0.3.7` (Zed's `gpui_macos`, zed@1a28cff) | NSWindow / NSView, frame pacing |
+
+The first commit, "build(gpui): 原样引入 …", copies the crates.io sources as they are (without
+`Cargo.lock` and `.cargo_vcs_info.json`). Every later change is marked with a `ZJ patch` comment;
+`git diff <that commit> -- vendor` shows all of them. Why we patch, what it saves and how to
+measure it are in [docs/adr/0005-gpu-memory.md](../docs/adr/0005-gpu-memory.md).
+
+## Our diff
+
+`gpui-pre-apple`:
+
+- `src/zj_low_memory.rs` (new): the policy, written without Metal types so it can be tested
+  anywhere. The app crate includes it in its tests (`crates/app/src/main.rs`). It covers:
+  - the `ZJ_GPU_LOWMEM` env toggle;
+  - the drawable count;
+  - when the path textures need (re)allocating and when they have been idle long enough to free;
+  - what to release when a window is hidden.
+- `src/metal_renderer.rs`:
+  - `maximumDrawableCount` is 2 instead of 3.
+  - The path intermediate texture and its MSAA texture are allocated by the first frame that
+    draws a path, at that frame's size, instead of on every resize. They are freed after 10 s
+    without paths.
+  - `zj_release_surfaces` / `zj_restore_surfaces`: while the window can't be seen, the layer is
+    shrunk to 1 × 1, which drops the pooled drawables, and the path textures are freed. When the
+    window is minimized or the app is hidden, the layer's contents are cleared as well. Nothing
+    is drawn while released.
+  - One sprite atlas is shared by all window renderers on the same device. It is held weakly,
+    so it is freed with the last window.
+  - Headless renderers keep upstream behaviour.
+- `src/gpui_apple.rs`: `pub mod zj_low_memory;`.
+- `Cargo.toml`: `[lints.rust] warnings = "allow"`. Path dependencies don't get `--cap-lints`, and
+  upstream prints about 1200 deprecation warnings.
+
+`gpui-pre-macos`:
+
+- `src/window.rs`:
+  - `windowDidChangeOcclusionState` calls `zj_release_surfaces` when the window stops being
+    visible. It passes `Hidden::Gone` when the window is miniaturized or `NSApp.isHidden`, and
+    `Occluded` otherwise.
+  - When the window is visible again, it calls `zj_restore_surfaces` and sets `zj_force_present`.
+    The next display-link `step` then passes `require_presentation: true`, so GPUI presents the
+    last scene again even if nothing changed.
+- `Cargo.toml`: the same lint override.
+
+`ZJ_GPU_LOWMEM=0` switches all of this off at startup, for A/B measurements.
+
+## Checking on Linux
+
+The crates only compile for macOS, and their build script only compiles the shaders on a Mac
+host. To type-check them from Linux:
+
+```sh
+rustup target add aarch64-apple-darwin
+cargo check --target aarch64-apple-darwin -p gpui-pre-macos   # fails: missing shader outputs
+for d in target/aarch64-apple-darwin/debug/build/gpui-pre-apple-*/out; do
+  touch "$d/stitched_shaders.metal" "$d/shaders.metallib"     # placeholders, check only
+done
+cargo check --target aarch64-apple-darwin -p gpui-pre-macos
+```
+
+For clippy, run the same check with `RUSTC_WRAPPER=$(rustup which clippy-driver)` and
+`CLIPPY_ARGS=-Wclippy::all__CLIPPY_HACKERY__`, and compare the warnings with the unpatched
+commit. The patch adds only `cocoa` deprecation warnings of the kind upstream already has.
+
+## Upgrading GPUI
+
+1. Copy the new crates.io sources over these directories.
+2. Re-apply the `ZJ patch` hunks from `git diff`.
+3. Update the version in this file and in the `[patch.crates-io]` comment.
+4. If upstream has fixed the same problem, delete the directory and its `[patch]` entry.

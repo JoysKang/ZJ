@@ -148,3 +148,9 @@ priority = -1
 [lints.rust.unexpected_cfgs]
 level = "allow"
 priority = 0
+
+# ZJ patch: crates.io dependencies build with --cap-lints, but path dependencies don't, so
+# upstream's ~1200 deprecation warnings (cocoa -> objc2) would print on every rebuild. Our
+# changes are checked separately (see vendor/README.md).
+[lints.rust]
+warnings = "allow"

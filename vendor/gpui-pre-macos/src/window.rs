@@ -667,6 +667,9 @@ struct MacWindowState {
     frame_source: Option<WindowFrameSource>,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
+    /// ZJ patch: the renderer gave back its surfaces while the window was hidden, so the next
+    /// display-link frame must present the last scene again even if nothing changed.
+    zj_force_present: bool,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
     visibility_callback: Option<Box<dyn FnMut(WindowVisibility)>>,
@@ -1106,6 +1109,7 @@ impl MacWindow {
                     false,
                 ),
                 request_frame_callback: None,
+                zj_force_present: false,
                 event_callback: None,
                 activate_callback: None,
                 visibility_callback: None,
@@ -2988,10 +2992,24 @@ extern "C" fn window_did_change_occlusion_state(this: &Object, _: Sel, _: id) {
             .occlusionState()
             .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
         {
+            // ZJ patch: get the surfaces back before the display link's first frame.
+            if lock.renderer.zj_restore_surfaces() {
+                lock.zj_force_present = true;
+            }
             lock.move_traffic_light();
             lock.start_display_link();
         } else {
             lock.stop_display_link();
+            // ZJ patch: nothing of this window is on screen; give the drawables and path
+            // textures back. Minimized windows and hidden apps drop the presented frame too.
+            let minimized: BOOL = msg_send![lock.native_window, isMiniaturized];
+            let app: id = msg_send![class!(NSApplication), sharedApplication];
+            let app_hidden: BOOL = msg_send![app, isHidden];
+            lock.renderer
+                .zj_release_surfaces(gpui_apple::zj_low_memory::Hidden::new(
+                    minimized == YES,
+                    app_hidden == YES,
+                ));
         }
     }
     drop(lock);
@@ -3305,8 +3323,13 @@ extern "C" fn step(view: *mut c_void) {
     let mut lock = window_state.lock();
 
     if let Some(mut callback) = lock.request_frame_callback.take() {
+        // ZJ patch: present the last scene after the surfaces were restored.
+        let options = RequestFrameOptions {
+            require_presentation: mem::take(&mut lock.zj_force_present),
+            ..Default::default()
+        };
         drop(lock);
-        callback(Default::default());
+        callback(options);
         window_state.lock().request_frame_callback = Some(callback);
     }
 }

@@ -6,3 +6,5 @@
 
 mod metal_atlas;
 pub mod metal_renderer;
+// ZJ patch: low-memory renderer policy (see vendor/README.md).
+pub mod zj_low_memory;

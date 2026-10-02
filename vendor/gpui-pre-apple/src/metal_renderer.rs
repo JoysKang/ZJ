@@ -1,4 +1,5 @@
 use crate::metal_atlas::MetalAtlas;
+use crate::zj_low_memory;
 use anyhow::{Context as _, Result};
 use block2::RcBlock;
 use cocoa::{
@@ -27,6 +28,8 @@ use objc::{self, msg_send, sel, sel_impl};
 use parking_lot::Mutex;
 
 use std::{cell::Cell, ffi::c_void, mem, mem::MaybeUninit, ops::Range, ptr, slice, sync::Arc};
+// ZJ patch: low-memory mode.
+use std::{sync::Weak, time::Instant};
 
 // Exported to metal
 pub(crate) type PointF = gpui::Point<f32>;
@@ -139,6 +142,37 @@ pub struct MetalRenderer {
     /// rendering headlessly without reading pixels back.
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
     headless_render_target: Option<metal::Texture>,
+    /// ZJ patch: low-memory mode state (see `zj_low_memory`).
+    zj: ZjLowMemory,
+}
+
+/// ZJ patch: what the low-memory mode tracks per renderer.
+struct ZjLowMemory {
+    enabled: bool,
+    /// The size the window wants; applied to the layer only while the surfaces are not released.
+    drawable_size: Size<DevicePixels>,
+    /// The window can't be seen and its surfaces were given back.
+    released: bool,
+    path_clock: zj_low_memory::PathTextureClock,
+}
+
+/// ZJ patch: one sprite atlas for all windows on the same device (upstream: one per window, so
+/// every window rasterizes and stores the same glyphs and icons again). Held weakly, so it is
+/// freed with the last window.
+static ZJ_SHARED_ATLAS: Mutex<Option<(u64, Weak<MetalAtlas>)>> = parking_lot::const_mutex(None);
+
+fn zj_shared_atlas(device: &metal::Device, is_apple_gpu: bool) -> Arc<MetalAtlas> {
+    let mut shared = ZJ_SHARED_ATLAS.lock();
+    let id = device.registry_id();
+    if let Some((shared_id, atlas)) = shared.as_ref()
+        && *shared_id == id
+        && let Some(atlas) = atlas.upgrade()
+    {
+        return atlas;
+    }
+    let atlas = Arc::new(MetalAtlas::new(device.clone(), is_apple_gpu));
+    *shared = Some((id, Arc::downgrade(&atlas)));
+    atlas
 }
 
 #[repr(C)]
@@ -160,7 +194,8 @@ impl MetalRenderer {
         // Support direct-to-display rendering if the window is not transparent
         // https://developer.apple.com/documentation/metal/managing-your-game-window-for-metal-in-macos
         layer.set_opaque(!transparent);
-        layer.set_maximum_drawable_count(3);
+        // ZJ patch: two drawables in low-memory mode (upstream: three).
+        layer.set_maximum_drawable_count(zj_low_memory::drawable_count(zj_low_memory::enabled()));
         // Allow texture reading for visual tests (captures screenshots without ScreenCaptureKit)
         #[cfg(any(test, feature = "test-support"))]
         layer.set_framebuffer_only(false);
@@ -215,6 +250,8 @@ impl MetalRenderer {
         opaque: bool,
         instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
     ) -> Self {
+        // ZJ patch: the low-memory mode only applies to window renderers.
+        let layer_present = layer.is_some();
         #[cfg(feature = "runtime_shaders")]
         let library = device
             .new_library_with_source(&SHADERS_SOURCE_FILE, &metal::CompileOptions::new())
@@ -326,7 +363,12 @@ impl MetalRenderer {
         );
 
         let command_queue = device.new_command_queue();
-        let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), is_apple_gpu));
+        // ZJ patch: window renderers share one atlas in low-memory mode.
+        let sprite_atlas = if layer_present && zj_low_memory::enabled() {
+            zj_shared_atlas(&device, is_apple_gpu)
+        } else {
+            Arc::new(MetalAtlas::new(device.clone(), is_apple_gpu))
+        };
         let core_video_texture_cache =
             CVMetalTextureCache::new(None, device.clone(), None).unwrap();
 
@@ -355,6 +397,13 @@ impl MetalRenderer {
             path_sample_count: PATH_SAMPLE_COUNT,
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
+            zj: ZjLowMemory {
+                // Only window renderers: headless rendering keeps upstream behaviour.
+                enabled: layer_present && zj_low_memory::enabled(),
+                drawable_size: Size::default(),
+                released: false,
+                path_clock: Default::default(),
+            },
         }
     }
 
@@ -381,6 +430,11 @@ impl MetalRenderer {
     }
 
     pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
+        // ZJ patch: remember the size; while released it is applied when the window shows again.
+        self.zj.drawable_size = size;
+        if self.zj.released {
+            return;
+        }
         if let Some(layer) = &self.layer {
             let ns_size = NSSize {
                 width: size.width.0 as f64,
@@ -393,7 +447,72 @@ impl MetalRenderer {
                 ];
             }
         }
-        self.update_path_intermediate_textures(size);
+        if self.zj.enabled {
+            // ZJ patch: allocated at the new size by the next frame that draws a path.
+            self.path_intermediate_texture = None;
+            self.path_intermediate_msaa_texture = None;
+        } else {
+            self.update_path_intermediate_textures(size);
+        }
+    }
+
+    /// ZJ patch: the window can't be seen (covered, on another Space, minimized, or the app is
+    /// hidden). Gives back the path textures and the layer's pooled drawables (shrinking the
+    /// drawable size makes the layer drop drawables of the old size); with
+    /// `Hidden::Gone` the presented frame goes too. Frames are not drawn until
+    /// `zj_restore_surfaces`.
+    pub fn zj_release_surfaces(&mut self, hidden: zj_low_memory::Hidden) {
+        if !self.zj.enabled {
+            return;
+        }
+        self.path_intermediate_texture = None;
+        self.path_intermediate_msaa_texture = None;
+        let Some(layer) = &self.layer else {
+            return;
+        };
+        if !self.zj.released {
+            self.zj.released = true;
+            let tiny = NSSize {
+                width: 1.,
+                height: 1.,
+            };
+            unsafe {
+                let _: () = msg_send![layer.as_ref(), setDrawableSize: tiny];
+            }
+        }
+        if hidden.clears_contents() {
+            unsafe {
+                let _: () = msg_send![layer.as_ref(), setContents: ptr::null_mut::<AnyObject>()];
+            }
+        }
+    }
+
+    /// ZJ patch: the window is visible again. Returns whether the window has to present a
+    /// frame (its layer was shrunk, or its contents cleared, while hidden).
+    pub fn zj_restore_surfaces(&mut self) -> bool {
+        if !self.zj.released {
+            return false;
+        }
+        self.zj.released = false;
+        let size = self.zj.drawable_size;
+        self.update_drawable_size(size);
+        true
+    }
+
+    /// ZJ patch: in low-memory mode the path textures are allocated by the first frame that
+    /// draws a path, at that frame's size.
+    fn zj_ensure_path_intermediate_textures(&mut self, viewport_size: Size<DevicePixels>) {
+        let current = self
+            .path_intermediate_texture
+            .as_ref()
+            .map(|texture| (texture.width(), texture.height()));
+        if zj_low_memory::needs_path_texture(
+            current,
+            (viewport_size.width.0, viewport_size.height.0),
+        ) {
+            self.update_path_intermediate_textures(viewport_size);
+        }
+        self.zj.path_clock.used(Instant::now());
     }
 
     fn update_path_intermediate_textures(&mut self, size: Size<DevicePixels>) {
@@ -455,6 +574,22 @@ impl MetalRenderer {
                 return;
             }
         };
+        // ZJ patch: nothing is drawn into a released (1 × 1) layer; the window presents its
+        // last scene again when it becomes visible.
+        if self.zj.released {
+            return;
+        }
+        // ZJ patch: free the path textures once no frame has drawn a path for a while.
+        if self.zj.enabled
+            && scene.paths.is_empty()
+            && self
+                .zj
+                .path_clock
+                .should_release(Instant::now(), self.path_intermediate_texture.is_some())
+        {
+            self.path_intermediate_texture = None;
+            self.path_intermediate_msaa_texture = None;
+        }
         let viewport_size = layer.drawable_size();
         let viewport_size: Size<DevicePixels> = size(
             (viewport_size.width.ceil() as i32).into(),
@@ -688,6 +823,10 @@ impl MetalRenderer {
                 PrimitiveBatch::Paths(range) => {
                     let paths = &scene.paths[range];
                     command_encoder.end_encoding();
+
+                    if self.zj.enabled {
+                        self.zj_ensure_path_intermediate_textures(viewport_size);
+                    }
 
                     let did_draw = self.draw_paths_to_intermediate(
                         paths,

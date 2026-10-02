@@ -210,3 +210,10 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         });
     Ok(())
 }
+
+// The vendored macOS renderer's low-memory policy is plain Rust; test it here so it runs on
+// every platform (the renderer itself only builds on macOS).
+#[cfg(test)]
+#[path = "../../../vendor/gpui-pre-apple/src/zj_low_memory.rs"]
+#[allow(dead_code)] // `enabled()` reads the environment for the renderer, not for the tests.
+mod gpu_low_memory_policy;
