@@ -749,3 +749,22 @@ fn write_errors_surface_on_flush() {
     // Reported once.
     h.flush().unwrap();
 }
+
+#[test]
+fn bundled_sqlite_has_fts5_without_the_trimmed_extras() {
+    // .cargo/config.toml passes LIBSQLITE3_FLAGS; see docs/adr/0004.
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let mut stmt = conn.prepare("PRAGMA compile_options").unwrap();
+    let options: Vec<String> = stmt
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(options.iter().any(|o| o == "ENABLE_FTS5"), "{options:?}");
+    assert!(
+        options.iter().any(|o| o == "OMIT_LOAD_EXTENSION"),
+        "{options:?}"
+    );
+    assert!(!options.iter().any(|o| o == "ENABLE_FTS3"), "{options:?}");
+    assert!(!options.iter().any(|o| o == "ENABLE_RTREE"), "{options:?}");
+}

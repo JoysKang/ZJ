@@ -45,3 +45,26 @@ debug = 1
 [patch.crates-io]
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
+
+# Agent 相关依赖按体积优化（docs/adr/0004）：这些代码不在按键 / 渲染路径上，
+# opt-level = "s" 让 ACP + SQLite 的增量从约 4.1 MB 降到约 2.4 MB（x86_64 实测）。
+[profile.dist.package.agent-client-protocol]
+opt-level = "s"
+
+[profile.dist.package.agent-client-protocol-schema]
+opt-level = "s"
+
+[profile.dist.package.serde_with]
+opt-level = "s"
+
+[profile.dist.package.libsqlite3-sys]
+opt-level = "s"
+
+[profile.dist.package.rusqlite]
+opt-level = "s"
+
+[profile.dist.package.workspace-editor-agent]
+opt-level = "s"
+
+[profile.dist.package.workspace-editor-agent-history]
+opt-level = "s"
