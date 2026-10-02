@@ -55,6 +55,17 @@ pub const QUICK_OPEN_TOP: Pixels = px(6.);
 pub const QUICK_OPEN_ROWS: usize = 12;
 pub const RADIUS: Pixels = px(4.);
 pub const RADIUS_LARGE: Pixels = px(6.);
+/// The editor's floating find / replace widget (VS Code: 419 px wide, inputs about 220 px).
+pub const FIND_WIDTH: Pixels = px(440.);
+pub const FIND_INPUT_WIDTH: Pixels = px(236.);
+/// Clear of the editor's vertical scrollbar.
+pub const FIND_RIGHT: Pixels = px(16.);
+pub const FIND_COUNT_WIDTH: Pixels = px(112.);
+/// Buttons are 22 px with 16 px icons; the toggles inside the inputs 20 px.
+pub const FIND_BUTTON: Pixels = px(22.);
+pub const FIND_TOGGLE: Pixels = px(20.);
+pub const FIND_SHADOW_BLUR: Pixels = px(8.);
+pub const FIND_SHADOW_Y: Pixels = px(2.);
 pub const STATUS_HEIGHT: Pixels = px(24.);
 /// Active tab indicator thickness (VS Code's tab.activeBorderTop).
 pub const INDICATOR: Pixels = px(1.);
@@ -162,6 +173,12 @@ pub struct Palette {
     pub logo: u32,
     /// The welcome logo's cursor (Nord aurora red in both themes, as in the app icon).
     pub logo_cursor: u32,
+    /// The current find match (VS Code `editor.findMatchBackground`), drawn at
+    /// `find_current_alpha`; the other matches use the accent.
+    pub find_current: u32,
+    pub find_current_alpha: f32,
+    /// Floating widgets' drop shadow (VS Code `widget.shadow`), black at this opacity.
+    pub shadow_alpha: f32,
     pub indent_guide: u32,
     pub added: u32,
     pub modified: u32,
@@ -206,6 +223,10 @@ pub const DARK: Palette = Palette {
     keycap: 0x103a44,
     logo: 0x00222b,
     logo_cursor: 0xbf616a,
+    // Solarized yellow.
+    find_current: 0xb58900,
+    find_current_alpha: 0.5,
+    shadow_alpha: 0.36,
     indent_guide: 0x0e4250,
     added: 0x81b88b,
     modified: 0xe2c08d,
@@ -245,6 +266,10 @@ pub const LIGHT: Palette = Palette {
     keycap: 0xd8dee9,
     logo: 0xdfe4ec,
     logo_cursor: 0xbf616a,
+    // Nord aurora yellow.
+    find_current: 0xebcb8b,
+    find_current_alpha: 0.8,
+    shadow_alpha: 0.16,
     indent_guide: 0xd0d6e0,
     added: 0x3f6b2d,
     modified: 0x8a5226,
@@ -409,6 +434,8 @@ pub struct Colors {
     pub selection: Hsla,
     /// Search matches inside result previews (VS Code `editor.findMatchHighlightBackground`).
     pub find_match: Hsla,
+    pub find_current: Hsla,
+    pub shadow: Hsla,
 }
 
 fn hsla(hex: u32) -> Hsla {
@@ -453,6 +480,8 @@ impl Palette {
             command_border: hsla(self.foreground).opacity(0.2),
             selection: hsla(self.selection),
             find_match: hsla(self.accent).opacity(0.3),
+            find_current: hsla(self.find_current).opacity(self.find_current_alpha),
+            shadow: hsla(0x000000).opacity(self.shadow_alpha),
         }
     }
 }

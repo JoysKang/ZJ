@@ -191,19 +191,12 @@ pub struct Matcher {
 
 impl Matcher {
     pub fn new(options: &Options) -> Result<Self, String> {
-        let pattern = if options.regex {
-            options.pattern.clone()
-        } else {
-            regex::escape(&options.pattern)
-        };
-        let pattern = if options.whole_word {
-            format!(r"\b(?:{pattern})\b")
-        } else {
-            pattern
-        };
+        let pattern =
+            crate::replace::pattern_source(&options.pattern, options.whole_word, options.regex);
         let regex = RegexBuilder::new(&pattern)
             .case_insensitive(!options.case_sensitive)
             .multi_line(true)
+            .crlf(true)
             .size_limit(16 * 1024 * 1024)
             .build()
             .map_err(|error| format!("正则表达式无效：{error}"))?;

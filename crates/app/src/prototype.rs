@@ -32,9 +32,14 @@ pub use diff_ops::{CopyDiff, SelectAllDiff};
 mod diff_view;
 mod editor_area;
 mod explorer_ops;
+mod find_widget;
 pub use explorer_ops::{
     CopyFiles, CopyPath, CopyRelativePath, CutFiles, Delete as DeleteFile, NewFile, NewFolder,
     PasteFiles, Rename as RenameFile, RevealInFinder,
+};
+pub use find_widget::{
+    FindInFile, FindNext, FindPrevious, FindReplace, ReplaceAll, ReplaceOne, ToggleFindCase,
+    ToggleFindInSelection, ToggleFindRegex, ToggleFindWord, TogglePreserveCase,
 };
 pub mod navigation;
 mod quick_open;
@@ -229,6 +234,7 @@ pub struct Prototype {
     tree_generation: u64,
     tree_message: String,
     search: search_view::SearchState,
+    find: find_widget::FindState,
     index: Option<Arc<PathIndex>>,
     index_task: Option<Task<()>>,
     index_cancel: Arc<AtomicBool>,
@@ -392,6 +398,7 @@ impl Prototype {
             .unwrap_or_else(|| format!("新窗口 {number}"));
         window.set_window_title(&format!("ZJ · {name}"));
         let search = search_view::SearchState::new(window, cx);
+        let find = find_widget::FindState::new(window, cx);
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             root,
@@ -425,6 +432,7 @@ impl Prototype {
             tree_generation: 0,
             tree_message: String::new(),
             search,
+            find,
             index: None,
             index_task: None,
             index_cancel: Arc::new(AtomicBool::new(false)),
@@ -793,6 +801,7 @@ impl Prototype {
         self.reveal_pending = matches!(pane, Pane::Document(_));
         self.clear_tree_selection_for(pane);
         self.update_welcome_blink(window, cx);
+        self.find_update(false, cx);
         if std::mem::take(&mut self.focus_tree_on_open) {
             self.explorer_focus.focus(window, cx);
         } else {
@@ -1006,8 +1015,10 @@ impl Prototype {
                 let path = loaded.path.clone();
                 let view = cx.weak_entity();
                 let editor = cx.new(|cx| {
+                    // The workbench's own find widget takes ⌘F (find_widget.rs).
                     let mut state = EditorState::new(window, cx)
                         .language(language)
+                        .searchable(false)
                         .default_value(loaded.text);
                     navigation::attach(&mut state, &path, view);
                     state
@@ -1018,6 +1029,9 @@ impl Prototype {
                         if matches!(event, InputEvent::Change) {
                             if let Some(doc) = this.documents.iter_mut().find(|doc| doc.id == id) {
                                 doc.dirty = true;
+                            }
+                            if this.active == Pane::Document(id) {
+                                this.find_update(false, cx);
                             }
                             cx.notify();
                         }
@@ -1684,6 +1698,25 @@ impl Render for Prototype {
             .on_action(cx.listener(|this, _: &ZoomReset, window, cx| this.zoom(None, window, cx)))
             .on_action(
                 cx.listener(|this, _: &FindInFiles, window, cx| this.find_in_files(window, cx)),
+            )
+            // Kit's editor leaves ⌘F to its host when it is not `searchable`.
+            .on_action(cx.listener(|this, _: &gpui_kit::component::input::Search, window, cx| {
+                this.open_find(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &gpui_kit::component::input::Replace, window, cx| {
+                this.open_find(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &find_widget::FindInFile, window, cx| {
+                this.open_find(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &find_widget::FindReplace, window, cx| {
+                this.open_find(true, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &find_widget::FindNext, _, cx| this.find_step(true, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &find_widget::FindPrevious, _, cx| this.find_step(false, cx)),
             )
             .on_action(cx.listener(|this, _: &ToggleHiddenFiles, window, cx| {
                 this.toggle_hidden_files(window, cx)

@@ -374,7 +374,14 @@ impl Prototype {
             .bg(colors.editor)
             .child(self.render_tabs(cx))
             .child(self.render_breadcrumbs(cx))
-            .child(div().flex_1().min_h_0().child(content))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(content)
+                    .children(self.render_find(cx)),
+            )
             .into_any_element()
     }
 }

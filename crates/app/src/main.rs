@@ -10,6 +10,7 @@ mod partial_patch;
 mod platform;
 mod prototype;
 mod refresh_plan;
+mod replace;
 mod settings;
 mod symbol_index;
 mod symbols;
@@ -155,6 +156,69 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     "secondary-shift-f",
                     prototype::FindInFiles,
                     Some("WorkspaceEditor"),
+                ),
+                // ⌘⇧F inside an editor is find in files (Kit binds it to its replace panel).
+                KeyBinding::new("secondary-shift-f", prototype::FindInFiles, Some("Input")),
+                // The editor's find widget, with VS Code's macOS keys.
+                KeyBinding::new(
+                    "secondary-f",
+                    prototype::FindInFile,
+                    Some("WorkspaceEditor"),
+                ),
+                KeyBinding::new(
+                    "alt-secondary-f",
+                    prototype::FindReplace,
+                    Some("WorkspaceEditor"),
+                ),
+                KeyBinding::new("secondary-g", prototype::FindNext, Some("WorkspaceEditor")),
+                KeyBinding::new(
+                    "secondary-shift-g",
+                    prototype::FindPrevious,
+                    Some("WorkspaceEditor"),
+                ),
+                KeyBinding::new("f3", prototype::FindNext, Some("WorkspaceEditor")),
+                KeyBinding::new("shift-f3", prototype::FindPrevious, Some("WorkspaceEditor")),
+                KeyBinding::new(
+                    "secondary-shift-1",
+                    prototype::ReplaceOne,
+                    Some("FindWidget"),
+                ),
+                // Some keyboards report ⇧1 as "!".
+                KeyBinding::new(
+                    "secondary-shift-!",
+                    prototype::ReplaceOne,
+                    Some("FindWidget"),
+                ),
+                KeyBinding::new("secondary-!", prototype::ReplaceOne, Some("FindWidget")),
+                KeyBinding::new(
+                    "secondary-alt-enter",
+                    prototype::ReplaceAll,
+                    Some("FindWidget"),
+                ),
+                KeyBinding::new(
+                    "alt-secondary-c",
+                    prototype::ToggleFindCase,
+                    Some("FindWidget"),
+                ),
+                KeyBinding::new(
+                    "alt-secondary-w",
+                    prototype::ToggleFindWord,
+                    Some("FindWidget"),
+                ),
+                KeyBinding::new(
+                    "alt-secondary-r",
+                    prototype::ToggleFindRegex,
+                    Some("FindWidget"),
+                ),
+                KeyBinding::new(
+                    "alt-secondary-p",
+                    prototype::TogglePreserveCase,
+                    Some("FindWidget"),
+                ),
+                KeyBinding::new(
+                    "alt-secondary-l",
+                    prototype::ToggleFindInSelection,
+                    Some("FindWidget"),
                 ),
                 KeyBinding::new("cmd-=", prototype::ZoomIn, Some("WorkspaceEditor")),
                 KeyBinding::new("cmd-+", prototype::ZoomIn, Some("WorkspaceEditor")),

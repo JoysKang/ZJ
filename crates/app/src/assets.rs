@@ -34,6 +34,9 @@ pub const EXTRA: &[(&str, &[u8])] = &[
     embed!("icons/whole-word.svg"),
     embed!("icons/regex.svg"),
     embed!("icons/book-marked.svg"),
+    embed!("icons/replace-all.svg"),
+    embed!("icons/case-upper.svg"),
+    embed!("icons/text-align-start.svg"),
     // Rendered at 3× from logo/zj-sprig*.svg: the dry-brush filter needs a browser-grade
     // rasterizer at this size.
     embed!("logo/zj-sprig.png"),
