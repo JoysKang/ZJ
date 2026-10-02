@@ -1,0 +1,97 @@
+# ADR 0004：Agent 走 ACP，会话历史存本地 SQLite
+
+日期：2026-10-02。状态：已采纳（界面在第 6 批之后接入）。
+
+## 背景
+
+用户要在右侧面板里用 Claude Code、Codex、Gemini CLI，以及「Claude Code · DeepSeek」，并且能找回、钉住、删除以前的会话。要求：
+
+- 质量优先，接入方式尽量通用；
+- Agent 标识用单色字形；布局以 A（会话列表 + 对话）为主，B / C 按需出现；
+- 文件写入方式可配置：默认直接落盘，可改成「接受后才落盘」；
+- 不导入 `~/.claude`、`~/.codex` 的原生历史；
+- 历史默认按工作区区分，可以切到「全部工作区」；本地全文搜索；
+- 会话可以删除，删除要真正删掉数据库里的记录，库文件不能一直变大。
+
+## 决定
+
+### 1. 所有 Agent 都走 ACP（Agent Client Protocol v1）
+
+新增 `crates/agent_client`（包名 `workspace-editor-agent`，不依赖 GPUI），用官方 Rust crate `agent-client-protocol =2.2.0`。这个 crate 不依赖 tokio，基于 `futures` / `async-io`；每个 Agent 一个监督线程，用 `async_io::block_on` 驱动连接。
+
+| 预设 | 启动方式（先找本机命令，再退回 `npx -y`）| 字形（Lucide）|
+| --- | --- | --- |
+| Claude Code | `claude-agent-acp`，或 `npx -y @agentclientprotocol/claude-agent-acp@0.85.0` | `asterisk` |
+| Codex | `codex-acp`，或 `npx -y @agentclientprotocol/codex-acp@2.1.1` | `square-terminal` |
+| Gemini CLI | `gemini --acp`，或 `npx -y @google/gemini-cli@0.62.0 --acp` | `sparkle` |
+| Claude Code · DeepSeek | 同 Claude Code，另加环境变量：`ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`、`ANTHROPIC_AUTH_TOKEN`（设置里填，或取自 `DEEPSEEK_API_KEY`）、`ANTHROPIC_MODEL` 等按 DeepSeek 官方文档设为 `deepseek-v4-pro[1m]` / `deepseek-v4-flash[1m]` | `fish` |
+| 用户自定义 | 设置 JSON 的 `agents` 数组：`id / name / command / args / env`（`"$NAME"` 表示取环境变量）| `bot` |
+
+版本号与 ACP registry（2026-10-01）一致。`-y` 是必须的：标准输入走 JSON-RPC，npx 的安装确认会让进程卡住。不自动安装；找不到 Node.js、命令或 Key 时给出中文提示（例如「启动「Claude Code」需要 Node.js（npx），但没有找到……」）。从 Finder 启动时 PATH 只有系统目录，所以搜索路径补上 Homebrew、nvm、volta、bun、pnpm 等常见位置，子进程的 PATH 以找到的 node 所在目录打头。
+
+**进程**：工作区根目录作为 cwd，独立进程组；去掉继承的 `GIT_*`、`ZJ_*`、`CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT` / `CLAUDE_CODE_SSE_PORT`（否则 Claude Code 会拒绝「嵌套启动」）；退出时先关 stdin，再对整组 SIGTERM，1.5 秒后 SIGKILL。stderr 只保留最后 16 KB，崩溃时显示给用户，不写日志。
+
+**协议**：`initialize` → `session/new`（`cwd` = 工作区根目录，`mcpServers` 为空）→ `session/prompt`。提示内容是文本加 `resource_link`（文件；选区带 `#L起:止`），Agent 声明 `embeddedContext` 时选区原文内嵌。`session/update` 转成类型化事件：回复 / 思考片段、工具调用（类别、状态、位置、Diff）、计划、可用命令、模式、用量、标题。`session/cancel` 中断，同时把未答的权限请求一律回 `cancelled`。权限请求作为事件交给界面，界面调用 `respond_permission` 作答；等待期间不占用 ACP 的分发循环。
+
+**客户端能力**：
+
+- `fs/read_text_file`：先取编辑器里未保存的缓冲区（`BufferProvider`），再读磁盘；路径必须在工作区内（规范化后比较，拒绝 `..` 和符号链接逃逸），16 MB 上限。
+- `fs/write_text_file`：`WriteMode::Direct`（默认）原子写入并发出 `FileWritten`，编辑器据此重载；`WriteMode::AcceptFirst` 写进影子副本（`ShadowStore`），Agent 回读时看到的是自己的版本，用户可以按文件或按块接受 / 拒绝，接受前如果磁盘内容变了就拒绝覆盖。运行中可以切换。
+- `terminal/*`：首版不声明。Agent 用自己的工具执行命令，执行前走权限请求；编辑器不实现终端。
+
+**空闲与重启**：没有进行中的回合、也没有待答的权限请求时，空闲 N 分钟（默认 10）结束进程，状态栏 / 面板收到 `Exited { Idle }`。下次提问时透明重启：Agent 支持 `loadSession` 就恢复原会话（重放的历史不再发给界面），否则新建会话。崩溃（`Exited { Crashed }`）之后同样在下次提问时重启。
+
+**有界**：事件通道 512 条（界面不读时会反压到 Agent），命令通道 64 条，单行 JSON 32 MB，stderr 16 KB，读文件 16 MB。日志只写 `event=agent_spawn / agent_exit / agent_turn_end …` 和 pid、结果类别，不写提示、回复、文件内容、环境变量值。
+
+### 2. 会话历史：SQLite + FTS5
+
+新增 `crates/agent_history`（包名 `workspace-editor-agent-history`），`rusqlite =0.40.2`，`bundled`（SQLite 3.53.2），关掉默认的语句缓存。
+
+- **位置与打开**：macOS 是 `~/Library/Application Support/ZJ/agent.db`，其他平台 `$XDG_DATA_HOME/zj/agent.db`，`ZJ_AGENT_DB` 可覆盖。第一次调用才建文件、开连接、起写线程；文件 0600（`-wal` / `-shm` 跟随），目录 0700；WAL、`synchronous=NORMAL`、每个连接 1 MiB 页缓存、`mmap_size=0`、外键开启；`auto_vacuum=INCREMENTAL` 在建表前设置。迁移按 `user_version` 编号执行。
+- **表**：`workspaces`、`sessions`（Agent、ACP 会话 id、标题及来源、仓库、分支、创建 / 更新时间、`pinned_rank`、归档、状态）、`messages`、`session_files`。
+- **写入**：一个后台写线程，队列 4096 条，一批一个事务，提交后才回复；`flush()` 返回期间的写错误，不吞掉。
+- **搜索**：两张无内容（contentless，`contentless_delete=1`）FTS5 表，正文只存一份：
+  - `trigram` 表：≥ 3 个字的子串，中英文都适用，大小写不敏感；
+  - CJK 二元词组表：写入时把连续汉字 / 假名 / 谚文切成重叠的两字词，`unicode61` 分词，用来查「重连」这类两个字的词；
+  - 单字（或两个字但不全是 CJK）：退回到标题、文件路径、Agent / 仓库 / 分支的 `LIKE`，不扫正文。
+  - 多个词要求在同一会话里都命中（可以在不同消息里）；每个会话一条结果，钉住的在前，其余按命中位置（标题 > 文件 > 元数据 > 正文）、命中次数和时间衰减（半衰期 14 天）排序；返回摘要和高亮字节范围。没有用 `bm25()`：常见词命中几千行时它比整次搜索的其余部分都慢。
+  - 范围：默认当前工作区，可选全部；筛选 Agent、仓库、时间、状态、只看钉住、归档（排除 / 只看 / 包括）；可按种类（标题 / 正文 / 文件 / 元数据）搜索。
+- **钉住**：新钉的在最上；拖动用分数插空，只改一行，间隙太小时重排。
+- **标题**：先存首条提示去掉 `@` 引用后的前 24 个字，Agent 或后续逻辑给出标题后更新；用户改过的不再覆盖。
+- **删除是硬删除**：`delete_session(s)`、`delete_archived(范围)`、`delete_workspace` 在一个事务里删会话、消息、文件、钉住和两张 FTS 表的对应行；提交后对 FTS 做 `optimize`、`PRAGMA incremental_vacuum`、`wal_checkpoint(TRUNCATE)`，库文件和 WAL 都缩回去。
+
+## 代价（实测）
+
+环境：Linux x86_64（本机无法构建 aarch64-apple-darwin），合入界面前要在 M5 Pro 上按 CLAUDE.md 重测。
+
+**依赖**：`cargo tree -e normal --target aarch64-apple-darwin --prefix none | sort -u | wc -l`，应用本身 582 行；应用加两个新 crate 603 行（新增 agent-client-protocol 及 -derive / -schema、serde_with 及 macros、darling 三个、ident_case、strsim、shell-words、rusqlite、libsqlite3-sys、fallible-iterator 两个）。`cargo deny check` 的 bans / licenses / sources 通过，重复版本告警数不变（26 条），advisories 只有基线就有的 instant / rustybuzz / ttf-parser / paste（unmaintained）和 yoke-derive（yanked），与基线逐条相同。
+
+**二进制**：应用目前还没有引用这两个 crate，链接器会把它们全部丢掉，所以直接比应用体积看不出增量；完整的应用 dist 构建也受限于本机磁盘。改用独立探针程序：对照组只用应用已有的 serde_json（preserve_order）、futures、async-io、async-channel，实验组在此基础上调用两个 crate 的全部公开 API，都用 `--profile dist`。
+
+| | 默认编译 | 本 ADR 的设置 |
+| --- | --- | --- |
+| agent_history（含 SQLite）| +2.27 MB | +1.15 MB |
+| agent_client（含 ACP crate）| +1.82 MB | +1.32 MB |
+| 两者合计 | +4.06 MB | **+2.38 MB** |
+
+「本 ADR 的设置」是：dist 下 ACP、serde_with、rusqlite、libsqlite3-sys 和两个新 crate 用 `opt-level = "s"`（这些代码不在按键 / 渲染路径上；改成 `"z"` 只再省 70 KB），以及 `.cargo/config.toml` 里的 `LIBSQLITE3_FLAGS` 去掉 FTS3、R*Tree、dbstat、STAT4、soundex、column metadata、load_extension、JSON 等。超过 200 KB 门槛，因此有这份 ADR。
+
+第 6 批的 Linux dist 二进制是 49,185,392 字节（ADR 0003），CI 预算 52 MB，加上这 2.4 MB 约 51.6 MB；接上界面后很可能逼近预算，届时要么在 macOS 上实测后重新校准预算，要么改用系统自带的 `libsqlite3`（可再省约 1.1 MB；需要 ≥ 3.43 才有 `contentless_delete`，还要带 FTS5 和 trigram，得先在目标 macOS 版本上用 `PRAGMA compile_options` 确认）。
+
+**内存**（Linux VmRSS，dist 探针，1 万条消息的库）：`History::new` 不占内存；第一次列表（打开文件、建两个连接、起写线程）+1.7 MB；再跑 4 次搜索后共 +3.5 MB；`AgentClient::start`（只有监督线程，还没起 Agent）再 +0.1 MB。面板不用时以上都不发生，空闲 footprint 不变。
+
+**搜索**（release，1 万条消息 / 250 个会话 / 正文 2.2 MB；测试里的词表很小，「快照」「缓存」这类词出现在约一半的消息里，属于最坏情况）：各查询中位数 0.4–8.7 ms，最慢 9.2 ms，全部低于 20 ms（`ten_thousand_messages_search_fast`）。
+
+**库文件**：1 万条消息 8.26 MB（正文 2.2 MB，trigram 索引占大头）；含 WAL 约 13.8 MB。全部删除后回到 73,728 字节，与只建了表的空库完全相同；两张 FTS 表的行数为 0。
+
+**Agent 进程**（不计入编辑器 footprint，单独列为整应用验收项）：真实的 `claude-agent-acp 0.85.0` 握手成功（`loadSession`、`embeddedContext`、图片均支持），首次 npx 下载约 10 秒。进程组（npx + 适配器 + Claude Code）在开始建会话时约 490 MB RSS。本机以 root 运行，Claude Code 拒绝 `--dangerously-skip-permissions`，会话没建起来；错误详情会原样显示在面板里。用 `npm i -g @agentclientprotocol/claude-agent-acp` 装成本机命令可以省掉 npx 那层 Node 进程，预设会优先用它。
+
+## 后果
+
+- **AcceptFirst 的局限**：只拦得住经 ACP `fs/write_text_file` 的写入。Agent 自己执行的命令（`sed -i`、`cargo fmt`、代码生成、`git checkout`）直接读写真实磁盘，影子副本管不到，这些操作仍然要靠权限请求把关；界面上要写明这一点。
+- AcceptFirst 下，Agent 在接受前读到的是自己的版本；如果用户在接受前改了同一个文件，接受会被拒绝，只能放弃或重新生成。
+- 没有声明 `terminal`，所以工具卡片里不会有可交互的终端输出，只有 Agent 回报的文本。
+- 空闲重启后，不支持 `loadSession` 的 Agent 会丢失上下文；界面要提示「已开始新会话」。
+- 搜索结果是「会话」粒度的；一个词在 2 万行以上都出现时只看前 2 万行，这种词本来也没有区分度。
+- 历史只记录 ZJ 自己的会话，不导入 `~/.claude`、`~/.codex`。
+- 测试用的假 Agent 是 `crates/agent_client/src/bin/fake_acp_agent.rs`，`cargo build --profile dist`（只构建 app）不会构建它。

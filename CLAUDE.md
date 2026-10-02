@@ -39,6 +39,8 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 - `crates/core`：身份模型与共享常量（`RepoId`、`DocumentId`、`EXCLUDED_DIRS`、按 Git 规则校验 `.git` 的 `git_marker`），**不依赖 GPUI**。
 - `crates/git_service`：调用系统 git，负责有界输出、超时、取消、全局限流，**不依赖 GPUI**。仓库发现最多向下 4 层，跳过 `EXCLUDED_DIRS` 和上层仓库忽略的目录，无效的 `.git` 静默跳过。
+- `crates/agent_client`：ACP 客户端（Agent 预设、子进程、会话、权限、`fs/*`、影子副本、空闲退出），**不依赖 GPUI**，见 docs/adr/0004。
+- `crates/agent_history`：Agent 会话历史（SQLite + FTS5，后台写线程、搜索、钉住、硬删除），**不依赖 GPUI**。
 - `crates/app`：GPUI 界面。
   - `theme.rs`：唯一允许写字面尺寸和颜色的地方。
   - `assets.rs`：内嵌资源；`file_icons.rs`：文件类型到图标的映射。
