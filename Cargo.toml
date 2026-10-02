@@ -1,6 +1,8 @@
 [workspace]
 members = ["crates/app", "crates/core", "crates/git_service"]
 default-members = ["crates/app"]
+# 打过补丁的 GPUI macOS 渲染 / 窗口 crate，不作为工作区成员（不跑本项目的 fmt / clippy）。
+exclude = ["vendor"]
 resolver = "2"
 
 [workspace.package]
@@ -37,3 +39,9 @@ strip = true
 
 [profile.dev]
 debug = 1
+
+# GPUI 的 macOS 渲染器和窗口层：为降低每个窗口的显存（IOSurface）打了小补丁，
+# 原版本、改动和测量方法见 vendor/README.md 与 docs/adr/0005-gpu-memory.md。
+[patch.crates-io]
+gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
+gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
