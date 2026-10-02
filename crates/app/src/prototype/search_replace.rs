@@ -16,6 +16,7 @@ use crate::files::FileStamp;
 use crate::replace::{self, Replacement};
 use crate::text_search::{FileMatches, MAX_MATCHES, Matcher};
 use gpui_kit::{
+    EntityInputHandler,
     component::input::{InputEvent, InputState},
     *,
 };
@@ -40,11 +41,13 @@ struct Undo {
     written: FileStamp,
 }
 
-/// One file to rewrite: the spans the search found there.
+/// One file to rewrite: the spans the search found there (and their lines, for a buffer
+/// with unsaved edits, whose offsets differ from the file's).
 struct Job {
     path: PathBuf,
     stamp: Option<FileStamp>,
     spans: Vec<Range<usize>>,
+    lines: Option<Vec<u32>>,
 }
 
 impl ReplaceState {
@@ -177,6 +180,9 @@ impl Prototype {
             path: found.path.clone(),
             stamp: found.stamp,
             spans,
+            lines: only
+                .and_then(|line| found.lines.get(line))
+                .map(|l| vec![l.line]),
         }
     }
 
@@ -279,17 +285,24 @@ impl Prototype {
         let replacement = self.search_replacement(cx);
         let me = cx.entity_id();
         let mut skipped: Vec<(PathBuf, String)> = Vec::new();
-        let jobs: Vec<Job> = jobs
+        // A file with unsaved edits is replaced in its buffer (which stays edited and is not
+        // saved), like VS Code; the file on disk is left alone.
+        let (in_buffers, jobs): (Vec<Job>, Vec<Job>) = jobs
             .into_iter()
             .filter(|job| !job.spans.is_empty())
-            .filter(|job| {
-                let unsaved = self.unsaved_elsewhere(&job.path, me, cx);
-                if unsaved {
-                    skipped.push((job.path.clone(), "有未保存的编辑".into()));
-                }
-                !unsaved
-            })
-            .collect();
+            .partition(|job| self.unsaved_elsewhere(&job.path, me, cx));
+        let mut buffer_count = 0;
+        for job in &in_buffers {
+            buffer_count += self.replace_in_buffers(
+                &job.path,
+                &finder,
+                &replacement,
+                job.lines.as_deref(),
+                window,
+                cx,
+            );
+            self.search.results.retain(|found| found.path != job.path);
+        }
         self.search.replace.running = true;
         let work = cx.background_spawn(async move {
             jobs.into_iter()
@@ -328,10 +341,15 @@ impl Prototype {
                 }
                 this.rebuild_after_edit();
                 this.search.replace.undo = undo;
-                this.search.replace.summary = Some(summary(
-                    format!("已在 {files} 个文件中替换 {count} 处"),
-                    &skipped,
-                ));
+                let buffers = in_buffers.len();
+                let in_editors =
+                    format!("在 {buffers} 个未保存的编辑器里替换 {buffer_count} 处（尚未保存）");
+                let done = match (files, buffer_count) {
+                    (0, 1..) => format!("已{in_editors}"),
+                    (_, 1..) => format!("已在 {files} 个文件中替换 {count} 处；另{in_editors}"),
+                    _ => format!("已在 {files} 个文件中替换 {count} 处"),
+                };
+                this.search.replace.summary = Some(summary(done, &skipped));
                 cx.notify();
             });
         }));
@@ -356,6 +374,75 @@ impl Prototype {
         }
         let state = crate::save::DiskState::of(done.written, done.text.as_bytes());
         self.reload_everywhere(&done.path, &done.text, state, window, cx);
+    }
+
+    /// Replaces in the buffers of `path` that have unsaved edits, in all windows: the matches
+    /// of the buffer's own text (on `lines` only, for a single result line). Returns how many.
+    fn replace_in_buffers(
+        &mut self,
+        path: &std::path::Path,
+        finder: &crate::replace::Finder,
+        replacement: &Replacement,
+        lines: Option<&[u32]>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let mut count = self.replace_in_own_buffer(path, finder, replacement, lines, window, cx);
+        let others: Vec<_> = self
+            .owners
+            .borrow()
+            .values()
+            .filter(|owner| owner.path == path)
+            .filter_map(|owner| Some((owner.window, owner.view.upgrade()?)))
+            .filter(|(_, view)| view.entity_id() != cx.entity_id())
+            .collect();
+        for (handle, view) in others {
+            let _ = handle.update(cx, |_, window, cx| {
+                view.update(cx, |this, cx| {
+                    count +=
+                        this.replace_in_own_buffer(path, finder, replacement, lines, window, cx);
+                });
+            });
+        }
+        count
+    }
+
+    fn replace_in_own_buffer(
+        &mut self,
+        path: &std::path::Path,
+        finder: &crate::replace::Finder,
+        replacement: &Replacement,
+        lines: Option<&[u32]>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let Some(editor) = self
+            .documents
+            .iter()
+            .find(|doc| doc.path == path && doc.dirty)
+            .map(|doc| doc.editor.clone())
+        else {
+            return 0;
+        };
+        editor.update(cx, |state, cx| {
+            let text = state.text().to_string();
+            let replacement = replacement.clone().with_eol(replace::eol_of(&text));
+            let line_of = |offset: usize| text[..offset].matches('\n').count() as u32;
+            let only: Vec<Range<usize>> = finder
+                .find_all(&text, MAX_MATCHES)
+                .into_iter()
+                .filter(|range| lines.is_none_or(|lines| lines.contains(&line_of(range.start))))
+                .collect();
+            if only.is_empty() {
+                return 0;
+            }
+            let (start, end) = (only[0].start, only[only.len() - 1].end);
+            let (new, count) = finder.replace(&text, Some(&only), &replacement);
+            let middle = &new[start..new.len() - (text.len() - end)];
+            let utf16 = replace::utf16_offset(&text, start)..replace::utf16_offset(&text, end);
+            state.replace_text_in_range(Some(utf16), middle, window, cx);
+            count
+        })
     }
 
     /// Puts `text` into every open, unedited buffer of `path`, in all windows.
