@@ -11,9 +11,13 @@ use std::{
 pub const READ_LIMIT: u64 = 16 * 1024 * 1024;
 
 /// Unsaved editor contents, so the agent sees what the user sees.
+///
+/// Asynchronous because the editor answers from its UI thread; the client waits a bounded
+/// time and gives up when it shuts down, so the provider never has to be answered.
 pub trait BufferProvider: Send + Sync {
-    /// Full text of an open buffer for this absolute, canonical path; `None` when not open.
-    fn buffer_text(&self, path: &Path) -> Option<String>;
+    /// Full text of an open buffer with unsaved edits at this absolute, canonical path;
+    /// `None` when there is none (the file on disk is used).
+    fn buffer_text(&self, path: &Path) -> futures::future::BoxFuture<'static, Option<String>>;
 }
 
 /// Canonical workspace root plus the checks every agent path goes through.

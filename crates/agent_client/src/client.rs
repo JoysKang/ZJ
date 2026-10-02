@@ -115,6 +115,8 @@ const COMMAND_CAPACITY: usize = 64;
 const MAX_LINE: usize = 32 * 1024 * 1024;
 /// Files remembered for Direct-mode reviews per client.
 const MAX_SNAPSHOTS: usize = 256;
+/// How long a read waits for the editor's unsaved buffer.
+const BUFFER_TIMEOUT: Duration = Duration::from_secs(5);
 
 enum Command {
     Connect,
@@ -135,6 +137,9 @@ struct Shared {
     resume_session: Option<String>,
     env_overrides: BTreeMap<String, String>,
     buffers: Option<Arc<dyn BufferProvider>>,
+    /// Closed by [`AgentClient::stop`]: a read waiting for the editor gives up instead of
+    /// holding the supervisor (and the UI thread joining it) until the timeout.
+    stopping: async_channel::Receiver<()>,
     search: SearchPath,
     write_mode: Mutex<WriteMode>,
     events: async_channel::Sender<AgentEvent>,
@@ -155,20 +160,47 @@ struct Shared {
 }
 
 impl Shared {
-    /// Records `path` as it is on disk now, once. Unreadable or oversized files are skipped.
-    fn snapshot(&self, path: &Path) {
-        let mut snapshots = self.snapshots.lock().unwrap();
-        if snapshots.contains_key(path) || snapshots.len() >= MAX_SNAPSHOTS {
+    /// The editor's unsaved text for `path`, if any.
+    async fn buffer_text(&self, path: &Path) -> io::Result<Option<String>> {
+        let Some(buffers) = &self.buffers else {
+            return Ok(None);
+        };
+        let read = buffers.buffer_text(path);
+        let stopping = std::pin::pin!(self.stopping.recv());
+        match with_timeout(futures::future::select(read, stopping), BUFFER_TIMEOUT).await {
+            Some(Either::Left((text, _))) => Ok(text),
+            Some(Either::Right(_)) => Err(io::Error::other("Agent 客户端已关闭")),
+            None => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "编辑器没有及时给出未保存的内容",
+            )),
+        }
+    }
+
+    /// Records `path` as it is now, once: the unsaved buffer when the editor has one (that is
+    /// what the agent read and edits), otherwise the disk. Unreadable or oversized files are
+    /// skipped.
+    async fn snapshot(&self, path: &Path) {
+        let known = |s: &Self| {
+            let snapshots = s.snapshots.lock().unwrap();
+            snapshots.contains_key(path) || snapshots.len() >= MAX_SNAPSHOTS
+        };
+        if known(self) {
             return;
         }
-        match read_disk(path) {
-            Ok(text) => {
-                snapshots.insert(path.to_path_buf(), Some(text));
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                snapshots.insert(path.to_path_buf(), None);
-            }
-            Err(_) => {}
+        let before = match self.buffer_text(path).await {
+            Ok(Some(text)) => Some(text),
+            Ok(None) | Err(_) => match read_disk(path) {
+                Ok(text) => Some(text),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                Err(_) => return,
+            },
+        };
+        if !known(self) {
+            self.snapshots
+                .lock()
+                .unwrap()
+                .insert(path.to_path_buf(), before);
         }
     }
 }
@@ -218,6 +250,7 @@ pub struct AgentClient {
     shared: Arc<Shared>,
     commands: async_channel::Sender<Command>,
     events: async_channel::Receiver<AgentEvent>,
+    stopping: async_channel::Sender<()>,
     supervisor: Option<thread::JoinHandle<()>>,
 }
 
@@ -229,6 +262,7 @@ impl AgentClient {
         let (events_tx, events_rx) = async_channel::bounded(EVENT_CAPACITY);
         let (commands_tx, commands_rx) = async_channel::bounded(COMMAND_CAPACITY);
         let (done_tx, done_rx) = async_channel::unbounded();
+        let (stopping_tx, stopping_rx) = async_channel::bounded(1);
         let shared = Arc::new(Shared {
             preset: options.preset,
             workspace,
@@ -237,6 +271,7 @@ impl AgentClient {
             resume_session: options.resume_session,
             env_overrides: options.env_overrides,
             buffers: options.buffers,
+            stopping: stopping_rx,
             search: options.search_path.unwrap_or_else(SearchPath::from_env),
             write_mode: Mutex::new(options.write_mode),
             events: events_tx,
@@ -261,6 +296,7 @@ impl AgentClient {
             shared,
             commands: commands_tx,
             events: events_rx,
+            stopping: stopping_tx,
             supervisor: Some(supervisor),
         })
     }
@@ -394,6 +430,7 @@ impl AgentClient {
         self.commands.close();
         // Nobody may read events any more; unblock a supervisor waiting to send one.
         self.events.close();
+        self.stopping.close();
         if let Some(handle) = self.supervisor.take() {
             let _ = handle.join();
         }
@@ -629,7 +666,7 @@ async fn connect(
             async move |request: acp::ReadTextFileRequest,
                         responder: Responder<acp::ReadTextFileResponse>,
                         _cx: ConnectionTo<Agent>| {
-                responder.respond_with_result(handle_read(&on_read, &request))
+                responder.respond_with_result(handle_read(&on_read, &request).await)
             },
             sdk::on_receive_request!(),
         )
@@ -946,7 +983,7 @@ async fn handle_update(shared: &Shared, notification: acp::SessionNotification) 
     {
         for location in &call.locations {
             if let Ok(path) = shared.workspace.resolve(&location.path) {
-                shared.snapshot(&path);
+                shared.snapshot(&path).await;
             }
         }
     }
@@ -1002,14 +1039,14 @@ async fn handle_permission(
     })
 }
 
-fn handle_read(
+async fn handle_read(
     shared: &Shared,
     request: &acp::ReadTextFileRequest,
 ) -> Result<acp::ReadTextFileResponse, sdk::Error> {
     let path = shared.workspace.resolve(&request.path).map_err(fs_error)?;
     let text = match shared.shadow.proposed_text(&path) {
         Some(text) => text,
-        None => match shared.buffers.as_ref().and_then(|b| b.buffer_text(&path)) {
+        None => match shared.buffer_text(&path).await.map_err(fs_error)? {
             Some(text) => text,
             None => read_disk(&path).map_err(fs_error)?,
         },
@@ -1029,7 +1066,7 @@ async fn handle_write(
     let mode = *shared.write_mode.lock().unwrap();
     match mode {
         WriteMode::Direct => {
-            shared.snapshot(&path);
+            shared.snapshot(&path).await;
             write_atomic(&path, &request.content).map_err(fs_error)?;
             shared.emit(AgentEvent::FileWritten { path }).await;
         }

@@ -68,22 +68,25 @@ struct SavedHooks(Vec<SavedHook>);
 impl Global for SavedHooks {}
 
 /// The text of `path` if it is open with unsaved edits in any window (what an agent should
-/// read instead of the file on disk).
-#[allow(dead_code)] // Called by the agent layer.
-pub fn buffer_text(path: &Path, cx: &App) -> Option<String> {
+/// read instead of the file on disk). Remembers which version the agent saw.
+pub fn buffer_text(path: &Path, cx: &mut App) -> Option<String> {
     let owners = cx.try_global::<OpenDocuments>()?.0.clone();
-    let owners = owners.borrow();
-    owners
+    let views: Vec<_> = owners
+        .borrow()
         .values()
         .filter(|owner| owner.path == path)
         .filter_map(|owner| owner.view.upgrade())
-        .find_map(|view| {
-            view.read(cx)
+        .collect();
+    views.into_iter().find_map(|view| {
+        view.update(cx, |this, cx| {
+            let doc = this
                 .documents
-                .iter()
-                .find(|doc| doc.path == path && doc.dirty)
-                .map(|doc| doc.editor.read(cx).text().to_string())
+                .iter_mut()
+                .find(|doc| doc.path == path && doc.dirty)?;
+            doc.agent_read = Some(doc.version);
+            Some(doc.editor.read(cx).text().to_string())
         })
+    })
 }
 
 /// Runs `hook` with the path of every buffer saved to disk from now on.
@@ -849,6 +852,38 @@ impl Prototype {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.reload_from_disk_at(id, None, window, cx);
+    }
+
+    /// An agent wrote the file after reading this buffer's unsaved text, so its version
+    /// contains the edits: the buffer follows it, unless something was typed meanwhile (then
+    /// the usual banner asks).
+    pub(super) fn follow_agent_write(
+        &mut self,
+        id: DocumentId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(doc) = self.document(id) else {
+            return;
+        };
+        if doc.dirty && doc.agent_read == Some(doc.version) {
+            self.reload_from_disk_at(id, Some(doc.version), window, cx);
+        } else {
+            let paths = BTreeSet::from([doc.path.clone()]);
+            self.check_disk(Some(&paths), window, cx);
+        }
+    }
+
+    /// `only_at`: reload only if the buffer is still at this version; otherwise the change
+    /// goes through [`Self::check_disk`].
+    fn reload_from_disk_at(
+        &mut self,
+        id: DocumentId,
+        only_at: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(path) = self.document(id).map(|doc| doc.path.clone()) else {
             return;
         };
@@ -860,6 +895,14 @@ impl Prototype {
         cx.spawn_in(window, async move |this, cx| {
             let result = work.await;
             let _ = this.update_in(cx, |this, window, cx| {
+                if let Some(version) = only_at
+                    && let Some(doc) = this.document(id)
+                    && doc.version != version
+                {
+                    let paths = BTreeSet::from([doc.path.clone()]);
+                    this.check_disk(Some(&paths), window, cx);
+                    return;
+                }
                 match result.map(|(state, bytes)| (state, decode(&bytes))) {
                     Ok((state, Some((text, crlf, bom)))) => {
                         this.set_buffer_text(id, &text, window, cx);
@@ -1045,6 +1088,7 @@ impl Document {
             deleted: false,
             unedited_when_deleted: None,
             banner: None,
+            agent_read: None,
             auto_save: Default::default(),
             auto_save_task: None,
             _subscription: subscription,

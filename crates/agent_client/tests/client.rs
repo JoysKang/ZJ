@@ -306,9 +306,61 @@ fn cancel_stops_a_streaming_turn() {
 struct Buffers(PathBuf);
 
 impl BufferProvider for Buffers {
-    fn buffer_text(&self, path: &Path) -> Option<String> {
-        (path == self.0).then(|| "unsaved buffer\n".to_string())
+    fn buffer_text(&self, path: &Path) -> futures::future::BoxFuture<'static, Option<String>> {
+        let text = (path == self.0).then(|| "unsaved buffer\n".to_string());
+        Box::pin(async move { text })
     }
+}
+
+/// An editor that never answers; reports each request on `asked`.
+struct Silent {
+    asked: async_channel::Sender<()>,
+}
+
+impl BufferProvider for Silent {
+    fn buffer_text(&self, _: &Path) -> futures::future::BoxFuture<'static, Option<String>> {
+        let _ = self.asked.try_send(());
+        Box::pin(futures::future::pending())
+    }
+}
+
+#[test]
+fn direct_writes_take_the_unsaved_buffer_as_the_before() {
+    let ws = Workspace::new("buffer-snapshot");
+    let file = ws.path("src/a.rs");
+    let mut opts = options(&ws, &[]);
+    opts.buffers = Some(Arc::new(Buffers(file.clone())));
+    let client = AgentClient::start(opts).unwrap();
+    let events = Events::of(&client);
+    client
+        .prompt(text(&format!("write {} agent", file.display())))
+        .unwrap();
+    events.turn();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "agent");
+    assert_eq!(
+        client.snapshot(&file),
+        Some(Some("unsaved buffer\n".into()))
+    );
+}
+
+#[test]
+fn stopping_does_not_wait_for_a_silent_editor() {
+    let ws = Workspace::new("silent");
+    let (asked, was_asked) = async_channel::bounded(4);
+    let mut opts = options(&ws, &[]);
+    opts.buffers = Some(Arc::new(Silent { asked }));
+    let client = AgentClient::start(opts).unwrap();
+    client
+        .prompt(text(&format!("read {}", ws.path("src/a.rs").display())))
+        .unwrap();
+    was_asked.recv_blocking().unwrap();
+    let started = Instant::now();
+    drop(client);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
 }
 
 #[test]

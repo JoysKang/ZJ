@@ -129,6 +129,9 @@ struct Document {
     unedited_when_deleted: Option<u64>,
     /// The file changed on disk while the buffer had edits.
     banner: Option<documents::Banner>,
+    /// `version` when an agent last read the unsaved text: if nothing was typed since, the
+    /// file the agent writes back replaces the buffer instead of raising the banner.
+    agent_read: Option<u64>,
     auto_save: crate::save::Debounce,
     auto_save_task: Option<Task<()>>,
     _subscription: Subscription,
