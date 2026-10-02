@@ -23,11 +23,10 @@
 | --- | --- | --- |
 | Claude Code | `claude-agent-acp`，或 `npx -y @agentclientprotocol/claude-agent-acp@0.85.0` | `asterisk` |
 | Codex | `codex-acp`，或 `npx -y @agentclientprotocol/codex-acp@2.1.1` | `square-terminal` |
-| Gemini CLI | `gemini --acp`，或 `npx -y @google/gemini-cli@0.62.0 --acp` | `sparkle` |
 | Claude Code · DeepSeek | 同 Claude Code，另加环境变量：`ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`、`ANTHROPIC_AUTH_TOKEN`（设置里填，或取自 `DEEPSEEK_API_KEY`）、`ANTHROPIC_MODEL` 等按 DeepSeek 官方文档设为 `deepseek-v4-pro[1m]` / `deepseek-v4-flash[1m]` | `fish` |
 | 用户自定义 | 设置 JSON 的 `agents` 数组：`id / name / command / args / env`（`"$NAME"` 表示取环境变量）| `bot` |
 
-版本号与 ACP registry（2026-10-01）一致。`-y` 是必须的：标准输入走 JSON-RPC，npx 的安装确认会让进程卡住。不自动安装；找不到 Node.js、命令或 Key 时给出中文提示（例如「启动「Claude Code」需要 Node.js（npx），但没有找到……」）。从 Finder 启动时 PATH 只有系统目录，所以搜索路径补上 Homebrew、nvm、volta、bun、pnpm 等常见位置，子进程的 PATH 以找到的 node 所在目录打头。
+版本号与 ACP registry（2026-10-01）一致。Gemini CLI 的预设已去掉（暂不考虑；`sparkle` 字形和配色保留，以后可以加回）。Claude Code 和 Codex 的适配器在 registry 里都只有 npm 包（TypeScript），没有原生二进制，所以两者都离不开 Node.js；ZJ 不附带 Node，只用本机已有的。本机装了命令（`npm i -g @agentclientprotocol/claude-agent-acp` / `codex-acp`）就直接启动它，省掉 npx 那一层进程，找不到才退回 npx。`-y` 是必须的：标准输入走 JSON-RPC，npx 的安装确认会让进程卡住。不自动安装；找不到 Node.js、命令或 Key 时给出中文提示（例如「启动「Claude Code」需要 Node.js（npx），但没有找到……」）。从 Finder 启动时 PATH 只有系统目录，所以搜索路径补上 Homebrew、nvm、mise（`installs/node/<最新版本>/bin` 和 `shims`，认 `MISE_DATA_DIR`）、volta、bun、pnpm 等常见位置，子进程的 PATH 以找到的 node 所在目录打头。
 
 **进程**：工作区根目录作为 cwd，独立进程组；去掉继承的 `GIT_*`、`ZJ_*`、`CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT` / `CLAUDE_CODE_SSE_PORT`（否则 Claude Code 会拒绝「嵌套启动」）；退出时先关 stdin，再对整组 SIGTERM，1.5 秒后 SIGKILL。stderr 只保留最后 16 KB，崩溃时显示给用户，不写日志。
 
@@ -35,7 +34,7 @@
 
 **客户端能力**：
 
-- `fs/read_text_file`：先取编辑器里未保存的缓冲区（`BufferProvider`），再读磁盘；路径必须在工作区内（规范化后比较，拒绝 `..` 和符号链接逃逸），16 MB 上限。
+- `fs/read_text_file`：先取编辑器里未保存的缓冲区（`BufferProvider`），再读磁盘。`BufferProvider` 是异步的：编辑器在 UI 线程上回答，客户端最多等 5 秒，`AgentClient` 关闭时立即放弃，所以关会话不会因为等编辑器而卡住；路径必须在工作区内（规范化后比较，拒绝 `..` 和符号链接逃逸），16 MB 上限。
 - `fs/write_text_file`：`WriteMode::Direct`（默认）原子写入并发出 `FileWritten`，编辑器据此重载；`WriteMode::AcceptFirst` 写进影子副本（`ShadowStore`），Agent 回读时看到的是自己的版本，用户可以按文件或按块接受 / 拒绝，接受前如果磁盘内容变了就拒绝覆盖。运行中可以切换。
 - `terminal/*`：首版不声明。Agent 用自己的工具执行命令，执行前走权限请求；编辑器不实现终端。
 
@@ -112,7 +111,7 @@
 | ⏎ / ⇧⏎ | 发送 / 换行；输入框为空时 ⏎ 允许一次、Esc 拒绝当前审批 | 输入框 |
 | ⌘Y / ⌘⌫ | 接受 / 拒绝当前这一处修改 | Agent 审阅的 Diff |
 
-**写入与审阅**：默认直接写入；设置里可改成「先审阅再写入」（影子副本）。直接写入时，`AgentClient` 在 Agent 第一次改某个文件前记下原文，面板的「改动文件」卡和编辑区审阅都对比这份快照：逐处接受把那一处并入快照，逐处拒绝在磁盘上还原那一处，整文件拒绝还原原文（Agent 新建的文件会被删除）。先审阅模式对比影子副本，接受才落盘。块按钮放在行号栏里，长行时也看得见。
+**写入与审阅**：默认直接写入；设置里可改成「先审阅再写入」（影子副本）。直接写入时，`AgentClient` 在 Agent 第一次改某个文件前记下原文，面板的「改动文件」卡和编辑区审阅都对比这份快照：逐处接受把那一处并入快照，逐处拒绝在磁盘上还原那一处，整文件拒绝还原原文（Agent 新建的文件会被删除）。先审阅模式对比影子副本，接受才落盘。每一处改动的「拒绝 / 接受」放在这一处第一行的右上角，固定在可见区域的右边缘：长行横向滚动时只有内容移动，按钮不动。
 
 **审批**：ZJ 从不自动批准写入或命令。「始终允许 `<前缀>`」按工作区写进设置（`agent.allow`），只覆盖命令执行，且命令里带 `&&`、`;`、`|`、`$(`、反引号、重定向时仍会询问；设置页可以删掉规则。Claude Code 以 `default`（询问）模式启动，`bypassPermissions` 不出现在模式列表里，也不会被请求（会话 `_meta` + 模式过滤，假 Agent 测试覆盖）。
 
@@ -124,4 +123,6 @@
 
 **体积**（Linux x86_64 dist，strip 后）：第 6 批 49,185,392 字节；agent-ui 接在第 6 批上 52,496,744（+3,311,352，ACP + SQLite + 面板）；接在第 7 批上 52,795,496 字节，超过原来的 52 MB 预算。CI 预算提高到 56,000,000 字节，CLAUDE.md 的上限同步改为 56 MB；macOS aarch64 上需要实测确认。
 
-**已知差距**：编辑器缓冲区还不能保存，所以 `BufferProvider` 没有接上，Agent 读的是磁盘；Agent 改动后，未修改的已打开文件会重新载入，有未保存修改的会提示而不覆盖。没有终端工具卡（客户端不声明 `terminal`）。中文标点后紧跟行内代码时，GPUI 的换行可能把标点放到行首。
+**未保存的缓冲区**（第 8 批 a 有了保存之后接上）：Agent 读文件时拿到的是编辑器里未保存的内容；直接写入模式记的「改动前」也取这份内容，审阅里不会把你自己的修改算成 Agent 的。Agent 写回后，没有修改的已打开文件静默跟随；有未保存修改的，如果 Agent 读过之后你没再输入，说明它的版本已经包含你的修改，编辑器直接换成它的版本（磁盘与缓冲区一致，变为已保存）；读过之后又输入过，就显示「磁盘上的文件已更改」横幅（重新加载 / 比较 / 保留我的），不覆盖。Agent 用自己的命令（`cat`、`sed -i`）读写时看到的仍是磁盘。
+
+**已知差距**：没有终端工具卡（客户端不声明 `terminal`）。中文标点后紧跟行内代码时，GPUI 的换行可能把标点放到行首。
