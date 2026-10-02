@@ -1,8 +1,10 @@
 //! Built-in agent presets, user-defined agents and launch resolution.
 //!
-//! Every agent speaks ACP over stdio. Presets prefer a natively installed binary and fall back
-//! to `npx -y <package>` (pinned to the versions in the ACP registry, 2026-10-01). Nothing is
-//! installed automatically; a missing Node.js or binary is reported with an install hint.
+//! Every agent speaks ACP over stdio. Presets prefer a command already installed on this
+//! machine and fall back to `npx -y <package>` (pinned to the versions in the ACP registry,
+//! 2026-10-01). The Claude Code and Codex adapters are only published as npm packages, so both
+//! need Node.js either way. Nothing is installed automatically; a missing Node.js or command is
+//! reported with an install hint.
 
 use serde::Deserialize;
 use std::{
@@ -111,13 +113,12 @@ fn claude_modes() -> ModePolicy {
 
 pub const CLAUDE_ACP_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@0.85.0";
 pub const CODEX_ACP_PACKAGE: &str = "@agentclientprotocol/codex-acp@2.1.1";
-pub const GEMINI_PACKAGE: &str = "@google/gemini-cli@0.62.0";
 
 fn s(v: &str) -> String {
     v.to_string()
 }
 
-/// Claude Code, Codex, Gemini CLI and "Claude Code · DeepSeek".
+/// Claude Code, Codex and "Claude Code · DeepSeek".
 pub fn builtin_presets() -> Vec<AgentPreset> {
     let claude_launch = vec![
         Launch::Binary {
@@ -139,7 +140,7 @@ pub fn builtin_presets() -> Vec<AgentPreset> {
             launch: claude_launch.clone(),
             env: vec![],
             install_hint: s(
-                "安装 Node.js 18 或更新版本（例如 brew install node），然后在终端运行一次 claude 完成登录",
+                "适配器只有 npm 包，需要 Node.js 18 或更新版本。建议运行 npm i -g @agentclientprotocol/claude-agent-acp 装成本机命令（之后不再经过 npx），并在终端运行一次 claude 完成登录",
             ),
             modes: claude_modes(),
             session_meta: claude_meta(),
@@ -161,30 +162,9 @@ pub fn builtin_presets() -> Vec<AgentPreset> {
             // codex-acp otherwise starts in "agent" (auto review).
             env: vec![(s("INITIAL_AGENT_MODE"), EnvValue::Literal(s("read-only")))],
             install_hint: s(
-                "安装 Node.js 18 或更新版本（例如 brew install node），然后在终端运行 codex login",
+                "适配器只有 npm 包，需要 Node.js 18 或更新版本。建议运行 npm i -g @agentclientprotocol/codex-acp 装成本机命令（之后不再经过 npx），并在终端运行 codex login",
             ),
             modes: ModePolicy::new("read-only", &["agent-full-access"]),
-            session_meta: None,
-        },
-        AgentPreset {
-            id: s("gemini"),
-            display_name: s("Gemini CLI"),
-            glyph: Glyph::Gemini,
-            launch: vec![
-                Launch::Binary {
-                    program: s("gemini"),
-                    args: vec![s("--acp")],
-                },
-                Launch::Npx {
-                    package: s(GEMINI_PACKAGE),
-                    args: vec![s("--acp")],
-                },
-            ],
-            env: vec![],
-            install_hint: s(
-                "安装 Node.js 20 或更新版本，然后运行 npm install -g @google/gemini-cli 并登录",
-            ),
-            modes: ModePolicy::new("default", &["yolo"]),
             session_meta: None,
         },
         AgentPreset {
@@ -220,7 +200,7 @@ pub fn builtin_presets() -> Vec<AgentPreset> {
                 ),
             ],
             install_hint: s(
-                "安装 Node.js 18 或更新版本，并在设置或环境变量 DEEPSEEK_API_KEY 里提供 DeepSeek API Key",
+                "适配器只有 npm 包，需要 Node.js 18 或更新版本（建议 npm i -g @agentclientprotocol/claude-agent-acp），并在设置或环境变量 DEEPSEEK_API_KEY 里提供 DeepSeek API Key",
             ),
             modes: claude_modes(),
             session_meta: claude_meta(),
@@ -332,7 +312,8 @@ impl fmt::Display for LaunchError {
 impl std::error::Error for LaunchError {}
 
 /// Directories searched for agent binaries. A desktop launch on macOS inherits only
-/// `/usr/bin:/bin:/usr/sbin:/sbin`, so the usual Node / Homebrew locations are added.
+/// `/usr/bin:/bin:/usr/sbin:/sbin`, so the usual Node / Homebrew / version-manager locations
+/// are added.
 #[derive(Clone, Debug)]
 pub struct SearchPath {
     dirs: Vec<PathBuf>,
@@ -360,9 +341,19 @@ impl SearchPath {
             ] {
                 extra.push(home.join(rel));
             }
-            if let Some(nvm) = newest_nvm_bin(&home.join(".nvm/versions/node")) {
+            if let Some(nvm) = newest_version_bin(&home.join(".nvm/versions/node")) {
                 extra.push(nvm);
             }
+        }
+        // mise: the install itself first (`npm i -g` puts the adapters there), then its shims.
+        let mise = env::var_os("MISE_DATA_DIR")
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|h| h.join(".local/share/mise")));
+        if let Some(mise) = mise {
+            if let Some(node) = newest_version_bin(&mise.join("installs/node")) {
+                extra.push(node);
+            }
+            extra.push(mise.join("shims"));
         }
         dirs.extend(extra);
         Self::new(dirs)
@@ -412,10 +403,12 @@ fn is_executable(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// `~/.nvm/versions/node/vX.Y.Z/bin` with the highest version.
-fn newest_nvm_bin(root: &Path) -> Option<PathBuf> {
+/// `<root>/X.Y.Z/bin` with the highest version (nvm names them `vX.Y.Z`); aliases such as
+/// `latest` are skipped.
+fn newest_version_bin(root: &Path) -> Option<PathBuf> {
     let parse = |name: &str| -> Option<Vec<u64>> {
-        name.strip_prefix('v')?
+        name.strip_prefix('v')
+            .unwrap_or(name)
             .split('.')
             .map(|p| p.parse().ok())
             .collect()
@@ -552,6 +545,19 @@ mod tests {
         );
         let native = fake_bin(&root.join("native"), "claude-agent-acp");
         assert_eq!(claude.resolve(&search, &none).unwrap().program, native);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn newest_version_manager_install_is_found() {
+        let root = temp("versions");
+        for name in ["v18.20.1", "v22.3.0", "22.10.0", "9.0.0", "latest"] {
+            std::fs::create_dir_all(root.join(name).join("bin")).unwrap();
+        }
+        assert_eq!(
+            newest_version_bin(&root),
+            Some(root.join("22.10.0").join("bin"))
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
