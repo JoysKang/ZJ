@@ -366,6 +366,12 @@ impl Prototype {
                     return Vec::new();
                 };
                 let colors = paint.colors;
+                // Rows are laid out after the list settles its scroll offset and bounds, so
+                // these are this frame's values.
+                let viewport = agent_actions.then(|| {
+                    let handle = &this.diff_scroll.0.borrow().base_handle;
+                    (handle.offset().x, handle.bounds().size.width)
+                });
                 range
                     .filter_map(|index| {
                         let selected = this.diff_selection.is_some_and(|s| s.contains(kind, index));
@@ -450,7 +456,7 @@ impl Prototype {
                                             i,
                                             block.start,
                                             current_change == Some(i),
-                                            kind == DiffList::Inline,
+                                            viewport.unwrap_or_default(),
                                             colors,
                                             cx,
                                         ))

@@ -434,15 +434,15 @@ impl Prototype {
     }
 }
 
-/// 接受 / 拒绝 over the line-number gutter of a change block's first row (the gutter is the
-/// one place that stays in view however long the lines are). Labeled when the inline layout
-/// leaves room for two gutters.
+/// 接受 / 拒绝 at the top right of a change block, on its first row. `viewport` is the list's
+/// horizontal scroll offset and visible width: the buttons stay at the right edge of what is
+/// visible while long lines scroll underneath.
 pub(super) fn agent_block_actions(
     list: &'static str,
     index: usize,
     block_start: usize,
     current: bool,
-    inline: bool,
+    viewport: (Pixels, Pixels),
     colors: theme::Colors,
     cx: &mut Context<Prototype>,
 ) -> AnyElement {
@@ -466,7 +466,7 @@ pub(super) fn agent_block_actions(
         } else {
             IconName::Undo2
         })
-        .when(inline, |b| b.label(label))
+        .label(label)
         .tooltip(if accept {
             "接受这一处修改（当前处：⌘Y）"
         } else {
@@ -478,20 +478,35 @@ pub(super) fn agent_block_actions(
             this.agent_review_hunk(index, accept, window, cx);
         }))
     };
-    let gutters = if inline { 2. } else { 1. };
+    let (scroll_x, width) = viewport;
     h_flex()
         .absolute()
-        .left_0()
         .top_0()
         .h_full()
-        .w(theme::DIFF_GUTTER * gutters + theme::DIFF_INDICATOR)
-        .gap_1()
-        .px_1()
-        .items_center()
-        .justify_center()
-        .bg(colors.panel)
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(button(true))
-        .child(button(false))
+        .map(|strip| {
+            // Before the list's first layout the width is unknown; the row then ends at the
+            // visible edge unless a line is wider than the view.
+            if width > Pixels::ZERO {
+                strip.left(-scroll_x).w(width)
+            } else {
+                strip.left_0().right_0()
+            }
+        })
+        .justify_end()
+        .pr(theme::AGENT_HUNK_ACTIONS_INSET)
+        .child(
+            h_flex()
+                .h_full()
+                .gap_1()
+                .px_1()
+                .items_center()
+                .rounded(theme::RADIUS)
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.panel)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(button(false))
+                .child(button(true)),
+        )
         .into_any_element()
 }

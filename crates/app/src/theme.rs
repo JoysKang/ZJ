@@ -157,6 +157,8 @@ pub const AGENT_PLAN_BAR_WIDTH: Pixels = px(160.);
 pub const AGENT_LINE: Pixels = px(22.);
 pub const AGENT_FILTER_CHIP: Pixels = px(22.);
 pub const AGENT_SEARCH_INPUT: Pixels = px(28.);
+/// 接受 / 拒绝 at the top right of a change block: kept clear of the overlay scrollbar.
+pub const AGENT_HUNK_ACTIONS_INSET: Pixels = px(16.);
 /// Two-line session rows in the history list.
 pub const AGENT_HISTORY_ROW: Pixels = px(52.);
 pub const AGENT_HISTORY_ROW_COMPACT: Pixels = px(32.);
