@@ -49,6 +49,10 @@ mod editor_area;
 mod explorer_ops;
 mod find_widget;
 mod graph_view;
+mod markdown_preview;
+#[cfg(test)]
+#[path = "prototype/markdown_ui_tests.rs"]
+mod markdown_ui_tests;
 pub use explorer_ops::{
     CopyFiles, CopyPath, CopyRelativePath, CutFiles, Delete as DeleteFile, NewFile, NewFolder,
     PasteFiles, Rename as RenameFile, RevealInFinder,
@@ -57,6 +61,7 @@ pub use find_widget::{
     FindInFile, FindNext, FindPrevious, FindReplace, ReplaceAll, ReplaceOne, ToggleFindCase,
     ToggleFindInSelection, ToggleFindRegex, ToggleFindWord, TogglePreserveCase,
 };
+pub use markdown_preview::ToggleMarkdownPreview;
 pub mod navigation;
 mod quick_open;
 mod scm;
@@ -154,6 +159,8 @@ struct Document {
     agent_read: Option<u64>,
     auto_save: crate::save::Debounce,
     auto_save_task: Option<Task<()>>,
+    /// Markdown files: the live preview (`None` for other languages).
+    markdown: Option<markdown_preview::MarkdownPreview>,
     _subscription: Subscription,
 }
 
@@ -905,6 +912,9 @@ impl Prototype {
     }
 
     fn focus_active_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus_preview(window, cx) {
+            return;
+        }
         if let Some(editor) = self.active_editor() {
             editor.update(cx, |editor, cx| editor.focus(window, cx));
         } else if self.active == Pane::Diff {
@@ -1139,7 +1149,7 @@ impl Prototype {
                     cx.notify();
                     return;
                 }
-                let (_, language_name) = language_for(&loaded.path);
+                let (language, language_name) = language_for(&loaded.path);
                 let path = loaded.path.clone();
                 let (editor, subscription) =
                     this.document_editor(id, &path, loaded.text, window, cx);
@@ -1151,6 +1161,7 @@ impl Prototype {
                     bom: loaded.bom,
                     disk: Some(loaded.disk),
                     untitled: false,
+                    markdown: markdown_preview::MarkdownPreview::for_language(language, false, cx),
                     ..Document::new(id, path, editor, subscription)
                 });
                 this.owners.borrow_mut().insert(
@@ -1162,6 +1173,7 @@ impl Prototype {
                     },
                 );
                 this.message.clear();
+                this.markdown_refresh(id, cx);
                 this.select_pane(Pane::Document(id), window, cx);
                 this.apply_pending_place(window, cx);
             });
@@ -1860,6 +1872,9 @@ impl Render for Prototype {
             }))
             .on_action(cx.listener(|this, _: &KillTerminal, window, cx| {
                 this.kill_terminal(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleMarkdownPreview, window, cx| {
+                this.toggle_markdown_preview(window, cx)
             }))
             .on_action(cx.listener(|this, _: &CloseOtherEditors, window, cx| {
                 this.active_pane_action(Prototype::close_other_panes, window, cx)

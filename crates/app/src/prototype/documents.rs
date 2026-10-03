@@ -156,7 +156,7 @@ impl Prototype {
         self.documents.iter().find(|doc| doc.id == id)
     }
 
-    fn document_mut(&mut self, id: DocumentId) -> Option<&mut Document> {
+    pub(super) fn document_mut(&mut self, id: DocumentId) -> Option<&mut Document> {
         self.documents.iter_mut().find(|doc| doc.id == id)
     }
 
@@ -267,6 +267,7 @@ impl Prototype {
             move |this: &mut Self, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.document_changed(id, window, cx);
+                    this.markdown_buffer_changed(id, cx);
                     if this.active == Pane::Document(id) {
                         this.find_update(false, cx);
                     }
@@ -600,6 +601,7 @@ impl Prototype {
                         doc.editor
                             .update(cx, |state, cx| state.set_highlighter(language, cx));
                     }
+                    this.markdown_path_changed(id, language, cx);
                     if let Some(owner) = this.owners.borrow_mut().get_mut(&id) {
                         owner.path = path.clone();
                     }
@@ -1092,6 +1094,7 @@ impl Document {
             agent_read: None,
             auto_save: Default::default(),
             auto_save_task: None,
+            markdown: None,
             _subscription: subscription,
         }
     }

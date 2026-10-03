@@ -9132,6 +9132,7 @@ dependencies = [
  "gpui-kit",
  "libc",
  "lsp-types",
+ "markdown",
  "notify",
  "objc2 0.6.4",
  "regex",

@@ -484,8 +484,11 @@ impl Prototype {
     ) {
         if let Some(doc) = self.documents.iter().find(|doc| doc.path == path) {
             let (id, editor) = (doc.id, doc.editor.clone());
+            let switched = self.markdown_show_source(id, window, cx);
             if self.active != Pane::Document(id) {
                 self.select_pane(Pane::Document(id), window, cx);
+            } else if switched {
+                self.focus_active_editor(window, cx);
             }
             place.apply(&editor, window, cx);
             return;
@@ -500,7 +503,11 @@ impl Prototype {
             return;
         };
         if let Some(doc) = self.documents.iter().find(|doc| doc.path == path) {
-            place.apply(&doc.editor.clone(), window, cx);
+            let (id, editor) = (doc.id, doc.editor.clone());
+            if self.markdown_show_source(id, window, cx) {
+                self.focus_active_editor(window, cx);
+            }
+            place.apply(&editor, window, cx);
         }
     }
 

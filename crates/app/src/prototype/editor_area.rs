@@ -268,6 +268,7 @@ impl Prototype {
             .flex_shrink_0()
             .bg(colors.tabs)
             .child(strip)
+            .children(self.render_markdown_toggle(cx))
             .when(
                 self.active == Pane::Diff && !self.diff_is_agent_review(),
                 |bar| bar.child(self.render_diff_actions(cx)),
@@ -452,6 +453,9 @@ impl Prototype {
             Pane::Diff => self.render_diff(cx),
             Pane::Graph => self.render_graph(cx),
             Pane::Document(id) => match self.documents.iter().find(|doc| doc.id == id) {
+                Some(doc) if doc.markdown.as_ref().is_some_and(|md| !md.source) => {
+                    self.render_markdown_preview(id, cx)
+                }
                 Some(doc) => Editor::new(&doc.editor)
                     .bordered(false)
                     .size_full()

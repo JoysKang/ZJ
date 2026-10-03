@@ -8,6 +8,7 @@ mod files;
 mod fuzzy;
 mod languages;
 mod markdown;
+mod markdown_blocks;
 mod partial_patch;
 mod platform;
 mod prototype;
@@ -220,6 +221,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 Some("WorkspaceEditor"),
             ),
             KeyBinding::new("cmd-\\", prototype::SplitTerminal, Some("Terminal")),
+            // VS Code's Markdown: Open Preview, here a toggle in place.
+            KeyBinding::new(
+                "shift-cmd-v",
+                prototype::ToggleMarkdownPreview,
+                Some("WorkspaceEditor"),
+            ),
             KeyBinding::new("secondary-q", prototype::Quit, None),
             KeyBinding::new("cmd-o", prototype::OpenFile, Some("WorkspaceEditor")),
             // VS Code: ⌘⇧O is go to symbol; open folder moves to ⌘K ⌘O.

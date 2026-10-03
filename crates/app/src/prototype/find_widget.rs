@@ -145,6 +145,9 @@ impl Prototype {
     /// ⌘F (`replace` false) / ⌥⌘F: open the widget, seeded with the selection if it is one
     /// line, and focus the find input.
     pub(super) fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Pane::Document(id) = self.active {
+            let _ = self.markdown_show_source(id, window, cx);
+        }
         let Some((_, editor, readonly)) = self.find_document() else {
             return;
         };

@@ -132,6 +132,18 @@ pub const TERMINAL_PAD_Y: Pixels = px(4.);
 /// The cursor's width as a bar and its height as an underline.
 pub const TERMINAL_CURSOR_BAR: Pixels = px(2.);
 
+/// The Markdown preview: VS Code's preview column (`max-width: 882px`, 26 px side padding),
+/// the space around each block, the clickable room after the last block, and how far the
+/// list lays out beyond the viewport.
+pub const MD_MAX_WIDTH: Pixels = px(882.);
+pub const MD_PAD_X: Pixels = px(26.);
+pub const MD_BLOCK_GAP: Pixels = px(6.);
+pub const MD_EDIT_PAD: Pixels = px(4.);
+pub const MD_TAIL: Pixels = px(160.);
+pub const MD_OVERDRAW: Pixels = px(800.);
+/// Rows the block editor grows to before it scrolls.
+pub const MD_EDIT_MAX_ROWS: usize = 400;
+
 /// Terminal row height for an editor font size (VS Code's `lineHeight` 1 is about 1.2× the
 /// font; a little more reads better at 14 px).
 pub fn terminal_line_height(font: Pixels) -> Pixels {
