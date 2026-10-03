@@ -38,6 +38,10 @@ measure it are in [docs/adr/0005-gpu-memory.md](../docs/adr/0005-gpu-memory.md).
   - Headless renderers keep upstream behaviour.
   - The shader library is compiled once per process. GPUI Kit always enables
     `runtime_shaders`, so upstream compiles the Metal source again for every window.
+- `src/metal_atlas.rs`: polychrome atlas textures start at 512² (1 MiB) instead of 1024²
+  (4 MiB). They only ever hold the welcome logo (320 × 300 device pixels) and small file
+  icons; anything bigger still gets a texture of its own size. Monochrome (glyphs and SVG
+  icons) keeps 1024².
 - `src/gpui_apple.rs`: `pub mod zj_low_memory;`.
 - `Cargo.toml`: `[lints.rust] warnings = "allow"`. Path dependencies don't get `--cap-lints`, and
   upstream prints about 1200 deprecation warnings.

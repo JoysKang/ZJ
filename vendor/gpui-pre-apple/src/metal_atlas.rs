@@ -135,7 +135,17 @@ impl MetalAtlasTextures {
             width: DevicePixels(16384),
             height: DevicePixels(16384),
         };
-        let size = min_size.min(&MAX_ATLAS_SIZE).max(&DEFAULT_ATLAS_SIZE);
+        // ZJ patch: polychrome textures only ever hold the welcome logo (320 × 300 device
+        // pixels) and small file icons, so they start at 512² (1 MiB) instead of 1024²
+        // (4 MiB). Anything bigger still gets a texture of its own size via `min_size`.
+        let default_size = match kind {
+            AtlasTextureKind::Polychrome => Size {
+                width: DevicePixels(512),
+                height: DevicePixels(512),
+            },
+            _ => DEFAULT_ATLAS_SIZE,
+        };
+        let size = min_size.min(&MAX_ATLAS_SIZE).max(&default_size);
         let texture_descriptor = metal::TextureDescriptor::new();
         texture_descriptor.set_width(size.width.into());
         texture_descriptor.set_height(size.height.into());
