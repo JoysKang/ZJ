@@ -1,8 +1,9 @@
 //! Git Graph（编辑区页签）：VS Code Git Graph 扩展的核心 —— 提交图带分支车道、引用标签、
 //! 作者、相对时间和短哈希；分支筛选、分页“加载更多”；点提交看详情和改动文件，点文件看
-//! Diff。车道布局是纯函数 `layout`：每条车道记住它期待的下一个哈希，提交落到第一个期待
-//! 它的车道；第一父提交继承车道，其余父提交占用第一条空闲车道。绘制只画本行与相邻行的
-//! 连接，列表虚拟化后任意长的历史都按可见行绘制。
+//! Diff。车道布局是纯函数 `layout`，移植自 Git Graph 的 `web/graph.ts`：沿第一父提交向下
+//! 走成一条分支，每一行取第一条空闲车道，所以车道空出后右边的线会左移；到已放置父提交的
+//! 线一直走到父提交才汇合；颜色在分支结束后复用。每行只画上一行下来的下半段和本行出去的
+//! 上半段，列表虚拟化后任意长的历史都按可见行绘制。
 
 use super::{DiffSource, DiffTab, Pane, Prototype, SINGLE_LINE};
 use crate::theme;
@@ -36,101 +37,213 @@ const FILES_MAX: usize = 500;
 /// One row's lane layout, parallel to `GitGraph::commits`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct GraphRow {
-    /// The commit node's lane and its lane color.
+    /// The commit node's lane and its color.
     lane: usize,
     color: usize,
-    /// (lane, color) verticals crossing the row untouched.
-    pass: Vec<(usize, usize)>,
-    /// A lane was already waiting for this commit: a line comes in from the top.
-    enter: bool,
-    /// The first parent stays on this lane: a line continues below the node.
-    exit: bool,
-    /// (lane, color) of extra parents the node curves down to.
-    links: Vec<(usize, usize)>,
+    /// (from lane, to lane, color) of each line from this row's node height down to the next
+    /// row's; the next row draws their lower halves.
+    down: Vec<(usize, usize, usize)>,
+    /// Rows of the loaded children, for the node tooltip's "包含它的分支".
+    children: Vec<usize>,
 }
 
-fn free_lane(waiting: &mut Vec<Option<(String, usize)>>) -> usize {
-    match waiting.iter().position(Option::is_none) {
-        Some(lane) => lane,
-        None => {
-            waiting.push(None);
-            waiting.len() - 1
+/// A parent outside the loaded commits: its line runs to the bottom of the list.
+const UNLOADED: usize = usize::MAX;
+
+#[derive(Default)]
+struct Vertex {
+    lane: usize,
+    branch: Option<usize>,
+    parents: Vec<usize>,
+    next_parent: usize,
+    /// The first lane still free at this row; `taken[lane]` says which line holds a lane
+    /// below it: (the vertex the line heads for, the line's branch).
+    next_lane: usize,
+    taken: Vec<(Option<usize>, usize)>,
+}
+
+impl Vertex {
+    fn next_parent(&self) -> Option<usize> {
+        self.parents.get(self.next_parent).copied()
+    }
+
+    fn take(&mut self, lane: usize, toward: Option<usize>, branch: usize) {
+        if lane == self.next_lane {
+            self.next_lane += 1;
+            self.taken.push((toward, branch));
         }
+    }
+
+    fn lane_toward(&self, vertex: usize, branch: usize) -> Option<usize> {
+        self.taken
+            .iter()
+            .position(|&taken| taken == (Some(vertex), branch))
     }
 }
 
-/// Assigns lanes to the loaded commits, newest first (`git log --date-order`). Freed lanes are
-/// reused; a lane's color is fixed when the lane is created.
-fn layout(commits: &[GraphCommit]) -> (Vec<GraphRow>, usize) {
-    // The hash each lane waits for next, with the lane's color.
-    let mut waiting: Vec<Option<(String, usize)>> = Vec::new();
-    let mut next_color = 0usize;
-    let mut rows = Vec::with_capacity(commits.len());
-    let mut width = 1usize;
-    for commit in commits {
-        let found = waiting
-            .iter()
-            .position(|slot| slot.as_ref().is_some_and(|(hash, _)| *hash == commit.hash));
-        let (lane, color, enter) = match found {
-            Some(lane) => {
-                let color = waiting[lane].as_ref().map(|(_, color)| *color).unwrap_or(0);
-                waiting[lane] = None;
-                (lane, color, true)
-            }
+/// VS Code Git Graph's layout (`web/graph.ts`): a branch follows first parents down from a
+/// vertex; at every row a line takes the first free lane, so lines shift left as lanes free
+/// up; a line to a parent that is already placed runs down to it. Merge edges into a placed
+/// branch join that branch's line where it passes. A color is reused once its branch ended.
+struct Layout {
+    vertices: Vec<Vertex>,
+    branch_colors: Vec<usize>,
+    /// The row where the last branch of each color ended.
+    color_ends: Vec<usize>,
+    /// (row, from lane, to lane, color).
+    lines: Vec<(usize, usize, usize, usize)>,
+}
+
+impl Layout {
+    fn color(&mut self, start: usize) -> usize {
+        match self.color_ends.iter().position(|&end| start > end) {
+            Some(color) => color,
             None => {
-                let lane = free_lane(&mut waiting);
-                let color = next_color;
-                next_color += 1;
-                (lane, color, false)
-            }
-        };
-        let mut exit = false;
-        let mut links = Vec::new();
-        for (n, parent) in commit.parents.iter().enumerate() {
-            let expected = waiting
-                .iter()
-                .position(|slot| slot.as_ref().is_some_and(|(hash, _)| hash == parent));
-            match (n, expected) {
-                // The first parent inherits the lane, unless another lane already waits for it
-                // (date order listed a sibling first): then this lane ends in a merge edge.
-                (0, None) => {
-                    waiting[lane] = Some((parent.clone(), color));
-                    exit = true;
-                }
-                (_, Some(other)) => {
-                    let color = waiting[other]
-                        .as_ref()
-                        .map(|(_, color)| *color)
-                        .unwrap_or(0);
-                    links.push((other, color));
-                }
-                (_, None) => {
-                    let other = free_lane(&mut waiting);
-                    let color = next_color;
-                    next_color += 1;
-                    waiting[other] = Some((parent.clone(), color));
-                    links.push((other, color));
-                }
+                self.color_ends.push(0);
+                self.color_ends.len() - 1
             }
         }
-        let pass = waiting
+    }
+
+    fn path(&mut self, start: usize) {
+        let rows = self.vertices.len();
+        let mut parent = self.vertices[start].next_parent();
+        let mut last = match self.vertices[start].branch {
+            Some(_) => self.vertices[start].lane,
+            None => self.vertices[start].next_lane,
+        };
+        let merge_into = parent.filter(|&p| {
+            p != UNLOADED
+                && self.vertices[start].parents.len() > 1
+                && self.vertices[start].branch.is_some()
+                && self.vertices[p].branch.is_some()
+        });
+        if let Some(target) = merge_into {
+            let branch = self.vertices[target].branch.unwrap_or(0);
+            let color = self.branch_colors[branch];
+            for row in start + 1..rows {
+                let joined = self.vertices[row].lane_toward(target, branch);
+                let lane = joined.unwrap_or(self.vertices[row].next_lane);
+                self.lines.push((row - 1, last, lane, color));
+                self.vertices[row].take(lane, Some(target), branch);
+                last = lane;
+                if joined.is_some() {
+                    break;
+                }
+            }
+            self.vertices[start].next_parent += 1;
+            return;
+        }
+        let color = self.color(start);
+        let branch = self.branch_colors.len();
+        self.branch_colors.push(color);
+        let vertex = &mut self.vertices[start];
+        if vertex.branch.is_none() {
+            vertex.branch = Some(branch);
+            vertex.lane = last;
+        }
+        vertex.take(last, Some(start), branch);
+        let mut current = start;
+        let mut row = start + 1;
+        // A root commit has no line below it.
+        if parent.is_some() {
+            while row < rows {
+                let reached = Some(row) == parent;
+                let placed = self.vertices[row].branch.is_some();
+                let lane = if reached && placed {
+                    self.vertices[row].lane
+                } else {
+                    self.vertices[row].next_lane
+                };
+                self.lines.push((row - 1, last, lane, color));
+                self.vertices[row].take(lane, parent, branch);
+                last = lane;
+                if reached {
+                    self.vertices[current].next_parent += 1;
+                    let vertex = &mut self.vertices[row];
+                    if vertex.branch.is_none() {
+                        vertex.branch = Some(branch);
+                        vertex.lane = lane;
+                    }
+                    current = row;
+                    parent = self.vertices[row].next_parent();
+                    if parent.is_none() || placed {
+                        break;
+                    }
+                }
+                row += 1;
+            }
+        }
+        if row >= rows && parent.is_some() {
+            // The parent is not loaded: the line has run to the last row.
+            self.vertices[current].next_parent += 1;
+        }
+        self.color_ends[color] = row;
+    }
+}
+
+/// Assigns lanes to the loaded commits, newest first (`git log --date-order`, so parents come
+/// after their children). Returns the rows and the widest row's lane count.
+fn layout(commits: &[GraphCommit]) -> (Vec<GraphRow>, usize) {
+    let index: std::collections::HashMap<&str, usize> = commits
+        .iter()
+        .enumerate()
+        .map(|(row, commit)| (commit.hash.as_str(), row))
+        .collect();
+    let mut children = vec![Vec::new(); commits.len()];
+    let mut vertices: Vec<Vertex> = Vec::with_capacity(commits.len());
+    for (row, commit) in commits.iter().enumerate() {
+        let parents = commit
+            .parents
             .iter()
-            .enumerate()
-            .filter(|(other, slot)| {
-                *other != lane && slot.is_some() && !links.iter().any(|(target, _)| target == other)
+            .map(|parent| match index.get(parent.as_str()) {
+                Some(&parent) => {
+                    children[parent].push(row);
+                    parent
+                }
+                None => UNLOADED,
             })
-            .map(|(other, slot)| (other, slot.as_ref().map(|(_, color)| *color).unwrap_or(0)))
             .collect();
-        width = width.max(waiting.len()).max(lane + 1);
-        rows.push(GraphRow {
-            lane,
-            color,
-            pass,
-            enter,
-            exit,
-            links,
+        vertices.push(Vertex {
+            parents,
+            ..Vertex::default()
         });
     }
+    let mut layout = Layout {
+        vertices,
+        branch_colors: Vec::new(),
+        color_ends: Vec::new(),
+        lines: Vec::new(),
+    };
+    let mut row = 0;
+    while row < commits.len() {
+        let vertex = &layout.vertices[row];
+        if vertex.next_parent < vertex.parents.len() || vertex.branch.is_none() {
+            layout.path(row);
+        } else {
+            row += 1;
+        }
+    }
+    let mut rows: Vec<GraphRow> = layout
+        .vertices
+        .iter()
+        .zip(children)
+        .map(|(vertex, children)| GraphRow {
+            lane: vertex.lane,
+            color: layout.branch_colors[vertex.branch.unwrap_or(0)],
+            down: Vec::new(),
+            children,
+        })
+        .collect();
+    for (row, from, to, color) in layout.lines {
+        rows[row].down.push((from, to, color));
+    }
+    let width = layout
+        .vertices
+        .iter()
+        .map(|vertex| vertex.next_lane.max(vertex.lane + 1))
+        .max()
+        .unwrap_or(1);
     (rows, width)
 }
 
@@ -192,7 +305,8 @@ impl GitGraph {
 }
 
 impl Prototype {
-    /// The SCM repository header's graph button: one graph tab per window, focused if open.
+    /// The status bar's Git 图 item and the repository ··· menu: one graph tab per window,
+    /// focused if open.
     pub(super) fn open_git_graph(&mut self, g: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(group) = self.groups.get(g) else {
             return;
@@ -541,7 +655,6 @@ impl Prototype {
             return self.graph_status_row(graph, colors, cx);
         }
         let commit = &graph.commits[index];
-        let row = &graph.rows[index];
         let selected = graph.selected == Some(index);
         let subject = commit.subject.replace(SINGLE_LINE, "⏎");
         let short: String = commit.hash.chars().take(7).collect();
@@ -550,10 +663,6 @@ impl Prototype {
             .map_or(0, |d| d.as_millis() as i64);
         let ms = commit.time.saturating_mul(1000);
         let time = crate::agent_model::relative_time(ms, now, crate::agent_model::local_offset(ms));
-        let tooltip = format!(
-            "{}\n{} · {} · {}",
-            commit.subject, commit.author, commit.hash, time
-        );
         h_flex()
             .id(("graph-row", index))
             .w_full()
@@ -564,18 +673,14 @@ impl Prototype {
             .text_size(theme::TEXT_CAPTION)
             .when(selected, |row| row.bg(colors.selected))
             .when(!selected, |row| row.hover(|row| row.bg(colors.hover)))
-            .child(self.graph_lanes(
-                row,
-                commit.refs.iter().any(|reference| reference.head),
-                graph.lanes,
-                colors,
-            ))
-            .children(
+            .child(self.graph_lanes(index, graph, colors, cx))
+            .children({
+                let lane = colors.graph_lanes[graph.rows[index].color % colors.graph_lanes.len()];
                 commit
                     .refs
                     .iter()
-                    .map(|reference| ref_chip(reference, colors)),
-            )
+                    .map(move |reference| ref_chip(reference, lane, colors))
+            })
             .child(
                 div()
                     .flex_1()
@@ -605,9 +710,6 @@ impl Prototype {
                     .text_color(colors.muted)
                     .child(time),
             )
-            .tooltip(move |window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
-            })
             .on_click(cx.listener(move |this, _, window, cx| this.graph_select(index, window, cx)))
             .context_menu({
                 let weak = cx.weak_entity();
@@ -742,19 +844,30 @@ impl Prototype {
             .into_any_element()
     }
 
-    /// The lane painting of one row: verticals through it, the node's connections, the node.
-    /// HEAD's commit gets a ring around its node, as in VS Code Git Graph.
+    /// The lane painting of one row: the lower halves of the lines coming from the row above,
+    /// the upper halves of the lines leaving this row, then the node. A lane change is Git
+    /// Graph's S curve (a cubic from one row's node height to the next), split at the row
+    /// boundary. HEAD's node is hollow, as in VS Code Git Graph; hovering the node tells which
+    /// branches and tags contain the commit.
     fn graph_lanes(
         &self,
-        row: &GraphRow,
-        head: bool,
-        lanes: usize,
+        index: usize,
+        graph: &GitGraph,
         colors: theme::Colors,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
-        let row = row.clone();
+        let row = graph.rows[index].clone();
+        let up = index
+            .checked_sub(1)
+            .and_then(|above| graph.rows.get(above))
+            .map(|above| above.down.clone())
+            .unwrap_or_default();
+        let head = graph.commits[index].refs.iter().any(is_head);
+        let lane = row.lane;
+        let weak = cx.weak_entity();
         let lanes_canvas = canvas(
-            move |_, _, _| row,
-            move |frame, row, window, _| {
+            move |_, _, _| (row, up),
+            move |frame, (row, up), window, _| {
                 let height = frame.size.height;
                 let lane_x = |lane: usize| {
                     frame.origin.x + theme::GRAPH_LANE * lane as f32 + theme::GRAPH_LANE / 2.
@@ -762,29 +875,36 @@ impl Prototype {
                 let top = frame.origin.y;
                 let middle = top + height / 2.;
                 let bottom = top + height;
+                let bend = height * 0.8;
                 let mut lines: Vec<(usize, PathBuilder)> = Vec::new();
-                for (lane, color) in &row.pass {
-                    let x = lane_x(*lane);
+                for (from, to, color) in &up {
+                    let (x1, x2) = (lane_x(*from), lane_x(*to));
                     let builder = graph_line(&mut lines, *color);
-                    builder.move_to(point(x, top));
-                    builder.line_to(point(x, bottom));
+                    builder.move_to(point((x1 + x2) / 2., top));
+                    if from == to {
+                        builder.line_to(point(x2, middle));
+                    } else {
+                        let y1 = middle - height;
+                        builder.cubic_bezier_to(
+                            point(x2, middle),
+                            point((x1 + x2 * 3.) / 4., y1 + (height * 3. - bend) / 4.),
+                            point(x2, middle - bend / 2.),
+                        );
+                    }
                 }
-                let node_x = lane_x(row.lane);
-                if row.enter {
-                    let builder = graph_line(&mut lines, row.color);
-                    builder.move_to(point(node_x, top));
-                    builder.line_to(point(node_x, middle));
-                }
-                if row.exit {
-                    let builder = graph_line(&mut lines, row.color);
-                    builder.move_to(point(node_x, middle));
-                    builder.line_to(point(node_x, bottom));
-                }
-                for (target, color) in &row.links {
-                    let to = point(lane_x(*target), bottom);
+                for (from, to, color) in &row.down {
+                    let (x1, x2) = (lane_x(*from), lane_x(*to));
                     let builder = graph_line(&mut lines, *color);
-                    builder.move_to(point(node_x, middle));
-                    builder.curve_to(to, point(to.x, middle));
+                    builder.move_to(point(x1, middle));
+                    if from == to {
+                        builder.line_to(point(x1, bottom));
+                    } else {
+                        builder.cubic_bezier_to(
+                            point((x1 + x2) / 2., bottom),
+                            point(x1, middle + bend / 2.),
+                            point((x1 * 3. + x2) / 4., middle + (bend + height) / 4.),
+                        );
+                    }
                 }
                 for (color, builder) in lines {
                     if let Ok(path) = builder.build() {
@@ -793,46 +913,57 @@ impl Prototype {
                     }
                 }
                 let radius = theme::GRAPH_NODE / 2.;
+                let node_x = lane_x(row.lane);
                 let lane_color = colors.graph_lanes[row.color % colors.graph_lanes.len()];
                 if head {
-                    // A ring: lane-colored disc, background gap, then the node.
-                    let ring = radius + theme::GRAPH_STROKE * 2.;
+                    // A stroked circle, so the row's hover / selection shows through it.
+                    let ring = radius - theme::GRAPH_STROKE / 2.;
+                    let mut circle = PathBuilder::stroke(theme::GRAPH_STROKE);
+                    circle.move_to(point(node_x - ring, middle));
+                    let radii = point(ring, ring);
+                    circle.arc_to(radii, px(0.), false, true, point(node_x + ring, middle));
+                    circle.arc_to(radii, px(0.), false, true, point(node_x - ring, middle));
+                    if let Ok(path) = circle.build() {
+                        window.paint_path(path, lane_color);
+                    }
+                } else {
                     window.paint_quad(
                         fill(
                             bounds(
-                                point(node_x - ring, middle - ring),
-                                size(ring * 2., ring * 2.),
+                                point(node_x - radius, middle - radius),
+                                size(theme::GRAPH_NODE, theme::GRAPH_NODE),
                             ),
                             lane_color,
                         )
-                        .corner_radii(Corners::all(ring)),
-                    );
-                    let gap = radius + theme::GRAPH_STROKE;
-                    window.paint_quad(
-                        fill(
-                            bounds(point(node_x - gap, middle - gap), size(gap * 2., gap * 2.)),
-                            colors.editor,
-                        )
-                        .corner_radii(Corners::all(gap)),
+                        .corner_radii(Corners::all(radius)),
                     );
                 }
-                window.paint_quad(
-                    fill(
-                        bounds(
-                            point(node_x - radius, middle - radius),
-                            size(theme::GRAPH_NODE, theme::GRAPH_NODE),
-                        ),
-                        lane_color,
-                    )
-                    .corner_radii(Corners::all(radius)),
-                );
             },
         );
         div()
-            .w(theme::GRAPH_LANE * lanes.max(1) as f32)
+            .relative()
+            .w(theme::GRAPH_LANE * graph.lanes.max(1) as f32)
             .flex_shrink_0()
             .h_full()
             .child(lanes_canvas.size_full())
+            .child(
+                div()
+                    .id(("graph-node", index))
+                    .absolute()
+                    .top_0()
+                    .left(theme::GRAPH_LANE * lane as f32)
+                    .w(theme::GRAPH_LANE)
+                    .h_full()
+                    .tooltip(move |window, cx| {
+                        let text = weak
+                            .upgrade()
+                            .and_then(|this| {
+                                this.read(cx).graph.as_ref().map(|g| node_tooltip(g, index))
+                            })
+                            .unwrap_or_default();
+                        gpui_kit::component::tooltip::Tooltip::new(text).build(window, cx)
+                    }),
+            )
             .into_any_element()
     }
 
@@ -1184,8 +1315,73 @@ fn graph_line(lines: &mut Vec<(usize, PathBuilder)>, color: usize) -> &mut PathB
     &mut lines[index].1
 }
 
-/// A branch / remote / tag / HEAD chip in front of the subject, as in VS Code Git Graph.
-fn ref_chip(reference: &GraphRef, colors: theme::Colors) -> AnyElement {
+fn is_head(reference: &GraphRef) -> bool {
+    reference.head || reference.kind == RefKind::Head
+}
+
+/// Git Graph's node tooltip: whether HEAD contains the commit, and the loaded branches and
+/// tags that do (the refs on the commit and on its loaded descendants).
+fn node_tooltip(graph: &GitGraph, index: usize) -> String {
+    let Some(commit) = graph.commits.get(index) else {
+        return String::new();
+    };
+    let mut seen = vec![false; graph.commits.len()];
+    let mut stack = vec![index];
+    let (mut head, mut branches, mut tags) = (false, Vec::new(), Vec::new());
+    while let Some(row) = stack.pop() {
+        if !std::mem::replace(&mut seen[row], true) {
+            stack.extend(graph.rows.get(row).map_or(&[][..], |row| &row.children));
+        }
+    }
+    // Top to bottom, as the refs appear in the graph.
+    for row in (0..seen.len()).filter(|&row| seen[row]) {
+        for reference in &graph.commits[row].refs {
+            head |= is_head(reference);
+            match reference.kind {
+                RefKind::Branch | RefKind::Remote => branches.push(reference.name.as_str()),
+                RefKind::Tag => tags.push(reference.name.as_str()),
+                RefKind::Head => {}
+            }
+        }
+    }
+    let short: String = commit.hash.chars().take(7).collect();
+    let mut lines = vec![format!("提交 {short}")];
+    if graph
+        .commits
+        .iter()
+        .any(|commit| commit.refs.iter().any(is_head))
+    {
+        lines.push(
+            if head {
+                "包含在 HEAD 中"
+            } else {
+                "不在 HEAD 中"
+            }
+            .to_string(),
+        );
+    }
+    for (label, names) in [("分支", branches), ("标签", tags)] {
+        if !names.is_empty() {
+            lines.push(format!("{label}：{}", limited(&names)));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Git Graph keeps the first and last five of a long ref list.
+fn limited(names: &[&str]) -> String {
+    if names.len() <= 10 {
+        return names.join("、");
+    }
+    let mut kept = names[..5].to_vec();
+    kept.push("…");
+    kept.extend_from_slice(&names[names.len() - 5..]);
+    kept.join("、")
+}
+
+/// A branch / remote / tag / HEAD chip in front of the subject, outlined in the commit's lane
+/// color as in VS Code Git Graph; the checked-out branch is filled with the accent.
+fn ref_chip(reference: &GraphRef, lane: Hsla, colors: theme::Colors) -> AnyElement {
     let (icon, label) = match reference.kind {
         RefKind::Head => (None, "HEAD".to_string()),
         RefKind::Branch => (Some(IconName::GitBranch), reference.name.clone()),
@@ -1200,6 +1396,8 @@ fn ref_chip(reference: &GraphRef, colors: theme::Colors) -> AnyElement {
         .gap_0p5()
         .items_center()
         .rounded(theme::RADIUS)
+        .border_1()
+        .border_color(lane)
         .text_size(theme::TEXT_BADGE)
         .map(|chip| {
             if reference.head {
@@ -1208,7 +1406,11 @@ fn ref_chip(reference: &GraphRef, colors: theme::Colors) -> AnyElement {
                 chip.bg(colors.keycap).text_color(colors.foreground)
             }
         })
-        .children(icon.map(|icon| Icon::new(icon).size(theme::AGENT_GLYPH_ICON)))
+        .children(icon.map(|icon| {
+            Icon::new(icon)
+                .size(theme::AGENT_GLYPH_ICON)
+                .when(!reference.head, |icon| icon.text_color(lane))
+        }))
         .child(label)
         .into_any_element()
 }
@@ -1232,20 +1434,31 @@ mod tests {
         }
     }
 
+    /// (lane, [(from, to)] of the lines down) per row, colors left out.
+    fn shape(rows: &[GraphRow]) -> Vec<(usize, Vec<(usize, usize)>)> {
+        rows.iter()
+            .map(|row| {
+                let down = row.down.iter().map(|&(from, to, _)| (from, to)).collect();
+                (row.lane, down)
+            })
+            .collect()
+    }
+
     #[test]
     fn linear_history_stays_on_one_lane() {
         let (rows, lanes) = layout(&[commit("c", &["b"]), commit("b", &["a"]), commit("a", &[])]);
         assert_eq!(lanes, 1);
-        assert!(rows.iter().all(|row| row.lane == 0));
-        assert!(!rows[0].enter && rows[0].exit);
-        assert!(rows[1].enter && rows[1].exit);
-        assert!(rows[2].enter && !rows[2].exit);
-        assert!(rows.iter().all(|row| row.links.is_empty()));
+        assert_eq!(
+            shape(&rows),
+            [(0, vec![(0, 0)]), (0, vec![(0, 0)]), (0, vec![])]
+        );
+        assert_eq!(rows[2].children, [1]);
     }
 
     #[test]
-    fn a_merged_branch_gets_its_own_lane() {
-        // m merges f into main; main's tip b shares the base e.
+    fn a_merged_branch_runs_down_to_the_shared_base() {
+        // m merges f into main; main's tip b shares the base e. f's line runs beside b and
+        // curves into e's node instead of joining main's line early.
         let (rows, lanes) = layout(&[
             commit("m", &["b", "f"]),
             commit("f", &["e"]),
@@ -1253,43 +1466,57 @@ mod tests {
             commit("e", &[]),
         ]);
         assert_eq!(lanes, 2);
-        assert_eq!(rows[0].lane, 0);
-        assert_eq!(rows[0].links.len(), 1);
-        assert_eq!(rows[0].links[0].0, 1);
-        assert!(rows[0].exit);
-        assert_eq!(rows[1].lane, 1);
-        assert!(rows[1].enter && rows[1].exit);
-        // b's parent e is already waited for by the branch lane: the edge merges into it.
-        assert_eq!(rows[2].lane, 0);
-        assert!(rows[2].enter && !rows[2].exit);
-        assert_eq!(rows[2].links.len(), 1);
-        assert_eq!(rows[2].links[0].0, 1);
-        assert_eq!(rows[3].lane, 1);
-        assert!(rows[3].enter && !rows[3].exit);
+        assert_eq!(
+            shape(&rows),
+            [
+                (0, vec![(0, 0), (0, 1)]),
+                (1, vec![(0, 0), (1, 1)]),
+                (0, vec![(0, 0), (1, 0)]),
+                (0, vec![]),
+            ]
+        );
+        assert_ne!(rows[0].color, rows[1].color);
+        assert_eq!(rows[0].color, rows[2].color);
+        assert_eq!(rows[3].children, [1, 2]);
     }
 
     #[test]
-    fn siblings_waiting_for_one_parent_share_a_lane() {
-        // x and y both point at root; y's edge joins the lane that already waits for root.
+    fn siblings_meet_at_their_parent() {
         let (rows, lanes) = layout(&[
             commit("x", &["root"]),
             commit("y", &["root"]),
             commit("root", &[]),
         ]);
         assert_eq!(lanes, 2);
-        assert_eq!(rows[0].lane, 0);
-        assert!(rows[0].exit);
-        assert_eq!(rows[1].lane, 1);
-        assert!(!rows[1].enter && !rows[1].exit);
-        assert_eq!(rows[1].links.len(), 1);
-        assert_eq!(rows[1].links[0].0, 0);
-        assert_eq!(rows[2].lane, 0);
-        assert!(rows[2].enter && !rows[2].exit);
+        assert_eq!(
+            shape(&rows),
+            [(0, vec![(0, 0)]), (1, vec![(0, 0), (1, 0)]), (0, vec![])]
+        );
     }
 
     #[test]
-    fn lanes_are_reused_after_they_free() {
-        // Two independent roots: the second chain reuses the freed first lane.
+    fn lines_shift_left_into_freed_lanes() {
+        // a's lane ends at root; b's line then moves over to lane 0 for c.
+        let (rows, lanes) = layout(&[
+            commit("a", &["root"]),
+            commit("b", &["c"]),
+            commit("root", &[]),
+            commit("c", &[]),
+        ]);
+        assert_eq!(lanes, 2);
+        assert_eq!(
+            shape(&rows),
+            [
+                (0, vec![(0, 0)]),
+                (1, vec![(0, 0), (1, 1)]),
+                (0, vec![(1, 0)]),
+                (0, vec![]),
+            ]
+        );
+    }
+
+    #[test]
+    fn colors_are_reused_after_a_branch_ends() {
         let (rows, lanes) = layout(&[
             commit("b", &["a"]),
             commit("a", &[]),
@@ -1297,7 +1524,105 @@ mod tests {
             commit("c", &[]),
         ]);
         assert_eq!(lanes, 1);
-        assert!(rows.iter().all(|row| row.lane == 0));
+        assert!(rows.iter().all(|row| row.lane == 0 && row.color == 0));
+        assert!(rows[1].down.is_empty());
+    }
+
+    #[test]
+    fn a_parent_beyond_the_loaded_page_keeps_its_line() {
+        // y's parent is not loaded: its line passes z and stops at the last row.
+        let (rows, lanes) = layout(&[commit("y", &["older"]), commit("z", &[])]);
+        assert_eq!(lanes, 2);
+        assert_eq!(shape(&rows), [(0, vec![(0, 0)]), (1, vec![])]);
+    }
+
+    #[test]
+    fn random_histories_draw_continuous_lines() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        for _ in 0..50 {
+            let count = 2 + next(120);
+            let hashes: Vec<String> = (0..count).map(|n| format!("c{n}")).collect();
+            let commits: Vec<GraphCommit> = (0..count)
+                .map(|n| {
+                    // Parents come later in date order; some point past the loaded page.
+                    let parents: Vec<String> = (0..next(3))
+                        .map(|_| match count - n - 1 {
+                            0 => "older".to_string(),
+                            later => hashes[n + 1 + next(later.min(8))].clone(),
+                        })
+                        .collect();
+                    let parents: Vec<&str> = parents.iter().map(String::as_str).collect();
+                    commit(&hashes[n], &parents)
+                })
+                .collect();
+            let (rows, lanes) = layout(&commits);
+            for (n, row) in rows.iter().enumerate() {
+                assert!(row.lane < lanes);
+                let up = n.checked_sub(1).map_or(&[][..], |above| &rows[above].down);
+                for &(from, to, _) in &row.down {
+                    assert!(from.max(to) < lanes);
+                    assert!(from == row.lane || up.iter().any(|&(_, end, _)| end == from));
+                }
+                for &(_, to, _) in up {
+                    assert!(to == row.lane || row.down.iter().any(|&(start, ..)| start == to));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_node_tooltip_lists_refs_of_descendants() {
+        let reference = |kind, name: &str, head| GraphRef {
+            kind,
+            name: name.into(),
+            head,
+        };
+        let mut commits = vec![
+            commit("m", &["b", "f"]),
+            commit("f", &["e"]),
+            commit("b", &["e"]),
+            commit("e", &[]),
+        ];
+        commits[0].refs = vec![reference(RefKind::Branch, "main", true)];
+        commits[1].refs = vec![
+            reference(RefKind::Branch, "feature", false),
+            reference(RefKind::Tag, "v1", false),
+        ];
+        let (rows, lanes) = layout(&commits);
+        let mut graph = GitGraph::new(workspace_editor_core::Repository {
+            id: RepoId("/tmp/repo/.git".into()),
+            worktree: "/tmp/repo".into(),
+            common_dir: "/tmp/repo/.git".into(),
+        });
+        graph.commits = commits;
+        graph.rows = rows;
+        graph.lanes = lanes;
+        assert_eq!(
+            node_tooltip(&graph, 3),
+            "提交 e\n包含在 HEAD 中\n分支：main、feature\n标签：v1"
+        );
+        assert_eq!(
+            node_tooltip(&graph, 1),
+            "提交 f\n包含在 HEAD 中\n分支：main、feature\n标签：v1"
+        );
+        graph.commits[0].refs.clear();
+        graph.commits[2].refs = vec![reference(RefKind::Head, "", false)];
+        assert_eq!(
+            node_tooltip(&graph, 1),
+            "提交 f\n不在 HEAD 中\n分支：feature\n标签：v1"
+        );
+        let names: Vec<String> = (0..12).map(|n| format!("t{n}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        assert_eq!(
+            limited(&names),
+            "t0、t1、t2、t3、t4、…、t7、t8、t9、t10、t11"
+        );
     }
 }
 

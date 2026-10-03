@@ -131,7 +131,7 @@ async fn the_graph_shows_lanes_refs_details_and_diffs(cx: &mut TestAppContext) {
     let repo = fixture("lanes");
     let (window, this) = open(cx, repo.clone());
 
-    // The repository header's graph button opens the tab and loads the first page.
+    // Opening the graph (status bar / ··· menu) shows the tab and loads the first page.
     cx.update_window(window.into(), |_, window, cx| {
         this.update(cx, |p, cx| p.open_git_graph(0, window, cx));
     })
@@ -156,7 +156,10 @@ async fn the_graph_shows_lanes_refs_details_and_diffs(cx: &mut TestAppContext) {
             graph
                 .rows
                 .iter()
-                .map(|row| (row.lane, row.enter, row.exit, row.links.len()))
+                .map(|row| {
+                    let down: Vec<_> = row.down.iter().map(|&(from, to, _)| (from, to)).collect();
+                    (row.lane, down)
+                })
                 .collect::<Vec<_>>(),
             graph.commits[0]
                 .refs
@@ -171,12 +174,16 @@ async fn the_graph_shows_lanes_refs_details_and_diffs(cx: &mut TestAppContext) {
         )
     });
     assert_eq!(subjects, ["merge", "feat", "two", "one"]);
-    // The merge links down to the feature lane; "two" ends its lane into the one waiting for
-    // "one", which the feature lane owns.
-    assert_eq!(shape[0], (0, false, true, 1));
-    assert_eq!(shape[1], (1, true, true, 0));
-    assert_eq!(shape[2], (0, true, false, 1));
-    assert_eq!(shape[3], (1, true, false, 0));
+    // main stays on lane 0; the feature line runs beside "two" and curves into "one".
+    assert_eq!(
+        shape,
+        [
+            (0, vec![(0, 0), (0, 1)]),
+            (1, vec![(0, 0), (1, 1)]),
+            (0, vec![(0, 0), (1, 0)]),
+            (0, vec![]),
+        ]
+    );
     assert!(refs.iter().any(|(name, head)| name == "main" && *head));
     // for-each-ref sorts by committerdate: the merge (main) is newer than feat (feature).
     assert_eq!(branches, ["main", "feature"]);
