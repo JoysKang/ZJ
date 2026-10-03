@@ -219,6 +219,14 @@ impl Prototype {
                 ),
                 "推送",
             )),
+            WriteOperation::PushTag { name } => Some((
+                format!("推送标签“{name}”？"),
+                format!(
+                    "仓库：{}\n推送到当前分支的远程（没有上游时用唯一的远程或 origin）；远程已有同名标签时不会覆盖。",
+                    request.repo.worktree.display()
+                ),
+                "推送",
+            )),
             // VS Code asks before syncing too (git.confirmSync).
             WriteOperation::Sync => Some((
                 "同步更改？".to_string(),
@@ -298,6 +306,22 @@ impl Prototype {
             WriteOperation::CreateBranch { name, .. } => Some((
                 format!("正在创建分支 {name}…"),
                 format!("无法创建分支 {name}"),
+            )),
+            WriteOperation::CreateTag { name, push, .. } => Some((
+                if *push {
+                    format!("正在创建并推送标签 {name}…")
+                } else {
+                    format!("正在创建标签 {name}…")
+                },
+                format!("无法创建标签 {name}"),
+            )),
+            WriteOperation::PushTag { name } => Some((
+                format!("正在推送标签 {name}…"),
+                format!("无法推送标签 {name}"),
+            )),
+            WriteOperation::DeleteTag { name, .. } => Some((
+                format!("正在删除标签 {name}…"),
+                format!("无法删除标签 {name}"),
             )),
             _ => None,
         }
@@ -417,7 +441,7 @@ impl Prototype {
         })
     }
 
-    fn scm_request_for(
+    pub(super) fn scm_request_for(
         &mut self,
         repo: &RepoId,
         operation: WriteOperation,
@@ -466,6 +490,78 @@ impl Prototype {
             window,
             cx,
         );
+    }
+
+    /// Asks for the name, then the optional message, of a tag at `commit`.
+    pub(super) fn open_create_tag(
+        &mut self,
+        repo: &RepoId,
+        commit: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let short: String = commit.chars().take(7).collect();
+        let item = PickItem {
+            label: String::new(),
+            detail: String::new(),
+            icon: PickIcon::Lucide(IconName::Tag),
+            pick: Pick::TagName {
+                repo: repo.clone(),
+                commit,
+            },
+        };
+        self.open_picker(
+            vec![item],
+            format!("新标签名称（在 {short}）"),
+            "",
+            window,
+            cx,
+        );
+    }
+
+    /// VS Code Git Graph's 删除标签…: only here, or on the remote as well.
+    pub(super) fn scm_delete_tag(
+        &mut self,
+        repo: &RepoId,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(worktree) = self
+            .groups
+            .iter()
+            .find(|g| &g.repo.id == repo)
+            .map(|g| g.repo.worktree.clone())
+        else {
+            return;
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("删除标签“{name}”？"),
+            Some(&format!(
+                "仓库：{}\n同时删除远程标签时，先删远程的，成功后再删本地的。",
+                worktree.display()
+            )),
+            &["取消", "删除本地标签", "同时删除远程标签"],
+            cx,
+        );
+        let repo = repo.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let remote = match answer.await {
+                Ok(1) => false,
+                Ok(2) => true,
+                _ => return,
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.scm_request_for(
+                    &repo,
+                    WriteOperation::DeleteTag { name, remote },
+                    window,
+                    cx,
+                )
+            });
+        })
+        .detach();
     }
 
     /// Asks for the name of a branch to create at HEAD (or at `start`) and switch to.

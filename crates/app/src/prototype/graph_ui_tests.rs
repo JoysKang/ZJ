@@ -5,7 +5,7 @@ use super::super::*;
 use super::*;
 #[allow(unused_imports)]
 use core::prelude::v1::test;
-use gpui_kit::{TestAppContext, WindowBounds, WindowOptions, base::Root};
+use gpui_kit::{TestAppContext, WindowBounds, WindowOptions, base::Root, test::TestWindowExt};
 
 fn git(dir: &std::path::Path, args: &[&str]) {
     git_env(dir, args, None);
@@ -42,6 +42,7 @@ fn fixture(name: &str) -> PathBuf {
         ("user.name", "Fixture"),
         ("user.email", "fixture@example.invalid"),
         ("commit.gpgsign", "false"),
+        ("tag.gpgSign", "false"),
         ("core.hooksPath", ".git/hooks"),
     ] {
         git(&repo, &["config", key, value]);
@@ -249,5 +250,121 @@ async fn the_graph_shows_lanes_refs_details_and_diffs(cx: &mut TestAppContext) {
         assert!(p.graph.is_none());
         assert_eq!(p.active, Pane::Diff);
     });
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+/// Types into the focused picker, then presses Enter (input events land between updates).
+fn type_and_enter(cx: &mut TestAppContext, window: WindowHandle<Root>, text: Option<&str>) {
+    if let Some(text) = text {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.input(text, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("enter", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+}
+
+fn tags_on(cx: &mut TestAppContext, this: &Entity<Prototype>, index: usize) -> Vec<String> {
+    this.read_with(cx, |p, _| {
+        p.graph.as_ref().map_or(Vec::new(), |graph| {
+            graph.commits.get(index).map_or(Vec::new(), |commit| {
+                commit
+                    .refs
+                    .iter()
+                    .filter(|r| matches!(r.kind, RefKind::Tag))
+                    .map(|r| r.name.clone())
+                    .collect()
+            })
+        })
+    })
+}
+
+#[gpui_kit::test]
+async fn tags_are_added_and_deleted_from_the_graph(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("tags");
+    let (window, this) = open(cx, repo.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_git_graph(0, window, cx));
+    })
+    .unwrap();
+    settle(cx, |cx| {
+        this.read_with(cx, |p, _| {
+            p.graph
+                .as_ref()
+                .is_some_and(|g| !g.loading && g.commits.len() == 4)
+        })
+    });
+    let (id, merge, one) = this.read_with(cx, |p, _| {
+        let graph = p.graph.as_ref().unwrap();
+        (
+            graph.repo.id.clone(),
+            graph.commits[0].hash.clone(),
+            graph.commits[3].hash.clone(),
+        )
+    });
+
+    // 添加标签…: the name, then a message, makes an annotated tag shown on the commit.
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_create_tag(&id, merge.clone(), window, cx)
+        });
+    })
+    .unwrap();
+    type_and_enter(cx, window, Some("v1"));
+    let labels: Vec<bool> = this.read_with(cx, |p, _| {
+        let (items, _) = p.quick_open.as_ref().unwrap().items.as_ref().unwrap();
+        items
+            .iter()
+            .map(|item| matches!(item.pick, super::super::quick_open::Pick::CreateTag { push, .. } if push))
+            .collect()
+    });
+    assert_eq!(labels, [false, true]);
+    type_and_enter(cx, window, Some("第一版"));
+    settle(cx, |cx| tags_on(cx, &this, 0) == ["v1"]);
+    assert_eq!(git_out(&repo, &["cat-file", "-t", "v1"]), "tag");
+    assert_eq!(
+        git_out(&repo, &["tag", "-l", "--format=%(contents)", "v1"]),
+        "第一版"
+    );
+
+    // Without a message the tag is lightweight.
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_create_tag(&id, one.clone(), window, cx));
+    })
+    .unwrap();
+    type_and_enter(cx, window, Some("v0"));
+    type_and_enter(cx, window, None);
+    settle(cx, |cx| tags_on(cx, &this, 3) == ["v0"]);
+    assert_eq!(git_out(&repo, &["cat-file", "-t", "v0"]), "commit");
+
+    // 删除标签… asks first; 删除本地标签 removes it from the repository and the graph.
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.scm_delete_tag(&id, "v1".into(), window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("删除本地标签");
+    settle(cx, |cx| tags_on(cx, &this, 0).is_empty());
+    assert_eq!(git_out(&repo, &["tag", "--list"]), "v0");
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }

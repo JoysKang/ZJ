@@ -48,6 +48,18 @@ pub(super) enum Pick {
         repo: RepoId,
         start: Option<String>,
     },
+    /// A new tag at `commit` named by the query; its message is asked for next.
+    TagName {
+        repo: RepoId,
+        commit: String,
+    },
+    /// Creates tag `name` with the query as its message (annotated; lightweight when empty).
+    CreateTag {
+        repo: RepoId,
+        commit: String,
+        name: String,
+        push: bool,
+    },
     /// The checked-out branch: nothing to do.
     Close,
 }
@@ -150,9 +162,13 @@ impl Prototype {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, item)| {
-                    if let Pick::CreateBranch { .. } = item.pick {
+                    if let Pick::CreateBranch { .. }
+                    | Pick::TagName { .. }
+                    | Pick::CreateTag { .. } = item.pick
+                    {
                         // First with an empty query (nothing is sorted then), after real
-                        // matches otherwise, so Enter on a typed branch checks it out.
+                        // matches otherwise, so Enter on a typed branch checks it out. The
+                        // query is a name or a message here, never a filter.
                         return Some((i32::MIN, i));
                     }
                     let key = item.label.to_lowercase();
@@ -249,6 +265,38 @@ impl Prototype {
                 self.open_picker(vec![item], "新分支名称".into(), "", window, cx);
                 return;
             }
+            if let Some(Pick::TagName { repo, commit }) = &pick {
+                if query.is_empty() {
+                    return;
+                }
+                // As in VS Code's 创建标签: the name, then an optional message.
+                let items = [false, true]
+                    .into_iter()
+                    .map(|push| PickItem {
+                        label: String::new(),
+                        detail: String::new(),
+                        icon: PickIcon::Lucide(if push {
+                            IconName::ArrowUp
+                        } else {
+                            IconName::Tag
+                        }),
+                        pick: Pick::CreateTag {
+                            repo: repo.clone(),
+                            commit: commit.clone(),
+                            name: query.clone(),
+                            push,
+                        },
+                    })
+                    .collect();
+                self.open_picker(
+                    items,
+                    "标签说明（可选；填写后创建附注标签）".into(),
+                    "",
+                    window,
+                    cx,
+                );
+                return;
+            }
             self.quick_open = None;
             match pick {
                 Some(Pick::Jump(target)) => self.jump_to(target, true, window, cx),
@@ -264,7 +312,24 @@ impl Prototype {
                     self.focus_active_editor(window, cx);
                     self.scm_create_branch(&repo, query, start, window, cx);
                 }
-                Some(Pick::Close) | None => self.focus_active_editor(window, cx),
+                Some(Pick::CreateTag {
+                    repo,
+                    commit,
+                    name,
+                    push,
+                }) => {
+                    self.focus_active_editor(window, cx);
+                    let operation = workspace_editor_git::WriteOperation::CreateTag {
+                        name,
+                        commit,
+                        message: (!query.is_empty()).then_some(query),
+                        push,
+                    };
+                    self.scm_request_for(&repo, operation, window, cx);
+                }
+                Some(Pick::TagName { .. }) | Some(Pick::Close) | None => {
+                    self.focus_active_editor(window, cx)
+                }
             }
             cx.notify();
             return;
@@ -470,17 +535,39 @@ impl Prototype {
                 })
                 .into_any_element(),
         };
+        let query = || {
+            self.quick_open
+                .as_ref()
+                .map(|quick| quick.input.read(cx).value().trim().to_string())
+                .unwrap_or_default()
+        };
         let label = match &item.pick {
             Pick::CreateBranch { .. } => {
-                let query = self
-                    .quick_open
-                    .as_ref()
-                    .map(|quick| quick.input.read(cx).value().trim().to_string())
-                    .unwrap_or_default();
+                let query = query();
                 if query.is_empty() {
                     "创建新分支…".to_string()
                 } else {
                     format!("创建新分支“{query}”")
+                }
+            }
+            Pick::TagName { .. } => {
+                let query = query();
+                if query.is_empty() {
+                    "输入新标签的名称".to_string()
+                } else {
+                    format!("添加标签“{query}”")
+                }
+            }
+            Pick::CreateTag { name, push, .. } => {
+                let kind = if query().is_empty() {
+                    "轻量"
+                } else {
+                    "附注"
+                };
+                if *push {
+                    format!("创建{kind}标签“{name}”并推送到远程")
+                } else {
+                    format!("创建{kind}标签“{name}”")
                 }
             }
             _ => item.label.clone(),

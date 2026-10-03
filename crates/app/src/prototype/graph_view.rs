@@ -12,7 +12,7 @@ use gpui_kit::{
         Disableable, Icon, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
-        menu::{DropdownMenu, PopupMenuItem},
+        menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
         v_flex,
     },
     prelude::FluentBuilder,
@@ -25,7 +25,7 @@ use std::sync::{
 use workspace_editor_core::RepoId;
 use workspace_editor_git::{
     Branch, CommitDetails, CommitFile, GraphCommit, GraphRef, GraphScope, Operation, RefKind,
-    Request,
+    Request, WriteOperation,
 };
 
 /// Page size, also the step of 加载更多.
@@ -609,7 +609,98 @@ impl Prototype {
                 gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
             })
             .on_click(cx.listener(move |this, _, window, cx| this.graph_select(index, window, cx)))
+            .context_menu({
+                let weak = cx.weak_entity();
+                move |menu, _, cx| match weak.upgrade() {
+                    Some(view) => view.read(cx).graph_menu(index, menu, view.clone()),
+                    None => menu,
+                }
+            })
             .into_any_element()
+    }
+
+    /// VS Code Git Graph's commit context menu, with the commit's tags' actions after it.
+    fn graph_menu(&self, index: usize, menu: PopupMenu, view: Entity<Self>) -> PopupMenu {
+        let Some(graph) = &self.graph else {
+            return menu;
+        };
+        let Some(commit) = graph.commits.get(index) else {
+            return menu;
+        };
+        let repo = graph.repo.id.clone();
+        let hash = commit.hash.clone();
+        type Action = Box<dyn Fn(&mut Prototype, &mut Window, &mut Context<Prototype>)>;
+        let item = |label: String, action: Action| {
+            let view = view.clone();
+            PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                view.update(cx, |this, cx| action(this, window, cx));
+            })
+        };
+        let mut menu = menu
+            .item(item("添加标签…".into(), {
+                let (repo, hash) = (repo.clone(), hash.clone());
+                Box::new(move |this, window, cx| {
+                    this.open_create_tag(&repo, hash.clone(), window, cx)
+                })
+            }))
+            .item(item("创建分支…".into(), {
+                let hash = hash.clone();
+                Box::new(move |this, window, cx| this.graph_create_branch(hash.clone(), window, cx))
+            }))
+            .item(item(
+                "复制提交哈希".into(),
+                Box::new(move |this, _, cx| this.graph_copy(hash.clone(), "已复制提交哈希", cx)),
+            ));
+        for tag in commit
+            .refs
+            .iter()
+            .filter(|reference| matches!(reference.kind, RefKind::Tag))
+        {
+            let name = tag.name.clone();
+            menu = menu
+                .separator()
+                .item(item(format!("推送标签“{name}”"), {
+                    let (repo, name) = (repo.clone(), name.clone());
+                    Box::new(move |this, window, cx| this.graph_push_tag(&repo, &name, window, cx))
+                }))
+                .item(item(format!("删除标签“{name}”…"), {
+                    let (repo, name) = (repo.clone(), name.clone());
+                    Box::new(move |this, window, cx| {
+                        this.scm_delete_tag(&repo, name.clone(), window, cx)
+                    })
+                }))
+                .item(item(
+                    format!("复制标签名“{name}”"),
+                    Box::new(move |this, _, cx| this.graph_copy(name.clone(), "已复制标签名", cx)),
+                ));
+        }
+        menu
+    }
+
+    fn graph_create_branch(&mut self, commit: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(repo) = self.graph.as_ref().map(|graph| graph.repo.id.clone()) else {
+            return;
+        };
+        if let Some(g) = self.groups.iter().position(|group| group.repo.id == repo) {
+            self.open_create_branch_at(g, Some(commit), window, cx);
+        }
+    }
+
+    fn graph_push_tag(
+        &mut self,
+        repo: &RepoId,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let operation = WriteOperation::PushTag { name: name.into() };
+        self.scm_request_for(repo, operation, window, cx);
+    }
+
+    fn graph_copy(&mut self, text: String, note: &str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.message = note.into();
+        cx.notify();
     }
 
     /// The trailing row: loading, error, empty state or 加载更多.
@@ -778,6 +869,15 @@ impl Prototype {
         };
         let repo = graph.repo.id.clone();
         let copy_hash = full.clone();
+        let tag_at = full.clone();
+        let tag_repo = repo.clone();
+        let tags: Vec<String> = commit
+            .refs
+            .iter()
+            .filter(|reference| matches!(reference.kind, RefKind::Tag))
+            .map(|reference| reference.name.clone())
+            .collect();
+        let tags_row = (!tags.is_empty()).then(|| self.graph_tags_row(&repo, tags, colors, cx));
         v_flex()
             .h(theme::GRAPH_DETAILS_MAX)
             .flex_shrink_0()
@@ -806,6 +906,16 @@ impl Prototype {
                             .min_w_0()
                             .truncate()
                             .child(commit.subject.replace(SINGLE_LINE, "⏎")),
+                    )
+                    .child(
+                        Button::new("graph-tag-at")
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::Tag)
+                            .label("添加标签…")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_create_tag(&tag_repo, tag_at.clone(), window, cx);
+                            })),
                     )
                     .child(
                         Button::new("graph-branch-at")
@@ -851,7 +961,63 @@ impl Prototype {
                             })),
                     ),
             )
+            .children(tags_row)
             .child(div().flex_1().min_h_0().child(body))
+            .into_any_element()
+    }
+
+    /// The selected commit's tags, each with 推送 and 删除.
+    fn graph_tags_row(
+        &self,
+        repo: &RepoId,
+        tags: Vec<String>,
+        colors: theme::Colors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        h_flex()
+            .id("graph-tags")
+            .w_full()
+            .min_h(theme::ROW_HEIGHT)
+            .px_3()
+            .gap_3()
+            .flex_wrap()
+            .border_b_1()
+            .border_color(colors.border)
+            .text_size(theme::TEXT_CAPTION)
+            .children(tags.into_iter().enumerate().map(|(i, name)| {
+                let (push_repo, push_name) = (repo.clone(), name.clone());
+                let (delete_repo, delete_name) = (repo.clone(), name.clone());
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Icon::new(IconName::Tag)
+                            .size(theme::ICON_SIZE)
+                            .text_color(colors.muted),
+                    )
+                    .child(name.clone())
+                    .child(
+                        Button::new(("graph-tag-push", i))
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::ArrowUp)
+                            .tooltip(format!("推送标签“{name}”"))
+                            .accessibility_label(format!("推送标签“{name}”"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.graph_push_tag(&push_repo, &push_name, window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new(("graph-tag-delete", i))
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::Trash)
+                            .tooltip(format!("删除标签“{name}”…"))
+                            .accessibility_label(format!("删除标签“{name}”"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.scm_delete_tag(&delete_repo, delete_name.clone(), window, cx);
+                            })),
+                    )
+            }))
             .into_any_element()
     }
 
