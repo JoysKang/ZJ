@@ -19,18 +19,20 @@
 
 新增 `crates/agent_client`（包名 `workspace-editor-agent`，不依赖 GPUI），用官方 Rust crate `agent-client-protocol =2.2.0`。这个 crate 不依赖 tokio，基于 `futures` / `async-io`；每个 Agent 一个监督线程，用 `async_io::block_on` 驱动连接。
 
-| 预设 | 启动方式（先找本机命令，再退回 `npx -y`）| 字形（Lucide）|
+| 预设 | 启动方式（先找本机命令，再用 ZJ 装好的 npm 包）| 字形（Lucide）|
 | --- | --- | --- |
-| Claude Code | `claude-agent-acp`，或 `npx -y @agentclientprotocol/claude-agent-acp@0.85.0` | `asterisk` |
-| Codex | `codex-acp`，或 `npx -y @agentclientprotocol/codex-acp@2.1.1` | `square-terminal` |
+| Claude Code | `claude-agent-acp`，或 `node <数据目录>/…/@agentclientprotocol/claude-agent-acp@0.85.0` | `asterisk` |
+| Codex | `codex-acp`，或 `node <数据目录>/…/@agentclientprotocol/codex-acp@2.1.1` | `square-terminal` |
 | Claude Code · DeepSeek | 同 Claude Code，另加环境变量：`ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`、`ANTHROPIC_AUTH_TOKEN`（设置里填，或取自 `DEEPSEEK_API_KEY`）、`ANTHROPIC_MODEL` 等按 DeepSeek 官方文档设为 `deepseek-v4-pro[1m]` / `deepseek-v4-flash[1m]` | `fish` |
 | 用户自定义 | 设置 JSON 的 `agents` 数组：`id / name / command / args / env`（`"$NAME"` 表示取环境变量）| `bot` |
 
-版本号与 ACP registry（2026-10-01）一致。Gemini CLI 的预设已去掉（暂不考虑；`sparkle` 字形和配色保留，以后可以加回）。Claude Code 和 Codex 的适配器在 registry 里都只有 npm 包（TypeScript），没有原生二进制，所以两者都离不开 Node.js；ZJ 不附带 Node，只用本机已有的。本机装了命令（`npm i -g @agentclientprotocol/claude-agent-acp` / `codex-acp`）就直接启动它，省掉 npx 那一层进程，找不到才退回 npx。`-y` 是必须的：标准输入走 JSON-RPC，npx 的安装确认会让进程卡住。不自动安装；找不到 Node.js、命令或 Key 时给出中文提示（例如「启动「Claude Code」需要 Node.js（npx），但没有找到……」）。从 Finder 启动时 PATH 只有系统目录，所以搜索路径补上 Homebrew、nvm、mise（`installs/node/<最新版本>/bin` 和 `shims`，认 `MISE_DATA_DIR`）、volta、bun、pnpm 等常见位置，子进程的 PATH 以找到的 node 所在目录打头。
+版本号与 ACP registry（2026-10-01）一致。Gemini CLI 的预设已去掉（暂不考虑；`sparkle` 字形和配色保留，以后可以加回）。Claude Code 和 Codex 的适配器在 registry 里都只有 npm 包（TypeScript），没有原生二进制，所以两者都离不开 Node.js。本机装了命令（`npm i -g @agentclientprotocol/claude-agent-acp` / `codex-acp`）就直接启动它。否则第一次使用时自动安装（`provision`）：npm 包装进 ZJ 数据目录（macOS 为 `~/Library/Application Support/ZJ/agents`），用 `node <入口>` 启动，不经过 npx（省掉常驻约 120 MB 的 `npm exec`）；本机没有 Node.js 22+ 时下载固定版本 Node.js 24.21.0（系统 `curl` / `tar`，校验 sha256）。安装先放进临时目录，完成后 rename 并写标记，中断不会留下半装好的目录。本机 `claude` / `codex` 版本够新时通过 `CLAUDE_CODE_EXECUTABLE` / `CODEX_PATH` 交给适配器，并用 `--omit=optional` 跳过适配器自带的 CLI（Claude 284 MB → 60 MB）。Node.js 不打进 `.app`：二进制预算放不下，适配器更新也不必跟着 ZJ 发版。进度用 `AgentEvent::Progress` 显示；安装失败或缺 Key 时给出中文提示。从 Finder 启动时 PATH 只有系统目录，所以搜索路径补上 Homebrew、nvm、mise（`installs/node/<最新版本>/bin` 和 `shims`，认 `MISE_DATA_DIR`）、volta、bun、pnpm 等常见位置，子进程的 PATH 以找到的 node 所在目录打头。
 
 **进程**：工作区根目录作为 cwd，独立进程组；去掉继承的 `GIT_*`、`ZJ_*`、`CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT` / `CLAUDE_CODE_SSE_PORT`（否则 Claude Code 会拒绝「嵌套启动」）；退出时先关 stdin，再对整组 SIGTERM，1.5 秒后 SIGKILL。stderr 只保留最后 16 KB，崩溃时显示给用户，不写日志。
 
 **协议**：`initialize` → `session/new`（`cwd` = 工作区根目录，`mcpServers` 为空）→ `session/prompt`。提示内容是文本加 `resource_link`（文件；选区带 `#L起:止`），Agent 声明 `embeddedContext` 时选区原文内嵌。`session/update` 转成类型化事件：回复 / 思考片段、工具调用（类别、状态、位置、Diff）、计划、可用命令、模式、用量、标题。`session/cancel` 中断，同时把未答的权限请求一律回 `cancelled`。权限请求作为事件交给界面，界面调用 `respond_permission` 作答；等待期间不占用 ACP 的分发循环。
+
+**登录**：`initialize` 声明 `auth.terminal`（仅 macOS）。`session/new`（Codex）或 `session/prompt`（Claude Code，会话能建，发提示词时才拒绝）返回 `auth_required` 时，客户端发出 `AgentEvent::AuthRequired`，列出 Agent 给的登录方式，面板显示登录卡片，这一轮保持进行中，提示词暂存。Agent 自己的方式（Codex 的 ChatGPT 打开浏览器、API Key 读环境变量）走 `authenticate`，最多等 10 分钟，成功后自动重试；`terminal` 方式（Claude 的订阅 / Console 登录）写一个只有本人可读的 `.command` 脚本，在「终端」里运行适配器加该方式的参数，用户完成后点「已登录，重试」。脚本只带 `PATH` 和本机 CLI 路径变量，不写入 Key 等其他环境变量，运行后自删。重试仍未登录时卡片显示「仍未登录」；在 `session/prompt` 阶段重试用同一个会话重发暂存的提示词。等待登录期间取消或空闲超时会结束这一轮。ZJ 不读取、不保存任何凭据，登录状态由 Agent 自己管理。
 
 **客户端能力**：
 

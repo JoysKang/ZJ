@@ -301,3 +301,12 @@ Linux 上的确认框是 GPUI 在窗口里画的备用样式，macOS 上是系�
 - 预设：去掉 Gemini CLI。Claude Code / Codex 的 ACP 适配器只有 npm 包，仍然需要 Node.js；本机命令优先，安装提示改为建议 `npm i -g` 装成本机命令；搜索路径加上 mise 的 node 安装目录和 shims。
 
 测试：`agent_client` 新增「写入快照取未保存的缓冲区」和「编辑器不回答时关闭客户端不等待」；`registry` 新增 nvm / mise 版本目录的选择。界面改动（按钮位置、Agent 写回后的缓冲区跟随）没有在真机上手动验证。
+
+## 同日追加：Agent 首次使用自动安装与登录引导
+
+- 自动安装：本机没有适配器命令时，把 npm 包和（必要时）Node.js 24.21.0 装进 ZJ 数据目录，直接用 node 启动，不经过 npx。细节见 docs/adr/0004。
+- 登录引导：Agent 报 `auth_required` 时面板显示登录卡片，列出 Agent 给的方式；浏览器方式走 `authenticate` 后自动继续，终端方式在「终端」里运行，完成后点「已登录，重试」。Codex 在新建会话时要求登录，Claude Code 在发提示词时才要求，两种都会暂存提示词，登录后继续。
+
+实测（临时数据目录、空的 `CODEX_HOME` / `CLAUDE_CONFIG_DIR`，模拟未登录）：Codex 从下载 Node（约 4 秒）、装适配器（约 5 秒）到弹出 API Key / ChatGPT 两种登录方式约 10 秒，进程树只剩适配器（约 85 MB）和 `codex app-server`；Claude Code 装适配器约 7 秒，弹出 Claude 订阅 / Anthropic Console 两种终端登录方式。数据目录里 Node 199 MB、Claude 适配器 60 MB、Codex 适配器 17 MB。
+
+测试：`agent_client` 新增「建会话时要求登录、登录后继续」「发提示词时要求登录、同一会话重发」「取消等待登录」和登录脚本不写入密钥；假 Agent 加 `FAKE_AUTH` / `FAKE_AUTH_AT=prompt`。没有用真实账号完成登录，登录卡片界面没有在真机上手动验证。
