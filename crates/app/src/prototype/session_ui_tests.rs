@@ -1,11 +1,11 @@
 //! Closing windows and the window record, in headless windows.
 
-use super::agent::AgentStore;
+use super::test_support::{empty_store, install_globals, new_window};
 use super::*;
 use crate::session::{self, SavedWindow};
 #[allow(unused_imports)]
 use core::prelude::v1::test;
-use gpui_kit::{TestAppContext, WindowBounds, WindowOptions};
+use gpui_kit::TestAppContext;
 
 fn open(
     cx: &mut TestAppContext,
@@ -14,19 +14,7 @@ fn open(
     documents: &DocumentOwners,
 ) -> AnyWindowHandle {
     let documents = documents.clone();
-    cx.update(|cx| {
-        let service = GitService::new(1, Duration::from_secs(5)).unwrap();
-        gpui_kit::open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(frame)),
-                ..Default::default()
-            },
-            cx,
-            |window, cx| cx.new(|cx| Prototype::new(root, service, documents, 1, window, cx)),
-        )
-        .map(|(window, _)| window)
-        .unwrap()
-    })
+    cx.update(|cx| new_window(cx, root, documents, frame).0)
 }
 
 fn roots(path: &std::path::Path) -> Vec<Option<PathBuf>> {
@@ -51,21 +39,14 @@ async fn closing_windows_falls_back_to_an_empty_window_and_never_quits(cx: &mut 
     std::fs::create_dir_all(&a).unwrap();
     std::fs::create_dir_all(&b).unwrap();
     let path = base.join("session.json");
-    let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
     let service = GitService::new(1, Duration::from_secs(5)).unwrap();
-    cx.update(|cx| {
-        gpui_kit::init(cx);
-        cx.set_global(crate::settings::Settings::default());
-        cx.set_global(crate::watch::WatchService::default());
-        cx.set_global(AgentStore {
-            history: None,
-            default_workspace: None,
-        });
-        cx.set_global(OpenDocuments(documents.clone()));
+    let documents = cx.update(|cx| {
+        let documents = install_globals(cx, crate::settings::Settings::default(), empty_store());
         session::track_at(Some(path.clone()), cx);
         let service = service.clone();
         cx.on_window_closed(move |cx, id| crate::window_closed(id, service.clone(), cx))
             .detach();
+        documents
     });
     let windows = |cx: &mut TestAppContext| cx.update(|cx| cx.windows().len());
 

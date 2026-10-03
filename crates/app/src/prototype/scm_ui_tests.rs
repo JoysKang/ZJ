@@ -1,11 +1,11 @@
 //! Source Control in a headless window, on a temporary repository.
 
-use super::super::agent::AgentStore;
+use super::super::test_support::{open, settle};
 use super::super::*;
 // `gpui_kit::*` also exports a `test` macro; `#[gpui_kit::test]` expands to the built-in one.
 #[allow(unused_imports)]
 use core::prelude::v1::test;
-use gpui_kit::{TestAppContext, WindowBounds, WindowOptions, base::Root, test::TestWindowExt};
+use gpui_kit::{TestAppContext, test::TestWindowExt};
 
 fn git(dir: &std::path::Path, args: &[&str]) {
     let output = std::process::Command::new("git")
@@ -55,42 +55,6 @@ fn fixture(name: &str, ahead: usize) -> PathBuf {
         );
     }
     std::fs::canonicalize(repo).unwrap()
-}
-
-fn open(cx: &mut TestAppContext, root: PathBuf) -> (WindowHandle<Root>, Entity<Prototype>) {
-    let (window, this) = cx.update(|cx| {
-        gpui_kit::init(cx);
-        cx.set_global(crate::settings::Settings::default());
-        cx.set_global(crate::watch::WatchService::default());
-        cx.set_global(AgentStore {
-            history: None,
-            default_workspace: None,
-        });
-        let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
-        cx.set_global(OpenDocuments(documents.clone()));
-        let service = GitService::new(1, Duration::from_secs(5)).unwrap();
-        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1400.), px(900.)));
-        gpui_kit::open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            cx,
-            |window, cx| cx.new(|cx| Prototype::new(Some(root), service, documents, 1, window, cx)),
-        )
-        .map(|(window, this)| (window.downcast::<Root>().unwrap(), this))
-        .unwrap()
-    });
-    // Discovery and status run on real threads; the view polls them on a 50 ms timer.
-    for _ in 0..200 {
-        cx.executor().advance_clock(Duration::from_millis(50));
-        cx.run_until_parked();
-        if this.read_with(cx, |p, _| p.refresh_completed && !p.loading) {
-            return (window, this);
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("the repository never finished loading");
 }
 
 fn rows(cx: &mut TestAppContext, this: &Entity<Prototype>) -> Vec<String> {
@@ -151,19 +115,6 @@ async fn a_clean_repository_in_sync_does_not_open(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }
 
-/// Waits until `done` holds (the picker lists branches after a real Git call).
-fn settle(cx: &mut TestAppContext, mut done: impl FnMut(&mut TestAppContext) -> bool) {
-    for _ in 0..200 {
-        cx.executor().advance_clock(Duration::from_millis(50));
-        cx.run_until_parked();
-        if done(cx) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("the operation never settled");
-}
-
 #[gpui_kit::test]
 async fn the_branch_button_checks_out_and_creates_branches(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
@@ -193,7 +144,7 @@ async fn the_branch_button_checks_out_and_creates_branches(cx: &mut TestAppConte
         this.update(cx, |p, cx| p.open_branch_picker(0, window, cx));
     })
     .unwrap();
-    settle(cx, |cx| {
+    settle(cx, None, |cx| {
         this.read_with(cx, |p, _| {
             p.quick_open
                 .as_ref()
@@ -240,7 +191,7 @@ async fn the_branch_button_checks_out_and_creates_branches(cx: &mut TestAppConte
         window.render_frame(cx);
     })
     .unwrap();
-    settle(cx, |cx| {
+    settle(cx, None, |cx| {
         this.read_with(cx, |p, _| {
             p.groups[0]
                 .status
@@ -265,7 +216,7 @@ async fn the_branch_button_checks_out_and_creates_branches(cx: &mut TestAppConte
         window.render_frame(cx);
     })
     .unwrap();
-    settle(cx, |cx| {
+    settle(cx, None, |cx| {
         this.read_with(cx, |p, _| {
             p.groups[0]
                 .status

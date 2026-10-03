@@ -1,57 +1,16 @@
 //! The Markdown live preview in a headless window, on a temporary folder.
 
-use super::agent::AgentStore;
+use super::test_support::{empty_store, loaded, open_window, settle};
 use super::*;
 #[allow(unused_imports)]
 use core::prelude::v1::test;
-use gpui_kit::{TestAppContext, WindowBounds, WindowOptions, base::Root, test::TestWindowExt};
+use gpui_kit::{TestAppContext, base::Root, test::TestWindowExt};
 
+/// Renders while it waits, unlike `test_support::open`.
 fn open(cx: &mut TestAppContext, root: PathBuf) -> (WindowHandle<Root>, Entity<Prototype>) {
-    let (window, this) = cx.update(|cx| {
-        gpui_kit::init(cx);
-        cx.set_global(crate::settings::Settings::default());
-        cx.set_global(crate::watch::WatchService::default());
-        cx.set_global(AgentStore {
-            history: None,
-            default_workspace: None,
-        });
-        let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
-        cx.set_global(OpenDocuments(documents.clone()));
-        let service = GitService::new(1, Duration::from_secs(5)).unwrap();
-        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1400.), px(900.)));
-        gpui_kit::open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            cx,
-            |window, cx| cx.new(|cx| Prototype::new(Some(root), service, documents, 1, window, cx)),
-        )
-        .map(|(window, this)| (window.downcast::<Root>().unwrap(), this))
-        .unwrap()
-    });
-    settle(cx, window, |cx| {
-        this.read_with(cx, |p, _| p.refresh_completed && !p.loading)
-    });
+    let (window, this) = open_window(cx, Some(root), Default::default(), empty_store());
+    settle(cx, Some(window), |cx| loaded(cx, &this));
     (window, this)
-}
-
-fn settle(
-    cx: &mut TestAppContext,
-    window: WindowHandle<Root>,
-    mut done: impl FnMut(&mut TestAppContext) -> bool,
-) {
-    for _ in 0..200 {
-        cx.executor().advance_clock(Duration::from_millis(50));
-        cx.run_until_parked();
-        cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
-            .unwrap();
-        if done(cx) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("the operation never settled");
 }
 
 fn blocks(cx: &mut TestAppContext, this: &Entity<Prototype>) -> Vec<String> {
@@ -104,7 +63,7 @@ async fn markdown_opens_rendered_and_edits_one_block_at_a_time(cx: &mut TestAppC
             p.open_file(path, Some(root.clone()), window, cx)
         })
     });
-    settle(cx, window, |cx| {
+    settle(cx, Some(window), |cx| {
         this.read_with(cx, |p, _| p.documents.len() == 1) && blocks(cx, &this).len() == 3
     });
     assert!(!source(cx, &this));
@@ -125,7 +84,9 @@ async fn markdown_opens_rendered_and_edits_one_block_at_a_time(cx: &mut TestAppC
     // Esc renders it again.
     window_do(cx, window, |window, cx| window.press("escape", cx));
     assert_eq!(editing(cx, &this), None);
-    settle(cx, window, |cx| blocks(cx, &this)[1] == "第一段，加一句");
+    settle(cx, Some(window), |cx| {
+        blocks(cx, &this)[1] == "第一段，加一句"
+    });
 
     // The room after the last block starts a new one, a blank line away from the list.
     window_do(cx, window, |window, cx| window.click("md-tail", cx));
@@ -142,7 +103,7 @@ async fn markdown_opens_rendered_and_edits_one_block_at_a_time(cx: &mut TestAppC
     });
     assert_eq!(editing(cx, &this), Some(Some(0)));
     window_do(cx, window, |window, cx| window.press("escape", cx));
-    settle(cx, window, |cx| blocks(cx, &this).len() == 4);
+    settle(cx, Some(window), |cx| blocks(cx, &this).len() == 4);
     assert_eq!(blocks(cx, &this)[3], "新段落");
 
     // ⇧⌘V shows the source editor, focused; edits there show in the preview.
@@ -163,7 +124,9 @@ async fn markdown_opens_rendered_and_edits_one_block_at_a_time(cx: &mut TestAppC
         window.dispatch_action(Box::new(ToggleMarkdownPreview), cx)
     });
     assert!(!source(cx, &this));
-    settle(cx, window, |cx| blocks(cx, &this).concat().contains('X'));
+    settle(cx, Some(window), |cx| {
+        blocks(cx, &this).concat().contains('X')
+    });
 
     // Find works on the source.
     window_do(cx, window, |window, cx| {

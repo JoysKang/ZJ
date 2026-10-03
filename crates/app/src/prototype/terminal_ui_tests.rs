@@ -1,63 +1,38 @@
 //! The terminal panel in a headless window, running `/bin/sh` on a real pty.
 
-use super::agent::AgentStore;
+use super::test_support::{TICK, empty_store, open_window, wait};
 use super::*;
 #[allow(unused_imports)]
 use core::prelude::v1::test;
-use gpui_kit::{TestAppContext, WindowBounds, WindowOptions, base::Root, test::TestWindowExt};
+use gpui_kit::{TestAppContext, base::Root, test::TestWindowExt};
 
 fn open(cx: &mut TestAppContext, root: PathBuf) -> (WindowHandle<Root>, Entity<Prototype>) {
-    cx.update(|cx| {
-        gpui_kit::init(cx);
-        cx.set_global(crate::settings::Settings::default());
-        cx.set_global(crate::watch::WatchService::default());
-        cx.set_global(AgentStore {
-            history: None,
-            default_workspace: None,
-        });
-        let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
-        cx.set_global(OpenDocuments(documents.clone()));
-        let service = GitService::new(1, Duration::from_secs(5)).unwrap();
-        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1400.), px(900.)));
-        gpui_kit::open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            cx,
-            |window, cx| {
-                cx.new(|cx| {
-                    let mut this = Prototype::new(Some(root), service, documents, 1, window, cx);
-                    this.terminals.set_shell(Some(crate::terminal::Shell::new(
-                        "/bin/sh".into(),
-                        Vec::new(),
-                    )));
-                    this
-                })
-            },
-        )
-        .map(|(window, this)| (window.downcast::<Root>().unwrap(), this))
-        .unwrap()
-    })
+    let (window, this) = open_window(cx, Some(root), Default::default(), empty_store());
+    this.update(cx, |p, _| {
+        p.terminals.set_shell(Some(crate::terminal::Shell::new(
+            "/bin/sh".into(),
+            Vec::new(),
+        )));
+    });
+    (window, this)
 }
 
 /// Renders and waits until `done` holds (the shell answers on its own thread).
 fn settle(
     cx: &mut TestAppContext,
     window: WindowHandle<Root>,
-    mut done: impl FnMut(&mut TestAppContext) -> bool,
+    this: &Entity<Prototype>,
+    done: impl FnMut(&mut TestAppContext) -> bool,
 ) {
-    for _ in 0..300 {
-        cx.executor().advance_clock(Duration::from_millis(50));
-        cx.run_until_parked();
-        cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
-            .unwrap();
-        if done(cx) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("the terminal never settled");
+    wait(cx, Some(TICK), Some(window), done, |cx| {
+        let screen = this.read_with(cx, |p, cx| {
+            p.terminals
+                .target(None)
+                .and_then(|(group, pane)| p.terminals.pane(group, pane))
+                .map(|view| view.read(cx).screen_text())
+        });
+        format!("the terminal never settled; focused screen: {screen:?}")
+    });
 }
 
 fn panes(cx: &mut TestAppContext, this: &Entity<Prototype>) -> Vec<usize> {
@@ -105,7 +80,7 @@ async fn terminals_open_split_run_commands_and_close(cx: &mut TestAppContext) {
     })
     .unwrap();
     let cwd = root.display().to_string();
-    settle(cx, window, |cx| {
+    settle(cx, window, &this, |cx| {
         let text = focused_text(cx, &this);
         text.contains("zj-42") && text.contains(&cwd)
     });
@@ -124,7 +99,7 @@ async fn terminals_open_split_run_commands_and_close(cx: &mut TestAppContext) {
         window.press("enter", cx);
     })
     .unwrap();
-    settle(cx, window, |cx| panes(cx, &this) == [2]);
+    settle(cx, window, &this, |cx| panes(cx, &this) == [2]);
     act(cx, window, KillTerminal);
     assert_eq!(panes(cx, &this), [1]);
 

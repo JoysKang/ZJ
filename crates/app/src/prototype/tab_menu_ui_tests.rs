@@ -1,10 +1,10 @@
 //! The editor tab's right-click menu in a headless window, on a temporary folder.
 
-use super::agent::AgentStore;
+use super::test_support::{open, settle};
 use super::*;
 #[allow(unused_imports)]
 use core::prelude::v1::test;
-use gpui_kit::{TestAppContext, WindowBounds, WindowOptions, base::Root, test::TestWindowExt};
+use gpui_kit::{TestAppContext, base::Root, test::TestWindowExt};
 
 fn fixture(name: &str) -> PathBuf {
     let base = std::env::temp_dir().join(format!("zj-tab-menu-{name}-{}", std::process::id()));
@@ -14,48 +14,6 @@ fn fixture(name: &str) -> PathBuf {
         std::fs::write(base.join(name), format!("{name}\n")).unwrap();
     }
     std::fs::canonicalize(base).unwrap()
-}
-
-fn open(cx: &mut TestAppContext, root: PathBuf) -> (WindowHandle<Root>, Entity<Prototype>) {
-    let (window, this) = cx.update(|cx| {
-        gpui_kit::init(cx);
-        cx.set_global(crate::settings::Settings::default());
-        cx.set_global(crate::watch::WatchService::default());
-        cx.set_global(AgentStore {
-            history: None,
-            default_workspace: None,
-        });
-        let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
-        cx.set_global(OpenDocuments(documents.clone()));
-        let service = GitService::new(1, Duration::from_secs(5)).unwrap();
-        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1400.), px(900.)));
-        gpui_kit::open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            cx,
-            |window, cx| cx.new(|cx| Prototype::new(Some(root), service, documents, 1, window, cx)),
-        )
-        .map(|(window, this)| (window.downcast::<Root>().unwrap(), this))
-        .unwrap()
-    });
-    settle(cx, |cx| {
-        this.read_with(cx, |p, _| p.refresh_completed && !p.loading)
-    });
-    (window, this)
-}
-
-fn settle(cx: &mut TestAppContext, mut done: impl FnMut(&mut TestAppContext) -> bool) {
-    for _ in 0..200 {
-        cx.executor().advance_clock(Duration::from_millis(50));
-        cx.run_until_parked();
-        if done(cx) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("the operation never settled");
 }
 
 fn open_files(
@@ -71,7 +29,7 @@ fn open_files(
             this.update(cx, |p, cx| p.open_file(path, root, window, cx));
         })
         .unwrap();
-        settle(cx, |cx| {
+        settle(cx, None, |cx| {
             this.read_with(cx, |p, _| p.documents.len() == count + 1)
         });
     }

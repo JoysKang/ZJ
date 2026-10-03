@@ -79,6 +79,9 @@ pub use terminal_panel::{KillTerminal, NewTerminal, SplitTerminal, ToggleTermina
 #[path = "prototype/terminal_ui_tests.rs"]
 mod terminal_ui_tests;
 mod terminal_view;
+#[cfg(test)]
+#[path = "prototype/test_support.rs"]
+mod test_support;
 pub use tab_menu::{
     CloseAllEditors, CloseOtherEditors, CopyActivePath, CopyActiveRelativePath,
     RevealActiveInExplorer, RevealActiveInFinder,

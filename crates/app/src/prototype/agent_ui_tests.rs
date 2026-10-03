@@ -1,12 +1,13 @@
 //! The agent panel in a headless window: typing and sending from the composer.
 
+use super::super::test_support::{empty_store, open_window, wait};
 use super::*;
 // `super::*` brings in GPUI's `test` macro through `gpui_kit::*`; `#[gpui_kit::test]` expands
 // to the built-in one.
 #[allow(unused_imports)]
 use core::prelude::v1::test;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{TestAppContext, WindowBounds, WindowOptions, base::Root};
+use gpui_kit::{TestAppContext, base::Root};
 use workspace_editor_agent::registry::UserAgentConfig;
 
 fn fake_agent() -> UserAgentConfig {
@@ -32,14 +33,7 @@ fn fake_agent() -> UserAgentConfig {
 }
 
 fn open(cx: &mut TestAppContext, root: Option<PathBuf>) -> (WindowHandle<Root>, Entity<Prototype>) {
-    open_with(
-        cx,
-        root,
-        AgentStore {
-            history: None,
-            default_workspace: None,
-        },
-    )
+    open_with(cx, root, empty_store())
 }
 
 fn open_with(
@@ -47,30 +41,11 @@ fn open_with(
     root: Option<PathBuf>,
     store: AgentStore,
 ) -> (WindowHandle<Root>, Entity<Prototype>) {
-    cx.update(|cx| {
-        gpui_kit::init(cx);
-        let mut settings = crate::settings::Settings::default();
-        settings.agent.panel_visible = true;
-        settings.agent.custom = vec![fake_agent()];
-        settings.agent.default_agent = "fake".into();
-        cx.set_global(settings);
-        cx.set_global(crate::watch::WatchService::default());
-        cx.set_global(store);
-        let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
-        cx.set_global(OpenDocuments(documents.clone()));
-        let service = GitService::new(1, std::time::Duration::from_secs(5)).unwrap();
-        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1400.), px(900.)));
-        let (window, content) = gpui_kit::open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            cx,
-            |window, cx| cx.new(|cx| Prototype::new(root, service, documents, 1, window, cx)),
-        )
-        .unwrap();
-        (window.downcast::<Root>().unwrap(), content)
-    })
+    let mut settings = crate::settings::Settings::default();
+    settings.agent.panel_visible = true;
+    settings.agent.custom = vec![fake_agent()];
+    settings.agent.default_agent = "fake".into();
+    open_window(cx, root, settings, store)
 }
 
 fn send(cx: &mut TestAppContext, handle: WindowHandle<Root>, this: &Entity<Prototype>, text: &str) {
@@ -86,20 +61,18 @@ fn send(cx: &mut TestAppContext, handle: WindowHandle<Root>, this: &Entity<Proto
 }
 
 /// Waits (real time: the agent is a child process) until the current session is idle again.
+/// The fake clock stays put.
 fn settle(cx: &mut TestAppContext, this: &Entity<Prototype>) {
-    for _ in 0..200 {
-        cx.run_until_parked();
-        let idle = this.read_with(cx, |p, _| {
+    let idle = |cx: &mut TestAppContext| {
+        this.read_with(cx, |p, _| {
             p.agent
                 .current()
                 .is_some_and(|s| !s.busy() && s.client.is_some())
-        });
-        if idle {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    panic!("the agent never finished the turn");
+        })
+    };
+    wait(cx, None, None, idle, |_| {
+        "the agent never finished the turn".into()
+    });
 }
 
 /// The user messages of the current session, and what is left in the composer.

@@ -1,11 +1,11 @@
 //! Git Graph in a headless window, on a temporary repository with a merged branch.
 
-use super::super::agent::AgentStore;
+use super::super::test_support::{open, settle};
 use super::super::*;
 use super::*;
 #[allow(unused_imports)]
 use core::prelude::v1::test;
-use gpui_kit::{TestAppContext, WindowBounds, WindowOptions, base::Root, test::TestWindowExt};
+use gpui_kit::{TestAppContext, base::Root, test::TestWindowExt};
 
 fn git(dir: &std::path::Path, args: &[&str]) {
     git_env(dir, args, None);
@@ -76,55 +76,6 @@ fn fixture(name: &str) -> PathBuf {
     std::fs::canonicalize(repo).unwrap()
 }
 
-fn open(cx: &mut TestAppContext, root: PathBuf) -> (WindowHandle<Root>, Entity<Prototype>) {
-    let (window, this) = cx.update(|cx| {
-        gpui_kit::init(cx);
-        cx.set_global(crate::settings::Settings::default());
-        cx.set_global(crate::watch::WatchService::default());
-        cx.set_global(AgentStore {
-            history: None,
-            default_workspace: None,
-        });
-        let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
-        cx.set_global(OpenDocuments(documents.clone()));
-        let service = GitService::new(1, Duration::from_secs(5)).unwrap();
-        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1400.), px(900.)));
-        gpui_kit::open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            cx,
-            |window, cx| cx.new(|cx| Prototype::new(Some(root), service, documents, 1, window, cx)),
-        )
-        .map(|(window, this)| (window.downcast::<Root>().unwrap(), this))
-        .unwrap()
-    });
-    // Discovery and status run on real threads; the view polls them on a 50 ms timer.
-    for _ in 0..200 {
-        cx.executor().advance_clock(Duration::from_millis(50));
-        cx.run_until_parked();
-        if this.read_with(cx, |p, _| p.refresh_completed && !p.loading) {
-            return (window, this);
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("the repository never finished loading");
-}
-
-/// Waits until `done` holds (pages and details load through real Git calls).
-fn settle(cx: &mut TestAppContext, mut done: impl FnMut(&mut TestAppContext) -> bool) {
-    for _ in 0..200 {
-        cx.executor().advance_clock(Duration::from_millis(50));
-        cx.run_until_parked();
-        if done(cx) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    panic!("the operation never settled");
-}
-
 #[gpui_kit::test]
 async fn the_graph_shows_lanes_refs_details_and_diffs(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
@@ -136,7 +87,7 @@ async fn the_graph_shows_lanes_refs_details_and_diffs(cx: &mut TestAppContext) {
         this.update(cx, |p, cx| p.open_git_graph(0, window, cx));
     })
     .unwrap();
-    settle(cx, |cx| {
+    settle(cx, None, |cx| {
         this.read_with(cx, |p, _| {
             p.graph
                 .as_ref()
@@ -193,7 +144,7 @@ async fn the_graph_shows_lanes_refs_details_and_diffs(cx: &mut TestAppContext) {
         this.update(cx, |p, cx| p.graph_select(0, window, cx));
     })
     .unwrap();
-    settle(cx, |cx| {
+    settle(cx, None, |cx| {
         this.read_with(cx, |p, _| {
             p.graph
                 .as_ref()
@@ -240,7 +191,7 @@ async fn the_graph_shows_lanes_refs_details_and_diffs(cx: &mut TestAppContext) {
         });
     })
     .unwrap();
-    settle(cx, |cx| {
+    settle(cx, None, |cx| {
         this.read_with(cx, |p, _| {
             p.graph.as_ref().is_some_and(|g| {
                 !g.loading && g.commits.len() == 2 && g.commits[0].subject == "feat"
@@ -313,7 +264,7 @@ async fn tags_are_added_and_deleted_from_the_graph(cx: &mut TestAppContext) {
         this.update(cx, |p, cx| p.open_git_graph(0, window, cx));
     })
     .unwrap();
-    settle(cx, |cx| {
+    settle(cx, None, |cx| {
         this.read_with(cx, |p, _| {
             p.graph
                 .as_ref()
@@ -346,7 +297,7 @@ async fn tags_are_added_and_deleted_from_the_graph(cx: &mut TestAppContext) {
     });
     assert_eq!(labels, [false, true]);
     type_and_enter(cx, window, Some("第一版"));
-    settle(cx, |cx| tags_on(cx, &this, 0) == ["v1"]);
+    settle(cx, None, |cx| tags_on(cx, &this, 0) == ["v1"]);
     assert_eq!(git_out(&repo, &["cat-file", "-t", "v1"]), "tag");
     assert_eq!(
         git_out(&repo, &["tag", "-l", "--format=%(contents)", "v1"]),
@@ -360,7 +311,7 @@ async fn tags_are_added_and_deleted_from_the_graph(cx: &mut TestAppContext) {
     .unwrap();
     type_and_enter(cx, window, Some("v0"));
     type_and_enter(cx, window, None);
-    settle(cx, |cx| tags_on(cx, &this, 3) == ["v0"]);
+    settle(cx, None, |cx| tags_on(cx, &this, 3) == ["v0"]);
     assert_eq!(git_out(&repo, &["cat-file", "-t", "v0"]), "commit");
 
     // 删除标签… asks first; 删除本地标签 removes it from the repository and the graph.
@@ -371,7 +322,7 @@ async fn tags_are_added_and_deleted_from_the_graph(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(cx.has_pending_prompt());
     cx.simulate_prompt_answer("删除本地标签");
-    settle(cx, |cx| tags_on(cx, &this, 0).is_empty());
+    settle(cx, None, |cx| tags_on(cx, &this, 0).is_empty());
     assert_eq!(git_out(&repo, &["tag", "--list"]), "v0");
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }
