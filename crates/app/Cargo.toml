@@ -25,6 +25,10 @@ lsp-types = "=0.97.0"
 # Already in GPUI Kit's tree (gpui-base, gpui-pre) with default features: full-text search.
 regex = "1"
 
+[dev-dependencies]
+# Headless windows with simulated input for UI tests; not part of the shipped binary.
+gpui-kit = { workspace = true, features = ["test-support"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # Already in GPUI's macOS tree; NSFileManager moves deleted files to the Trash.
 objc2 = "0.6"

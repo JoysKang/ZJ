@@ -22,6 +22,10 @@ use workspace_editor_agent_history::{
     History, NewSession, Role as HistoryRole, SessionId, SessionStatus, SessionSummary,
 };
 
+#[cfg(test)]
+#[path = "agent_ui_tests.rs"]
+mod ui_tests;
+
 gpui_kit::actions!(
     agent,
     [
@@ -214,6 +218,8 @@ pub(super) struct AgentPanel {
     /// The agent picked for the next new session.
     pub agent_id: String,
     pub composer_focused: bool,
+    /// Sending in a window without a folder asks for one; the prompt goes out once it is open.
+    pub send_after_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -294,6 +300,7 @@ impl AgentPanel {
             agent_id: settings.default_agent.clone(),
             presets,
             composer_focused: false,
+            send_after_open: false,
             _subscriptions: vec![events],
         }
     }
@@ -555,8 +562,8 @@ impl Prototype {
             return;
         }
         let Some(root) = self.root.clone() else {
-            self.message = "先打开一个文件夹，Agent 会在这个工作区里工作".into();
-            cx.notify();
+            self.agent.send_after_open = true;
+            self.choose_path(true, window, cx);
             return;
         };
         if self.agent.current.is_none() {

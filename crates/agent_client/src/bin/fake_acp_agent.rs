@@ -1,4 +1,5 @@
-//! Test-only ACP agent for `tests/client.rs`. Not shipped: the app does not build it.
+//! Test-only ACP agent for `tests/client.rs` and the app's panel tests
+//! (`crates/app/src/prototype/agent_ui_tests.rs`). Not shipped: the app does not build it.
 //!
 //! The first word of the prompt text selects a script:
 //! `echo <text>` · `links` · `tool <path>` · `permission` · `read <path>` ·

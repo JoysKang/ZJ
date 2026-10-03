@@ -475,7 +475,7 @@ impl Prototype {
                     div()
                         .text_size(theme::TEXT_CAPTION)
                         .text_color(colors.muted)
-                        .child("先打开一个文件夹：Agent 在工作区里读写文件"),
+                        .child("还没有打开文件夹：发送时先选一个，Agent 在里面读写文件"),
                 )
             })
             .child(
@@ -1944,8 +1944,12 @@ impl Prototype {
                 .primary()
                 .small()
                 .icon(IconName::ArrowUp)
-                .tooltip("发送（⏎）")
-                .disabled(empty || self.root.is_none())
+                .tooltip(if self.root.is_some() {
+                    "发送（⏎）"
+                } else {
+                    "选择文件夹后发送（⏎）"
+                })
+                .disabled(empty)
                 .on_click(cx.listener(|this, _, window, cx| this.agent_submit(window, cx)))
         };
         let composer = v_flex()

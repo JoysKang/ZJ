@@ -177,7 +177,8 @@ impl Prototype {
             .child(
                 filter_chip(
                     "agent-filter-scope",
-                    if filter.all_workspaces {
+                    // Without a folder the list already shows every workspace.
+                    if filter.all_workspaces || self.root.is_none() {
                         "所有工作区".into()
                     } else {
                         "本工作区".into()
