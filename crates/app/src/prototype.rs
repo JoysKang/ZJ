@@ -63,6 +63,9 @@ mod scm;
 mod scm_actions;
 mod search_replace;
 mod search_view;
+#[cfg(test)]
+#[path = "prototype/session_ui_tests.rs"]
+mod session_ui_tests;
 mod sidebar;
 mod welcome;
 mod workspace_refresh;
@@ -460,6 +463,10 @@ impl Prototype {
                 this.auto_save_on_focus_change(None, window, cx);
             }
         });
+        crate::session::remember(window, root.as_deref(), true, cx);
+        let frame = cx.observe_window_bounds(window, |this, window, cx| {
+            crate::session::remember(window, this.root.as_deref(), false, cx);
+        });
         let weak = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             weak.update(cx, |this, cx| {
@@ -576,7 +583,7 @@ impl Prototype {
             pending_plan: None,
             ignore_cache: Default::default(),
             agent,
-            _subscriptions: vec![appearance, activation, settings],
+            _subscriptions: vec![appearance, activation, settings, frame],
         };
         this.start_watching(window, cx);
         this.refresh_tree(window, cx);
@@ -956,6 +963,7 @@ impl Prototype {
             self.service.clone(),
             self.owners.clone(),
             cx.windows().len(),
+            None,
             cx,
         ) {
             self.message = format!("无法新建窗口：{error}");
@@ -1016,6 +1024,7 @@ impl Prototype {
                         if this.root.is_none() {
                             window.set_window_title(&format!("ZJ · {}", path.display()));
                             this.root = Some(path);
+                            crate::session::remember(window, this.root.as_deref(), true, cx);
                             this.sidebar = Sidebar::Explorer;
                             this.start_watching(window, cx);
                             this.refresh_tree(window, cx);
@@ -1025,6 +1034,7 @@ impl Prototype {
                             this.service.clone(),
                             this.owners.clone(),
                             cx.windows().len(),
+                            None,
                             cx,
                         ) {
                             this.message = format!("无法打开工作区：{error}");

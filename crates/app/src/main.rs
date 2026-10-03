@@ -15,6 +15,7 @@ mod refresh_plan;
 mod replace;
 mod save;
 mod secrets;
+mod session;
 mod settings;
 mod symbol_index;
 mod symbols;
@@ -30,11 +31,13 @@ use workspace_editor_git::GitService;
 
 impl Global for watch::WatchService {}
 
+/// `bounds`: a frame restored from the last session; `None` cascades from the default place.
 fn open_workspace(
     root: Option<PathBuf>,
     service: GitService,
     documents: DocumentOwners,
     index: usize,
+    bounds: Option<WindowBounds>,
     cx: &mut App,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     if cx.windows().len() >= 5 {
@@ -47,10 +50,10 @@ fn open_workspace(
             appears_transparent: true,
             traffic_light_position: Some(point(theme::TRAFFIC_LIGHT_X, theme::TRAFFIC_LIGHT_Y)),
         }),
-        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+        window_bounds: Some(bounds.unwrap_or(WindowBounds::Windowed(Bounds::new(
             point(offset, offset),
             size(theme::WINDOW_WIDTH, theme::WINDOW_HEIGHT),
-        ))),
+        )))),
         window_min_size: Some(size(theme::WINDOW_MIN_WIDTH, theme::WINDOW_MIN_HEIGHT)),
         ..gpui_kit::component::TitleBar::window_options()
     };
@@ -90,7 +93,15 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             roots.push(root);
         }
     }
-    let count = windows.unwrap_or(roots.len().max(1));
+    // A launch without arguments (Dock, Finder) reopens the windows open at the last quit.
+    let restored = if roots.is_empty() && windows.is_none() {
+        session::path()
+            .map(|path| session::restorable(session::load_from(&path), 5))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let count = windows.unwrap_or(roots.len().max(restored.len()).max(1));
     if count > 5 || roots.len() > count {
         return Err("原型最多支持 5 个窗口，每个根目录一个窗口".into());
     }
@@ -343,11 +354,24 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             cx.set_global(prototype::OpenDocuments(documents.clone()));
             // ⌘Q asks about unsaved changes window by window before quitting.
             cx.on_action(|_: &prototype::Quit, cx| prototype::quit(cx));
+            session::track(cx);
+            let displays: Vec<_> = cx
+                .displays()
+                .iter()
+                .map(|display| display.bounds())
+                .collect();
             for index in 0..count {
-                let root = roots.get(index).cloned();
+                let saved = restored.get(index);
+                let root = roots
+                    .get(index)
+                    .cloned()
+                    .or_else(|| saved.and_then(|saved| saved.root.clone()));
+                let bounds = saved
+                    .and_then(|saved| saved.frame)
+                    .and_then(|frame| frame.window_bounds(&displays));
                 let service = service.clone();
                 let documents = documents.clone();
-                if let Err(e) = open_workspace(root, service, documents, index, cx) {
+                if let Err(e) = open_workspace(root, service, documents, index, bounds, cx) {
                     eprintln!("无法创建窗口: {e}");
                 }
             }
