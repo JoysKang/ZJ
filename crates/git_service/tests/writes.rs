@@ -702,3 +702,99 @@ fn branches_graph_details_and_commit_diff() {
     assert!(diff("HEAD", None, "src/lib.rs").is_err());
     assert!(diff(&edit, Some(&head_parent), "../escape").is_err());
 }
+
+#[test]
+fn tags_are_created_pushed_and_deleted() {
+    let fixture = fixture();
+    let root = fixture.0.join("a");
+    let service = GitService::new(2, Duration::from_secs(20)).unwrap();
+    // The user's global tag signing must not decide the test.
+    git(&root, &["config", "tag.gpgSign", "false"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "base"]);
+    let base = git(&root, &["rev-parse", "HEAD"]).trim().to_string();
+    let create = |name: &str, message: Option<&str>, push: bool| WriteOperation::CreateTag {
+        name: name.into(),
+        commit: base.clone(),
+        message: message.map(str::to_string),
+        push,
+    };
+    let tags = |repo: &Path| {
+        git(repo, &["tag", "--list"])
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+
+    // Without a remote, a tag to push is not created at all.
+    let error = write(&service, &root, create("early", None, true))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("没有配置远程"), "{error}");
+    assert!(tags(&root).is_empty());
+
+    let bare = fixture.0.join("remote.git");
+    fs::create_dir(&bare).unwrap();
+    git(&bare, &["init", "--bare", "-b", "main"]);
+    git(&root, &["remote", "add", "origin", bare.to_str().unwrap()]);
+    git(&root, &["push", "-u", "origin", "main"]);
+
+    // Lightweight without a message, annotated with one; the annotated one is pushed.
+    write(&service, &root, create("v1", None, false)).unwrap();
+    assert_eq!(git(&root, &["cat-file", "-t", "v1"]).trim(), "commit");
+    write(&service, &root, create("v2", Some("第二版\n\n说明"), true)).unwrap();
+    assert_eq!(git(&root, &["cat-file", "-t", "v2"]).trim(), "tag");
+    assert_eq!(
+        git(&root, &["tag", "-l", "--format=%(contents)", "v2"]).trim(),
+        "第二版\n\n说明"
+    );
+    assert_eq!(git(&root, &["rev-parse", "v2^{commit}"]).trim(), base);
+    assert_eq!(tags(&bare), ["v2"]);
+
+    // Never over an existing tag, with a bad name, an empty message or a symbolic commit.
+    let error = write(&service, &root, create("v1", None, false))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("已存在"), "{error}");
+    for name in ["a..b", "with space", "-x", "", "x.lock"] {
+        assert!(
+            write(&service, &root, create(name, None, false)).is_err(),
+            "{name}"
+        );
+    }
+    assert!(write(&service, &root, create("v3", Some("  "), false)).is_err());
+    let symbolic = WriteOperation::CreateTag {
+        name: "v3".into(),
+        commit: "HEAD".into(),
+        message: None,
+        push: false,
+    };
+    assert!(write(&service, &root, symbolic).is_err());
+    assert_eq!(tags(&root), ["v1", "v2"]);
+
+    // Pushing one tag publishes only it.
+    write(
+        &service,
+        &root,
+        WriteOperation::PushTag { name: "v1".into() },
+    )
+    .unwrap();
+    assert_eq!(tags(&bare), ["v1", "v2"]);
+    let missing = WriteOperation::PushTag {
+        name: "missing".into(),
+    };
+    assert!(write(&service, &root, missing).is_err());
+
+    // Deleting: on the remote too, or only locally.
+    let delete = |name: &str, remote: bool| WriteOperation::DeleteTag {
+        name: name.into(),
+        remote,
+    };
+    write(&service, &root, delete("v1", true)).unwrap();
+    assert_eq!(tags(&root), ["v2"]);
+    assert_eq!(tags(&bare), ["v2"]);
+    write(&service, &root, delete("v2", false)).unwrap();
+    assert!(tags(&root).is_empty());
+    assert_eq!(tags(&bare), ["v2"]);
+    assert!(write(&service, &root, delete("v2", false)).is_err());
+}

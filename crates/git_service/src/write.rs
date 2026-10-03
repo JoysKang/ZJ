@@ -43,6 +43,24 @@ pub enum WriteOperation {
         name: String,
         start: Option<String>,
     },
+    /// Tags `commit` (a full hash): annotated with `message`, lightweight when `None`; `push`
+    /// then pushes the tag to the tag remote under the same lock.
+    CreateTag {
+        name: String,
+        commit: String,
+        message: Option<String>,
+        push: bool,
+    },
+    /// Pushes one tag to the tag remote, never forced.
+    PushTag {
+        name: String,
+    },
+    /// Deletes a local tag; `remote` deletes it on the tag remote first, so a failure there
+    /// leaves the local tag to retry from.
+    DeleteTag {
+        name: String,
+        remote: bool,
+    },
     /// Applies a generated partial patch for one changed file: to the index (`cached`, stage /
     /// unstage selected lines) or to the worktree (revert selected lines).
     ApplyPatch {
@@ -106,10 +124,25 @@ impl GitService {
             return Err(error("仓库身份已变化，请重新打开工作区"));
         }
         let current = self.status_locked(&request.repo, request.generation, cancel)?;
-        // Fetching only moves remote-tracking refs, so a stale view cannot mislead it.
-        if current != *request.expected && !matches!(request.operation, WriteOperation::Fetch) {
+        // Fetching and tags only touch refs named in the request, so a stale view of files
+        // and branches cannot mislead them.
+        if current != *request.expected
+            && !matches!(
+                request.operation,
+                WriteOperation::Fetch
+                    | WriteOperation::CreateTag { .. }
+                    | WriteOperation::PushTag { .. }
+                    | WriteOperation::DeleteTag { .. }
+            )
+        {
             return Err(error("文件、暂存区或分支已变化，请刷新后重试"));
         }
+        // Hooks, signatures and network authentication need more time than status queries.
+        let writer = Self {
+            shared: self.shared.clone(),
+            timeout: Duration::from_secs(120),
+        };
+        let mut tag_push = None;
         let conflicted = current
             .changes
             .iter()
@@ -340,12 +373,62 @@ impl GitService {
                     args.push(start.into());
                 }
             }
+            WriteOperation::CreateTag {
+                name,
+                commit,
+                message,
+                push,
+            } => {
+                self.check_tag_name(&request.repo, name, cancel)?;
+                if self.has_tag(&request.repo, name, cancel) {
+                    return Err(error(format!("标签 {name} 已存在")));
+                }
+                if !crate::graph::is_hash(commit) {
+                    return Err(error("无效的提交"));
+                }
+                self.verify(&request.repo, &format!("{commit}^{{commit}}"), cancel)
+                    .map_err(|_| error("找不到这个提交"))?;
+                if *push {
+                    // Checked before tagging, so a missing remote leaves nothing half done.
+                    let remote = self.tag_remote(&request.repo, &current, cancel)?;
+                    tag_push = Some(tag_push_args(&remote, format!("refs/tags/{name}")));
+                }
+                args.push("tag".into());
+                if let Some(message) = message {
+                    if message.trim().is_empty() || message.len() > 65_536 || message.contains('\0')
+                    {
+                        return Err(error("标签说明不能为空，且不能超过 64 KiB"));
+                    }
+                    args.extend(["-a".into(), "-F".into(), "-".into()]);
+                    input = Some(message.as_bytes());
+                }
+                args.extend([name.into(), commit.into()]);
+            }
+            WriteOperation::PushTag { name } => {
+                self.check_tag_name(&request.repo, name, cancel)?;
+                if !self.has_tag(&request.repo, name, cancel) {
+                    return Err(error(format!("找不到标签 {name}")));
+                }
+                let remote = self.tag_remote(&request.repo, &current, cancel)?;
+                args = tag_push_args(&remote, format!("refs/tags/{name}"));
+            }
+            WriteOperation::DeleteTag { name, remote } => {
+                self.check_tag_name(&request.repo, name, cancel)?;
+                if !self.has_tag(&request.repo, name, cancel) {
+                    return Err(error(format!("找不到标签 {name}")));
+                }
+                if *remote {
+                    let remote = self.tag_remote(&request.repo, &current, cancel)?;
+                    let delete = tag_push_args(&remote, format!(":refs/tags/{name}"));
+                    writer
+                        .run_with_input(&request.repo.worktree, &delete, cancel, false, None)
+                        .map_err(|e| {
+                            error(format!("无法从远程 {remote} 删除标签，本地标签未删除：{e}"))
+                        })?;
+                }
+                args.extend(["tag".into(), "-d".into(), name.into()]);
+            }
         }
-        // Hooks, signatures and network authentication need more time than status queries.
-        let writer = Self {
-            shared: self.shared.clone(),
-            timeout: Duration::from_secs(120),
-        };
         let partial =
             |e: io::Error| error(format!("{e}。操作可能已经部分完成；请刷新检查仓库状态"));
         if let WriteOperation::Commit { all: true, .. } = &request.operation {
@@ -374,6 +457,13 @@ impl GitService {
                 writer
                     .run_with_input(&request.repo.worktree, &push, cancel, false, None)
                     .map_err(|e| error(format!("{done}，但推送失败：{e}")))?,
+            );
+        }
+        if let Some(push) = tag_push {
+            output.extend(
+                writer
+                    .run_with_input(&request.repo.worktree, &push, cancel, false, None)
+                    .map_err(|e| error(format!("已创建标签，但推送失败：{e}")))?,
             );
         }
         if !untracked.is_empty() {
@@ -410,6 +500,68 @@ impl GitService {
             cancel,
         )
         .map(|_| ())
+    }
+
+    fn check_tag_name(&self, repo: &Repository, name: &str, cancel: &AtomicBool) -> io::Result<()> {
+        if name.trim().is_empty() || name.starts_with('-') || name.contains('\0') {
+            return Err(error("无效的标签名"));
+        }
+        self.run(
+            &repo.worktree,
+            &[
+                "check-ref-format".into(),
+                format!("refs/tags/{name}").into(),
+            ],
+            cancel,
+        )
+        .map(|_| ())
+        .map_err(|_| error(format!("“{name}”不是有效的标签名")))
+    }
+
+    fn has_tag(&self, repo: &Repository, name: &str, cancel: &AtomicBool) -> bool {
+        self.verify(repo, &format!("refs/tags/{name}"), cancel)
+            .is_ok()
+    }
+
+    /// Where tags go: the current branch's remote, else the only remote, else `origin`.
+    fn tag_remote(
+        &self,
+        repo: &Repository,
+        current: &Status,
+        cancel: &AtomicBool,
+    ) -> io::Result<String> {
+        let text = |bytes: Vec<u8>| {
+            String::from_utf8(bytes)
+                .map_err(io::Error::other)
+                .map(|text| text.trim().to_owned())
+        };
+        if current.upstream.is_some()
+            && let Some(branch) = current.branch.as_deref().filter(|b| *b != "(detached)")
+            && let Ok(remote) = self.run(
+                &repo.worktree,
+                &[
+                    "config".into(),
+                    "--get".into(),
+                    format!("branch.{branch}.remote").into(),
+                ],
+                cancel,
+            )
+        {
+            let remote = text(remote)?;
+            if !remote.is_empty() && remote != "." && !remote.starts_with('-') {
+                return Ok(remote);
+            }
+        }
+        let remotes = text(self.run(&repo.worktree, &["remote".into()], cancel)?)?;
+        let remotes: Vec<&str> = remotes.lines().filter(|r| !r.starts_with('-')).collect();
+        match remotes.as_slice() {
+            [] => Err(error("仓库没有配置远程")),
+            [only] => Ok((*only).to_owned()),
+            _ if remotes.contains(&"origin") => Ok("origin".into()),
+            _ => Err(error(
+                "有多个远程且当前分支没有上游，无法确定推送到哪个远程，请在终端操作",
+            )),
+        }
     }
 
     /// `git push` arguments for the current branch to exactly its configured upstream branch,
@@ -475,4 +627,17 @@ impl GitService {
             format!("HEAD:{target}").into(),
         ])
     }
+}
+
+/// Pushes (or, with `:refs/tags/…`, deletes) exactly one tag ref, never forced.
+fn tag_push_args(remote: &str, refspec: String) -> Vec<OsString> {
+    vec![
+        "--literal-pathspecs".into(),
+        "push".into(),
+        "--porcelain".into(),
+        "--no-force".into(),
+        "--".into(),
+        remote.into(),
+        refspec.into(),
+    ]
 }
