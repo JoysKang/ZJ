@@ -30,13 +30,15 @@ print_stdout = "warn"
 debug = 1
 
 # 发布与体积测量专用：cargo build --profile dist
-# 未开 panic = "abort"：GPUI Kit 运行期用 catch_unwind 做状态清理后再 resume_unwind，
-# 改为 abort 前需单独验证行为与体积收益。
+# opt-level = "s"：体积 −3.57 MB（35.46 → 31.89 MB 实测）；冷启动到窗口出现 33 → 40 ms，
+# 远低于 250 ms 预算。未开 panic = "abort"：GPUI Kit 运行期用 catch_unwind 做状态清理后
+# 再 resume_unwind，改为 abort 前需单独验证行为与体积收益。
 [profile.dist]
 inherits = "release"
 debug = 0
 lto = "fat"
 codegen-units = 1
+opt-level = "s"
 strip = true
 
 [profile.dev]
@@ -48,25 +50,5 @@ debug = 1
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 
-# Agent 相关依赖按体积优化（docs/adr/0004）：这些代码不在按键 / 渲染路径上，
-# opt-level = "s" 让 ACP + SQLite 的增量从约 4.1 MB 降到约 2.4 MB（x86_64 实测）。
-[profile.dist.package.agent-client-protocol]
-opt-level = "s"
-
-[profile.dist.package.agent-client-protocol-schema]
-opt-level = "s"
-
-[profile.dist.package.serde_with]
-opt-level = "s"
-
-[profile.dist.package.libsqlite3-sys]
-opt-level = "s"
-
-[profile.dist.package.rusqlite]
-opt-level = "s"
-
-[profile.dist.package.workspace-editor-agent]
-opt-level = "s"
-
-[profile.dist.package.workspace-editor-agent-history]
-opt-level = "s"
+# Agent 相关依赖原来单独按体积优化（docs/adr/0004）：dist 已整体 opt-level = "s"，
+# 逐包覆盖不再需要。
