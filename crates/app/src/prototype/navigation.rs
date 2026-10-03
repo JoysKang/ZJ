@@ -30,8 +30,30 @@ const URI_PREFIX: &str = "zj-nav:";
 
 gpui_kit::actions!(
     workspace,
-    [GoToSymbol, FindReferences, NavigateBack, NavigateForward]
+    [
+        GoToSymbol,
+        GoToLine,
+        FindReferences,
+        NavigateBack,
+        NavigateForward
+    ]
 );
+
+/// `:12` or `:12:5` (also `:12,5`) in the command center: 1-based line and optional column.
+/// `None` for anything else, including 0.
+pub(super) fn parse_line_query(query: &str) -> Option<(u32, Option<u32>)> {
+    let query = query.trim();
+    let (line, column) = match query.split_once([':', ',']) {
+        Some((line, column)) => (line.trim(), Some(column.trim())),
+        None => (query, None),
+    };
+    let number = |text: &str| text.parse::<u32>().ok().filter(|n| *n > 0);
+    let line = number(line)?;
+    match column {
+        None => Some((line, None)),
+        Some(column) => Some((line, Some(number(column)?))),
+    }
+}
 
 /// A place to jump to; `column` and `len` are bytes in the line.
 #[derive(Clone, Debug)]
@@ -424,7 +446,7 @@ impl Prototype {
         self.open_picker(items, placeholder, "没有找到", window, cx);
     }
 
-    fn active_document(&self) -> Option<(PathBuf, Entity<EditorState>)> {
+    pub(super) fn active_document(&self) -> Option<(PathBuf, Entity<EditorState>)> {
         match self.active {
             Pane::Document(id) => self
                 .documents
@@ -531,6 +553,31 @@ impl Prototype {
         self.go(point.path, Placement::Offset(point.offset), window, cx);
     }
 
+    /// ⌃G / `:N:C`: puts the cursor at 0-based `line` and `column` (characters) of the
+    /// active document, recorded in the back history.
+    pub(super) fn go_to_line(
+        &mut self,
+        line: u32,
+        column: u32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Pane::Document(id) = self.active else {
+            return;
+        };
+        let Some(doc) = self.documents.iter().find(|doc| doc.id == id) else {
+            return;
+        };
+        let (path, center) = (doc.path.clone(), !doc.soft_wrap);
+        self.remember(cx);
+        let place = Placement::Line {
+            line,
+            column,
+            center,
+        };
+        self.go(path, place, window, cx);
+    }
+
     /// ⌘⇧O: the outline of the active file in a filterable list.
     pub(super) fn go_to_symbol(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((path, editor)) = self.active_document() else {
@@ -599,15 +646,44 @@ impl Prototype {
 /// Where to put the cursor once a file is showing.
 #[derive(Clone, Debug)]
 pub enum Placement {
-    Point { line: u32, column: u32, len: u32 },
+    Point {
+        line: u32,
+        column: u32,
+        len: u32,
+    },
     Offset(usize),
+    /// `column` in characters; `center` scrolls the line to the middle of the editor.
+    Line {
+        line: u32,
+        column: u32,
+        center: bool,
+    },
 }
 
 impl Placement {
     fn apply(&self, editor: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
         editor.update(cx, |state, cx| {
+            if let Placement::Line {
+                line,
+                column,
+                center,
+            } = *self
+            {
+                state.set_cursor_position(lsp_types::Position::new(line, column), window, cx);
+                // Kit only scrolls the cursor into view at the nearest edge. Buffer lines are
+                // display rows only without soft wrap, so wrapped buffers keep Kit's scroll.
+                if center
+                    && let (Some(height), Some(bounds)) = (state.line_height(), state.text_bounds())
+                {
+                    let top = height * line as f32 - (bounds.size.height - height) / 2.;
+                    let x = state.scroll_offset().x;
+                    state.set_scroll_offset(point(x, -top.max(px(0.))), cx);
+                }
+                return;
+            }
             let rope = state.text().clone();
             let (start, end) = match *self {
+                Placement::Line { .. } => return,
                 Placement::Point { line, column, len } => {
                     let start = rope.point_to_offset(gpui_kit::component::input::Point::new(
                         line as usize,
@@ -630,8 +706,20 @@ impl Placement {
 
 #[cfg(test)]
 mod tests {
-    use super::{AtomicBool, Path, SymbolIndex, references, resolve};
+    use super::{AtomicBool, Path, SymbolIndex, parse_line_query, references, resolve};
     use std::fs;
+
+    #[test]
+    fn line_queries_parse_line_and_column() {
+        assert_eq!(parse_line_query("3"), Some((3, None)));
+        assert_eq!(parse_line_query(" 12 "), Some((12, None)));
+        assert_eq!(parse_line_query("12:5"), Some((12, Some(5))));
+        assert_eq!(parse_line_query("12,5"), Some((12, Some(5))));
+        assert_eq!(parse_line_query("12 : 5"), Some((12, Some(5))));
+        for invalid in ["", "0", "-1", "a", "3:", "3:0", "3:x", ":3", "3:4:5", "1.5"] {
+            assert_eq!(parse_line_query(invalid), None, "{invalid:?}");
+        }
+    }
 
     /// Each language: the reference in the sample resolves to its definition line.
     #[test]

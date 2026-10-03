@@ -56,6 +56,9 @@ mod edit_commands_ui_tests;
 mod editor_area;
 mod explorer_ops;
 mod find_widget;
+#[cfg(test)]
+#[path = "prototype/go_to_line_ui_tests.rs"]
+mod go_to_line_ui_tests;
 mod graph_view;
 mod markdown_preview;
 #[cfg(test)]
@@ -1993,6 +1996,9 @@ impl Render for Prototype {
             }))
             .on_action(cx.listener(|this, _: &navigation::GoToSymbol, window, cx| {
                 this.go_to_symbol(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &navigation::GoToLine, window, cx| {
+                this.open_quick_open_with(":", window, cx)
             }))
             .on_action(
                 cx.listener(|this, _: &navigation::FindReferences, window, cx| {

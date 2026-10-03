@@ -243,6 +243,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 nav::GoToSymbol,
                 Some("WorkspaceEditor"),
             ),
+            KeyBinding::new("ctrl-g", nav::GoToLine, Some("WorkspaceEditor")),
             KeyBinding::new("f12", GoToDefinition, Some("Input")),
             KeyBinding::new("shift-f12", nav::FindReferences, Some("WorkspaceEditor")),
             KeyBinding::new("secondary-c", prototype::CopyDiff, Some("DiffEditor")),
@@ -441,6 +442,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 MenuItem::action("转到定义", GoToDefinition),
                 MenuItem::action("查找所有引用", nav::FindReferences),
                 MenuItem::action("转到文件中的符号…", nav::GoToSymbol),
+                MenuItem::action("转到行/列…", nav::GoToLine),
             ]),
         ]);
         let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));

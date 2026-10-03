@@ -1,5 +1,6 @@
-//! ⌘P "转到文件": a VS Code-style quick open over the workspace path index. The same panel
-//! lists symbols (⌘⇧O) and definition / reference locations.
+//! ⌘P "转到文件": a VS Code-style quick open over the workspace path index. A query starting
+//! with `:` goes to a line of the active file (⌃G). The same panel lists symbols (⌘⇧O) and
+//! definition / reference locations.
 
 use super::Prototype;
 use super::SINGLE_LINE;
@@ -10,7 +11,7 @@ use gpui_kit::{
     assets::IconName,
     component::{
         Sizable, h_flex,
-        input::{Input, InputEvent, InputState},
+        input::{Input, InputEvent, InputState, RopeExt},
         v_flex,
     },
     prelude::FluentBuilder,
@@ -31,6 +32,7 @@ pub(super) enum PickIcon {
     File(&'static str),
     Symbol(Kind),
     Lucide(IconName),
+    None,
 }
 
 /// What choosing a row does.
@@ -62,10 +64,15 @@ pub(super) enum Pick {
     },
     /// The checked-out branch: nothing to do.
     Close,
+    /// `:N:C` in the file search: 0-based line and column; `None` (no file, or the line is
+    /// out of range) keeps the panel open, as in VS Code.
+    Line(Option<(u32, u32)>),
 }
 
 pub(super) struct QuickOpen {
     pub(super) input: Entity<InputState>,
+    /// Opened as the file search (⌘P), where a `:` prefix switches to going to a line.
+    launcher: bool,
     results: Vec<PathBuf>,
     /// `Some` for a symbol / location list: the items and the indexes matching the query.
     pub(super) items: Option<(Vec<PickItem>, Vec<usize>)>,
@@ -79,10 +86,35 @@ pub(super) struct QuickOpen {
 
 impl Prototype {
     pub(super) fn open_quick_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.quick_open.is_some() {
+        if self.quick_open.as_ref().is_some_and(|quick| quick.launcher) {
             return;
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("按名称搜索文件"));
+        self.open_quick_open_with("", window, cx);
+    }
+
+    /// Opens the file search with `prefix` typed (`:` for ⌃G), or retypes the query of the
+    /// one already open.
+    pub(super) fn open_quick_open_with(
+        &mut self,
+        prefix: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(quick) = self.quick_open.as_ref().filter(|quick| quick.launcher) {
+            let input = quick.input.clone();
+            input.update(cx, |input, cx| {
+                input.set_value(prefix.to_string(), window, cx);
+                input.focus(window, cx);
+            });
+            self.update_quick_open(window, cx);
+            return;
+        }
+        let input = cx.new(|cx| {
+            let mut input =
+                InputState::new(window, cx).placeholder("按名称搜索文件（输入 : 转到行）");
+            input.set_value(prefix.to_string(), window, cx);
+            input
+        });
         input.update(cx, |input, cx| input.focus(window, cx));
         let subscription = cx.subscribe_in(
             &input,
@@ -95,6 +127,7 @@ impl Prototype {
         );
         self.quick_open = Some(QuickOpen {
             input,
+            launcher: true,
             results: Vec::new(),
             items: None,
             empty_note: "",
@@ -131,6 +164,7 @@ impl Prototype {
         let all = (0..items.len()).collect();
         self.quick_open = Some(QuickOpen {
             input,
+            launcher: false,
             results: Vec::new(),
             items: Some((items, all)),
             empty_note,
@@ -141,6 +175,44 @@ impl Prototype {
             _subscription: subscription,
         });
         cx.notify();
+    }
+
+    /// The one row of `:N:C`: where Enter goes, or why it cannot go (VS Code's wording).
+    fn line_item(&self, query: &str, cx: &App) -> PickItem {
+        let row = |label: String, line| PickItem {
+            label,
+            detail: String::new(),
+            icon: PickIcon::None,
+            pick: Pick::Line(line),
+        };
+        let Some((_, editor)) = self.active_document() else {
+            return row("请先打开一个文件".into(), None);
+        };
+        let state = editor.read(cx);
+        let lines = state.text().lines_len() as u32;
+        match super::navigation::parse_line_query(query) {
+            Some((line, column)) if line <= lines => {
+                let label = match column {
+                    Some(column) => format!("转到第 {line} 行第 {column} 个字符"),
+                    None => format!("转到第 {line} 行"),
+                };
+                row(
+                    label,
+                    Some((line - 1, column.map_or(0, |column| column - 1))),
+                )
+            }
+            _ => {
+                let here = state.cursor_position();
+                row(
+                    format!(
+                        "当前行: {}，字符: {}。请输入 1 到 {lines} 之间的行号。",
+                        here.line + 1,
+                        here.character + 1
+                    ),
+                    None,
+                )
+            }
+        }
     }
 
     fn quick_open_len(&self) -> usize {
@@ -154,6 +226,23 @@ impl Prototype {
 
     /// Empty query lists open files, most recent first; otherwise fuzzy results from the index.
     pub(super) fn update_quick_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(quick) = self.quick_open.as_ref().filter(|quick| quick.launcher) {
+            let query = quick.input.read(cx).value();
+            if let Some(line) = query.strip_prefix(':') {
+                let item = self.line_item(line, cx);
+                if let Some(quick) = self.quick_open.as_mut() {
+                    quick.generation += 1;
+                    quick.task = None;
+                    quick.selected = 0;
+                    quick.items = Some((vec![item], vec![0]));
+                }
+                cx.notify();
+                return;
+            }
+            if let Some(quick) = self.quick_open.as_mut() {
+                quick.items = None;
+            }
+        }
         if let Some(quick) = self.quick_open.as_mut()
             && let Some((items, filtered)) = &mut quick.items
         {
@@ -297,9 +386,13 @@ impl Prototype {
                 );
                 return;
             }
+            if let Some(Pick::Line(None)) = pick {
+                return;
+            }
             self.quick_open = None;
             match pick {
                 Some(Pick::Jump(target)) => self.jump_to(target, true, window, cx),
+                Some(Pick::Line(Some((line, column)))) => self.go_to_line(line, column, window, cx),
                 Some(Pick::Checkout {
                     repo,
                     branch,
@@ -327,7 +420,7 @@ impl Prototype {
                     };
                     self.scm_request_for(&repo, operation, window, cx);
                 }
-                Some(Pick::TagName { .. }) | Some(Pick::Close) | None => {
+                Some(Pick::TagName { .. }) | Some(Pick::Close) | Some(Pick::Line(None)) | None => {
                     self.focus_active_editor(window, cx)
                 }
             }
@@ -518,22 +611,27 @@ impl Prototype {
     ) -> AnyElement {
         let colors = theme::colors(cx);
         let icon = match item.icon {
-            PickIcon::File(icon) => file_icons::icon(icon).into_any_element(),
+            PickIcon::File(icon) => Some(file_icons::icon(icon).into_any_element()),
             PickIcon::Symbol(kind) => {
                 let (name, color) = super::navigation::kind_icon(kind, colors);
+                Some(
+                    gpui_kit::component::Icon::new(name)
+                        .size(theme::ICON_SIZE)
+                        .text_color(color)
+                        .into_any_element(),
+                )
+            }
+            PickIcon::Lucide(name) => Some(
                 gpui_kit::component::Icon::new(name)
                     .size(theme::ICON_SIZE)
-                    .text_color(color)
-                    .into_any_element()
-            }
-            PickIcon::Lucide(name) => gpui_kit::component::Icon::new(name)
-                .size(theme::ICON_SIZE)
-                .text_color(if selected {
-                    colors.selected_fg
-                } else {
-                    colors.muted
-                })
-                .into_any_element(),
+                    .text_color(if selected {
+                        colors.selected_fg
+                    } else {
+                        colors.muted
+                    })
+                    .into_any_element(),
+            ),
+            PickIcon::None => None,
         };
         let query = || {
             self.quick_open
@@ -585,7 +683,9 @@ impl Prototype {
                 row.bg(colors.selected).text_color(colors.selected_fg)
             })
             .when(!selected, |row| row.hover(|row| row.bg(colors.hover)))
-            .child(div().flex_shrink_0().child(icon))
+            .when_some(icon, |row, icon| {
+                row.child(div().flex_shrink_0().child(icon))
+            })
             .child(
                 div()
                     .flex_shrink(1.)
