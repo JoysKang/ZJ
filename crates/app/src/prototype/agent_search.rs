@@ -2,7 +2,7 @@
 //! and metadata, Chinese included. Pinned hits first, then by relevance and recency. Runs in
 //! the background with a generation check; nothing is searched while the overlay is closed.
 
-use super::agent::{AgentStore, agent_name, glyph_for};
+use super::agent::{AgentStore, agent_name, glyph_for, workspace_label};
 use super::agent_history::filter_chip;
 use super::agent_panel::{glyph_tile, status_mark};
 use super::*;
@@ -186,7 +186,7 @@ impl Prototype {
             }
             return;
         };
-        let root = self.root.clone();
+        let root = self.agent_workspace(cx);
         let Some(search) = self.agent.search.as_mut() else {
             return;
         };
@@ -530,11 +530,7 @@ impl Prototype {
                     .child(
                         filter_chip(
                             "agent-search-scope",
-                            if search.all_workspaces {
-                                "所有工作区".into()
-                            } else {
-                                "本工作区".into()
-                            },
+                            self.agent_scope_label(search.all_workspaces, cx),
                             false,
                             colors,
                         )
@@ -756,7 +752,7 @@ impl Prototype {
                             .child(agent_name(&self.agent.presets, &s.agent_id))
                             .child("·")
                             .child(Icon::new(IconName::GitBranch).size(theme::SMALL_ICON_SIZE))
-                            .child(agent_model::file_name(&s.workspace_root))
+                            .child(workspace_label(&s.workspace_root, cx))
                             .when_some(s.branch.clone(), |m, branch| m.child("·").child(branch))
                             .children(kind_tag.map(tag))
                             .when(s.archived, |m| m.child(tag("已归档".into()))),

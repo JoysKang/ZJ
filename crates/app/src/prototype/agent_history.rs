@@ -1,7 +1,7 @@
 //! The session list in the agent panel (design 02-A): the search box (opens ⌘J), filter
 //! chips, then 已钉住 (drag to reorder) / 今天 / 昨天 / 本周 / 更早 with hover actions.
 
-use super::agent::{HistoryOp, agent_name, glyph_for};
+use super::agent::{HistoryOp, agent_name, glyph_for, workspace_label};
 use super::agent_panel::{glyph_tile, status_mark};
 use super::*;
 use crate::agent_model::{self, Bucket, ListRow, RowStatus};
@@ -177,12 +177,7 @@ impl Prototype {
             .child(
                 filter_chip(
                     "agent-filter-scope",
-                    // Without a folder the list already shows every workspace.
-                    if filter.all_workspaces || self.root.is_none() {
-                        "所有工作区".into()
-                    } else {
-                        "本工作区".into()
-                    },
+                    self.agent_scope_label(filter.all_workspaces, cx),
                     true,
                     colors,
                 )
@@ -350,9 +345,8 @@ impl Prototype {
         let id = s.id;
         let pinned = s.pinned();
         let other_workspace = self
-            .root
-            .as_ref()
-            .is_some_and(|root| *root != s.workspace_root);
+            .agent_workspace(cx)
+            .is_some_and(|root| root != s.workspace_root);
         let group: SharedString = format!("agent-session-{}", id.0).into();
         let fg = if selected {
             colors.selected_fg
@@ -522,7 +516,7 @@ impl Prototype {
                         .rounded(theme::RADIUS)
                         .bg(colors.keycap)
                         .text_color(if selected { fg } else { colors.foreground })
-                        .child(agent_model::file_name(&s.workspace_root)),
+                        .child(workspace_label(&s.workspace_root, cx)),
                 )
             })
             .when_some(s.branch.clone(), |m, branch| {

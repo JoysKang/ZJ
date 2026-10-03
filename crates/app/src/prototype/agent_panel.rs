@@ -345,7 +345,10 @@ impl Prototype {
                         div()
                             .text_size(theme::TEXT_SECTION)
                             .text_color(colors.muted)
-                            .child(format!("本工作区 {here} · 全部 {all}")),
+                            .child(format!(
+                                "{} {here} · 全部 {all}",
+                                self.agent_scope_label(false, cx)
+                            )),
                     )
                 })
                 .child(new_session)
@@ -475,7 +478,7 @@ impl Prototype {
                     div()
                         .text_size(theme::TEXT_CAPTION)
                         .text_color(colors.muted)
-                        .child("还没有打开文件夹：发送时先选一个，Agent 在里面读写文件"),
+                        .child("没有打开文件夹：对话在默认工作区里进行"),
                 )
             })
             .child(
@@ -1944,11 +1947,7 @@ impl Prototype {
                 .primary()
                 .small()
                 .icon(IconName::ArrowUp)
-                .tooltip(if self.root.is_some() {
-                    "发送（⏎）"
-                } else {
-                    "选择文件夹后发送（⏎）"
-                })
+                .tooltip("发送（⏎）")
                 .disabled(empty)
                 .on_click(cx.listener(|this, _, window, cx| this.agent_submit(window, cx)))
         };
@@ -2375,8 +2374,7 @@ impl Prototype {
                 }))
         });
         let rules = self
-            .root
-            .as_ref()
+            .agent_workspace(cx)
             .and_then(|root| settings.allow.get(&root.to_string_lossy().into_owned()))
             .cloned()
             .unwrap_or_default();

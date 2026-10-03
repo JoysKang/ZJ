@@ -47,6 +47,8 @@ pub(super) const SPIN_FRAMES: usize = 8;
 /// thread).
 pub struct AgentStore {
     pub history: Option<Arc<History>>,
+    /// Where sessions run in a window without a folder; created on first use.
+    pub default_workspace: Option<PathBuf>,
 }
 
 impl Global for AgentStore {}
@@ -55,14 +57,51 @@ pub fn init_store(cx: &mut App) {
     let path = std::env::var_os("ZJ_AGENT_DB")
         .map(PathBuf::from)
         .or_else(workspace_editor_agent_history::default_db_path);
+    let default_workspace = std::env::var_os("ZJ_AGENT_WORKSPACE")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(default_workspace_path);
     cx.set_global(AgentStore {
         history: path.map(|path| Arc::new(History::new(path))),
+        default_workspace,
     });
+}
+
+/// `~/Library/Application Support/ZJ/workspace` on macOS, `$XDG_DATA_HOME/zj/workspace` (or
+/// `~/.local/share/zj/workspace`) elsewhere, next to the history database.
+fn default_workspace_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from);
+    if cfg!(target_os = "macos") {
+        return Some(home?.join("Library/Application Support/ZJ/workspace"));
+    }
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.map(|h| h.join(".local/share")))?;
+    Some(data.join("zj/workspace"))
 }
 
 fn history(cx: &App) -> Option<Arc<History>> {
     cx.try_global::<AgentStore>()
         .and_then(|store| store.history.clone())
+}
+
+pub(super) fn default_workspace(cx: &App) -> Option<PathBuf> {
+    cx.try_global::<AgentStore>()
+        .and_then(|store| store.default_workspace.clone())
+}
+
+pub(super) const DEFAULT_WORKSPACE_NAME: &str = "默认工作区";
+
+/// The name shown for a session's workspace.
+pub(super) fn workspace_label(root: &std::path::Path, cx: &App) -> String {
+    if default_workspace(cx).as_deref() == Some(root) {
+        DEFAULT_WORKSPACE_NAME.into()
+    } else {
+        agent_model::file_name(root)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +116,9 @@ pub(super) struct LiveSession {
     pub key: u64,
     pub preset: AgentPreset,
     pub client: Option<Arc<AgentClient>>,
+    /// The workspace the agent runs in: the window's folder, or the default workspace when
+    /// the window has none. Fixed when the agent first starts.
+    pub root: Option<PathBuf>,
     starting: bool,
     pub thread: Thread,
     pub db: Option<SessionId>,
@@ -105,6 +147,7 @@ impl LiveSession {
             key,
             preset,
             client: None,
+            root: None,
             starting: false,
             thread: Thread::new(),
             db: None,
@@ -219,8 +262,6 @@ pub(super) struct AgentPanel {
     /// The agent picked for the next new session.
     pub agent_id: String,
     pub composer_focused: bool,
-    /// Sending in a window without a folder asks for one; the prompt goes out once it is open.
-    pub send_after_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -301,7 +342,6 @@ impl AgentPanel {
             agent_id: settings.default_agent.clone(),
             presets,
             composer_focused: false,
-            send_after_open: false,
             _subscriptions: vec![events],
         }
     }
@@ -553,6 +593,21 @@ impl Prototype {
 
     // ----- sending ------------------------------------------------------------------------
 
+    /// The workspace new sessions run in and the history lists: the window's folder, or the
+    /// default workspace.
+    pub(super) fn agent_workspace(&self, cx: &App) -> Option<PathBuf> {
+        self.root.clone().or_else(|| default_workspace(cx))
+    }
+
+    /// The history and search scope chip.
+    pub(super) fn agent_scope_label(&self, all_workspaces: bool, cx: &App) -> String {
+        match self.agent_workspace(cx) {
+            Some(_) if !all_workspaces && self.root.is_none() => DEFAULT_WORKSPACE_NAME.into(),
+            Some(_) if !all_workspaces => "本工作区".into(),
+            _ => "所有工作区".into(),
+        }
+    }
+
     pub(super) fn agent_submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.agent.mention.is_some() {
             self.agent_pick_mention(None, window, cx);
@@ -562,15 +617,21 @@ impl Prototype {
         if text.is_empty() {
             return;
         }
-        let Some(root) = self.root.clone() else {
-            self.agent.send_after_open = true;
-            self.choose_path(true, window, cx);
-            return;
-        };
         if self.agent.current.is_none() {
             self.agent_new_session(None, window, cx);
         }
         let Some(key) = self.agent.current else {
+            return;
+        };
+        let root = self
+            .agent
+            .session(key)
+            .and_then(|s| s.root.clone())
+            .or_else(|| self.agent_workspace(cx));
+        let Some(root) = root else {
+            self.message =
+                "找不到数据目录（HOME 未设置），没有默认工作区可用；先打开一个文件夹".into();
+            cx.notify();
             return;
         };
         let attachments = std::mem::take(&mut self.agent.attachments);
@@ -613,6 +674,7 @@ impl Prototype {
             return;
         }
         session.starting = true;
+        session.root = Some(root.clone());
         let preset = session.preset.clone();
         let resume = session.resume.clone();
         let overrides = settings.env.get(&preset.id).cloned().unwrap_or_default();
@@ -623,7 +685,12 @@ impl Prototype {
         };
         let idle = Duration::from_secs(u64::from(settings.idle_minutes) * 60);
         let buffers = buffer_provider(cx);
+        let create = default_workspace(cx).as_ref() == Some(&root);
         let job = cx.background_spawn(async move {
+            if create {
+                std::fs::create_dir_all(&root)
+                    .map_err(|e| format!("无法创建默认工作区 {}：{e}", root.display()))?;
+            }
             let env = crate::secrets::resolve(&overrides, |name| std::env::var(name).ok())?;
             let mut options = ClientOptions::new(preset, root);
             options.write_mode = write_mode;
@@ -701,10 +768,13 @@ impl Prototype {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let root = self.root.clone();
         let branch = self.active_branch();
-        let workspace_name = self.workspace_name();
         let store = history(cx);
+        let Some(root) = self.agent.session(key).and_then(|s| s.root.clone()) else {
+            return;
+        };
+        let workspace_name = workspace_label(&root, cx);
+        let in_default = default_workspace(cx).as_ref() == Some(&root);
         let Some(session) = self.agent.session_mut(key) else {
             return;
         };
@@ -753,16 +823,16 @@ impl Prototype {
                             if !session.db_creating {
                                 session.db_creating = true;
                                 let new = NewSession {
-                                    workspace_root: root.clone().unwrap_or_default(),
+                                    repo: (!in_default)
+                                        .then(|| root.file_name())
+                                        .flatten()
+                                        .map(|n| n.to_string_lossy().into_owned()),
+                                    workspace_root: root,
                                     workspace_name: Some(workspace_name),
                                     agent_id: session.preset.id.clone(),
                                     acp_session_id: session.thread.session_id.clone(),
                                     title: session.thread.title.clone(),
                                     first_prompt: Some(text),
-                                    repo: root
-                                        .as_ref()
-                                        .and_then(|r| r.file_name())
-                                        .map(|n| n.to_string_lossy().into_owned()),
                                     branch,
                                     created_at: Some(session.started_at),
                                 };
@@ -864,8 +934,9 @@ impl Prototype {
             && self.agent.view == AgentView::Thread
             && window.is_window_active();
         let rules: Vec<String> = self
-            .root
-            .as_ref()
+            .agent
+            .session(key)
+            .and_then(|s| s.root.as_ref())
             .and_then(|root| {
                 cx.global::<crate::settings::Settings>()
                     .agent
@@ -1156,10 +1227,10 @@ impl Prototype {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let root = self.root.clone();
         let Some(session) = self.agent.session_mut(key) else {
             return;
         };
+        let root = session.root.clone();
         let Some(card) = session
             .thread
             .pending_permissions()
@@ -1261,7 +1332,10 @@ impl Prototype {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(root) = self.root.as_ref().map(|r| r.to_string_lossy().into_owned()) else {
+        let Some(root) = self
+            .agent_workspace(cx)
+            .map(|r| r.to_string_lossy().into_owned())
+        else {
             return;
         };
         self.change_settings(window, cx, move |s| {
@@ -1652,7 +1726,7 @@ impl Prototype {
             return;
         };
         let filter = self.agent.history.filter.clone();
-        let root = self.root.clone();
+        let root = self.agent_workspace(cx);
         self.agent.history.generation += 1;
         let generation = self.agent.history.generation;
         let job = cx.background_spawn(async move {
@@ -1842,6 +1916,7 @@ impl Prototype {
         session.db = Some(summary.id);
         session.started_at = summary.created_at;
         session.branch = summary.branch.clone();
+        session.root = Some(summary.workspace_root.clone());
         session.resume = summary.acp_session_id.clone();
         session.thread.session_id = summary.acp_session_id.clone();
         session.thread.title = Some(summary.title.clone());
@@ -2015,8 +2090,11 @@ impl Prototype {
 
     pub(super) fn agent_delete_archived(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         use workspace_editor_agent_history::Scope;
-        let scope = match (&self.root, self.agent.history.filter.all_workspaces) {
-            (Some(root), false) => Scope::Workspace(root.clone()),
+        let scope = match (
+            self.agent_workspace(cx),
+            self.agent.history.filter.all_workspaces,
+        ) {
+            (Some(root), false) => Scope::Workspace(root),
             _ => Scope::All,
         };
         let count = self.agent.history.counts.2;

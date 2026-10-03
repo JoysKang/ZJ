@@ -32,6 +32,8 @@
 
 **进程**：工作区根目录作为 cwd，独立进程组；去掉继承的 `GIT_*`、`ZJ_*`、`CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT` / `CLAUDE_CODE_SSE_PORT`（否则 Claude Code 会拒绝「嵌套启动」）；退出时先关 stdin，再对整组 SIGTERM，1.5 秒后 SIGKILL。stderr 只保留最后 16 KB，崩溃时显示给用户，不写日志。
 
+**没有文件夹时**：窗口没有打开文件夹（从 Dock 或 Finder 启动）也能直接对话，会话在默认工作区里运行：macOS 是 `~/Library/Application Support/ZJ/workspace`，其他平台 `$XDG_DATA_HOME/zj/workspace`，`ZJ_AGENT_WORKSPACE` 可覆盖；第一次启动 Agent 时才创建这个空目录。历史按这个路径记录，没有文件夹的窗口里会话列表、⌘J 的范围是「默认工作区」，在其他工作区里这些会话标成「默认工作区」，筛选方式和普通工作区一样。会话的工作区在 Agent 第一次启动时确定，之后窗口再打开文件夹也不变；从历史打开的会话回到它原来的工作区。默认工作区不建文件索引，`@` 只能引用已打开的文件。
+
 **协议**：`initialize` → `session/new`（`cwd` = 工作区根目录，`mcpServers` 为空）→ `session/prompt`。提示内容是文本加 `resource_link`（文件；选区带 `#L起:止`），Agent 声明 `embeddedContext` 时选区原文内嵌。`session/update` 转成类型化事件：回复 / 思考片段、工具调用（类别、状态、位置、Diff）、计划、可用命令、模式、用量、标题。`session/cancel` 中断，同时把未答的权限请求一律回 `cancelled`。权限请求作为事件交给界面，界面调用 `respond_permission` 作答；等待期间不占用 ACP 的分发循环。
 
 **登录**：`initialize` 声明 `auth.terminal`（仅 macOS）。`session/new`（Codex）或 `session/prompt`（Claude Code，会话能建，发提示词时才拒绝）返回 `auth_required` 时，客户端发出 `AgentEvent::AuthRequired`，列出 Agent 给的登录方式，面板显示登录卡片，这一轮保持进行中，提示词暂存。Agent 自己的方式（Codex 的 ChatGPT 打开浏览器、API Key 读环境变量）走 `authenticate`，最多等 10 分钟，成功后自动重试；`terminal` 方式（Claude 的订阅 / Console 登录）写一个只有本人可读的 `.command` 脚本，在「终端」里运行适配器加该方式的参数，用户完成后点「已登录，重试」。脚本只带 `PATH` 和本机 CLI 路径变量，不写入 Key 等其他环境变量，运行后自删。重试仍未登录时卡片显示「仍未登录」；在 `session/prompt` 阶段重试用同一个会话重发暂存的提示词。等待登录期间取消或空闲超时会结束这一轮。ZJ 不读取、不保存任何凭据，登录状态由 Agent 自己管理。

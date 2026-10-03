@@ -32,6 +32,21 @@ fn fake_agent() -> UserAgentConfig {
 }
 
 fn open(cx: &mut TestAppContext, root: Option<PathBuf>) -> (WindowHandle<Root>, Entity<Prototype>) {
+    open_with(
+        cx,
+        root,
+        AgentStore {
+            history: None,
+            default_workspace: None,
+        },
+    )
+}
+
+fn open_with(
+    cx: &mut TestAppContext,
+    root: Option<PathBuf>,
+    store: AgentStore,
+) -> (WindowHandle<Root>, Entity<Prototype>) {
     cx.update(|cx| {
         gpui_kit::init(cx);
         let mut settings = crate::settings::Settings::default();
@@ -40,7 +55,7 @@ fn open(cx: &mut TestAppContext, root: Option<PathBuf>) -> (WindowHandle<Root>, 
         settings.agent.default_agent = "fake".into();
         cx.set_global(settings);
         cx.set_global(crate::watch::WatchService::default());
-        cx.set_global(AgentStore { history: None });
+        cx.set_global(store);
         let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
         cx.set_global(OpenDocuments(documents.clone()));
         let service = GitService::new(1, std::time::Duration::from_secs(5)).unwrap();
@@ -155,36 +170,51 @@ async fn enter_sends_every_turn(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-async fn enter_without_a_folder_asks_for_one_then_sends(cx: &mut TestAppContext) {
+async fn without_a_folder_the_session_runs_in_the_default_workspace(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let root = temp_root("nofolder");
-    let (handle, this) = open(cx, None);
-    send(cx, handle, &this, "echo hi");
-    assert!(cx.did_prompt_for_paths());
-    assert_eq!(sent(cx, &this), (Vec::new(), "echo hi".to_string()));
-    let picked = root.clone();
-    cx.simulate_path_prompt_response(move |options| {
-        assert!(options.directories);
-        Some(vec![picked])
-    });
-    settle(cx, &this);
-    assert_eq!(
-        this.read_with(cx, |p, _| p.root.clone()),
-        Some(root.clone())
+    let data = temp_root("default");
+    let workspace = data.join("workspace");
+    let (handle, this) = open_with(
+        cx,
+        None,
+        AgentStore {
+            history: Some(Arc::new(History::new(data.join("history.sqlite")))),
+            default_workspace: Some(workspace.clone()),
+        },
     );
+    send(cx, handle, &this, "echo hi");
+    settle(cx, &this);
+    assert!(!cx.did_prompt_for_paths());
+    assert!(workspace.is_dir(), "the default workspace is created");
     assert_eq!(
         sent(cx, &this),
         (vec!["echo hi".to_string()], String::new())
     );
-    let _ = std::fs::remove_dir_all(root);
-}
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.root, None);
+        assert_eq!(p.agent.current().unwrap().root, Some(workspace.clone()));
+    });
 
-#[gpui_kit::test]
-async fn cancelling_the_folder_prompt_keeps_the_draft(cx: &mut TestAppContext) {
-    let (handle, this) = open(cx, None);
-    send(cx, handle, &this, "echo hi");
-    cx.simulate_path_prompt_response(|_| None);
-    cx.run_until_parked();
-    assert_eq!(sent(cx, &this), (Vec::new(), "echo hi".to_string()));
-    assert!(!this.read_with(cx, |p, _| p.agent.send_after_open));
+    // The history list of a window without a folder is the default workspace's.
+    let mut rows = Vec::new();
+    for _ in 0..100 {
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |this, cx| this.agent_reload_history(window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        rows = this.read_with(cx, |p, _| p.agent.history.rows.clone());
+        if !rows.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].workspace_root, workspace);
+    this.read_with(cx, |p, cx| {
+        assert_eq!(p.agent.history.counts.0, 1);
+        assert_eq!(p.agent_scope_label(false, cx), "默认工作区");
+        assert_eq!(workspace_label(&workspace, cx), "默认工作区");
+    });
+    let _ = std::fs::remove_dir_all(data);
 }

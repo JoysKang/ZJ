@@ -981,7 +981,6 @@ impl Prototype {
             };
             let _ = this.update_in(cx, |this, window, cx| {
                 this.path_prompt_open = false;
-                let send = std::mem::take(&mut this.agent.send_after_open);
                 match selected {
                     Ok(Some(path)) if directory => {
                         if this.root.is_none() {
@@ -991,9 +990,6 @@ impl Prototype {
                             this.start_watching(window, cx);
                             this.refresh_tree(window, cx);
                             this.refresh(window, cx);
-                            if send {
-                                this.agent_submit(window, cx);
-                            }
                         } else if let Err(error) = crate::open_workspace(
                             Some(path),
                             this.service.clone(),
