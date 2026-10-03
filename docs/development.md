@@ -310,3 +310,12 @@ Linux 上的确认框是 GPUI 在窗口里画的备用样式，macOS 上是系�
 实测（临时数据目录、空的 `CODEX_HOME` / `CLAUDE_CONFIG_DIR`，模拟未登录）：Codex 从下载 Node（约 4 秒）、装适配器（约 5 秒）到弹出 API Key / ChatGPT 两种登录方式约 10 秒，进程树只剩适配器（约 85 MB）和 `codex app-server`；Claude Code 装适配器约 7 秒，弹出 Claude 订阅 / Anthropic Console 两种终端登录方式。数据目录里 Node 199 MB、Claude 适配器 60 MB、Codex 适配器 17 MB。
 
 测试：`agent_client` 新增「建会话时要求登录、登录后继续」「发提示词时要求登录、同一会话重发」「取消等待登录」和登录脚本不写入密钥；假 Agent 加 `FAKE_AUTH` / `FAKE_AUTH_AT=prompt`。没有用真实账号完成登录，登录卡片界面没有在真机上手动验证。
+
+## 2026 年 10 月 3 日追加：Agent 发送、会话列表行高、默认 Codex、Rust 1.99
+
+- 发送：从 Dock 或 Finder 启动时窗口没有文件夹，原来发送按钮一直是灰的，回车只在状态栏留一句提示。现在输入框有内容时按钮就可用；没有文件夹时发送会先弹出“打开文件夹”，选好后自动发出，取消则保留草稿。没有文件夹时会话列表本来就显示所有工作区，筛选标签改为“所有工作区”。
+- 会话列表：第二行（其他工作区、分支、增删行数、未读、出错）为空的行改为 32 px 单行，不再留出半行空白。
+- 新会话默认使用 Codex（`agent.default_agent` 的默认值）。已保存的设置文件里的值不变。
+- 工具链：Rust 1.98.0 → 1.99.0。GPUI Kit 0.7.0 / GPUI snapshot 0.3.7 已是 crates.io 最新版，未变。dist 二进制 +240 字节；同一空工作区窗口空闲 30 秒后 footprint 两版都是 165 MB（终端直接启动 dist 二进制、临时设置和历史库；比 docs/adr/0005 的数字高，主要是 90 MB 的 Owned unmapped (graphics)，与工具链无关，没有展开排查）。
+
+测试：app 新增无头窗口测试（`prototype/agent_ui_tests.rs`，gpui-kit `test-support` 只在 dev-dependencies，用假 Agent）：有文件夹时连续两轮回车发送、没有文件夹时先弹选择框再发送、取消后草稿还在。会话列表行高没有截图验证。
