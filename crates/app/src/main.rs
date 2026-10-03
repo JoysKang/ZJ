@@ -63,6 +63,44 @@ fn open_workspace(
     Ok(())
 }
 
+fn display_bounds(cx: &App) -> Vec<Bounds<Pixels>> {
+    cx.displays()
+        .iter()
+        .map(|display| display.bounds())
+        .collect()
+}
+
+/// An empty window: the Dock icon or 新建窗口 with no window open.
+fn open_empty_window(service: GitService, cx: &mut App) {
+    let documents = cx.global::<prototype::OpenDocuments>().0.clone();
+    let index = cx.windows().len();
+    if let Err(e) = open_workspace(None, service, documents, index, None, cx) {
+        eprintln!("无法创建窗口: {e}");
+    }
+}
+
+/// Closing a window never quits ZJ. The last workspace window gives way to an empty window
+/// in its place; closing that one leaves ZJ in the Dock, whose icon opens a window again.
+fn window_closed(id: WindowId, service: GitService, cx: &mut App) {
+    let closed = session::closed(id, cx);
+    if !cx.windows().is_empty() {
+        return;
+    }
+    let Some(closed) = closed.filter(|closed| closed.root.is_some()) else {
+        return;
+    };
+    let bounds = closed
+        .frame
+        .and_then(|frame| frame.window_bounds(&display_bounds(cx)));
+    let documents = cx.global::<prototype::OpenDocuments>().0.clone();
+    // Not from inside the close notification, which runs while GPUI removes the window.
+    cx.defer(move |cx| {
+        if let Err(e) = open_workspace(None, service, documents, 0, bounds, cx) {
+            eprintln!("无法创建窗口: {e}");
+        }
+    });
+}
+
 #[allow(clippy::print_stdout)] // --help output belongs on stdout.
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut roots = Vec::new();
@@ -106,283 +144,285 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         return Err("原型最多支持 5 个窗口，每个根目录一个窗口".into());
     }
     let service = GitService::new(2, Duration::from_secs(30))?;
-    gpui_kit::application()
-        .with_assets(assets::AppAssets)
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            cx.set_global(settings::Settings::load());
-            cx.set_global(watch::WatchService::default());
-            prototype::init_agent_store(cx);
-            diff_syntax::register();
-            platform::DockBlink::apply(cx);
-            cx.observe_global::<settings::Settings>(platform::DockBlink::apply)
-                .detach();
-            theme::follow_appearance(None, cx);
-            cx.bind_keys([
-                KeyBinding::new("cmd-shift-n", prototype::NewWindow, Some("WorkspaceEditor")),
-                KeyBinding::new("secondary-s", prototype::Save, Some("WorkspaceEditor")),
-                KeyBinding::new(
-                    "secondary-shift-s",
-                    prototype::SaveAs,
-                    Some("WorkspaceEditor"),
-                ),
-                KeyBinding::new(
-                    "alt-secondary-s",
-                    prototype::SaveAll,
-                    Some("WorkspaceEditor"),
-                ),
-                KeyBinding::new(
-                    "secondary-n",
-                    prototype::NewUntitled,
-                    Some("WorkspaceEditor"),
-                ),
-                KeyBinding::new(
-                    "secondary-w",
-                    prototype::CloseEditor,
-                    Some("WorkspaceEditor"),
-                ),
-                KeyBinding::new("secondary-q", prototype::Quit, None),
-                KeyBinding::new("cmd-o", prototype::OpenFile, Some("WorkspaceEditor")),
-                // VS Code: ⌘⇧O is go to symbol; open folder moves to ⌘K ⌘O.
-                KeyBinding::new(
-                    "cmd-k cmd-o",
-                    prototype::OpenFolder,
-                    Some("WorkspaceEditor"),
-                ),
-                KeyBinding::new(
-                    "secondary-shift-o",
-                    nav::GoToSymbol,
-                    Some("WorkspaceEditor"),
-                ),
-                KeyBinding::new("f12", GoToDefinition, Some("Input")),
-                KeyBinding::new("shift-f12", nav::FindReferences, Some("WorkspaceEditor")),
-                KeyBinding::new("secondary-c", prototype::CopyDiff, Some("DiffEditor")),
-                KeyBinding::new("secondary-a", prototype::SelectAllDiff, Some("DiffEditor")),
-                // Agent reviews (design): accept / reject the current change.
-                KeyBinding::new(
-                    "secondary-y",
-                    prototype::AcceptAgentChange,
-                    Some("DiffEditor"),
-                ),
-                KeyBinding::new(
-                    "secondary-backspace",
-                    prototype::RejectAgentChange,
-                    Some("DiffEditor"),
-                ),
-                KeyBinding::new("ctrl--", nav::NavigateBack, Some("WorkspaceEditor")),
-                KeyBinding::new(
-                    "ctrl-shift--",
-                    nav::NavigateForward,
-                    Some("WorkspaceEditor"),
-                ),
-                KeyBinding::new(
-                    "secondary-p",
-                    prototype::QuickOpenFile,
-                    Some("WorkspaceEditor"),
-                ),
-                KeyBinding::new(
-                    "secondary-b",
-                    prototype::ToggleSidebar,
-                    Some("WorkspaceEditor"),
-                ),
-                // Explorer (VS Code's macOS bindings), acting on the selected row.
-                KeyBinding::new("f2", prototype::RenameFile, Some("Explorer")),
-                KeyBinding::new("enter", prototype::RenameFile, Some("Explorer")),
-                KeyBinding::new("delete", prototype::DeleteFile, Some("Explorer")),
-                KeyBinding::new("cmd-backspace", prototype::DeleteFile, Some("Explorer")),
-                KeyBinding::new("secondary-c", prototype::CopyFiles, Some("Explorer")),
-                KeyBinding::new("secondary-x", prototype::CutFiles, Some("Explorer")),
-                KeyBinding::new("secondary-v", prototype::PasteFiles, Some("Explorer")),
-                KeyBinding::new("alt-cmd-c", prototype::CopyPath, Some("Explorer")),
-                KeyBinding::new(
-                    "alt-shift-cmd-c",
-                    prototype::CopyRelativePath,
-                    Some("Explorer"),
-                ),
-                KeyBinding::new("alt-cmd-r", prototype::RevealInFinder, Some("Explorer")),
-                KeyBinding::new(
-                    "secondary-shift-f",
-                    prototype::FindInFiles,
-                    Some("WorkspaceEditor"),
-                ),
-                // ⌘⇧F inside an editor is find in files (Kit binds it to its replace panel).
-                KeyBinding::new("secondary-shift-f", prototype::FindInFiles, Some("Input")),
-                // The editor's find widget, with VS Code's macOS keys.
-                KeyBinding::new(
-                    "secondary-f",
-                    prototype::FindInFile,
-                    Some("WorkspaceEditor"),
-                ),
-                KeyBinding::new(
-                    "alt-secondary-f",
-                    prototype::FindReplace,
-                    Some("WorkspaceEditor"),
-                ),
-                KeyBinding::new("secondary-g", prototype::FindNext, Some("WorkspaceEditor")),
-                KeyBinding::new(
-                    "secondary-shift-g",
-                    prototype::FindPrevious,
-                    Some("WorkspaceEditor"),
-                ),
-                KeyBinding::new("f3", prototype::FindNext, Some("WorkspaceEditor")),
-                KeyBinding::new("shift-f3", prototype::FindPrevious, Some("WorkspaceEditor")),
-                KeyBinding::new(
-                    "secondary-shift-1",
-                    prototype::ReplaceOne,
-                    Some("FindWidget"),
-                ),
-                // Some keyboards report ⇧1 as "!".
-                KeyBinding::new(
-                    "secondary-shift-!",
-                    prototype::ReplaceOne,
-                    Some("FindWidget"),
-                ),
-                KeyBinding::new("secondary-!", prototype::ReplaceOne, Some("FindWidget")),
-                KeyBinding::new(
-                    "secondary-alt-enter",
-                    prototype::ReplaceAll,
-                    Some("FindWidget"),
-                ),
-                KeyBinding::new(
-                    "alt-secondary-c",
-                    prototype::ToggleFindCase,
-                    Some("FindWidget"),
-                ),
-                KeyBinding::new(
-                    "alt-secondary-w",
-                    prototype::ToggleFindWord,
-                    Some("FindWidget"),
-                ),
-                KeyBinding::new(
-                    "alt-secondary-r",
-                    prototype::ToggleFindRegex,
-                    Some("FindWidget"),
-                ),
-                KeyBinding::new(
-                    "alt-secondary-p",
-                    prototype::TogglePreserveCase,
-                    Some("FindWidget"),
-                ),
-                KeyBinding::new(
-                    "alt-secondary-l",
-                    prototype::ToggleFindInSelection,
-                    Some("FindWidget"),
-                ),
-                KeyBinding::new("cmd-=", prototype::ZoomIn, Some("WorkspaceEditor")),
-                KeyBinding::new("cmd-+", prototype::ZoomIn, Some("WorkspaceEditor")),
-                KeyBinding::new("cmd--", prototype::ZoomOut, Some("WorkspaceEditor")),
-                KeyBinding::new("cmd-0", prototype::ZoomReset, Some("WorkspaceEditor")),
-                // Agent panel: ⌥⌘B as VS Code's secondary side bar; ⌘J / ⌘L / ⌘⇧A as in the
-                // design (session search, add the selection, next approval).
-                KeyBinding::new(
-                    "alt-cmd-b",
-                    prototype::ToggleAgentPanel,
-                    Some("WorkspaceEditor"),
-                ),
-                KeyBinding::new(
-                    "secondary-j",
-                    prototype::SearchSessions,
-                    Some("WorkspaceEditor"),
-                ),
-                KeyBinding::new(
-                    "secondary-l",
-                    prototype::AddSelectionToAgent,
-                    Some("WorkspaceEditor"),
-                ),
-                KeyBinding::new(
-                    "secondary-shift-a",
-                    prototype::NextApproval,
-                    Some("WorkspaceEditor"),
-                ),
-                KeyBinding::new(
-                    "secondary-n",
-                    prototype::NewAgentSession,
-                    Some("AgentPanel"),
-                ),
-                // Finder's shortcut for hidden files.
-                KeyBinding::new(
-                    "cmd-shift-.",
-                    prototype::ToggleHiddenFiles,
-                    Some("WorkspaceEditor"),
-                ),
-            ]);
-            cx.set_menus([
-                Menu::new("ZJ").items([
-                    MenuItem::os_submenu("服务", SystemMenuType::Services),
-                    MenuItem::separator(),
-                    MenuItem::action("退出 ZJ", prototype::Quit),
-                ]),
-                Menu::new("文件").items([
-                    MenuItem::action("新建文件", prototype::NewUntitled),
-                    MenuItem::action("新建窗口", prototype::NewWindow),
-                    MenuItem::separator(),
-                    MenuItem::action("打开文件…", prototype::OpenFile),
-                    MenuItem::action("打开文件夹…", prototype::OpenFolder),
-                    MenuItem::separator(),
-                    MenuItem::action("保存", prototype::Save),
-                    MenuItem::action("另存为…", prototype::SaveAs),
-                    MenuItem::action("全部保存", prototype::SaveAll),
-                    MenuItem::separator(),
-                    MenuItem::action("关闭编辑器", prototype::CloseEditor),
-                    MenuItem::separator(),
-                    MenuItem::submenu(Menu::new("自动保存").items([
-                        MenuItem::action("关闭", prototype::AutoSaveOff),
-                        MenuItem::action("编辑后 1 秒", prototype::AutoSaveAfterDelay),
-                        MenuItem::action("失去焦点时", prototype::AutoSaveOnFocusChange),
-                    ])),
-                ]),
-                Menu::new("查看").items([
-                    MenuItem::action("放大", prototype::ZoomIn),
-                    MenuItem::action("缩小", prototype::ZoomOut),
-                    MenuItem::action("重置缩放", prototype::ZoomReset),
-                    MenuItem::separator(),
-                    MenuItem::action("显示 / 隐藏点文件", prototype::ToggleHiddenFiles),
-                    MenuItem::separator(),
-                    MenuItem::action("Agent 面板", prototype::ToggleAgentPanel),
-                    MenuItem::action("搜索 Agent 会话…", prototype::SearchSessions),
-                ]),
-                Menu::new("转到").items([
-                    MenuItem::action("返回", nav::NavigateBack),
-                    MenuItem::action("前进", nav::NavigateForward),
-                    MenuItem::separator(),
-                    MenuItem::action("转到定义", GoToDefinition),
-                    MenuItem::action("查找所有引用", nav::FindReferences),
-                    MenuItem::action("转到文件中的符号…", nav::GoToSymbol),
-                ]),
-            ]);
-            let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
-            cx.set_global(prototype::OpenDocuments(documents.clone()));
-            // ⌘Q asks about unsaved changes window by window before quitting.
-            cx.on_action(|_: &prototype::Quit, cx| prototype::quit(cx));
-            session::track(cx);
-            let displays: Vec<_> = cx
-                .displays()
-                .iter()
-                .map(|display| display.bounds())
-                .collect();
-            for index in 0..count {
-                let saved = restored.get(index);
-                let root = roots
-                    .get(index)
-                    .cloned()
-                    .or_else(|| saved.and_then(|saved| saved.root.clone()));
-                let bounds = saved
-                    .and_then(|saved| saved.frame)
-                    .and_then(|frame| frame.window_bounds(&displays));
-                let service = service.clone();
-                let documents = documents.clone();
-                if let Err(e) = open_workspace(root, service, documents, index, bounds, cx) {
-                    eprintln!("无法创建窗口: {e}");
-                }
-            }
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    cx.quit();
-                }
-            })
+    let app = gpui_kit::application().with_assets(assets::AppAssets);
+    let reopen = service.clone();
+    // The Dock icon with no window open (the last one was closed) brings up an empty window.
+    app.on_reopen(move |cx| {
+        if cx.windows().is_empty() && cx.has_global::<prototype::OpenDocuments>() {
+            open_empty_window(reopen.clone(), cx);
+        }
+    });
+    app.run(move |cx| {
+        gpui_kit::init(cx);
+        cx.set_global(settings::Settings::load());
+        cx.set_global(watch::WatchService::default());
+        prototype::init_agent_store(cx);
+        diff_syntax::register();
+        platform::DockBlink::apply(cx);
+        cx.observe_global::<settings::Settings>(platform::DockBlink::apply)
             .detach();
-            cx.activate(true);
-        });
+        theme::follow_appearance(None, cx);
+        cx.bind_keys([
+            KeyBinding::new("cmd-shift-n", prototype::NewWindow, Some("WorkspaceEditor")),
+            KeyBinding::new("secondary-s", prototype::Save, Some("WorkspaceEditor")),
+            KeyBinding::new(
+                "secondary-shift-s",
+                prototype::SaveAs,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new(
+                "alt-secondary-s",
+                prototype::SaveAll,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new(
+                "secondary-n",
+                prototype::NewUntitled,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new(
+                "secondary-w",
+                prototype::CloseEditor,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new("secondary-q", prototype::Quit, None),
+            KeyBinding::new("cmd-o", prototype::OpenFile, Some("WorkspaceEditor")),
+            // VS Code: ⌘⇧O is go to symbol; open folder moves to ⌘K ⌘O.
+            KeyBinding::new(
+                "cmd-k cmd-o",
+                prototype::OpenFolder,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new(
+                "secondary-shift-o",
+                nav::GoToSymbol,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new("f12", GoToDefinition, Some("Input")),
+            KeyBinding::new("shift-f12", nav::FindReferences, Some("WorkspaceEditor")),
+            KeyBinding::new("secondary-c", prototype::CopyDiff, Some("DiffEditor")),
+            KeyBinding::new("secondary-a", prototype::SelectAllDiff, Some("DiffEditor")),
+            // Agent reviews (design): accept / reject the current change.
+            KeyBinding::new(
+                "secondary-y",
+                prototype::AcceptAgentChange,
+                Some("DiffEditor"),
+            ),
+            KeyBinding::new(
+                "secondary-backspace",
+                prototype::RejectAgentChange,
+                Some("DiffEditor"),
+            ),
+            KeyBinding::new("ctrl--", nav::NavigateBack, Some("WorkspaceEditor")),
+            KeyBinding::new(
+                "ctrl-shift--",
+                nav::NavigateForward,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new(
+                "secondary-p",
+                prototype::QuickOpenFile,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new(
+                "secondary-b",
+                prototype::ToggleSidebar,
+                Some("WorkspaceEditor"),
+            ),
+            // Explorer (VS Code's macOS bindings), acting on the selected row.
+            KeyBinding::new("f2", prototype::RenameFile, Some("Explorer")),
+            KeyBinding::new("enter", prototype::RenameFile, Some("Explorer")),
+            KeyBinding::new("delete", prototype::DeleteFile, Some("Explorer")),
+            KeyBinding::new("cmd-backspace", prototype::DeleteFile, Some("Explorer")),
+            KeyBinding::new("secondary-c", prototype::CopyFiles, Some("Explorer")),
+            KeyBinding::new("secondary-x", prototype::CutFiles, Some("Explorer")),
+            KeyBinding::new("secondary-v", prototype::PasteFiles, Some("Explorer")),
+            KeyBinding::new("alt-cmd-c", prototype::CopyPath, Some("Explorer")),
+            KeyBinding::new(
+                "alt-shift-cmd-c",
+                prototype::CopyRelativePath,
+                Some("Explorer"),
+            ),
+            KeyBinding::new("alt-cmd-r", prototype::RevealInFinder, Some("Explorer")),
+            KeyBinding::new(
+                "secondary-shift-f",
+                prototype::FindInFiles,
+                Some("WorkspaceEditor"),
+            ),
+            // ⌘⇧F inside an editor is find in files (Kit binds it to its replace panel).
+            KeyBinding::new("secondary-shift-f", prototype::FindInFiles, Some("Input")),
+            // The editor's find widget, with VS Code's macOS keys.
+            KeyBinding::new(
+                "secondary-f",
+                prototype::FindInFile,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new(
+                "alt-secondary-f",
+                prototype::FindReplace,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new("secondary-g", prototype::FindNext, Some("WorkspaceEditor")),
+            KeyBinding::new(
+                "secondary-shift-g",
+                prototype::FindPrevious,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new("f3", prototype::FindNext, Some("WorkspaceEditor")),
+            KeyBinding::new("shift-f3", prototype::FindPrevious, Some("WorkspaceEditor")),
+            KeyBinding::new(
+                "secondary-shift-1",
+                prototype::ReplaceOne,
+                Some("FindWidget"),
+            ),
+            // Some keyboards report ⇧1 as "!".
+            KeyBinding::new(
+                "secondary-shift-!",
+                prototype::ReplaceOne,
+                Some("FindWidget"),
+            ),
+            KeyBinding::new("secondary-!", prototype::ReplaceOne, Some("FindWidget")),
+            KeyBinding::new(
+                "secondary-alt-enter",
+                prototype::ReplaceAll,
+                Some("FindWidget"),
+            ),
+            KeyBinding::new(
+                "alt-secondary-c",
+                prototype::ToggleFindCase,
+                Some("FindWidget"),
+            ),
+            KeyBinding::new(
+                "alt-secondary-w",
+                prototype::ToggleFindWord,
+                Some("FindWidget"),
+            ),
+            KeyBinding::new(
+                "alt-secondary-r",
+                prototype::ToggleFindRegex,
+                Some("FindWidget"),
+            ),
+            KeyBinding::new(
+                "alt-secondary-p",
+                prototype::TogglePreserveCase,
+                Some("FindWidget"),
+            ),
+            KeyBinding::new(
+                "alt-secondary-l",
+                prototype::ToggleFindInSelection,
+                Some("FindWidget"),
+            ),
+            KeyBinding::new("cmd-=", prototype::ZoomIn, Some("WorkspaceEditor")),
+            KeyBinding::new("cmd-+", prototype::ZoomIn, Some("WorkspaceEditor")),
+            KeyBinding::new("cmd--", prototype::ZoomOut, Some("WorkspaceEditor")),
+            KeyBinding::new("cmd-0", prototype::ZoomReset, Some("WorkspaceEditor")),
+            // Agent panel: ⌥⌘B as VS Code's secondary side bar; ⌘J / ⌘L / ⌘⇧A as in the
+            // design (session search, add the selection, next approval).
+            KeyBinding::new(
+                "alt-cmd-b",
+                prototype::ToggleAgentPanel,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new(
+                "secondary-j",
+                prototype::SearchSessions,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new(
+                "secondary-l",
+                prototype::AddSelectionToAgent,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new(
+                "secondary-shift-a",
+                prototype::NextApproval,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new(
+                "secondary-n",
+                prototype::NewAgentSession,
+                Some("AgentPanel"),
+            ),
+            // Finder's shortcut for hidden files.
+            KeyBinding::new(
+                "cmd-shift-.",
+                prototype::ToggleHiddenFiles,
+                Some("WorkspaceEditor"),
+            ),
+        ]);
+        cx.set_menus([
+            Menu::new("ZJ").items([
+                MenuItem::os_submenu("服务", SystemMenuType::Services),
+                MenuItem::separator(),
+                MenuItem::action("退出 ZJ", prototype::Quit),
+            ]),
+            Menu::new("文件").items([
+                MenuItem::action("新建文件", prototype::NewUntitled),
+                MenuItem::action("新建窗口", prototype::NewWindow),
+                MenuItem::separator(),
+                MenuItem::action("打开文件…", prototype::OpenFile),
+                MenuItem::action("打开文件夹…", prototype::OpenFolder),
+                MenuItem::separator(),
+                MenuItem::action("保存", prototype::Save),
+                MenuItem::action("另存为…", prototype::SaveAs),
+                MenuItem::action("全部保存", prototype::SaveAll),
+                MenuItem::separator(),
+                MenuItem::action("关闭编辑器", prototype::CloseEditor),
+                MenuItem::separator(),
+                MenuItem::submenu(Menu::new("自动保存").items([
+                    MenuItem::action("关闭", prototype::AutoSaveOff),
+                    MenuItem::action("编辑后 1 秒", prototype::AutoSaveAfterDelay),
+                    MenuItem::action("失去焦点时", prototype::AutoSaveOnFocusChange),
+                ])),
+            ]),
+            Menu::new("查看").items([
+                MenuItem::action("放大", prototype::ZoomIn),
+                MenuItem::action("缩小", prototype::ZoomOut),
+                MenuItem::action("重置缩放", prototype::ZoomReset),
+                MenuItem::separator(),
+                MenuItem::action("显示 / 隐藏点文件", prototype::ToggleHiddenFiles),
+                MenuItem::separator(),
+                MenuItem::action("Agent 面板", prototype::ToggleAgentPanel),
+                MenuItem::action("搜索 Agent 会话…", prototype::SearchSessions),
+            ]),
+            Menu::new("转到").items([
+                MenuItem::action("返回", nav::NavigateBack),
+                MenuItem::action("前进", nav::NavigateForward),
+                MenuItem::separator(),
+                MenuItem::action("转到定义", GoToDefinition),
+                MenuItem::action("查找所有引用", nav::FindReferences),
+                MenuItem::action("转到文件中的符号…", nav::GoToSymbol),
+            ]),
+        ]);
+        let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
+        cx.set_global(prototype::OpenDocuments(documents.clone()));
+        // ⌘Q asks about unsaved changes window by window before quitting.
+        cx.on_action(|_: &prototype::Quit, cx| prototype::quit(cx));
+        session::track(cx);
+        // 新建窗口 from the menu bar when no window is open to handle it.
+        let empty = service.clone();
+        cx.on_action(move |_: &prototype::NewWindow, cx| open_empty_window(empty.clone(), cx));
+        let displays = display_bounds(cx);
+        for index in 0..count {
+            let saved = restored.get(index);
+            let root = roots
+                .get(index)
+                .cloned()
+                .or_else(|| saved.and_then(|saved| saved.root.clone()));
+            let bounds = saved
+                .and_then(|saved| saved.frame)
+                .and_then(|frame| frame.window_bounds(&displays));
+            let service = service.clone();
+            let documents = documents.clone();
+            if let Err(e) = open_workspace(root, service, documents, index, bounds, cx) {
+                eprintln!("无法创建窗口: {e}");
+            }
+        }
+        let closing = service.clone();
+        cx.on_window_closed(move |cx, id| window_closed(id, closing.clone(), cx))
+            .detach();
+        cx.activate(true);
+    });
     Ok(())
 }
 

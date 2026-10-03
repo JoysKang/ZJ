@@ -2,9 +2,10 @@
 //! without arguments. `session.json` sits next to `settings.json`; `ZJ_SESSION` overrides.
 //!
 //! The record lives in memory and is written when a window opens, gets its folder, or closes
-//! while others stay open. Closing the last window keeps that window in the record (closing it
-//! quits), and quitting writes the record with every window's current frame: GPUI runs the
-//! quit callbacks before it drops the windows, without calling `on_window_closed` for them.
+//! while others stay open. A last workspace window that closes gives way to an empty window,
+//! which records itself; a last empty window that closes stays recorded (ZJ stays in the
+//! Dock). Quitting writes the record with every window's current frame: GPUI runs the quit
+//! callbacks before it drops the windows, without calling `on_window_closed` for them.
 
 use gpui_kit::{App, Bounds, Global, Pixels, Window, WindowBounds, WindowId, point, px, size};
 use serde_json::{Value, json};
@@ -193,9 +194,10 @@ impl Frame {
     }
 }
 
-/// The in-memory record; present only in the real app (tests never write a session).
+/// The in-memory record; present only in the real app (tests install it themselves).
 struct Tracker {
-    path: PathBuf,
+    /// `None`: no place to keep the file; windows are still tracked for closing.
+    path: Option<PathBuf>,
     windows: Vec<(WindowId, SavedWindow)>,
 }
 
@@ -203,12 +205,15 @@ impl Global for Tracker {}
 
 impl Tracker {
     fn save(&self) {
+        let Some(path) = &self.path else {
+            return;
+        };
         let windows: Vec<SavedWindow> = self
             .windows
             .iter()
             .map(|(_, window)| window.clone())
             .collect();
-        if let Err(error) = save_to(&self.path, &windows) {
+        if let Err(error) = save_to(path, &windows) {
             eprintln!("event=session_save_failed error={error}");
         }
     }
@@ -216,12 +221,10 @@ impl Tracker {
 
 /// Starts recording windows; called once at launch.
 pub fn track(cx: &mut App) {
-    if let Some(path) = path() {
-        track_at(path, cx);
-    }
+    track_at(path(), cx);
 }
 
-pub fn track_at(path: PathBuf, cx: &mut App) {
+pub fn track_at(path: Option<PathBuf>, cx: &mut App) {
     cx.set_global(Tracker {
         path,
         windows: Vec::new(),
@@ -235,19 +238,30 @@ pub fn track_at(path: PathBuf, cx: &mut App) {
         async {}
     })
     .detach();
-    cx.on_window_closed(|cx, id| {
-        // The last window stays recorded: closing it quits, and the next launch reopens it.
-        if cx.windows().is_empty() || !cx.has_global::<Tracker>() {
-            return;
-        }
-        let tracker = cx.global_mut::<Tracker>();
-        let before = tracker.windows.len();
-        tracker.windows.retain(|(window, _)| *window != id);
-        if tracker.windows.len() != before {
-            tracker.save();
-        }
-    })
-    .detach();
+}
+
+/// Forgets a closed window and returns what it showed. A last window without a folder stays
+/// recorded: ZJ stays in the Dock with no windows, and the next launch reopens it.
+pub fn closed(id: WindowId, cx: &mut App) -> Option<SavedWindow> {
+    let last = cx.windows().is_empty();
+    if !cx.has_global::<Tracker>() {
+        return None;
+    }
+    let tracker = cx.global_mut::<Tracker>();
+    let index = tracker
+        .windows
+        .iter()
+        .position(|(window, _)| *window == id)?;
+    let saved = tracker.windows[index].1.clone();
+    if last && saved.root.is_none() {
+        return Some(saved);
+    }
+    tracker.windows.remove(index);
+    // A last workspace window is replaced by an empty window, which writes the record.
+    if !last {
+        tracker.save();
+    }
+    Some(saved)
 }
 
 /// Records a window's folder and frame. `persist` writes the file too (a window opened or got

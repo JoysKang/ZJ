@@ -1,4 +1,4 @@
-//! The window record across opening, closing and quitting, in headless windows.
+//! Closing windows and the window record, in headless windows.
 
 use super::agent::AgentStore;
 use super::*;
@@ -36,8 +36,14 @@ fn roots(path: &std::path::Path) -> Vec<Option<PathBuf>> {
         .collect()
 }
 
+fn close(cx: &mut TestAppContext, window: AnyWindowHandle) {
+    cx.update_window(window, |_, window, _| window.remove_window())
+        .unwrap();
+    cx.run_until_parked();
+}
+
 #[gpui_kit::test]
-async fn windows_are_recorded_until_the_last_one_and_written_on_quit(cx: &mut TestAppContext) {
+async fn closing_windows_falls_back_to_an_empty_window_and_never_quits(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let base = std::env::temp_dir().join(format!("zj-session-ui-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
@@ -46,6 +52,7 @@ async fn windows_are_recorded_until_the_last_one_and_written_on_quit(cx: &mut Te
     std::fs::create_dir_all(&b).unwrap();
     let path = base.join("session.json");
     let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
+    let service = GitService::new(1, Duration::from_secs(5)).unwrap();
     cx.update(|cx| {
         gpui_kit::init(cx);
         cx.set_global(crate::settings::Settings::default());
@@ -55,8 +62,12 @@ async fn windows_are_recorded_until_the_last_one_and_written_on_quit(cx: &mut Te
             default_workspace: None,
         });
         cx.set_global(OpenDocuments(documents.clone()));
-        session::track_at(path.clone(), cx);
+        session::track_at(Some(path.clone()), cx);
+        let service = service.clone();
+        cx.on_window_closed(move |cx, id| crate::window_closed(id, service.clone(), cx))
+            .detach();
     });
+    let windows = |cx: &mut TestAppContext| cx.update(|cx| cx.windows().len());
 
     // Opening writes the window with its folder and frame.
     let frame = Bounds::new(point(px(40.), px(60.)), size(px(1200.), px(800.)));
@@ -64,28 +75,38 @@ async fn windows_are_recorded_until_the_last_one_and_written_on_quit(cx: &mut Te
     let second = open(cx, Some(b.clone()), frame, &documents);
     cx.run_until_parked();
     assert_eq!(roots(&path), [Some(a.clone()), Some(b.clone())]);
-    let saved = session::load_from(&path);
-    let restored = saved[0].frame.unwrap();
+    let restored = session::load_from(&path)[0].frame.unwrap();
     assert_eq!((restored.x, restored.width), (40., 1200.));
 
-    // Closing one of two drops it from the record.
-    cx.update_window(first, |_, window, _| window.remove_window())
-        .unwrap();
-    cx.run_until_parked();
+    // Closing one of two only closes that window.
+    close(cx, first);
+    assert_eq!(windows(cx), 1);
     assert_eq!(roots(&path), [Some(b.clone())]);
 
-    // Closing the last window keeps it: that close quits, and the next launch reopens it.
-    cx.update_window(second, |_, window, _| window.remove_window())
-        .unwrap();
-    cx.run_until_parked();
-    assert_eq!(roots(&path), [Some(b.clone())]);
+    // Closing the last workspace window brings up an empty window in its place.
+    close(cx, second);
+    assert_eq!(windows(cx), 1);
+    assert_eq!(roots(&path), [None]);
+    let empty = cx.update(|cx| cx.windows()[0]);
+    let placed = session::load_from(&path)[0].frame.unwrap();
+    assert_eq!((placed.x, placed.y), (40., 60.));
 
-    // Quitting with windows open writes all of them, including a window without a folder.
-    std::fs::remove_file(&path).unwrap();
+    // Closing that one leaves no window, and ZJ keeps running with the empty window recorded.
+    close(cx, empty);
+    assert_eq!(windows(cx), 0);
+    assert_eq!(roots(&path), [None]);
+
+    // The Dock icon opens an empty window again.
+    cx.update(|cx| crate::open_empty_window(service.clone(), cx));
+    cx.run_until_parked();
+    assert_eq!(windows(cx), 1);
+    assert_eq!(roots(&path), [None]);
+
+    // Quitting writes every open window.
     open(cx, Some(a.clone()), frame, &documents);
-    open(cx, None, frame, &documents);
     cx.run_until_parked();
+    std::fs::remove_file(&path).unwrap();
     cx.quit();
-    assert_eq!(roots(&path), [Some(a), None]);
+    assert_eq!(roots(&path), [None, Some(a)]);
     let _ = std::fs::remove_dir_all(base);
 }
