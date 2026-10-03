@@ -31,14 +31,17 @@ debug = 1
 
 # 发布与体积测量专用：cargo build --profile dist
 # opt-level = "s"：体积 −3.57 MB（35.46 → 31.89 MB 实测）；冷启动到窗口出现 33 → 40 ms，
-# 远低于 250 ms 预算。未开 panic = "abort"：GPUI Kit 运行期用 catch_unwind 做状态清理后
-# 再 resume_unwind，改为 abort 前需单独验证行为与体积收益。
+# 远低于 250 ms 预算。panic = "abort"：再 −3.52 MB（→ 28.37 MB 实测）。已核实运行期唯一
+# 的 catch_unwind 在 gpui-base text_selection.rs，是“弹出作用域栈后 resume_unwind”的清理
+# 模式，panic 本来就活不下去，abort 只少一次无意义的清理；冒烟验证（启动、欢迎页渲染、
+# 空闲）正常。
 [profile.dist]
 inherits = "release"
 debug = 0
 lto = "fat"
 codegen-units = 1
 opt-level = "s"
+panic = "abort"
 strip = true
 
 [profile.dev]
