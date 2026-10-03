@@ -287,7 +287,7 @@ impl Prototype {
         };
         let path = match &tab_request.operation {
             Operation::Diff { path, .. } | Operation::UntrackedDiff { path } => path.clone(),
-            Operation::Status => return,
+            Operation::Status | Operation::CommitDiff { .. } => return,
         };
         let Some(group) = self
             .groups

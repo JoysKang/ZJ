@@ -1,11 +1,17 @@
 //! Bounded, cancellable system Git operations, serialized by worktree identity.
 
+mod graph;
 mod log;
 mod ls_files;
+mod refs;
 mod status;
 mod write;
+pub use graph::{
+    CommitDetails, CommitFile, GraphCommit, GraphRef, RefKind, parse_graph, parse_name_status,
+};
 pub use log::{Commit, parse_log};
 pub use ls_files::{ListedKind, parse_ls_files};
+pub use refs::{Branch, parse_branches};
 pub use status::{Change, ChangeKind, Status, parse_status};
 pub use write::{WriteOperation, WriteRequest};
 
@@ -50,6 +56,24 @@ pub enum Operation {
         path: PathBuf,
         original_path: Option<PathBuf>,
     },
+    /// One file of a commit against its first parent (`None`: a root commit).
+    CommitDiff {
+        commit: String,
+        parent: Option<String>,
+        path: PathBuf,
+        original_path: Option<PathBuf>,
+    },
+}
+
+/// Which commits the graph lists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphScope {
+    /// Local and remote-tracking branches, tags and HEAD.
+    All,
+    /// Local branches, tags and HEAD.
+    Local,
+    /// One branch: `refs/heads/main` or `refs/remotes/origin/main`.
+    Branch(String),
 }
 
 #[derive(Clone, Debug)]
@@ -418,6 +442,40 @@ impl GitService {
                 }
                 (args, false)
             }
+            Operation::CommitDiff {
+                commit,
+                parent,
+                path,
+                original_path,
+            } => {
+                validate_relative_path(path)?;
+                if !graph::is_hash(commit) || parent.as_deref().is_some_and(|p| !graph::is_hash(p))
+                {
+                    return Err(error("无效的提交"));
+                }
+                let base = match parent {
+                    Some(parent) => parent.clone(),
+                    None => self.empty_tree(&request.repo, cancel)?,
+                };
+                let mut args: Vec<OsString> = vec![
+                    "--literal-pathspecs".into(),
+                    "diff".into(),
+                    "--no-ext-diff".into(),
+                    "--no-textconv".into(),
+                    "--no-color".into(),
+                    "-M".into(),
+                    FULL_CONTEXT.into(),
+                    base.into(),
+                    commit.into(),
+                    "--".into(),
+                    path.as_os_str().to_owned(),
+                ];
+                if let Some(original) = original_path {
+                    validate_relative_path(original)?;
+                    args.push(original.as_os_str().to_owned());
+                }
+                (args, false)
+            }
         };
         let output = self.run_command(&request.repo.worktree, &args, cancel, allow_difference)?;
         Ok(Reply {
@@ -460,6 +518,142 @@ impl GitService {
         }
         status.version = write::worktree_version(repo, &status, after)?;
         Ok(status)
+    }
+
+    /// Local and remote-tracking branches, most recently committed first.
+    pub fn branches(&self, repo: &Repository, cancel: &AtomicBool) -> io::Result<Vec<Branch>> {
+        let output = self.run(
+            &repo.worktree,
+            &[
+                "for-each-ref".into(),
+                "--sort=-committerdate".into(),
+                refs::BRANCH_FORMAT.into(),
+                "refs/heads".into(),
+                "refs/remotes".into(),
+            ],
+            cancel,
+        )?;
+        parse_branches(&output)
+    }
+
+    /// A page of the commit graph, children before parents, newest first.
+    pub fn graph(
+        &self,
+        repo: &Repository,
+        scope: &GraphScope,
+        skip: usize,
+        limit: usize,
+        cancel: &AtomicBool,
+    ) -> io::Result<Vec<GraphCommit>> {
+        let mut args: Vec<OsString> = vec![
+            "log".into(),
+            "-z".into(),
+            "--no-color".into(),
+            "--no-show-signature".into(),
+            "--date-order".into(),
+            "--decorate=full".into(),
+            graph::GRAPH_FORMAT.into(),
+            format!("--skip={skip}").into(),
+            format!("--max-count={limit}").into(),
+        ];
+        match scope {
+            GraphScope::All => {
+                args.extend(["--branches".into(), "--remotes".into(), "--tags".into()])
+            }
+            GraphScope::Local => args.extend(["--branches".into(), "--tags".into()]),
+            GraphScope::Branch(name) => {
+                if !(name.starts_with("refs/heads/") || name.starts_with("refs/remotes/")) {
+                    return Err(error("无效的分支"));
+                }
+                args.push(name.into());
+            }
+        }
+        // A detached HEAD is on no branch; an unborn one has nothing to list.
+        if !matches!(scope, GraphScope::Branch(_))
+            && self
+                .run(
+                    &repo.worktree,
+                    &[
+                        "rev-parse".into(),
+                        "--verify".into(),
+                        "--quiet".into(),
+                        "HEAD".into(),
+                    ],
+                    cancel,
+                )
+                .is_ok()
+        {
+            args.push("HEAD".into());
+        }
+        args.push("--".into());
+        parse_graph(&self.run(&repo.worktree, &args, cancel)?)
+    }
+
+    /// The whole message, both identities and the files changed against the first parent.
+    pub fn commit_details(
+        &self,
+        repo: &Repository,
+        hash: &str,
+        cancel: &AtomicBool,
+    ) -> io::Result<CommitDetails> {
+        if !graph::is_hash(hash) {
+            return Err(error("无效的提交"));
+        }
+        let show = self.run(
+            &repo.worktree,
+            &[
+                "show".into(),
+                "-s".into(),
+                "--no-color".into(),
+                "--no-show-signature".into(),
+                graph::DETAILS_FORMAT.into(),
+                hash.into(),
+            ],
+            cancel,
+        )?;
+        let mut details = graph::parse_details(&show)?;
+        let base = match details.parents.first() {
+            Some(parent) => parent.clone(),
+            None => self.empty_tree(repo, cancel)?,
+        };
+        let files = self.run(
+            &repo.worktree,
+            &[
+                "diff".into(),
+                "--no-ext-diff".into(),
+                "--no-color".into(),
+                "-z".into(),
+                "-M".into(),
+                "--name-status".into(),
+                base.into(),
+                details.hash.clone().into(),
+                "--".into(),
+            ],
+            cancel,
+        )?;
+        details.files = parse_name_status(&files)?;
+        Ok(details)
+    }
+
+    /// The empty tree's name in this repository's hash (SHA-1 or SHA-256).
+    fn empty_tree(&self, repo: &Repository, cancel: &AtomicBool) -> io::Result<String> {
+        let output = self.run_with_input(
+            &repo.worktree,
+            &[
+                "hash-object".into(),
+                "-t".into(),
+                "tree".into(),
+                "--stdin".into(),
+            ],
+            cancel,
+            false,
+            Some(b""),
+        )?;
+        let hash = String::from_utf8_lossy(&output).trim().to_string();
+        if !graph::is_hash(&hash) {
+            return Err(error("无法计算空树"));
+        }
+        Ok(hash)
     }
 
     /// Commits on HEAD that its upstream does not have, newest first, at most `limit`.

@@ -461,3 +461,244 @@ fn outgoing_lists_the_commits_the_upstream_lacks() {
     );
     assert_eq!(service.outgoing(&repo, 2, &cancel).unwrap().len(), 2);
 }
+
+fn configure(repo: &Path) {
+    for (key, value) in [
+        ("user.name", "Other"),
+        ("user.email", "other@example.invalid"),
+        ("commit.gpgsign", "false"),
+        ("core.hooksPath", ".git/hooks"),
+    ] {
+        git(repo, &["config", key, value]);
+    }
+}
+
+#[test]
+fn fetch_pull_sync_checkout_and_create_branch() {
+    let fixture = fixture();
+    let root = fixture.0.join("a");
+    let service = GitService::new(2, Duration::from_secs(20)).unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "base"]);
+    let base = git(&root, &["rev-parse", "HEAD"]).trim().to_string();
+    // No upstream: nothing is pulled or pushed.
+    for operation in [WriteOperation::Pull, WriteOperation::Sync] {
+        let error = write(&service, &root, operation).unwrap_err().to_string();
+        assert!(error.contains("尚未配置上游"), "{error}");
+    }
+    let bare = fixture.0.join("remote.git");
+    fs::create_dir(&bare).unwrap();
+    git(&bare, &["init", "--bare", "-b", "main"]);
+    git(&root, &["remote", "add", "origin", bare.to_str().unwrap()]);
+    git(&root, &["push", "-u", "origin", "main"]);
+    // The user's global pull settings must not decide the test.
+    git(&root, &["config", "pull.rebase", "false"]);
+    let other = fixture.0.join("other");
+    git(
+        &fixture.0,
+        &["clone", bare.to_str().unwrap(), other.to_str().unwrap()],
+    );
+    configure(&other);
+    git(&other, &["commit", "--allow-empty", "-m", "remote one"]);
+    git(&other, &["push", "origin", "main"]);
+    let remote_one = git(&other, &["rev-parse", "HEAD"]).trim().to_string();
+
+    // Fetch moves the remote-tracking branch only.
+    write(&service, &root, WriteOperation::Fetch).unwrap();
+    assert_eq!(git(&root, &["rev-parse", "origin/main"]).trim(), remote_one);
+    assert_eq!(git(&root, &["rev-parse", "HEAD"]).trim(), base);
+    write(&service, &root, WriteOperation::Pull).unwrap();
+    assert_eq!(git(&root, &["rev-parse", "HEAD"]).trim(), remote_one);
+
+    // Sync on diverged branches: pull (merge), then push the result.
+    git(&other, &["commit", "--allow-empty", "-m", "remote two"]);
+    git(&other, &["push", "origin", "main"]);
+    fs::write(root.join("src/main.rs"), "local\n").unwrap();
+    git(&root, &["commit", "-am", "local"]);
+    write(&service, &root, WriteOperation::Sync).unwrap();
+    let subjects = git(&bare, &["log", "main", "--format=%s"]);
+    assert!(subjects.contains("remote two") && subjects.contains("local"));
+    assert_eq!(
+        git(&bare, &["rev-parse", "main"]),
+        git(&root, &["rev-parse", "HEAD"])
+    );
+
+    // Checking out a remote-tracking branch creates the tracking local branch.
+    git(&other, &["switch", "-c", "feature"]);
+    git(&other, &["commit", "--allow-empty", "-m", "feature work"]);
+    git(&other, &["push", "origin", "feature"]);
+    write(&service, &root, WriteOperation::Fetch).unwrap();
+    let checkout = |branch: &str, remote: bool| WriteOperation::Checkout {
+        branch: branch.into(),
+        remote,
+    };
+    write(&service, &root, checkout("origin/feature", true)).unwrap();
+    assert_eq!(git(&root, &["branch", "--show-current"]).trim(), "feature");
+    assert_eq!(
+        git(&root, &["rev-parse", "--abbrev-ref", "@{upstream}"]).trim(),
+        "origin/feature"
+    );
+    write(&service, &root, checkout("main", false)).unwrap();
+    assert_eq!(git(&root, &["branch", "--show-current"]).trim(), "main");
+    for (branch, remote) in [("missing", false), ("origin/missing", true), ("-f", false)] {
+        assert!(write(&service, &root, checkout(branch, remote)).is_err());
+    }
+    assert_eq!(git(&root, &["branch", "--show-current"]).trim(), "main");
+
+    // New branches: at HEAD, at a commit, never over an existing one or with a bad name.
+    let create = |name: &str, start: Option<&str>| WriteOperation::CreateBranch {
+        name: name.into(),
+        start: start.map(str::to_string),
+    };
+    write(&service, &root, create("topic", None)).unwrap();
+    assert_eq!(git(&root, &["branch", "--show-current"]).trim(), "topic");
+    let error = write(&service, &root, create("topic", None))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("已存在"), "{error}");
+    for name in ["a..b", "with space", "-x", ""] {
+        assert!(
+            write(&service, &root, create(name, None)).is_err(),
+            "{name}"
+        );
+    }
+    write(&service, &root, create("old", Some(&base))).unwrap();
+    assert_eq!(git(&root, &["rev-parse", "HEAD"]).trim(), base);
+    assert!(write(&service, &root, create("bad-start", Some("HEAD"))).is_err());
+}
+
+#[test]
+fn branches_graph_details_and_commit_diff() {
+    use workspace_editor_git::{GraphScope, Operation, RefKind, Request};
+    let fixture = fixture();
+    let root = fixture.0.join("a");
+    let service = GitService::new(2, Duration::from_secs(10)).unwrap();
+    let cancel = AtomicBool::new(false);
+    let repo = service.identify(&root, &cancel).unwrap();
+    // An unborn branch has no commits, and that is not an error.
+    assert!(
+        service
+            .graph(&repo, &GraphScope::All, 0, 10, &cancel)
+            .unwrap()
+            .is_empty()
+    );
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "root"]);
+    let root_commit = git(&root, &["rev-parse", "HEAD"]).trim().to_string();
+    git(&root, &["mv", "src/main.rs", "src/lib.rs"]);
+    git(&root, &["commit", "-m", "rename"]);
+    let rename = git(&root, &["rev-parse", "HEAD"]).trim().to_string();
+    git(&root, &["switch", "-c", "feature"]);
+    git(&root, &["commit", "--allow-empty", "-m", "feature work"]);
+    git(&root, &["switch", "main"]);
+    git(&root, &["commit", "--allow-empty", "-m", "main work"]);
+    git(
+        &root,
+        &["merge", "--no-ff", "-m", "merge feature", "feature"],
+    );
+    git(&root, &["tag", "v1"]);
+
+    let branches = service.branches(&repo, &cancel).unwrap();
+    let names: Vec<_> = branches
+        .iter()
+        .map(|b| (b.name.as_str(), b.head, b.remote))
+        .collect();
+    assert!(names.contains(&("main", true, false)));
+    assert!(names.contains(&("feature", false, false)));
+
+    let all = service
+        .graph(&repo, &GraphScope::All, 0, 100, &cancel)
+        .unwrap();
+    let subjects: Vec<_> = all.iter().map(|c| c.subject.as_str()).collect();
+    assert_eq!(subjects.len(), 5);
+    assert_eq!(subjects[0], "merge feature");
+    assert_eq!(*subjects.last().unwrap(), "root");
+    assert_eq!(all[0].parents.len(), 2);
+    assert!(
+        all[0]
+            .refs
+            .iter()
+            .any(|r| r.kind == RefKind::Branch && r.name == "main" && r.head)
+    );
+    assert!(
+        all[0]
+            .refs
+            .iter()
+            .any(|r| r.kind == RefKind::Tag && r.name == "v1")
+    );
+    // Every parent is listed after its child.
+    for (i, commit) in all.iter().enumerate() {
+        for parent in &commit.parents {
+            assert!(all[i + 1..].iter().any(|c| &c.hash == parent));
+        }
+    }
+    let page = service
+        .graph(&repo, &GraphScope::All, 1, 2, &cancel)
+        .unwrap();
+    assert_eq!(page, all[1..3]);
+    let feature = service
+        .graph(
+            &repo,
+            &GraphScope::Branch("refs/heads/feature".into()),
+            0,
+            100,
+            &cancel,
+        )
+        .unwrap();
+    let subjects: Vec<_> = feature.iter().map(|c| c.subject.as_str()).collect();
+    assert_eq!(subjects, ["feature work", "rename", "root"]);
+    for scope in ["main", "--all", "refs/tags/v1"] {
+        assert!(
+            service
+                .graph(&repo, &GraphScope::Branch(scope.into()), 0, 10, &cancel)
+                .is_err()
+        );
+    }
+
+    let details = service.commit_details(&repo, &rename, &cancel).unwrap();
+    assert_eq!(details.message, "rename");
+    assert_eq!(details.parents, std::slice::from_ref(&root_commit));
+    assert_eq!(details.files.len(), 1);
+    assert_eq!(details.files[0].status, 'R');
+    assert_eq!(details.files[0].path, PathBuf::from("src/lib.rs"));
+    assert_eq!(
+        details.files[0].original_path,
+        Some(PathBuf::from("src/main.rs"))
+    );
+    let first = service
+        .commit_details(&repo, &root_commit, &cancel)
+        .unwrap();
+    assert!(first.parents.is_empty());
+    assert_eq!(first.files[0].status, 'A');
+    assert!(service.commit_details(&repo, "HEAD", &cancel).is_err());
+
+    let diff = |commit: &str, parent: Option<&str>, path: &str| {
+        service.execute(
+            &Request {
+                repo: repo.clone(),
+                generation: 1,
+                operation: Operation::CommitDiff {
+                    commit: commit.into(),
+                    parent: parent.map(str::to_string),
+                    path: path.into(),
+                    original_path: None,
+                },
+            },
+            &cancel,
+        )
+    };
+    let added = diff(&root_commit, None, "src/main.rs").unwrap().output;
+    let added = String::from_utf8(added).unwrap();
+    assert!(added.contains("new file mode") && added.contains("+original"));
+    fs::write(root.join("src/lib.rs"), "changed\n").unwrap();
+    git(&root, &["commit", "-am", "edit"]);
+    let edit = git(&root, &["rev-parse", "HEAD"]).trim().to_string();
+    let head_parent = git(&root, &["rev-parse", "HEAD^"]).trim().to_string();
+    let changed = diff(&edit, Some(&head_parent), "src/lib.rs")
+        .unwrap()
+        .output;
+    let changed = String::from_utf8(changed).unwrap();
+    assert!(changed.contains("-original") && changed.contains("+changed"));
+    assert!(diff("HEAD", None, "src/lib.rs").is_err());
+    assert!(diff(&edit, Some(&head_parent), "../escape").is_err());
+}

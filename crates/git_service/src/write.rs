@@ -26,6 +26,23 @@ pub enum WriteOperation {
         all: bool,
     },
     Push,
+    /// `git fetch --all --prune`: remote-tracking branches only, the worktree is untouched.
+    Fetch,
+    /// `git pull` from the configured upstream; the user's `pull.rebase` / `pull.ff` apply.
+    Pull,
+    /// Pull, then push (VS Code's 同步更改).
+    Sync,
+    /// Switches to a local branch, or (`remote`) creates the local branch tracking a
+    /// remote-tracking one, as `git switch --track` names it.
+    Checkout {
+        branch: String,
+        remote: bool,
+    },
+    /// Creates a branch at `start` (a commit; HEAD when `None`) and switches to it.
+    CreateBranch {
+        name: String,
+        start: Option<String>,
+    },
     /// Applies a generated partial patch for one changed file: to the index (`cached`, stage /
     /// unstage selected lines) or to the worktree (revert selected lines).
     ApplyPatch {
@@ -89,9 +106,14 @@ impl GitService {
             return Err(error("仓库身份已变化，请重新打开工作区"));
         }
         let current = self.status_locked(&request.repo, request.generation, cancel)?;
-        if current != *request.expected {
+        // Fetching only moves remote-tracking refs, so a stale view cannot mislead it.
+        if current != *request.expected && !matches!(request.operation, WriteOperation::Fetch) {
             return Err(error("文件、暂存区或分支已变化，请刷新后重试"));
         }
+        let conflicted = current
+            .changes
+            .iter()
+            .any(|c| c.kind == ChangeKind::Conflict);
         let mut args: Vec<OsString> = vec!["--literal-pathspecs".into()];
         // Discarding untracked files deletes them with `git clean`, after the tracked restore.
         let mut untracked: Vec<PathBuf> = Vec::new();
@@ -238,6 +260,86 @@ impl GitService {
             WriteOperation::Push => {
                 args.extend(self.push_args(&request.repo, &current, cancel)?);
             }
+            WriteOperation::Fetch => {
+                args.extend(["fetch".into(), "--all".into(), "--prune".into()]);
+            }
+            WriteOperation::Pull | WriteOperation::Sync => {
+                if current.upstream.is_none() {
+                    return Err(error(
+                        "此分支尚未配置上游。请先在终端执行 git push -u，再刷新",
+                    ));
+                }
+                if conflicted {
+                    return Err(error("请先解决冲突"));
+                }
+                if let WriteOperation::Sync = &request.operation {
+                    // Checked before pulling, so a branch that cannot be pushed is left alone.
+                    self.push_args(&request.repo, &current, cancel)?;
+                }
+                args.extend(["pull".into(), "--no-edit".into()]);
+                // Without either setting, Git refuses diverged branches outright; merging is
+                // what it did before asking.
+                let set = |key: &str| {
+                    self.run(
+                        &request.repo.worktree,
+                        &["config".into(), "--get".into(), key.into()],
+                        cancel,
+                    )
+                    .is_ok()
+                };
+                if !set("pull.rebase") && !set("pull.ff") {
+                    args.push("--no-rebase".into());
+                }
+            }
+            WriteOperation::Checkout { branch, remote } => {
+                if branch.is_empty() || branch.starts_with('-') || branch.contains('\0') {
+                    return Err(error("无效的分支名"));
+                }
+                if conflicted {
+                    return Err(error("请先解决冲突"));
+                }
+                let full = if *remote {
+                    format!("refs/remotes/{branch}")
+                } else {
+                    format!("refs/heads/{branch}")
+                };
+                self.verify(&request.repo, &full, cancel)
+                    .map_err(|_| error(format!("找不到分支 {branch}")))?;
+                args.push("switch".into());
+                if *remote {
+                    args.push("--track".into());
+                }
+                args.push(branch.into());
+            }
+            WriteOperation::CreateBranch { name, start } => {
+                if name.trim().is_empty() || name.starts_with('-') || name.contains('\0') {
+                    return Err(error("无效的分支名"));
+                }
+                if conflicted {
+                    return Err(error("请先解决冲突"));
+                }
+                self.run(
+                    &request.repo.worktree,
+                    &["check-ref-format".into(), "--branch".into(), name.into()],
+                    cancel,
+                )
+                .map_err(|_| error(format!("“{name}”不是有效的分支名")))?;
+                if self
+                    .verify(&request.repo, &format!("refs/heads/{name}"), cancel)
+                    .is_ok()
+                {
+                    return Err(error(format!("分支 {name} 已存在")));
+                }
+                args.extend(["switch".into(), "-c".into(), name.into()]);
+                if let Some(start) = start {
+                    if !crate::graph::is_hash(start) {
+                        return Err(error("无效的提交"));
+                    }
+                    self.verify(&request.repo, &format!("{start}^{{commit}}"), cancel)
+                        .map_err(|_| error("找不到这个提交"))?;
+                    args.push(start.into());
+                }
+            }
         }
         // Hooks, signatures and network authentication need more time than status queries.
         let writer = Self {
@@ -260,13 +362,18 @@ impl GitService {
         let mut output = writer
             .run_with_input(&request.repo.worktree, &args, cancel, false, input)
             .map_err(partial)?;
-        if let WriteOperation::Commit { push: true, .. } = &request.operation {
+        if let WriteOperation::Commit { push: true, .. } | WriteOperation::Sync = &request.operation
+        {
             let mut push: Vec<OsString> = vec!["--literal-pathspecs".into()];
             push.extend(self.push_args(&request.repo, &current, cancel)?);
+            let done = match request.operation {
+                WriteOperation::Sync => "已拉取",
+                _ => "已提交",
+            };
             output.extend(
                 writer
                     .run_with_input(&request.repo.worktree, &push, cancel, false, None)
-                    .map_err(|e| error(format!("已提交，但推送失败：{e}")))?,
+                    .map_err(|e| error(format!("{done}，但推送失败：{e}")))?,
             );
         }
         if !untracked.is_empty() {
@@ -289,6 +396,20 @@ impl GitService {
             generation: request.generation,
             output,
         })
+    }
+
+    fn verify(&self, repo: &Repository, revision: &str, cancel: &AtomicBool) -> io::Result<()> {
+        self.run(
+            &repo.worktree,
+            &[
+                "rev-parse".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                revision.into(),
+            ],
+            cancel,
+        )
+        .map(|_| ())
     }
 
     /// `git push` arguments for the current branch to exactly its configured upstream branch,
