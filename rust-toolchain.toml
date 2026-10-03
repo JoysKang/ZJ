@@ -1,5 +1,5 @@
 [toolchain]
 # gpui-pre 0.3.7 使用 std::hint::cold_path，1.94 无法编译；与 README 基线一致。
-channel = "1.98.0"
+channel = "1.99.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

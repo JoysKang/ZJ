@@ -4,7 +4,7 @@ Rust 原生多工作区代码编辑器的 P0 / P1 开发原型。需求与阶段
 
 ## 构建与运行
 
-环境：macOS Apple Silicon、Rust 1.98.0、系统 Git。GPUI Kit 固定为 0.7.0，兼容 GPUI snapshot 固定为 0.3.7，依赖记录在 `Cargo.lock`。运行时 shader 路径已在只有 Xcode Command Line Tools 的 M5 Pro 上编译和启动，不需要本阶段安装完整 Xcode。
+环境：macOS Apple Silicon、Rust 1.99.0、系统 Git。GPUI Kit 固定为 0.7.0，兼容 GPUI snapshot 固定为 0.3.7，依赖记录在 `Cargo.lock`。运行时 shader 路径已在只有 Xcode Command Line Tools 的 M5 Pro 上编译和启动，不需要本阶段安装完整 Xcode。
 
 在项目目录执行：
 
