@@ -122,6 +122,22 @@ pub fn diff_metrics(font: Pixels) -> DiffMetrics {
         column: px(font * MONO_ADVANCE),
     }
 }
+/// The terminal panel: its starting / smallest height, the grid's inset, the header buttons'
+/// gap.
+pub const TERMINAL_HEIGHT: Pixels = px(280.);
+pub const TERMINAL_MIN: Pixels = px(80.);
+pub const TERMINAL_MAX: Pixels = px(4000.);
+pub const TERMINAL_PAD_X: Pixels = px(12.);
+pub const TERMINAL_PAD_Y: Pixels = px(4.);
+/// The cursor's width as a bar and its height as an underline.
+pub const TERMINAL_CURSOR_BAR: Pixels = px(2.);
+
+/// Terminal row height for an editor font size (VS Code's `lineHeight` 1 is about 1.2× the
+/// font; a little more reads better at 14 px).
+pub fn terminal_line_height(font: Pixels) -> Pixels {
+    px((f32::from(font) * 1.3).round())
+}
+
 /// Overview ruler at the right edge of the diff editor, and its smallest marker.
 pub const DIFF_RULER: Pixels = px(14.);
 pub const DIFF_RULER_MIN: Pixels = px(3.);
@@ -277,6 +293,8 @@ pub struct Palette {
     pub glyph_deepseek: u32,
     pub glyph_gemini: u32,
     pub glyph_generic: u32,
+    /// The terminal's 16 ANSI colors (black … white, then the bright ones).
+    pub terminal: [u32; 16],
 }
 
 /// Solarized Dark, mapped like VS Code's built-in theme (sidebar #00212B, editor #002B36,
@@ -338,6 +356,11 @@ pub const DARK: Palette = Palette {
     glyph_deepseek: 0x6c71c4,
     glyph_gemini: 0xd33682,
     glyph_generic: 0x93a1a1,
+    // VS Code's Solarized Dark `terminal.ansi*`: the bright colors are Solarized's base tones.
+    terminal: [
+        0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5, 0x586e75,
+        0xcb4b16, 0x586e75, 0x657b83, 0x839496, 0x6c71c4, 0x93a1a1, 0xfdf6e3,
+    ],
 };
 
 /// Nord Light: snow storm backgrounds, polar night text, frost accents. Aurora colors are
@@ -396,6 +419,12 @@ pub const LIGHT: Palette = Palette {
     glyph_deepseek: 0x81587a,
     glyph_gemini: 0x2f6f6d,
     glyph_generic: 0x4c566a,
+    // Nord with the aurora colors darkened (as for the git decorations) so text in them stays
+    // readable on snow storm; white is a light gray, as on any light terminal theme.
+    terminal: [
+        0x3b4252, 0x99353f, 0x3f6b2d, 0x8a5226, 0x4c6a94, 0x81587a, 0x2f6f6d, 0xd8dee9, 0x4c566a,
+        0xbf616a, 0x4f7433, 0x96593a, 0x5e81ac, 0xb48ead, 0x2f6b8f, 0xe5e9f0,
+    ],
 };
 
 /// Syntax colors (tree-sitter capture → color, style) in the same Kit JSON shape as its theme
@@ -570,6 +599,8 @@ pub struct Colors {
     pub banner: Hsla,
     /// Git Graph lane colors, cycled as lanes are created (lines and nodes, never text).
     pub graph_lanes: [Hsla; 8],
+    /// The terminal draws on the editor background in the code color, as VS Code's does.
+    pub terminal: crate::terminal::Palette,
 }
 
 fn hsla(hex: u32) -> Hsla {
@@ -642,6 +673,12 @@ impl Palette {
                 0x0085d9, 0xd9008f, 0x00d0a0, 0xd98500, 0xa000d9, 0x00b8d9, 0xd0a000, 0xd94545,
             ]
             .map(hsla),
+            terminal: crate::terminal::Palette {
+                ansi: self.terminal.map(hsla),
+                foreground: hsla(self.code),
+                background: hsla(self.editor),
+                cursor: hsla(self.caret),
+            },
         }
     }
 }

@@ -3,7 +3,7 @@ use crate::{theme, watch};
 use gpui_kit::{
     component::{
         input::{EditorState, InputEvent, TextareaState},
-        resizable::{h_resizable, resizable_panel},
+        resizable::{h_resizable, resizable_panel, v_resizable},
         v_flex,
     },
     *,
@@ -68,6 +68,12 @@ mod search_view;
 mod session_ui_tests;
 mod sidebar;
 mod tab_menu;
+mod terminal_panel;
+pub use terminal_panel::{KillTerminal, NewTerminal, SplitTerminal, ToggleTerminal};
+#[cfg(test)]
+#[path = "prototype/terminal_ui_tests.rs"]
+mod terminal_ui_tests;
+mod terminal_view;
 pub use tab_menu::{
     CloseAllEditors, CloseOtherEditors, CopyActivePath, CopyActiveRelativePath,
     RevealActiveInExplorer, RevealActiveInFinder,
@@ -380,6 +386,7 @@ pub struct Prototype {
     graph: Option<graph_view::GitGraph>,
     /// The last tab right-click menu; tab tooltips stay hidden while it has focus.
     tab_menu_focus: Option<FocusHandle>,
+    terminals: terminal_panel::Terminals,
     preview_stale: bool,
     generation: u64,
     cancel: Arc<AtomicBool>,
@@ -574,6 +581,7 @@ impl Prototype {
             preview_diff: None,
             graph: None,
             tab_menu_focus: None,
+            terminals: Default::default(),
             preview_stale: false,
             generation: 0,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -1770,7 +1778,18 @@ impl Render for Prototype {
             self.window_edited = edited;
             window.set_window_edited(edited);
         }
-        let editor = self.render_editor_area(cx);
+        let mut editor = self.render_editor_area(cx);
+        if self.terminals.visible && !self.terminals.groups.is_empty() {
+            editor = v_resizable("editor-terminal")
+                .child(resizable_panel().child(editor))
+                .child(
+                    resizable_panel()
+                        .size(theme::TERMINAL_HEIGHT)
+                        .size_range(theme::TERMINAL_MIN..theme::TERMINAL_MAX)
+                        .child(self.render_terminal_panel(cx)),
+                )
+                .into_any_element();
+        }
         let agent_panel = self.agent.visible.then(|| self.render_agent_panel(cx));
         let workbench = if self.sidebar_visible || agent_panel.is_some() {
             // One layout per combination, so a hidden panel does not leave its size behind.
@@ -1832,6 +1851,16 @@ impl Render for Prototype {
             }))
             .on_action(cx.listener(|this, _: &NewUntitled, window, cx| this.new_untitled(window, cx)))
             .on_action(cx.listener(|this, _: &CloseEditor, window, cx| this.close_editor(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
+                this.toggle_terminal(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &NewTerminal, window, cx| this.new_terminal(window, cx)))
+            .on_action(cx.listener(|this, _: &SplitTerminal, window, cx| {
+                this.split_terminal(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &KillTerminal, window, cx| {
+                this.kill_terminal(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &CloseOtherEditors, window, cx| {
                 this.active_pane_action(Prototype::close_other_panes, window, cx)
             }))

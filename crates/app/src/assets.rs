@@ -65,6 +65,8 @@ pub const EXTRA: &[(&str, &[u8])] = &[
     embed!("icons/database.svg"),
     embed!("icons/shield.svg"),
     embed!("icons/trash.svg"),
+    // Terminal panel: split.
+    embed!("icons/square-split-horizontal.svg"),
     // Rendered at 3× from logo/zj-sprig*.svg: the dry-brush filter needs a browser-grade
     // rasterizer at this size.
     embed!("logo/zj-sprig.png"),

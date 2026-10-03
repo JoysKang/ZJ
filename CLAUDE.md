@@ -55,6 +55,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `settings.rs`：所有窗口共用的设置文件（字号、显示隐藏文件、Diff 布局、隐藏无变更仓库、搜索排除、Dock 图标闪烁、自动保存）。
   - `platform.rs`：少量 macOS 系统接口（“减少动态效果”、Dock 图标替换与闪烁），其他平台为空实现；`prototype/welcome.rs`：欢迎页 logo 上单独绘制的闪烁光标。
   - `file_ops.rs`：资源管理器的新建、重命名、复制、移动和移到废纸篓；`prototype/explorer_ops.rs`：右键菜单、快捷键和行内改名；`prototype/tab_menu.rs`：编辑器标签页的右键菜单和对应快捷键。
+  - 终端（docs/adr/0006）：`terminal.rs` 是 `alacritty_terminal` 的衔接层（起 shell、事件、按键编码、ANSI 颜色映射），不依赖界面状态；`prototype/terminal_view.rs` 画网格并处理键鼠和输入法；`prototype/terminal_panel.rs` 是底部面板的分组、拆分和关闭。终端没有定时器，只在 shell 有输出时重画。
   - `text_search.rs`：全文搜索（glob 包含 / 排除、默认排除、二进制与大文件跳过、结果上限）；`prototype/search_view.rs`：搜索视图；`prototype/search_replace.rs`：搜索视图里的替换（行内预览、替换前 Diff、原子写入、跳过搜索后改过的文件、撤销）。
   - `replace.rs`：查找替换的共同规则（Aa / ab / .*、`$1` 与大小写转义、保留大小写、CRLF、不跨行）；`prototype/find_widget.rs`：编辑器右上角的查找替换浮层（⌘F / ⌥⌘F）。
   - `watch.rs`：共用原生文件监听、路径引用回收和有界事件信号（带变更路径，超出上限退化为全量刷新）；不持有界面实体。

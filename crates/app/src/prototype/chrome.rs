@@ -90,6 +90,20 @@ impl Prototype {
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
             )
             .child(
+                Button::new("toggle-terminal")
+                    .xsmall()
+                    .ghost()
+                    .icon(if self.terminals.visible {
+                        IconName::PanelBottom
+                    } else {
+                        IconName::PanelBottomOpen
+                    })
+                    .tooltip("切换终端面板（⌃`）")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.toggle_terminal_panel(window, cx)),
+                    ),
+            )
+            .child(
                 Button::new("toggle-agent")
                     .xsmall()
                     .ghost()

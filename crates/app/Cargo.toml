@@ -24,6 +24,8 @@ async-channel = "=2.5.0"
 lsp-types = "=0.97.0"
 # Already in GPUI Kit's tree (gpui-base, gpui-pre) with default features: full-text search.
 regex = "1"
+# The integrated terminal's emulator and pty (docs/adr/0006); serde off.
+alacritty_terminal = { version = "=0.26.0", default-features = false }
 
 [dev-dependencies]
 # Headless windows with simulated input for UI tests; not part of the shipped binary.

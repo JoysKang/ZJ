@@ -19,6 +19,7 @@ mod session;
 mod settings;
 mod symbol_index;
 mod symbols;
+mod terminal;
 mod text_search;
 mod theme;
 mod watch;
@@ -211,6 +212,14 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 prototype::RevealActiveInFinder,
                 Some("WorkspaceEditor"),
             ),
+            // The terminal panel (VS Code's macOS keys).
+            KeyBinding::new("ctrl-`", prototype::ToggleTerminal, Some("WorkspaceEditor")),
+            KeyBinding::new(
+                "ctrl-shift-`",
+                prototype::NewTerminal,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new("cmd-\\", prototype::SplitTerminal, Some("Terminal")),
             KeyBinding::new("secondary-q", prototype::Quit, None),
             KeyBinding::new("cmd-o", prototype::OpenFile, Some("WorkspaceEditor")),
             // VS Code: ⌘⇧O is go to symbol; open folder moves to ⌘K ⌘O.
