@@ -49,6 +49,7 @@ pub(super) const COMMANDS: &[Command] = &[
     command!("文件: 关闭编辑器", CloseEditor),
     command!("文件: 关闭其他编辑器", CloseOtherEditors),
     command!("文件: 关闭所有编辑器", CloseAllEditors),
+    command!("视图: 重新打开已关闭的编辑器", ReopenClosedEditor),
     command!("文件: 复制活动文件的路径", CopyActivePath),
     command!("文件: 复制活动文件的相对路径", CopyActiveRelativePath),
     command!("文件: 在 Finder 中显示活动文件", RevealActiveInFinder),

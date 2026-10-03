@@ -189,6 +189,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 prototype::CloseEditor,
                 Some("WorkspaceEditor"),
             ),
+            KeyBinding::new(
+                "secondary-shift-t",
+                prototype::ReopenClosedEditor,
+                Some("WorkspaceEditor"),
+            ),
             // The tab menu's commands (VS Code's macOS keys), acting on the active tab.
             KeyBinding::new(
                 "alt-cmd-t",

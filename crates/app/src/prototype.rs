@@ -80,6 +80,9 @@ pub use find_widget::{
 pub use markdown_preview::ToggleMarkdownPreview;
 pub mod navigation;
 mod quick_open;
+#[cfg(test)]
+#[path = "prototype/reopen_ui_tests.rs"]
+mod reopen_ui_tests;
 mod scm;
 mod scm_actions;
 mod search_replace;
@@ -99,7 +102,7 @@ mod terminal_view;
 #[path = "prototype/test_support.rs"]
 mod test_support;
 pub use tab_menu::{
-    CloseAllEditors, CloseOtherEditors, CopyActivePath, CopyActiveRelativePath,
+    CloseAllEditors, CloseOtherEditors, CopyActivePath, CopyActiveRelativePath, ReopenClosedEditor,
     RevealActiveInExplorer, RevealActiveInFinder,
 };
 #[cfg(test)]
@@ -426,6 +429,8 @@ pub struct Prototype {
     graph: Option<graph_view::GitGraph>,
     /// The last tab right-click menu; tab tooltips stay hidden while it has focus.
     tab_menu_focus: Option<FocusHandle>,
+    /// ⇧⌘T reopens these, most recent first.
+    closed_tabs: tab_menu::ClosedTabs,
     terminals: terminal_panel::Terminals,
     preview_stale: bool,
     generation: u64,
@@ -623,6 +628,7 @@ impl Prototype {
             preview_diff: None,
             graph: None,
             tab_menu_focus: None,
+            closed_tabs: Default::default(),
             terminals: Default::default(),
             preview_stale: false,
             generation: 0,
@@ -1223,6 +1229,16 @@ impl Prototype {
     }
 
     fn remove_document(&mut self, id: DocumentId, window: &mut Window, cx: &mut Context<Self>) {
+        // ⇧⌘T reopens closed files; untitled buffers have nothing to reopen.
+        if let Some(doc) = self.documents.iter().find(|doc| doc.id == id)
+            && !doc.untitled
+        {
+            let offset = doc.editor.read(cx).cursor();
+            self.closed_tabs.push(tab_menu::ClosedTab {
+                path: doc.path.clone(),
+                offset,
+            });
+        }
         self.documents.retain(|doc| doc.id != id);
         self.owners.borrow_mut().remove(&id);
         if self.active == Pane::Document(id) {
@@ -1904,6 +1920,9 @@ impl Render for Prototype {
             }))
             .on_action(cx.listener(|this, _: &NewUntitled, window, cx| this.new_untitled(window, cx)))
             .on_action(cx.listener(|this, _: &CloseEditor, window, cx| this.close_editor(window, cx)))
+            .on_action(cx.listener(|this, _: &ReopenClosedEditor, window, cx| {
+                this.reopen_closed_tab(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
                 this.toggle_terminal(window, cx)
             }))

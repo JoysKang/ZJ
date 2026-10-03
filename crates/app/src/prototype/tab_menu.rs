@@ -17,9 +17,52 @@ gpui_kit::actions!(
         CopyActivePath,
         CopyActiveRelativePath,
         RevealActiveInFinder,
-        RevealActiveInExplorer
+        RevealActiveInExplorer,
+        ReopenClosedEditor
     ]
 );
+
+/// A closed document tab, for ⇧⌘T: the file and where the cursor was.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ClosedTab {
+    pub path: PathBuf,
+    /// UTF-8 offset of the cursor when the tab closed.
+    pub offset: usize,
+}
+
+/// The window's closed-tab stack (in memory only): most recent first, one entry per path.
+#[derive(Default)]
+pub(super) struct ClosedTabs {
+    tabs: Vec<ClosedTab>,
+}
+
+/// VS Code keeps a hundred; twenty is plenty for a window that holds at most 20 documents.
+const MAX_CLOSED: usize = 20;
+
+impl ClosedTabs {
+    /// Re-closing a path replaces its entry and moves it to the top.
+    pub(super) fn push(&mut self, tab: ClosedTab) {
+        self.tabs.retain(|kept| kept.path != tab.path);
+        self.tabs.insert(0, tab);
+        self.tabs.truncate(MAX_CLOSED);
+    }
+
+    /// The most recently closed tab whose file still exists; missing files are dropped.
+    pub(super) fn pop_existing(&mut self) -> Option<ClosedTab> {
+        loop {
+            let tab = self.tabs.first()?;
+            if tab.path.is_file() {
+                return Some(self.tabs.remove(0));
+            }
+            self.tabs.remove(0);
+        }
+    }
+
+    #[cfg(test)]
+    fn paths(&self) -> Vec<&PathBuf> {
+        self.tabs.iter().map(|tab| &tab.path).collect()
+    }
+}
 
 type PaneAction = fn(&mut Prototype, Pane, &mut Window, &mut Context<Prototype>);
 
@@ -213,5 +256,78 @@ impl Prototype {
     ) {
         let pane = self.active;
         run(self, pane, window, cx);
+    }
+
+    /// ⇧⌘T: reopens the most recently closed tab whose file is still there, cursor restored.
+    pub(super) fn reopen_closed_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.closed_tabs.pop_existing() else {
+            self.message = "没有可以重新打开的编辑器".into();
+            cx.notify();
+            return;
+        };
+        // open_file loads in the background and applies the pending placement.
+        self.pending_place = Some((
+            tab.path.clone(),
+            super::navigation::Placement::Offset(tab.offset),
+        ));
+        self.open_file(tab.path, self.root.clone(), window, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ClosedTab, ClosedTabs, MAX_CLOSED};
+    use std::path::PathBuf;
+
+    fn tab(name: &str, offset: usize) -> ClosedTab {
+        ClosedTab {
+            path: PathBuf::from(name),
+            offset,
+        }
+    }
+
+    #[test]
+    fn reclosing_a_path_keeps_only_the_latest() {
+        let mut tabs = ClosedTabs::default();
+        tabs.push(tab("/a.rs", 3));
+        tabs.push(tab("/b.rs", 0));
+        tabs.push(tab("/a.rs", 40));
+        assert_eq!(
+            tabs.paths(),
+            [&PathBuf::from("/a.rs"), &PathBuf::from("/b.rs")]
+        );
+        assert_eq!(tabs.pop_existing(), None); // none of them exists
+    }
+
+    #[test]
+    fn the_stack_is_capped() {
+        let mut tabs = ClosedTabs::default();
+        for i in 0..MAX_CLOSED + 5 {
+            tabs.push(tab(&format!("/{i}.rs"), i));
+        }
+        assert_eq!(tabs.paths().len(), MAX_CLOSED);
+        assert_eq!(tabs.tabs[0], tab("/24.rs", 24));
+        assert!(!tabs.paths().contains(&&PathBuf::from("/0.rs")));
+    }
+
+    #[test]
+    fn reopening_skips_files_that_are_gone() {
+        let root = std::env::temp_dir().join(format!("zj-closed-tabs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let kept = root.join("kept.rs");
+        std::fs::write(&kept, "fn main() {}\n").unwrap();
+        let mut tabs = ClosedTabs::default();
+        tabs.push(tab(kept.to_str().unwrap(), 7));
+        tabs.push(tab(root.join("gone.rs").to_str().unwrap(), 1));
+        assert_eq!(
+            tabs.pop_existing(),
+            Some(ClosedTab {
+                path: kept.clone(),
+                offset: 7
+            })
+        );
+        assert_eq!(tabs.pop_existing(), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
