@@ -46,7 +46,10 @@ pub use documents::{
     OpenDocuments, Quit, Save, SaveAll, SaveAs, ToggleLineEnding, ToggleSoftWrap, quit,
 };
 mod edit_commands;
-pub use edit_commands::{ToggleLineComment, key_bindings as edit_key_bindings};
+pub use edit_commands::{
+    CopyLinesDown, CopyLinesUp, MoveLinesDown, MoveLinesUp, ToggleLineComment,
+    key_bindings as edit_key_bindings,
+};
 #[cfg(test)]
 #[path = "prototype/edit_commands_ui_tests.rs"]
 mod edit_commands_ui_tests;
@@ -1926,6 +1929,18 @@ impl Render for Prototype {
             }))
             .on_action(cx.listener(|this, _: &ToggleLineComment, window, cx| {
                 this.toggle_line_comment(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &MoveLinesUp, window, cx| {
+                this.move_lines(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &MoveLinesDown, window, cx| {
+                this.move_lines(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CopyLinesUp, window, cx| {
+                this.copy_lines(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CopyLinesDown, window, cx| {
+                this.copy_lines(true, window, cx)
             }))
             .on_action(cx.listener(|this, _: &AutoSaveOff, window, cx| {
                 this.set_auto_save(crate::save::AutoSave::Off, window, cx)

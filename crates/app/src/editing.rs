@@ -1,5 +1,5 @@
 //! Line editing commands as pure functions of the buffer text and the selection, following
-//! VS Code: toggle line comment (⌘/). Offsets are byte offsets; line breaks are `\n` or
+//! VS Code: toggle line comment (⌘/), move and copy lines (⌥↑↓, ⇧⌥↑↓). Offsets are byte offsets; line breaks are `\n` or
 //! `\r\n` (CRLF files keep `\r\n` in the buffer).
 
 use std::ops::Range;
@@ -257,6 +257,76 @@ fn block_comment(text: &str, lines: &[Line], open: &str, close: &str) -> Vec<Spl
     ]
 }
 
+/// ⌥↑ / ⌥↓: swaps the selected lines with the line above or below; `None` at the first /
+/// last line. Line breaks stay where they were, so a last line without one stays without
+/// one, and CRLF stays CRLF. The selection moves with the lines.
+pub fn move_lines(text: &str, selection: Range<usize>, down: bool) -> Option<Edit> {
+    let block = selected_lines(text, &selection);
+    let count = block.len();
+    let (first, last) = (block[0], block[count - 1]);
+    let mut lines = block;
+    // `order[slot]` is the line (index into `lines`) that ends up in `slot`.
+    let order: Vec<usize> = if down {
+        if last.next == last.end {
+            return None;
+        }
+        lines.push(line_at(text, last.next));
+        std::iter::once(count).chain(0..count).collect()
+    } else {
+        if first.start == 0 {
+            return None;
+        }
+        lines.insert(0, line_at(text, first.start - 1));
+        (1..=count).chain(std::iter::once(0)).collect()
+    };
+    let region = lines[0].start..lines[lines.len() - 1].next;
+    let mut out = String::with_capacity(region.len());
+    let mut moved_to = vec![(0, 0); lines.len()];
+    for (slot, &index) in order.iter().enumerate() {
+        let start = region.start + out.len();
+        out.push_str(&text[lines[index].start..lines[index].end]);
+        out.push_str(&text[lines[slot].end..lines[slot].next]);
+        moved_to[index] = (start, region.start + out.len());
+    }
+    let block = if down { 0..count } else { 1..count + 1 };
+    let map = |offset: usize| {
+        for index in block.clone() {
+            let line = lines[index];
+            if offset <= line.end {
+                return moved_to[index].0 + offset.saturating_sub(line.start);
+            }
+        }
+        // A selection ending at the start of the next line keeps doing so.
+        moved_to[block.end - 1].1
+    };
+    Some(Edit {
+        range: region,
+        text: out,
+        selection: map(selection.start)..map(selection.end),
+    })
+}
+
+/// ⇧⌥↑ / ⇧⌥↓: duplicates the selected lines above or below and selects the new copy (above,
+/// the copy is the upper one). A last line without a break gets the document's line break
+/// between the two copies.
+pub fn copy_lines(text: &str, selection: Range<usize>, down: bool) -> Edit {
+    let lines = selected_lines(text, &selection);
+    let (first, last) = (lines[0], lines[lines.len() - 1]);
+    let region = first.start..last.next;
+    let block = &text[region.clone()];
+    let between = if last.next > last.end {
+        ""
+    } else {
+        crate::replace::eol_of(text)
+    };
+    let shift = if down { block.len() + between.len() } else { 0 };
+    Edit {
+        range: region,
+        text: format!("{block}{between}{block}"),
+        selection: selection.start + shift..selection.end + shift,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +364,57 @@ mod tests {
     fn comment(marked: &str, comment: Comment) -> String {
         let (text, selection) = parse(marked);
         show(&text, toggle_comment(&text, selection, comment, 4))
+    }
+
+    fn moved(marked: &str, down: bool) -> String {
+        let (text, selection) = parse(marked);
+        show(&text, move_lines(&text, selection, down))
+    }
+
+    fn copied(marked: &str, down: bool) -> String {
+        let (text, selection) = parse(marked);
+        show(&text, Some(copy_lines(&text, selection, down)))
+    }
+
+    #[test]
+    fn moves_a_line_and_stops_at_the_ends() {
+        assert_eq!(moved("a\nb|b\nc\n", true), "a\nc\nb|b\n");
+        assert_eq!(moved("a\nb|b\nc\n", false), "b|b\na\nc\n");
+        assert_eq!(moved("a|a\nb\n", false), "(none)");
+        assert_eq!(moved("a\nb|b", true), "(none)");
+        // The empty line after a final break is a line too (VS Code).
+        assert_eq!(moved("a\nb|b\n", true), "a\n\nb|b");
+    }
+
+    #[test]
+    fn moves_a_block_of_lines() {
+        assert_eq!(moved("a\n[b\nc]\nd\n", true), "a\nd\n[b\nc]\n");
+        assert_eq!(moved("a\n[b\nc]\nd\n", false), "[b\nc]\na\nd\n");
+        assert_eq!(
+            moved("a\n[b\nc\n]d\n", false),
+            "[b\nc\n]a\nd\n",
+            "a selection ending at a line start moves the lines above it"
+        );
+        assert_eq!(moved("a\n[b\nc\n]d\n", true), "a\nd\n[b\nc\n]");
+    }
+
+    #[test]
+    fn moving_keeps_the_last_line_without_a_break() {
+        assert_eq!(moved("a|a\nb", true), "b\na|a");
+        assert_eq!(moved("a\nb|b", false), "b|b\na");
+        assert_eq!(moved("x\r\na|a\r\nb", true), "x\r\nb\r\na|a");
+        assert_eq!(moved("x\r\na\r\nb|", false), "x\r\nb|\r\na");
+    }
+
+    #[test]
+    fn copies_lines_up_and_down() {
+        assert_eq!(copied("a\nb|b\nc\n", true), "a\nbb\nb|b\nc\n");
+        assert_eq!(copied("a\nb|b\nc\n", false), "a\nb|b\nbb\nc\n");
+        assert_eq!(copied("[a\nb]\nc", true), "a\nb\n[a\nb]\nc");
+        assert_eq!(copied("[a\nb\n]c", false), "[a\nb\n]a\nb\nc");
+        assert_eq!(copied("a\nb|", true), "a\nb\nb|");
+        assert_eq!(copied("a\r\nb|", false), "a\r\nb|\r\nb");
+        assert_eq!(copied("|", true), "\n|");
     }
 
     #[test]

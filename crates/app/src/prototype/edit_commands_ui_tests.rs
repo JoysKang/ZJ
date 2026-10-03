@@ -83,3 +83,45 @@ async fn cmd_slash_toggles_line_comments_and_undoes_in_one_step(cx: &mut TestApp
     assert_eq!(text(cx, &editor), source);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[gpui_kit::test]
+async fn alt_down_moves_and_shift_alt_down_copies_lines(cx: &mut TestAppContext) {
+    let source = "fn main() {\n    let a = 1;\n    let b = 2;\n}";
+    let (root, window, editor) = open_rust(cx, "move-lines", source);
+    // The cursor inside `let a`.
+    select(cx, window, &editor, 20..20);
+    press(cx, window, "alt-down");
+    assert_eq!(
+        text(cx, &editor),
+        "fn main() {\n    let b = 2;\n    let a = 1;\n}"
+    );
+    assert_eq!(
+        editor.read_with(cx, |state, _| state.selected_range()),
+        35..35
+    );
+    // Past the last line, which has no line break, nothing moves.
+    press(cx, window, "alt-down");
+    press(cx, window, "alt-down");
+    assert_eq!(
+        text(cx, &editor),
+        "fn main() {\n    let b = 2;\n}\n    let a = 1;"
+    );
+    press(cx, window, "cmd-z");
+    press(cx, window, "cmd-z");
+    assert_eq!(text(cx, &editor), source);
+
+    // ⇧⌥↓ copies, and the cursor lands on the copy.
+    select(cx, window, &editor, 20..20);
+    press(cx, window, "shift-alt-down");
+    assert_eq!(
+        text(cx, &editor),
+        "fn main() {\n    let a = 1;\n    let a = 1;\n    let b = 2;\n}"
+    );
+    assert_eq!(
+        editor.read_with(cx, |state, _| state.selected_range()),
+        35..35
+    );
+    press(cx, window, "cmd-z");
+    assert_eq!(text(cx, &editor), source);
+    let _ = std::fs::remove_dir_all(&root);
+}

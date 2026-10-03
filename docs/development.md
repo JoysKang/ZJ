@@ -431,5 +431,8 @@ Linux 上的确认框是 GPUI 在窗口里画的备用样式，macOS 上是系�
 - 注释符在 `languages.rs::comment_for`：Rust / JS / TS / TSX / Go / C / C++ / Java / JSON 用 `//`，Python / Shell / YAML / TOML / Makefile 用 `#`，SQL 用 `--`；没有行注释的 HTML、Markdown（`<!-- -->`）和 CSS（`/* */`）照 VS Code 退回块注释：从首行缩进处到末行行尾包成一段，首尾已是注释就去掉；纯文本和 Diff 不做事。
 - 快捷键绑在 `DocumentEditor > Input`：编辑区给文档编辑器外面包了一层 `DocumentEditor` 键上下文，这些键只在文档编辑器里生效（查找框、快速打开不受影响），并且与 Kit 的 `Input` 绑定同一深度、注册在后，同键时优先于 Kit 默认（`prototype/edit_commands.rs::key_bindings`，main.rs 在 `gpui_kit::init` 之后注册）。
 - 一次替换整行范围（`replace_text_in_range`，非空范围记为 Atomic），一次 ⌘Z 撤销，撤销后选区回到原处。Kit 只公开主选区（`selected_range` / `set_selected_range`），多光标时只处理主光标所在行，其余光标被收掉。
+- ⌥↑ / ⌥↓ 移动行（`editing.rs::move_lines`）：所选整行块和上一行 / 下一行交换，首行上移、末行下移不动；末尾换行之后的空行也算一行（VS Code 同样）。换行符留在原位置，所以 CRLF 不变，最后一行没有换行符时换上去的行也没有，原来的行补上那个位置的换行符。选区跟着行走。
+- ⇧⌥↑ / ⇧⌥↓ 复制行（`editing.rs::copy_lines`）：所选行块复制到上方或下方，选区落在新副本上（向上复制时是上面那份）；最后一行没有换行符时两份之间补一个文档的换行符（`replace::eol_of`）。
+- 快捷键：Kit 在 macOS 上没有绑 ⌥↑↓ / ⇧⌥↑↓，⌥⌘↑↓ 是添加光标，保留不动；在 Linux 上 Kit 把 ⇧⌥↑↓ 绑成添加光标，这里的 `DocumentEditor > Input` 与它同深度、后注册，所以复制行优先，不需要 `NoAction` 解绑。移动和复制都是一次替换，一次 ⌘Z 撤销。
 
-没有新依赖。测试：`editing.rs` 的单元测试覆盖加 / 去注释、混合、空行、缩进不一致（含制表符）、CRLF 和块注释；`edit_commands_ui_tests.rs` 在临时 `.rs` 文件里选中两行按 ⌘/ 检查文本和选区，再按一次复原，⌘Z 一步撤销。
+没有新依赖。测试：`editing.rs` 的单元测试覆盖加 / 去注释、混合、空行、缩进不一致（含制表符）、CRLF 和块注释，移动的首末行边界、多行块、末行无换行和 CRLF，以及向上 / 向下复制；`edit_commands_ui_tests.rs` 在临时 `.rs` 文件里选中两行按 ⌘/ 检查文本和选区，再按一次复原，⌘Z 一步撤销；按 ⌥↓ 移动一行（到末行后不再动、两次 ⌘Z 复原）、⇧⌥↓ 复制一行并检查光标落在副本上。

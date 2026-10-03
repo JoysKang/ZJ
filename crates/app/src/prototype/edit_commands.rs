@@ -9,7 +9,16 @@ use crate::replace;
 use gpui_kit::{EntityInputHandler, KeyBinding, *};
 use std::ops::Range;
 
-gpui_kit::actions!(editor, [ToggleLineComment]);
+gpui_kit::actions!(
+    editor,
+    [
+        ToggleLineComment,
+        MoveLinesUp,
+        MoveLinesDown,
+        CopyLinesUp,
+        CopyLinesDown
+    ]
+);
 
 /// Key context around a document's editor. Bindings in `DocumentEditor > Input` reach only
 /// document buffers (not the find widget or quick open) and match at the same depth as Kit's
@@ -19,7 +28,14 @@ pub(super) const CONTEXT: &str = "DocumentEditor";
 /// Registered after `gpui_kit::init`, so they win over Kit's defaults for the same keys.
 pub fn key_bindings() -> Vec<KeyBinding> {
     let input = Some("DocumentEditor > Input");
-    vec![KeyBinding::new("secondary-/", ToggleLineComment, input)]
+    vec![
+        KeyBinding::new("secondary-/", ToggleLineComment, input),
+        KeyBinding::new("alt-up", MoveLinesUp, input),
+        KeyBinding::new("alt-down", MoveLinesDown, input),
+        // Kit binds these to add cursors off macOS; ⌥⌘↑ / ⌥⌘↓ still add cursors.
+        KeyBinding::new("shift-alt-up", CopyLinesUp, input),
+        KeyBinding::new("shift-alt-down", CopyLinesDown, input),
+    ]
 }
 
 impl Prototype {
@@ -28,6 +44,20 @@ impl Prototype {
         self.edit_active(window, cx, |doc, text, selection| {
             let comment = crate::languages::comment_for(&doc.path)?;
             editing::toggle_comment(text, selection, comment, doc.indent.width)
+        });
+    }
+
+    /// ⌥↑ / ⌥↓: moves the selected lines past the line above or below.
+    pub(super) fn move_lines(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit_active(window, cx, |_, text, selection| {
+            editing::move_lines(text, selection, down)
+        });
+    }
+
+    /// ⇧⌥↑ / ⇧⌥↓: duplicates the selected lines and selects the copy.
+    pub(super) fn copy_lines(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit_active(window, cx, |_, text, selection| {
+            Some(editing::copy_lines(text, selection, down))
         });
     }
 
