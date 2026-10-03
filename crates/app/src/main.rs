@@ -185,6 +185,32 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 prototype::CloseEditor,
                 Some("WorkspaceEditor"),
             ),
+            // The tab menu's commands (VS Code's macOS keys), acting on the active tab.
+            KeyBinding::new(
+                "alt-cmd-t",
+                prototype::CloseOtherEditors,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new(
+                "cmd-k cmd-w",
+                prototype::CloseAllEditors,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new(
+                "cmd-k p",
+                prototype::CopyActivePath,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new(
+                "cmd-k alt-cmd-c",
+                prototype::CopyActiveRelativePath,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new(
+                "cmd-k r",
+                prototype::RevealActiveInFinder,
+                Some("WorkspaceEditor"),
+            ),
             KeyBinding::new("secondary-q", prototype::Quit, None),
             KeyBinding::new("cmd-o", prototype::OpenFile, Some("WorkspaceEditor")),
             // VS Code: ⌘⇧O is go to symbol; open folder moves to ⌘K ⌘O.

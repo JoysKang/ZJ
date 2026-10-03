@@ -5,7 +5,8 @@ use super::{NewWindow, OpenFile, OpenFolder, Pane, Prototype, QuickOpenFile, Tog
 use crate::{file_icons, theme};
 use gpui_kit::{
     assets::IconName,
-    component::{Icon, h_flex, input::Editor, v_flex},
+    base::TestSupportExt,
+    component::{Icon, h_flex, input::Editor, menu::ContextMenuExt, v_flex},
     prelude::FluentBuilder,
     *,
 };
@@ -138,9 +139,11 @@ impl Prototype {
             })
             .child(
                 div()
+                    .id(("tab-label", spec.key))
                     .pl_1()
                     .when(spec.deleted, |label| label.line_through())
-                    .child(spec.label),
+                    .child(spec.label)
+                    .test_support(),
             )
             .when_some(spec.note, |tab, note| {
                 tab.child(
@@ -162,11 +165,34 @@ impl Prototype {
             .child(close)
             .tooltip({
                 let tooltip = spec.tooltip.clone();
+                let weak = cx.weak_entity();
                 move |window, cx| {
+                    // Tooltips paint above everything, menus included; one that comes up while
+                    // the tab's menu is open would cover the menu.
+                    let menu_open = weak.upgrade().is_some_and(|view| {
+                        view.read(cx)
+                            .tab_menu_focus
+                            .as_ref()
+                            .is_some_and(|focus| focus.contains_focused(window, cx))
+                    });
+                    if menu_open {
+                        return cx.new(|_| Empty).into();
+                    }
                     gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
                 }
             })
             .on_click(cx.listener(move |this, _, window, cx| this.select_pane(pane, window, cx)))
+            .context_menu({
+                let weak = cx.weak_entity();
+                move |menu, _, cx| match weak.upgrade() {
+                    Some(view) => {
+                        let focus = menu.focus_handle(cx);
+                        view.update(cx, |this, _| this.tab_menu_focus = Some(focus));
+                        view.read(cx).tab_menu(pane, menu, view.clone())
+                    }
+                    None => menu,
+                }
+            })
             .into_any_element()
     }
 

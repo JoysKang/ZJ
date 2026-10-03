@@ -477,9 +477,12 @@ impl Prototype {
     }
 
     pub(super) fn reveal_selection(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.tree_selection.clone().or_else(|| self.root.clone()) else {
-            return;
-        };
+        if let Some(path) = self.tree_selection.clone().or_else(|| self.root.clone()) {
+            self.reveal_in_finder(path, cx);
+        }
+    }
+
+    pub(super) fn reveal_in_finder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         cx.background_spawn(async move {
             let mut command = if cfg!(target_os = "macos") {
                 let mut command = std::process::Command::new("open");

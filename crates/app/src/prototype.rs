@@ -67,6 +67,14 @@ mod search_view;
 #[path = "prototype/session_ui_tests.rs"]
 mod session_ui_tests;
 mod sidebar;
+mod tab_menu;
+pub use tab_menu::{
+    CloseAllEditors, CloseOtherEditors, CopyActivePath, CopyActiveRelativePath,
+    RevealActiveInExplorer, RevealActiveInFinder,
+};
+#[cfg(test)]
+#[path = "prototype/tab_menu_ui_tests.rs"]
+mod tab_menu_ui_tests;
 mod welcome;
 mod workspace_refresh;
 
@@ -370,6 +378,8 @@ pub struct Prototype {
     preview_diff: Option<DiffTab>,
     /// The Git Graph tab's state (opened from a repository's header).
     graph: Option<graph_view::GitGraph>,
+    /// The last tab right-click menu; tab tooltips stay hidden while it has focus.
+    tab_menu_focus: Option<FocusHandle>,
     preview_stale: bool,
     generation: u64,
     cancel: Arc<AtomicBool>,
@@ -563,6 +573,7 @@ impl Prototype {
             preview_title: String::new(),
             preview_diff: None,
             graph: None,
+            tab_menu_focus: None,
             preview_stale: false,
             generation: 0,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -1821,6 +1832,24 @@ impl Render for Prototype {
             }))
             .on_action(cx.listener(|this, _: &NewUntitled, window, cx| this.new_untitled(window, cx)))
             .on_action(cx.listener(|this, _: &CloseEditor, window, cx| this.close_editor(window, cx)))
+            .on_action(cx.listener(|this, _: &CloseOtherEditors, window, cx| {
+                this.active_pane_action(Prototype::close_other_panes, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CloseAllEditors, window, cx| {
+                this.close_all_panes(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CopyActivePath, window, cx| {
+                this.active_pane_action(|this, pane, _, cx| this.copy_pane_path(pane, false, cx), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CopyActiveRelativePath, window, cx| {
+                this.active_pane_action(|this, pane, _, cx| this.copy_pane_path(pane, true, cx), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &RevealActiveInFinder, window, cx| {
+                this.active_pane_action(|this, pane, _, cx| this.reveal_pane_in_finder(pane, cx), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &RevealActiveInExplorer, window, cx| {
+                this.active_pane_action(Prototype::reveal_pane_in_explorer, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ToggleLineEnding, window, cx| {
                 this.toggle_line_ending(window, cx)
             }))
