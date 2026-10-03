@@ -26,6 +26,8 @@
 | Claude Code · DeepSeek | 同 Claude Code，另加环境变量：`ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`、`ANTHROPIC_AUTH_TOKEN`（设置里填，或取自 `DEEPSEEK_API_KEY`）、`ANTHROPIC_MODEL` 等按 DeepSeek 官方文档设为 `deepseek-v4-pro[1m]` / `deepseek-v4-flash[1m]` | `fish` |
 | 用户自定义 | 设置 JSON 的 `agents` 数组：`id / name / command / args / env`（`"$NAME"` 表示取环境变量）| `bot` |
 
+新会话默认用 Codex（`agent.default_agent`，设置页「新会话默认使用」可以改）。
+
 版本号与 ACP registry（2026-10-01）一致。Gemini CLI 的预设已去掉（暂不考虑；`sparkle` 字形和配色保留，以后可以加回）。Claude Code 和 Codex 的适配器在 registry 里都只有 npm 包（TypeScript），没有原生二进制，所以两者都离不开 Node.js。本机装了命令（`npm i -g @agentclientprotocol/claude-agent-acp` / `codex-acp`）就直接启动它。否则第一次使用时自动安装（`provision`）：npm 包装进 ZJ 数据目录（macOS 为 `~/Library/Application Support/ZJ/agents`），用 `node <入口>` 启动，不经过 npx（省掉常驻约 120 MB 的 `npm exec`）；本机没有 Node.js 22+ 时下载固定版本 Node.js 24.21.0（系统 `curl` / `tar`，校验 sha256）。安装先放进临时目录，完成后 rename 并写标记，中断不会留下半装好的目录。本机 `claude` / `codex` 版本够新时通过 `CLAUDE_CODE_EXECUTABLE` / `CODEX_PATH` 交给适配器，并用 `--omit=optional` 跳过适配器自带的 CLI（Claude 284 MB → 60 MB）。Node.js 不打进 `.app`：二进制预算放不下，适配器更新也不必跟着 ZJ 发版。进度用 `AgentEvent::Progress` 显示；安装失败或缺 Key 时给出中文提示。从 Finder 启动时 PATH 只有系统目录，所以搜索路径补上 Homebrew、nvm、mise（`installs/node/<最新版本>/bin` 和 `shims`，认 `MISE_DATA_DIR`）、volta、bun、pnpm 等常见位置，子进程的 PATH 以找到的 node 所在目录打头。
 
 **进程**：工作区根目录作为 cwd，独立进程组；去掉继承的 `GIT_*`、`ZJ_*`、`CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT` / `CLAUDE_CODE_SSE_PORT`（否则 Claude Code 会拒绝「嵌套启动」）；退出时先关 stdin，再对整组 SIGTERM，1.5 秒后 SIGKILL。stderr 只保留最后 16 KB，崩溃时显示给用户，不写日志。

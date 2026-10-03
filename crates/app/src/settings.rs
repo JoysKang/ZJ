@@ -42,7 +42,7 @@ impl Default for AgentSettings {
         Self {
             panel_visible: false,
             panel_width: AGENT_PANEL_WIDTH_DEFAULT,
-            default_agent: "claude-code".into(),
+            default_agent: "codex".into(),
             accept_first: false,
             idle_minutes: AGENT_IDLE_DEFAULT,
             env: BTreeMap::new(),
@@ -326,7 +326,7 @@ mod tests {
             agent: AgentSettings {
                 panel_visible: true,
                 panel_width: 380.,
-                default_agent: "codex".into(),
+                default_agent: "claude-code".into(),
                 accept_first: true,
                 idle_minutes: 30,
                 env: BTreeMap::from([(
