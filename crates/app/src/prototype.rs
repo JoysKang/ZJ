@@ -45,6 +45,11 @@ pub use documents::{
     AutoSaveAfterDelay, AutoSaveOff, AutoSaveOnFocusChange, CloseEditor, NewUntitled,
     OpenDocuments, Quit, Save, SaveAll, SaveAs, ToggleLineEnding, ToggleSoftWrap, quit,
 };
+mod edit_commands;
+pub use edit_commands::{ToggleLineComment, key_bindings as edit_key_bindings};
+#[cfg(test)]
+#[path = "prototype/edit_commands_ui_tests.rs"]
+mod edit_commands_ui_tests;
 mod editor_area;
 mod explorer_ops;
 mod find_widget;
@@ -1918,6 +1923,9 @@ impl Render for Prototype {
             }))
             .on_action(cx.listener(|this, _: &ToggleSoftWrap, window, cx| {
                 this.toggle_soft_wrap(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleLineComment, window, cx| {
+                this.toggle_line_comment(window, cx)
             }))
             .on_action(cx.listener(|this, _: &AutoSaveOff, window, cx| {
                 this.set_auto_save(crate::save::AutoSave::Off, window, cx)

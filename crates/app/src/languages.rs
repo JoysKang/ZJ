@@ -1,6 +1,7 @@
 //! File → highlighter language. Only grammars compiled into GPUI Kit (see the workspace
 //! `gpui-kit` features) are returned; everything else is plain text with a display name.
 
+use crate::editing::Comment;
 use std::path::Path;
 
 /// (Kit highlighter language, status bar display name).
@@ -48,6 +49,29 @@ pub fn for_path(path: &Path) -> (&'static str, &'static str) {
         "sql" => ("sql", "SQL"),
         _ => ("plain", "纯文本"),
     }
+}
+
+/// What ⌘/ inserts for the file (VS Code's language configurations); `None` for plain text
+/// and diffs.
+pub fn comment_for(path: &Path) -> Option<Comment> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(name.as_str(), "makefile" | "gnumakefile") || name.ends_with(".mk") {
+        return Some(Comment::Line("#"));
+    }
+    Some(match for_path(path).0 {
+        "rust" | "javascript" | "typescript" | "tsx" | "go" | "c" | "cpp" | "java" | "json" => {
+            Comment::Line("//")
+        }
+        "python" | "bash" | "yaml" | "toml" => Comment::Line("#"),
+        "sql" => Comment::Line("--"),
+        "css" => Comment::Block("/*", "*/"),
+        "html" | "markdown" => Comment::Block("<!--", "-->"),
+        _ => return None,
+    })
 }
 
 /// Every grammar this build relies on, with a small sample, for tests and smoke checks.
@@ -138,6 +162,21 @@ mod tests {
         assert_eq!(lang("App.java"), "java");
         assert_eq!(lang("q.sql"), "sql");
         assert_eq!(lang("README"), "plain");
+    }
+
+    #[test]
+    fn comment_tokens() {
+        let comment = |p: &str| comment_for(Path::new(p));
+        assert_eq!(comment("a.rs"), Some(Comment::Line("//")));
+        assert_eq!(comment("a.tsx"), Some(Comment::Line("//")));
+        assert_eq!(comment("a.py"), Some(Comment::Line("#")));
+        assert_eq!(comment("Makefile"), Some(Comment::Line("#")));
+        assert_eq!(comment("Cargo.lock"), Some(Comment::Line("#")));
+        assert_eq!(comment("q.sql"), Some(Comment::Line("--")));
+        assert_eq!(comment("a.css"), Some(Comment::Block("/*", "*/")));
+        assert_eq!(comment("README.md"), Some(Comment::Block("<!--", "-->")));
+        assert_eq!(comment("notes.txt"), None);
+        assert_eq!(comment("x.diff"), None);
     }
 
     /// Each language has a registered grammar, parses its sample, and yields highlight

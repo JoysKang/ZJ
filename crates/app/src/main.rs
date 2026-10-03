@@ -2,6 +2,7 @@ mod agent_model;
 mod assets;
 mod diff_doc;
 mod diff_syntax;
+mod editing;
 mod file_icons;
 mod file_ops;
 mod files;
@@ -394,6 +395,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 Some("WorkspaceEditor"),
             ),
         ]);
+        // ⌘/ and the other line editing keys on document editors (prototype/edit_commands.rs).
+        cx.bind_keys(prototype::edit_key_bindings());
         cx.set_menus([
             Menu::new("ZJ").items([
                 MenuItem::os_submenu("服务", SystemMenuType::Services),

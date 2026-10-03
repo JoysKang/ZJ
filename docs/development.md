@@ -424,3 +424,12 @@ Linux 上的确认框是 GPUI 在窗口里画的备用样式，macOS 上是系�
 - 软换行：代码文件默认不换行，Markdown 和纯文本（`languages.rs` 里没有语法的文件）默认换行。⌥Z（或“查看 → 自动换行”）切换当前文档，VS Code 的“查看: 切换自动换行”；只影响这个文档，不记住（Untitled 另存为后按新语言重设）。用的是 Kit 的 `EditorState::soft_wrap` / `set_soft_wrap`。Markdown 预览里点块编辑用的 `TextareaState` 是单独的状态，不受影响；预览模式下按 ⌥Z 改的是源码视图。
 
 没有新依赖。测试：`indent.rs` 的单元测试覆盖制表符、2 / 4 空格、混合、样本不足、语言默认、节匹配、就近覆盖和 `root = true`；`indent_ui_tests.rs` 在无头窗口里打开临时文件夹里的 `.go`（制表符）、`.py`（语言默认）、`.ts`（`.editorconfig` 指定制表符），检查状态栏文字，用菜单切到空格、宽度 8 后文本不变、Tab 插入 8 个空格。`soft_wrap_ui_tests.rs` 打开 `.rs`、`.txt`、`.md` 检查默认值，在 Rust 编辑器里按 ⌥Z 两次，只有它翻转，且没有输入字符。
+
+## 同日追加：行编辑命令
+
+- ⌘/ 切换行注释（`editing.rs::toggle_comment`），按 VS Code 的规则：所选非空行全部已注释就取消，否则全部加上；注释符插在这些行的最小缩进处（按列算，制表符按文档的缩进宽度对齐到下一个制表位），后面跟一个空格；空行跳过（全是空行时也加）；取消时去掉注释符和其后一个空格。选区结束在某行行首时不含那一行。光标跟着文字移动，非空选区在行首插入时把注释符包进来。
+- 注释符在 `languages.rs::comment_for`：Rust / JS / TS / TSX / Go / C / C++ / Java / JSON 用 `//`，Python / Shell / YAML / TOML / Makefile 用 `#`，SQL 用 `--`；没有行注释的 HTML、Markdown（`<!-- -->`）和 CSS（`/* */`）照 VS Code 退回块注释：从首行缩进处到末行行尾包成一段，首尾已是注释就去掉；纯文本和 Diff 不做事。
+- 快捷键绑在 `DocumentEditor > Input`：编辑区给文档编辑器外面包了一层 `DocumentEditor` 键上下文，这些键只在文档编辑器里生效（查找框、快速打开不受影响），并且与 Kit 的 `Input` 绑定同一深度、注册在后，同键时优先于 Kit 默认（`prototype/edit_commands.rs::key_bindings`，main.rs 在 `gpui_kit::init` 之后注册）。
+- 一次替换整行范围（`replace_text_in_range`，非空范围记为 Atomic），一次 ⌘Z 撤销，撤销后选区回到原处。Kit 只公开主选区（`selected_range` / `set_selected_range`），多光标时只处理主光标所在行，其余光标被收掉。
+
+没有新依赖。测试：`editing.rs` 的单元测试覆盖加 / 去注释、混合、空行、缩进不一致（含制表符）、CRLF 和块注释；`edit_commands_ui_tests.rs` 在临时 `.rs` 文件里选中两行按 ⌘/ 检查文本和选区，再按一次复原，⌘Z 一步撤销。

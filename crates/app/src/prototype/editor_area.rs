@@ -456,9 +456,10 @@ impl Prototype {
                 Some(doc) if doc.markdown.as_ref().is_some_and(|md| !md.source) => {
                     self.render_markdown_preview(id, cx)
                 }
-                Some(doc) => Editor::new(&doc.editor)
-                    .bordered(false)
+                Some(doc) => div()
+                    .key_context(super::edit_commands::CONTEXT)
                     .size_full()
+                    .child(Editor::new(&doc.editor).bordered(false).size_full())
                     .into_any_element(),
                 None => div().into_any_element(),
             },

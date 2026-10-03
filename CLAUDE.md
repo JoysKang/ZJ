@@ -64,6 +64,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `prototype.rs`：工作台的状态和逻辑；`prototype/` 下是各区域的渲染（`chrome` 标题栏与状态栏、`sidebar` 侧栏与资源管理器、`scm`、`editor_area`、`quick_open`），以及 `workspace_refresh` 的事件刷新编排。
   - `diff_syntax.rs`：重新注册 diff 语法，让新增 / 删除有独立的颜色。
   - `languages.rs`：文件名 / 扩展名到语法的映射；新增语法要同时打开 Kit 的 feature 并在 `SAMPLES` 里加样例。
+  - `editing.rs`：行编辑命令的纯逻辑（⌘/ 行注释、按 VS Code 规则），不依赖 GPUI；`prototype/edit_commands.rs` 接到文档编辑器上（`DocumentEditor > Input` 键上下文，只用 Kit 公开的主选区）。
   - `indent.rs`：每个文件的缩进（`.editorconfig` > 按内容猜测 > 语言默认），不依赖 GPUI；`.editorconfig` 在后台打开文件时一起读，状态栏的缩进菜单只改当前文档。
   - `diff_doc.rs`：在后台把全上下文补丁还原成两侧全文，做行对齐、语法高亮和字符级差异；`prototype/diff_view.rs`：只切片现成数据的虚拟化左右 / 内联 Diff 编辑器；`prototype/diff_ops.rs`：行选择、复制、概览标尺和块 / 行级暂存；`partial_patch.rs`：从全上下文补丁生成只含所选行的补丁。
   - `prototype/scm_actions.rs`：Git 写操作确认与结果展示；`git_service/src/write.rs`：仓库锁内校验及有界执行。
