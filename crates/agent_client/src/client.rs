@@ -5,7 +5,8 @@ use crate::{
     events::{self, AgentEvent, AgentInfo, ExitReason, Modes, PermissionId, TurnId, TurnOutcome},
     fs::{BufferProvider, Workspace, read_disk, window, write_atomic},
     process::{AgentProcess, describe},
-    registry::{AgentPreset, SearchPath},
+    provision::{self, InstallError},
+    registry::{AgentPreset, LaunchPlan, SearchPath},
     shadow::ShadowStore,
 };
 use agent_client_protocol::{
@@ -47,13 +48,16 @@ pub struct ClientOptions {
     pub write_mode: WriteMode,
     /// Stop the process after this long without a turn, prompt or permission request.
     pub idle_timeout: Duration,
-    /// Initialize / session setup; the first `npx` run downloads the adapter.
+    /// Initialize / session setup.
     pub handshake_timeout: Duration,
     /// Values from the settings file, e.g. `ANTHROPIC_AUTH_TOKEN` for the DeepSeek preset.
     pub env_overrides: BTreeMap<String, String>,
     pub buffers: Option<Arc<dyn BufferProvider>>,
     /// Defaults to [`SearchPath::from_env`].
     pub search_path: Option<SearchPath>,
+    /// Where npm adapters and ZJ's Node.js are installed on first use; `None` only uses
+    /// commands already on this machine. Defaults to [`provision::default_root`].
+    pub install_root: Option<PathBuf>,
     /// An ACP session id from an earlier run (history); restored with `session/load` when the
     /// agent supports it, otherwise a new session starts.
     pub resume_session: Option<String>,
@@ -70,6 +74,7 @@ impl ClientOptions {
             env_overrides: BTreeMap::new(),
             buffers: None,
             search_path: None,
+            install_root: provision::default_root(),
             resume_session: None,
         }
     }
@@ -141,6 +146,9 @@ struct Shared {
     /// holding the supervisor (and the UI thread joining it) until the timeout.
     stopping: async_channel::Receiver<()>,
     search: SearchPath,
+    install_root: Option<PathBuf>,
+    /// Set by [`AgentClient::cancel`]: a running first-use install stops.
+    install_cancel: AtomicBool,
     write_mode: Mutex<WriteMode>,
     events: async_channel::Sender<AgentEvent>,
     /// Wakes the session loop when a turn finishes (re-arms the idle timer).
@@ -273,6 +281,8 @@ impl AgentClient {
             buffers: options.buffers,
             stopping: stopping_rx,
             search: options.search_path.unwrap_or_else(SearchPath::from_env),
+            install_root: options.install_root,
+            install_cancel: AtomicBool::new(false),
             write_mode: Mutex::new(options.write_mode),
             events: events_tx,
             turn_done: done_tx,
@@ -336,6 +346,7 @@ impl AgentClient {
     /// `session/cancel`; pending permission requests are answered `cancelled`. The turn ends
     /// with [`TurnOutcome::Cancelled`] once the agent stops.
     pub fn cancel(&self) {
+        self.shared.install_cancel.store(true, Ordering::Relaxed);
         self.shared.cancel_permissions();
         let _ = self.commands.try_send(Command::Cancel);
     }
@@ -483,8 +494,39 @@ async fn run_process(
     resume: &mut Option<acp::SessionId>,
 ) -> End {
     let name = shared.preset.display_name.clone();
-    let launch = match shared.preset.resolve(&shared.search, &shared.env_overrides) {
-        Ok(launch) => launch,
+    let plan = shared.preset.resolve(
+        &shared.search,
+        &shared.env_overrides,
+        shared.install_root.as_deref(),
+    );
+    let launch = match plan {
+        Ok(LaunchPlan::Ready(launch)) => launch,
+        Ok(LaunchPlan::Install(install)) => match run_install(shared, install) {
+            Ok(launch) => launch,
+            Err(InstallError::Aborted) => {
+                eprintln!("event=agent_install_aborted agent={}", shared.preset.id);
+                shared.finish_turn(None, TurnOutcome::Cancelled).await;
+                return if shared.stopping.is_closed() {
+                    End::Shutdown
+                } else {
+                    End::Failed
+                };
+            }
+            Err(InstallError::Failed(detail)) => {
+                eprintln!("event=agent_install_failed agent={}", shared.preset.id);
+                let message = format!(
+                    "安装「{name}」失败：{detail}。{}。",
+                    shared.preset.install_hint
+                );
+                shared
+                    .emit(AgentEvent::Error {
+                        message: message.clone(),
+                    })
+                    .await;
+                shared.finish_turn(None, TurnOutcome::Failed(message)).await;
+                return End::Failed;
+            }
+        },
         Err(e) => {
             eprintln!("event=agent_launch_unavailable agent={}", shared.preset.id);
             let message = e.to_string();
@@ -586,6 +628,25 @@ async fn run_process(
     }
     shared.emit(AgentEvent::Exited { reason }).await;
     end
+}
+
+/// Blocks this client's thread (it has nothing else to do before the process exists); stops
+/// when the client shuts down or the user cancels.
+fn run_install(
+    shared: &Shared,
+    install: crate::registry::PackageInstall,
+) -> Result<crate::registry::ResolvedLaunch, InstallError> {
+    shared.install_cancel.store(false, Ordering::Relaxed);
+    eprintln!("event=agent_install_start agent={}", shared.preset.id);
+    let progress = |message: String| {
+        let _ = shared
+            .events
+            .send_blocking(AgentEvent::Progress { message });
+    };
+    let abort = || shared.stopping.is_closed() || shared.install_cancel.load(Ordering::Relaxed);
+    let launch = install.run(&progress, &abort)?;
+    eprintln!("event=agent_install_done agent={}", shared.preset.id);
+    Ok(launch)
 }
 
 type Transport =

@@ -122,6 +122,8 @@ pub struct Thread {
     pub version: u64,
     /// Items appended since the last [`Thread::take_records`] that should be persisted.
     records: Vec<Record>,
+    /// The last item is an install progress notice, replaced by the next one.
+    progress_shown: bool,
 }
 
 fn diff_stats(old: Option<&str>, new: &str) -> (usize, usize) {
@@ -248,6 +250,7 @@ impl Thread {
     }
 
     fn push(&mut self, item: Item) {
+        self.progress_shown = false;
         self.items.push_back(item);
         while self.items.len() > MAX_ITEMS {
             self.items.pop_front();
@@ -599,6 +602,19 @@ impl Thread {
                     self.status = Status::Error;
                 }
             }
+            AgentEvent::Progress { message } => {
+                if self.progress_shown
+                    && let Some(Item::Notice { text, .. }) = self.items.back_mut()
+                {
+                    *text = message.clone();
+                } else {
+                    self.push(Item::Notice {
+                        text: message.clone(),
+                        error: false,
+                    });
+                    self.progress_shown = true;
+                }
+            }
             AgentEvent::Error { message } => {
                 self.last_error = Some(message.clone());
                 self.push(Item::Notice {
@@ -635,6 +651,30 @@ mod tests {
                 kind: PermissionKind::AllowOnce,
             }],
         }
+    }
+
+    #[test]
+    fn install_progress_replaces_itself() {
+        let mut t = Thread::new();
+        t.push_user("hi".into(), vec![], 1);
+        for step in ["下载 Node.js", "安装适配器"] {
+            t.apply(
+                &AgentEvent::Progress {
+                    message: step.into(),
+                },
+                true,
+            );
+        }
+        assert_eq!(t.items.len(), 2);
+        assert!(matches!(&t.items[1], Item::Notice { text, error: false } if text == "安装适配器"));
+        t.apply(&AgentEvent::MessageChunk { text: "ok".into() }, true);
+        t.apply(
+            &AgentEvent::Progress {
+                message: "again".into(),
+            },
+            true,
+        );
+        assert_eq!(t.items.len(), 4);
     }
 
     #[test]

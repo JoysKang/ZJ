@@ -17,6 +17,7 @@ mod client;
 mod events;
 pub mod fs;
 mod process;
+pub mod provision;
 pub mod registry;
 pub mod review;
 pub mod shadow;

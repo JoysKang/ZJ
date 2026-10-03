@@ -66,6 +66,11 @@ pub enum AgentEvent {
     Exited {
         reason: ExitReason,
     },
+    /// A first-use install step (downloading Node.js, installing the adapter); each message
+    /// replaces the previous one.
+    Progress {
+        message: String,
+    },
     /// Launch or protocol failure the user should see.
     Error {
         message: String,

@@ -29,6 +29,7 @@ fn inherited_git_and_claude_variables_are_removed() {
         install_hint: String::new(),
         modes: Default::default(),
         session_meta: None,
+        local_cli: None,
     };
     let mut options = ClientOptions::new(preset, &root);
     options.search_path = Some(SearchPath::new(vec![]));

@@ -26,6 +26,7 @@ fn client(tag: &str, mode: WriteMode) -> (AgentClient, PathBuf) {
         install_hint: String::new(),
         modes: Default::default(),
         session_meta: None,
+        local_cli: None,
     };
     let mut options = ClientOptions::new(preset, &root);
     options.search_path = Some(SearchPath::new(vec![]));
@@ -188,6 +189,7 @@ fn a_full_turn_reviews_hunk_by_hunk() {
         install_hint: String::new(),
         modes: Default::default(),
         session_meta: None,
+        local_cli: None,
     };
     let mut options = ClientOptions::new(preset, &root);
     options.search_path = Some(SearchPath::new(vec![]));

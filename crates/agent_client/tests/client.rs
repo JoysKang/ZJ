@@ -60,6 +60,7 @@ fn preset(env: &[(&str, &str)]) -> AgentPreset {
         install_hint: "test".into(),
         modes: Default::default(),
         session_meta: None,
+        local_cli: None,
     }
 }
 
@@ -607,6 +608,8 @@ fn launch_errors_are_friendly() {
     let ws = Workspace::new("launch");
     let mut opts = ClientOptions::new(AgentPreset::find_builtin("claude-code").unwrap(), &ws.0);
     opts.search_path = Some(SearchPath::new(vec![]));
+    // No install directory: nothing may be downloaded.
+    opts.install_root = None;
     let client = AgentClient::start(opts).unwrap();
     let events = Events::of(&client);
     client.prompt(text("hi")).unwrap();
@@ -629,6 +632,67 @@ fn launch_errors_are_friendly() {
     assert!(
         matches!(outcome(&events.turn()), TurnOutcome::Failed(m) if m.contains("/nonexistent/agent"))
     );
+}
+
+fn write_script(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn npm_adapters_are_installed_on_first_use() {
+    let ws = Workspace::new("install");
+    let bin = ws.path("node-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = ws.path("npm.log");
+    // `node <entry>` starts the fake agent; `npm install --prefix DIR` lays out a package.
+    write_script(
+        &bin.join("node"),
+        &format!("[ \"$1\" = --version ] && echo v24.0.0 && exit 0\nexec '{FAKE}'"),
+    );
+    write_script(
+        &bin.join("npm"),
+        &format!(
+            "echo \"$*\" >> '{}'\nwhile [ $# -gt 0 ]; do [ \"$1\" = --prefix ] && p=\"$2\"; shift; done\n\
+             d=\"$p/node_modules/@zj/fake\"; mkdir -p \"$d/dist\"\n\
+             echo '{{\"bin\":{{\"fake\":\"dist/index.js\"}}}}' > \"$d/package.json\"\n: > \"$d/dist/index.js\"",
+            log.display()
+        ),
+    );
+    let start = || {
+        let mut opts = options(&ws, &[]);
+        opts.preset.launch = vec![Launch::Package {
+            package: "@zj/fake@1.0.0".into(),
+            bin: "fake".into(),
+            args: vec![],
+        }];
+        opts.search_path = Some(SearchPath::new(vec![bin.clone()]));
+        opts.install_root = Some(ws.path("data"));
+        AgentClient::start(opts).unwrap()
+    };
+    let client = start();
+    let events = Events::of(&client);
+    client.prompt(text("echo hi")).unwrap();
+    let seen = events.turn();
+    assert!(
+        matches!(&seen[0], AgentEvent::Progress { message } if message.contains("首次使用")),
+        "{seen:?}"
+    );
+    assert_eq!(outcome(&seen), TurnOutcome::EndTurn);
+    assert_eq!(message(&seen), "hi");
+    let installs = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(installs.lines().count(), 1);
+    assert!(installs.contains("@zj/fake@1.0.0"), "{installs}");
+    client.shutdown();
+
+    // Installed: the next client starts it directly.
+    let client = start();
+    let events = Events::of(&client);
+    client.prompt(text("echo again")).unwrap();
+    let seen = events.turn();
+    assert!(matches!(&seen[0], AgentEvent::Starting { .. }), "{seen:?}");
+    assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
 }
 
 #[test]
