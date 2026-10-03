@@ -125,3 +125,24 @@ async fn alt_down_moves_and_shift_alt_down_copies_lines(cx: &mut TestAppContext)
     assert_eq!(text(cx, &editor), source);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[gpui_kit::test]
+async fn cmd_d_selects_the_word_then_the_next_whole_word(cx: &mut TestAppContext) {
+    let source = "fn main() {\n    let id = 1;\n    let idx = id;\n    id\n}\n";
+    let (root, window, editor) = open_rust(cx, "select-next", source);
+    let selected =
+        |cx: &mut TestAppContext| editor.read_with(cx, |state, _| state.selected_range());
+    // The cursor inside the first `id`.
+    select(cx, window, &editor, 21..21);
+    press(cx, window, "cmd-d");
+    assert_eq!(selected(cx), 20..22);
+    // Whole words: `idx` is skipped.
+    press(cx, window, "cmd-d");
+    assert_eq!(selected(cx), 42..44);
+    press(cx, window, "cmd-d");
+    assert_eq!(selected(cx), 50..52);
+    press(cx, window, "cmd-d");
+    assert_eq!(selected(cx), 20..22, "wraps around");
+    assert_eq!(text(cx, &editor), source);
+    let _ = std::fs::remove_dir_all(&root);
+}

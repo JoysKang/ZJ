@@ -16,7 +16,8 @@ gpui_kit::actions!(
         MoveLinesUp,
         MoveLinesDown,
         CopyLinesUp,
-        CopyLinesDown
+        CopyLinesDown,
+        SelectNextOccurrence
     ]
 );
 
@@ -35,6 +36,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         // Kit binds these to add cursors off macOS; ⌥⌘↑ / ⌥⌘↓ still add cursors.
         KeyBinding::new("shift-alt-up", CopyLinesUp, input),
         KeyBinding::new("shift-alt-down", CopyLinesDown, input),
+        KeyBinding::new("secondary-d", SelectNextOccurrence, input),
     ]
 }
 
@@ -59,6 +61,37 @@ impl Prototype {
         self.edit_active(window, cx, |_, text, selection| {
             Some(editing::copy_lines(text, selection, down))
         });
+    }
+
+    /// ⌘D: selects the word at the cursor, then moves the selection to the next occurrence.
+    /// Kit cannot add a selection from outside, so this moves the one selection (VS Code's
+    /// ⌘K ⌘D) instead of adding one.
+    pub(super) fn select_next_occurrence(&mut self, cx: &mut Context<Self>) {
+        let Pane::Document(id) = self.active else {
+            return;
+        };
+        let Some(editor) = self.document(id).map(|doc| doc.editor.clone()) else {
+            return;
+        };
+        let (text, selection) = {
+            let state = editor.read(cx);
+            (state.text().to_string(), state.selected_range())
+        };
+        let next = if selection.is_empty() {
+            let word = editing::word_at(&text, selection.start);
+            self.whole_word_selection = word.clone().map(|word| (id, word));
+            word
+        } else {
+            let whole_word = self.whole_word_selection == Some((id, selection.clone()));
+            let next = editing::next_occurrence(&text, selection, whole_word);
+            if whole_word && let Some(next) = &next {
+                self.whole_word_selection = Some((id, next.clone()));
+            }
+            next
+        };
+        if let Some(range) = next {
+            editor.update(cx, |state, cx| state.set_selected_range(range, cx));
+        }
     }
 
     /// Computes one edit from the active buffer's text and primary selection and applies it as

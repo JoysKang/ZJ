@@ -1,6 +1,7 @@
 //! Line editing commands as pure functions of the buffer text and the selection, following
-//! VS Code: toggle line comment (⌘/), move and copy lines (⌥↑↓, ⇧⌥↑↓). Offsets are byte offsets; line breaks are `\n` or
-//! `\r\n` (CRLF files keep `\r\n` in the buffer).
+//! VS Code: toggle line comment (⌘/), move and copy lines (⌥↑↓, ⇧⌥↑↓), and the word and
+//! next match for ⌘D. Offsets are byte offsets; line breaks are `\n` or `\r\n` (CRLF files
+//! keep `\r\n` in the buffer).
 
 use std::ops::Range;
 
@@ -327,6 +328,53 @@ pub fn copy_lines(text: &str, selection: Range<usize>, down: bool) -> Edit {
     }
 }
 
+fn is_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// ⌘D with no selection: the word the cursor is in or touches (the one after it first).
+pub fn word_at(text: &str, offset: usize) -> Option<Range<usize>> {
+    let start = text[..offset]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| is_word(*c))
+        .last()
+        .map_or(offset, |(i, _)| i);
+    let end = text[offset..]
+        .char_indices()
+        .find(|(_, c)| !is_word(*c))
+        .map_or(text.len(), |(i, _)| offset + i);
+    (start < end).then_some(start..end)
+}
+
+/// ⌘D with a selection: the next occurrence of the selected text after it, wrapping around
+/// at the end; case-sensitive, and only whole words when `whole_word` (the selection came
+/// from the word under the cursor). `None` when the selection is the only one.
+pub fn next_occurrence(
+    text: &str,
+    selection: Range<usize>,
+    whole_word: bool,
+) -> Option<Range<usize>> {
+    let needle = &text[selection.clone()];
+    if needle.is_empty() {
+        return None;
+    }
+    let bounded = |start: usize| {
+        let end = start + needle.len();
+        !whole_word
+            || (!text[..start].chars().next_back().is_some_and(is_word)
+                && !text[end..].chars().next().is_some_and(is_word))
+    };
+    let after = text[selection.end..]
+        .match_indices(needle)
+        .map(|(i, _)| selection.end + i);
+    let wrapped = text[..selection.end].match_indices(needle).map(|(i, _)| i);
+    after
+        .chain(wrapped)
+        .find(|&start| start != selection.start && bounded(start))
+        .map(|start| start..start + needle.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,6 +463,48 @@ mod tests {
         assert_eq!(copied("a\nb|", true), "a\nb\nb|");
         assert_eq!(copied("a\r\nb|", false), "a\r\nb|\r\nb");
         assert_eq!(copied("|", true), "\n|");
+    }
+
+    #[test]
+    fn word_under_the_cursor() {
+        let word = |marked: &str| {
+            let (text, selection) = parse(marked);
+            word_at(&text, selection.start).map(|range| text[range].to_string())
+        };
+        assert_eq!(word("let fo|o = 1;").as_deref(), Some("foo"));
+        assert_eq!(word("let |foo = 1;").as_deref(), Some("foo"));
+        assert_eq!(word("let foo| = 1;").as_deref(), Some("foo"));
+        assert_eq!(word("a.b|_c(d)").as_deref(), Some("b_c"));
+        assert_eq!(word("变量|名 = 1").as_deref(), Some("变量名"));
+        assert_eq!(word("a = | 1"), None);
+        assert_eq!(word("|"), None);
+    }
+
+    #[test]
+    fn next_occurrence_wraps_and_matches_case_and_words() {
+        let next = |marked: &str, whole_word: bool| {
+            let (text, selection) = parse(marked);
+            let found = next_occurrence(&text, selection, whole_word);
+            show(
+                &text,
+                found.map(|selection| Edit {
+                    range: 0..0,
+                    text: String::new(),
+                    selection,
+                }),
+            )
+        };
+        assert_eq!(next("[a] b a", false), "a b [a]");
+        assert_eq!(next("a b [a]", false), "[a] b a", "wraps to the start");
+        assert_eq!(
+            next("[Foo] foo Foo", false),
+            "Foo foo [Foo]",
+            "case-sensitive"
+        );
+        assert_eq!(next("[foo] foobar foo", true), "foo foobar [foo]");
+        assert_eq!(next("[foo] foobar foo", false), "foo [foo]bar foo");
+        assert_eq!(next("[x] y", false), "(none)");
+        assert_eq!(next("[a\nb] a\nb", false), "a\nb [a\nb]");
     }
 
     #[test]

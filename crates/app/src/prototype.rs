@@ -47,8 +47,8 @@ pub use documents::{
 };
 mod edit_commands;
 pub use edit_commands::{
-    CopyLinesDown, CopyLinesUp, MoveLinesDown, MoveLinesUp, ToggleLineComment,
-    key_bindings as edit_key_bindings,
+    CopyLinesDown, CopyLinesUp, MoveLinesDown, MoveLinesUp, SelectNextOccurrence,
+    ToggleLineComment, key_bindings as edit_key_bindings,
 };
 #[cfg(test)]
 #[path = "prototype/edit_commands_ui_tests.rs"]
@@ -368,6 +368,8 @@ pub struct Prototype {
     tree_message: String,
     search: search_view::SearchState,
     find: find_widget::FindState,
+    /// The selection ⌘D made from the word under the cursor: the next ⌘D matches whole words.
+    whole_word_selection: Option<(DocumentId, std::ops::Range<usize>)>,
     /// Buffers being reloaded after a replace in the Search view: their next change event
     /// does not mark them edited.
     reloading: std::collections::HashSet<DocumentId>,
@@ -573,6 +575,7 @@ impl Prototype {
             search,
             find,
             reloading: Default::default(),
+            whole_word_selection: None,
             index: None,
             index_task: None,
             index_cancel: Arc::new(AtomicBool::new(false)),
@@ -1941,6 +1944,9 @@ impl Render for Prototype {
             }))
             .on_action(cx.listener(|this, _: &CopyLinesDown, window, cx| {
                 this.copy_lines(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SelectNextOccurrence, _, cx| {
+                this.select_next_occurrence(cx)
             }))
             .on_action(cx.listener(|this, _: &AutoSaveOff, window, cx| {
                 this.set_auto_save(crate::save::AutoSave::Off, window, cx)
