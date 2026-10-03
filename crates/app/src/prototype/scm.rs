@@ -385,14 +385,6 @@ impl Prototype {
                 )),
             )
             .child(
-                action(("scm-repo-refresh", g), IconName::RotateCw, "刷新").on_click(cx.listener(
-                    |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.refresh(window, cx)
-                    },
-                )),
-            )
-            .child(
                 action(("scm-repo-more", g), IconName::Ellipsis, "更多操作").dropdown_menu(
                     move |menu, _, cx| {
                         let view = weak.clone();
