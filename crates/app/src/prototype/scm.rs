@@ -377,6 +377,14 @@ impl Prototype {
                     })),
             )
             .child(
+                action(("scm-repo-graph", g), IconName::GitGraph, "Git 图").on_click(cx.listener(
+                    move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_git_graph(g, window, cx);
+                    },
+                )),
+            )
+            .child(
                 action(("scm-repo-refresh", g), IconName::RotateCw, "刷新").on_click(cx.listener(
                     |this, _, window, cx| {
                         cx.stop_propagation();

@@ -131,7 +131,7 @@ async fn the_graph_shows_lanes_refs_details_and_diffs(cx: &mut TestAppContext) {
     let repo = fixture("lanes");
     let (window, this) = open(cx, repo.clone());
 
-    // Opening the graph (status bar / ··· menu) shows the tab and loads the first page.
+    // The repository header's graph button opens the tab and loads the first page.
     cx.update_window(window.into(), |_, window, cx| {
         this.update(cx, |p, cx| p.open_git_graph(0, window, cx));
     })

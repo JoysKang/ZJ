@@ -305,8 +305,7 @@ impl GitGraph {
 }
 
 impl Prototype {
-    /// The status bar's Git 图 item and the repository ··· menu: one graph tab per window,
-    /// focused if open.
+    /// The SCM repository header's graph button: one graph tab per window, focused if open.
     pub(super) fn open_git_graph(&mut self, g: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(group) = self.groups.get(g) else {
             return;
