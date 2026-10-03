@@ -21,37 +21,117 @@ gpui_kit::actions!(
     [ToggleTerminal, NewTerminal, SplitTerminal, KillTerminal]
 );
 
+/// The panel as the workbench holds it.
+pub(super) type Terminals = TerminalPanel<Entity<TerminalView>>;
+
 /// Terminals side by side in the panel; the panel shows one group at a time.
-pub(super) struct Group {
-    pub(super) panes: Vec<Entity<TerminalView>>,
+struct Group<T> {
+    panes: Vec<T>,
     /// The pane that last had focus.
-    pub(super) focused: usize,
+    focused: usize,
 }
 
-#[derive(Default)]
-pub(super) struct Terminals {
-    pub(super) visible: bool,
-    pub(super) groups: Vec<Group>,
-    pub(super) active: usize,
+/// The panel's groups, active group and visibility. Generic over the pane so that every
+/// index rule (clamping, group removal, falling back to a neighbour) lives here and is unit
+/// tested with plain ids; the workbench only adds spawning, focus and repainting.
+pub(super) struct TerminalPanel<T> {
+    visible: bool,
+    groups: Vec<Group<T>>,
+    active: usize,
     /// The shell to start; `None` is the user's login shell (tests use `/bin/sh`).
-    pub(super) shell: Option<Shell>,
+    shell: Option<Shell>,
     subscriptions: Vec<(EntityId, Subscription)>,
 }
 
-impl Terminals {
-    fn focused_pane(&self, window: &Window, cx: &App) -> Option<(usize, usize)> {
-        self.groups.iter().enumerate().find_map(|(g, group)| {
-            group
-                .panes
-                .iter()
-                .position(|pane| pane.read(cx).focus_handle(cx).contains_focused(window, cx))
-                .map(|p| (g, p))
-        })
+impl<T> Default for TerminalPanel<T> {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            groups: Vec::new(),
+            active: 0,
+            shell: None,
+            subscriptions: Vec::new(),
+        }
+    }
+}
+
+/// What [`TerminalPanel::remove`] did, from the smallest change to the largest.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum RemoveOutcome {
+    /// No pane matched.
+    Missing,
+    /// The pane's group still has other panes.
+    Pane,
+    /// The pane was its group's last, so the group is gone too.
+    Group,
+    /// That was the last terminal; the panel is hidden.
+    Last,
+}
+
+impl<T> TerminalPanel<T> {
+    pub(super) fn is_visible(&self) -> bool {
+        self.visible
     }
 
-    /// The pane commands act on: the focused one, else the active group's last focused.
-    fn target(&self, window: &Window, cx: &App) -> Option<(usize, usize)> {
-        self.focused_pane(window, cx).or_else(|| {
+    /// Whether the panel takes room under the editor: visible and holding a terminal.
+    pub(super) fn is_shown(&self) -> bool {
+        self.visible && !self.groups.is_empty()
+    }
+
+    pub(super) fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.groups.is_empty()
+    }
+
+    pub(super) fn active(&self) -> usize {
+        self.active
+    }
+
+    pub(super) fn shell(&self) -> Option<Shell> {
+        self.shell.clone()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_shell(&mut self, shell: Option<Shell>) {
+        self.shell = shell;
+    }
+
+    /// Each group's panes, left to right.
+    pub(super) fn groups(&self) -> impl ExactSizeIterator<Item = &[T]> {
+        self.groups.iter().map(|group| group.panes.as_slice())
+    }
+
+    /// The panes the panel shows; empty when there is no active group.
+    pub(super) fn active_panes(&self) -> &[T] {
+        self.groups
+            .get(self.active)
+            .map_or(&[], |group| group.panes.as_slice())
+    }
+
+    pub(super) fn pane(&self, group: usize, pane: usize) -> Option<&T> {
+        self.groups.get(group)?.panes.get(pane)
+    }
+
+    /// The pane that last had focus in `group`, as recorded (not clamped).
+    pub(super) fn last_focused(&self, group: usize) -> Option<usize> {
+        self.groups.get(group).map(|group| group.focused)
+    }
+
+    /// Where the first pane matching `matches` is, as (group, pane).
+    pub(super) fn position(&self, mut matches: impl FnMut(&T) -> bool) -> Option<(usize, usize)> {
+        self.groups
+            .iter()
+            .enumerate()
+            .find_map(|(g, group)| group.panes.iter().position(&mut matches).map(|p| (g, p)))
+    }
+
+    /// The pane commands act on: `focused` (the pane holding keyboard focus, which only the
+    /// window knows), else the active group's last focused one, clamped to its panes.
+    pub(super) fn target(&self, focused: Option<(usize, usize)>) -> Option<(usize, usize)> {
+        focused.or_else(|| {
             let group = self.groups.get(self.active)?;
             Some((
                 self.active,
@@ -59,9 +139,89 @@ impl Terminals {
             ))
         })
     }
+
+    /// Makes `group` active and remembers `pane` as its focus; returns the pane to give
+    /// keyboard focus to, if both exist.
+    pub(super) fn focus(&mut self, group: usize, pane: usize) -> Option<&T> {
+        self.active = group;
+        let target = self.groups.get_mut(group)?;
+        target.focused = pane;
+        target.panes.get(pane)
+    }
+
+    /// Records a click on a pane without switching groups; focus itself follows the click.
+    pub(super) fn remember_focus(&mut self, group: usize, pane: usize) {
+        if let Some(group) = self.groups.get_mut(group) {
+            group.focused = pane;
+        }
+    }
+
+    /// Adds `pane` as a new group of its own and shows the panel; returns the group's index.
+    pub(super) fn push_group(&mut self, pane: T) -> usize {
+        self.groups.push(Group {
+            panes: vec![pane],
+            focused: 0,
+        });
+        self.visible = true;
+        self.groups.len() - 1
+    }
+
+    /// Inserts `new` right of `pane` in `group` and shows the panel; returns where it went.
+    /// `pane` is clamped so a stale index appends instead of panicking; a missing group drops
+    /// `new` and returns `None`.
+    pub(super) fn insert_split(&mut self, group: usize, pane: usize, new: T) -> Option<usize> {
+        let target = self.groups.get_mut(group)?;
+        let at = pane.saturating_add(1).min(target.panes.len());
+        target.panes.insert(at, new);
+        self.visible = true;
+        Some(at)
+    }
+
+    /// Drops the first pane matching `matches`. An emptied group goes away; an active group
+    /// after it steps left with it, and when the active group itself goes, the next one
+    /// slides into its place (the previous one if it was the last). The last terminal hides
+    /// the panel.
+    pub(super) fn remove(&mut self, matches: impl FnMut(&T) -> bool) -> RemoveOutcome {
+        let mut outcome = RemoveOutcome::Missing;
+        if let Some((g, index)) = self.position(matches) {
+            let group = &mut self.groups[g];
+            group.panes.remove(index);
+            group.focused = group.focused.min(group.panes.len().saturating_sub(1));
+            outcome = RemoveOutcome::Pane;
+            if group.panes.is_empty() {
+                self.groups.remove(g);
+                if self.active > g || self.active >= self.groups.len() {
+                    self.active = self.active.saturating_sub(1);
+                }
+                outcome = RemoveOutcome::Group;
+            }
+        }
+        if self.groups.is_empty() {
+            self.visible = false;
+            self.active = 0;
+            if outcome == RemoveOutcome::Group {
+                outcome = RemoveOutcome::Last;
+            }
+        }
+        outcome
+    }
+
+    fn subscribe(&mut self, id: EntityId, subscription: Subscription) {
+        self.subscriptions.push((id, subscription));
+    }
+
+    fn unsubscribe(&mut self, id: EntityId) {
+        self.subscriptions.retain(|(pane, _)| *pane != id);
+    }
 }
 
 impl Prototype {
+    /// The terminal holding keyboard focus, if any.
+    fn focused_terminal(&self, window: &Window, cx: &App) -> Option<(usize, usize)> {
+        self.terminals
+            .position(|pane| pane.read(cx).focus_handle(cx).contains_focused(window, cx))
+    }
+
     fn spawn_terminal(
         &mut self,
         window: &mut Window,
@@ -71,7 +231,7 @@ impl Prototype {
             .root
             .clone()
             .or_else(|| std::env::var_os("HOME").map(Into::into));
-        match TerminalView::spawn(cwd, self.terminals.shell.clone(), cx) {
+        match TerminalView::spawn(cwd, self.terminals.shell(), cx) {
             Ok(pane) => {
                 let subscription =
                     cx.subscribe_in(&pane, window, |this, pane, event, window, cx| match event {
@@ -84,9 +244,7 @@ impl Prototype {
                         }
                         TerminalEvent::TitleChanged => cx.notify(),
                     });
-                self.terminals
-                    .subscriptions
-                    .push((pane.entity_id(), subscription));
+                self.terminals.subscribe(pane.entity_id(), subscription);
                 Some(pane)
             }
             Err(error) => {
@@ -99,27 +257,23 @@ impl Prototype {
     }
 
     fn focus_terminal(&mut self, group: usize, pane: usize, window: &mut Window, cx: &mut App) {
-        if let Some(target) = self.terminals.groups.get_mut(group) {
-            target.focused = pane;
-            if let Some(pane) = target.panes.get(pane) {
-                pane.read(cx).focus_handle(cx).focus(window, cx);
-            }
+        if let Some(pane) = self.terminals.focus(group, pane) {
+            pane.read(cx).focus_handle(cx).focus(window, cx);
         }
-        self.terminals.active = group;
     }
 
     /// ⌃`: opens the panel (with a terminal if there is none), focuses it, or hides it when a
     /// terminal already has focus.
     pub(super) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.terminals.groups.is_empty() {
+        if self.terminals.is_empty() {
             return self.new_terminal(window, cx);
         }
-        let focused = self.terminals.focused_pane(window, cx);
-        if self.terminals.visible && focused.is_some() {
-            self.terminals.visible = false;
+        let focused = self.focused_terminal(window, cx);
+        if self.terminals.is_visible() && focused.is_some() {
+            self.terminals.set_visible(false);
             self.focus_active_editor(window, cx);
-        } else if let Some((group, pane)) = self.terminals.target(window, cx) {
-            self.terminals.visible = true;
+        } else if let Some((group, pane)) = self.terminals.target(focused) {
+            self.terminals.set_visible(true);
             self.focus_terminal(group, pane, window, cx);
         }
         cx.notify();
@@ -127,13 +281,17 @@ impl Prototype {
 
     /// The title bar's button: shows or hides the panel without the focus rule of ⌃`.
     pub(super) fn toggle_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.terminals.visible {
-            self.terminals.visible = false;
-            self.focus_active_editor(window, cx);
-            cx.notify();
+        if self.terminals.is_visible() {
+            self.hide_terminal_panel(window, cx);
         } else {
             self.toggle_terminal(window, cx);
         }
+    }
+
+    fn hide_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.terminals.set_visible(false);
+        self.focus_active_editor(window, cx);
+        cx.notify();
     }
 
     /// ⌃⇧`: a new terminal in its own group.
@@ -141,46 +299,45 @@ impl Prototype {
         let Some(pane) = self.spawn_terminal(window, cx) else {
             return;
         };
-        self.terminals.groups.push(Group {
-            panes: vec![pane],
-            focused: 0,
-        });
-        self.terminals.visible = true;
-        let group = self.terminals.groups.len() - 1;
+        let group = self.terminals.push_group(pane);
         self.focus_terminal(group, 0, window, cx);
         cx.notify();
     }
 
     /// ⌘\: a new terminal to the right of the focused one.
     pub(super) fn split_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((group, pane)) = self.terminals.target(window, cx) else {
+        let focused = self.focused_terminal(window, cx);
+        let Some((group, pane)) = self.terminals.target(focused) else {
             return self.new_terminal(window, cx);
         };
         let Some(new) = self.spawn_terminal(window, cx) else {
             return;
         };
-        let Some(target) = self.terminals.groups.get_mut(group) else {
+        let Some(at) = self.terminals.insert_split(group, pane, new) else {
             return;
         };
-        let at = (pane + 1).min(target.panes.len());
-        target.panes.insert(at, new);
-        self.terminals.visible = true;
         self.focus_terminal(group, at, window, cx);
         cx.notify();
     }
 
     pub(super) fn kill_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((group, pane)) = self.terminals.target(window, cx) else {
+        let focused = self.focused_terminal(window, cx);
+        let Some(pane) = self
+            .terminals
+            .target(focused)
+            .and_then(|(group, pane)| self.terminals.pane(group, pane))
+            .cloned()
+        else {
             return;
         };
-        let pane = self.terminals.groups[group].panes[pane].clone();
         self.remove_terminal(&pane, cx);
         self.refocus_after_close(window, cx);
     }
 
     /// Focus moves to the group's next terminal, or to the editor when none is left.
     fn refocus_after_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((group, pane)) = self.terminals.target(window, cx) {
+        let focused = self.focused_terminal(window, cx);
+        if let Some((group, pane)) = self.terminals.target(focused) {
             self.focus_terminal(group, pane, window, cx);
         } else {
             self.focus_active_editor(window, cx);
@@ -190,27 +347,8 @@ impl Prototype {
     /// Drops a terminal (its shell is hung up); the last one hides the panel.
     fn remove_terminal(&mut self, pane: &Entity<TerminalView>, cx: &mut Context<Self>) {
         let id = pane.entity_id();
-        self.terminals.subscriptions.retain(|(pane, _)| *pane != id);
-        let terminals = &mut self.terminals;
-        for g in 0..terminals.groups.len() {
-            let group = &mut terminals.groups[g];
-            let Some(index) = group.panes.iter().position(|p| p.entity_id() == id) else {
-                continue;
-            };
-            group.panes.remove(index);
-            group.focused = group.focused.min(group.panes.len().saturating_sub(1));
-            if group.panes.is_empty() {
-                terminals.groups.remove(g);
-                if terminals.active > g || terminals.active >= terminals.groups.len() {
-                    terminals.active = terminals.active.saturating_sub(1);
-                }
-            }
-            break;
-        }
-        if terminals.groups.is_empty() {
-            terminals.visible = false;
-            terminals.active = 0;
-        }
+        self.terminals.unsubscribe(id);
+        self.terminals.remove(|pane| pane.entity_id() == id);
         cx.notify();
     }
 
@@ -220,7 +358,7 @@ impl Prototype {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let pane = self.terminals.groups.get(group).map_or(0, |g| g.focused);
+        let pane = self.terminals.last_focused(group).unwrap_or(0);
         self.focus_terminal(group, pane, window, cx);
         cx.notify();
     }
@@ -228,19 +366,18 @@ impl Prototype {
     pub(super) fn render_terminal_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
         let terminals = &self.terminals;
-        let label = |group: &Group, cx: &App| {
-            group
-                .panes
+        let label = |panes: &[Entity<TerminalView>], cx: &App| {
+            panes
                 .iter()
                 .map(|pane| pane.read(cx).title().to_string())
                 .collect::<Vec<_>>()
                 .join("、")
         };
-        let chips = (terminals.groups.len() > 1).then(|| {
+        let chips = (terminals.groups().len() > 1).then(|| {
             h_flex()
                 .gap_1()
-                .children(terminals.groups.iter().enumerate().map(|(g, group)| {
-                    let active = g == terminals.active;
+                .children(terminals.groups().enumerate().map(|(g, panes)| {
+                    let active = g == terminals.active();
                     div()
                         .id(("terminal-group", g))
                         .px_2()
@@ -255,7 +392,7 @@ impl Prototype {
                                     .hover(|chip| chip.bg(colors.hover))
                             }
                         })
-                        .child(format!("{}: {}", g + 1, label(group, cx)))
+                        .child(format!("{}: {}", g + 1, label(panes, cx)))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.select_terminal_group(g, window, cx)
                         }))
@@ -294,20 +431,12 @@ impl Prototype {
                     .on_click(cx.listener(|this, _, window, cx| this.kill_terminal(window, cx))),
             )
             .child(
-                button("terminal-hide", IconName::Close, "隐藏面板（⌃`）").on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.terminals.visible = false;
-                        this.focus_active_editor(window, cx);
-                        cx.notify();
-                    },
-                )),
+                button("terminal-hide", IconName::Close, "隐藏面板（⌃`）").on_click(
+                    cx.listener(|this, _, window, cx| this.hide_terminal_panel(window, cx)),
+                ),
             );
-        let group = terminals.active;
-        let panes = terminals
-            .groups
-            .get(group)
-            .map(|group| group.panes.clone())
-            .unwrap_or_default();
+        let group = terminals.active();
+        let panes = terminals.active_panes().to_vec();
         v_flex()
             .size_full()
             .bg(colors.editor)
@@ -327,14 +456,163 @@ impl Prototype {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _, _, _| {
-                                    if let Some(group) = this.terminals.groups.get_mut(group) {
-                                        group.focused = p;
-                                    }
+                                    this.terminals.remember_focus(group, p)
                                 }),
                             )
                             .child(pane)
                     })),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RemoveOutcome, TerminalPanel};
+
+    /// A panel whose groups hold the given ids, left to right; the last group is active.
+    fn with_groups(groups: &[&[u32]]) -> TerminalPanel<u32> {
+        let mut panel = TerminalPanel::default();
+        for panes in groups {
+            let group = panel.push_group(panes[0]);
+            for (p, &pane) in panes.iter().enumerate().skip(1) {
+                panel.insert_split(group, p - 1, pane);
+            }
+        }
+        panel
+    }
+
+    fn layout(panel: &TerminalPanel<u32>) -> Vec<Vec<u32>> {
+        panel.groups().map(<[u32]>::to_vec).collect()
+    }
+
+    #[test]
+    fn push_group_appends_and_shows_the_panel() {
+        let mut panel = TerminalPanel::default();
+        assert!(panel.is_empty() && !panel.is_visible() && !panel.is_shown());
+        assert_eq!(panel.push_group(1), 0);
+        assert_eq!(panel.push_group(2), 1);
+        assert!(panel.is_visible() && panel.is_shown());
+        assert_eq!(layout(&panel), [vec![1], vec![2]]);
+        // Pushing alone does not move the active group; focusing does.
+        assert_eq!(panel.active(), 0);
+        assert_eq!(panel.focus(1, 0), Some(&2));
+        assert_eq!(panel.active(), 1);
+        assert_eq!(panel.active_panes(), [2]);
+    }
+
+    #[test]
+    fn insert_split_goes_right_of_the_pane_and_clamps_stale_indices() {
+        let mut panel = with_groups(&[&[1, 2]]);
+        assert_eq!(panel.insert_split(0, 0, 3), Some(1));
+        assert_eq!(layout(&panel), [vec![1, 3, 2]]);
+        // A pane index past the end appends instead of panicking.
+        assert_eq!(panel.insert_split(0, 99, 4), Some(3));
+        assert_eq!(panel.insert_split(0, usize::MAX, 5), Some(4));
+        assert_eq!(layout(&panel), [vec![1, 3, 2, 4, 5]]);
+        // A missing group changes nothing.
+        assert_eq!(panel.insert_split(7, 0, 6), None);
+        assert_eq!(layout(&panel), [vec![1, 3, 2, 4, 5]]);
+
+        // Splitting re-shows a hidden panel.
+        panel.set_visible(false);
+        assert_eq!(panel.insert_split(0, 0, 7), Some(1));
+        assert!(panel.is_visible());
+    }
+
+    #[test]
+    fn remove_keeps_the_group_while_it_has_panes() {
+        let mut panel = with_groups(&[&[1, 2, 3]]);
+        panel.focus(0, 2);
+        assert_eq!(panel.remove(|&pane| pane == 3), RemoveOutcome::Pane);
+        assert_eq!(layout(&panel), [vec![1, 2]]);
+        // The group's focus is clamped onto a pane that still exists.
+        assert_eq!(panel.last_focused(0), Some(1));
+        assert_eq!(panel.remove(|&pane| pane == 9), RemoveOutcome::Missing);
+        assert_eq!(layout(&panel), [vec![1, 2]]);
+        assert!(panel.is_visible());
+    }
+
+    #[test]
+    fn remove_of_a_middle_group_keeps_the_active_group_in_range() {
+        // Active after the removed group: it steps left with its group.
+        let mut panel = with_groups(&[&[1], &[2], &[3]]);
+        panel.focus(2, 0);
+        assert_eq!(panel.remove(|&pane| pane == 2), RemoveOutcome::Group);
+        assert_eq!(layout(&panel), [vec![1], vec![3]]);
+        assert_eq!(panel.active(), 1);
+        assert_eq!(panel.active_panes(), [3]);
+
+        // Active before the removed group: unchanged.
+        let mut panel = with_groups(&[&[1], &[2], &[3]]);
+        panel.focus(0, 0);
+        assert_eq!(panel.remove(|&pane| pane == 2), RemoveOutcome::Group);
+        assert_eq!(panel.active(), 0);
+        assert_eq!(panel.active_panes(), [1]);
+
+        // Active is the removed group: its right neighbour slides into its place.
+        let mut panel = with_groups(&[&[1], &[2], &[3]]);
+        panel.focus(1, 0);
+        assert_eq!(panel.remove(|&pane| pane == 2), RemoveOutcome::Group);
+        assert_eq!(panel.active(), 1);
+        assert_eq!(panel.active_panes(), [3]);
+        assert!(panel.is_visible());
+    }
+
+    #[test]
+    fn remove_of_the_last_group_falls_back_to_its_left_neighbour() {
+        let mut panel = with_groups(&[&[1], &[2, 3], &[4]]);
+        panel.focus(2, 0);
+        assert_eq!(panel.remove(|&pane| pane == 4), RemoveOutcome::Group);
+        assert_eq!(layout(&panel), [vec![1], vec![2, 3]]);
+        assert_eq!(panel.active(), 1);
+        assert_eq!(panel.active_panes(), [2, 3]);
+
+        // The first group, while active, leaves the next one active at index 0.
+        let mut panel = with_groups(&[&[1], &[2]]);
+        panel.focus(0, 0);
+        assert_eq!(panel.remove(|&pane| pane == 1), RemoveOutcome::Group);
+        assert_eq!(panel.active(), 0);
+        assert_eq!(panel.active_panes(), [2]);
+    }
+
+    #[test]
+    fn remove_of_the_last_terminal_hides_the_panel() {
+        let mut panel = with_groups(&[&[1], &[2]]);
+        panel.focus(1, 0);
+        assert_eq!(panel.remove(|&pane| pane == 2), RemoveOutcome::Group);
+        assert_eq!(panel.remove(|&pane| pane == 1), RemoveOutcome::Last);
+        assert!(panel.is_empty() && !panel.is_visible() && !panel.is_shown());
+        assert_eq!(panel.active(), 0);
+        assert_eq!(panel.active_panes(), [] as [u32; 0]);
+        assert_eq!(panel.target(None), None);
+        assert_eq!(panel.remove(|_| true), RemoveOutcome::Missing);
+    }
+
+    #[test]
+    fn target_prefers_keyboard_focus_then_the_active_groups_last_focus() {
+        let mut panel = with_groups(&[&[1, 2], &[3, 4, 5]]);
+        panel.focus(1, 2);
+        assert_eq!(panel.target(Some((0, 1))), Some((0, 1)));
+        assert_eq!(panel.target(None), Some((1, 2)));
+
+        // A recorded focus past the end is clamped onto the group's last pane.
+        panel.remember_focus(1, 9);
+        assert_eq!(panel.last_focused(1), Some(9));
+        assert_eq!(panel.target(None), Some((1, 2)));
+        assert_eq!(panel.pane(1, 2), Some(&5));
+
+        // An active group that does not exist has no fallback.
+        assert_eq!(panel.focus(5, 0), None);
+        assert_eq!(panel.target(None), None);
+        assert_eq!(panel.active_panes(), [] as [u32; 0]);
+    }
+
+    #[test]
+    fn position_finds_panes_across_groups() {
+        let panel = with_groups(&[&[1, 2], &[3]]);
+        assert_eq!(panel.position(|&pane| pane == 2), Some((0, 1)));
+        assert_eq!(panel.position(|&pane| pane == 3), Some((1, 0)));
+        assert_eq!(panel.position(|&pane| pane == 4), None);
     }
 }

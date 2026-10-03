@@ -93,7 +93,7 @@ impl Prototype {
                 Button::new("toggle-terminal")
                     .xsmall()
                     .ghost()
-                    .icon(if self.terminals.visible {
+                    .icon(if self.terminals.is_visible() {
                         IconName::PanelBottom
                     } else {
                         IconName::PanelBottomOpen

@@ -1791,7 +1791,7 @@ impl Render for Prototype {
             window.set_window_edited(edited);
         }
         let mut editor = self.render_editor_area(cx);
-        if self.terminals.visible && !self.terminals.groups.is_empty() {
+        if self.terminals.is_shown() {
             editor = v_resizable("editor-terminal")
                 .child(resizable_panel().child(editor))
                 .child(

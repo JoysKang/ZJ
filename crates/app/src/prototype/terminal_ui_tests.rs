@@ -28,8 +28,10 @@ fn open(cx: &mut TestAppContext, root: PathBuf) -> (WindowHandle<Root>, Entity<P
             |window, cx| {
                 cx.new(|cx| {
                     let mut this = Prototype::new(Some(root), service, documents, 1, window, cx);
-                    this.terminals.shell =
-                        Some(crate::terminal::Shell::new("/bin/sh".into(), Vec::new()));
+                    this.terminals.set_shell(Some(crate::terminal::Shell::new(
+                        "/bin/sh".into(),
+                        Vec::new(),
+                    )));
                     this
                 })
             },
@@ -59,19 +61,17 @@ fn settle(
 }
 
 fn panes(cx: &mut TestAppContext, this: &Entity<Prototype>) -> Vec<usize> {
-    this.read_with(cx, |p, _| {
-        p.terminals
-            .groups
-            .iter()
-            .map(|group| group.panes.len())
-            .collect()
-    })
+    this.read_with(cx, |p, _| p.terminals.groups().map(<[_]>::len).collect())
 }
 
 fn focused_text(cx: &mut TestAppContext, this: &Entity<Prototype>) -> String {
     this.read_with(cx, |p, cx| {
-        let group = &p.terminals.groups[p.terminals.active];
-        group.panes[group.focused].read(cx).screen_text()
+        let (group, pane) = p.terminals.target(None).unwrap();
+        p.terminals
+            .pane(group, pane)
+            .unwrap()
+            .read(cx)
+            .screen_text()
     })
 }
 
@@ -95,7 +95,7 @@ async fn terminals_open_split_run_commands_and_close(cx: &mut TestAppContext) {
     // ⌃` with no terminal opens the panel with one, focused, in the workspace folder.
     act(cx, window, ToggleTerminal);
     assert_eq!(panes(cx, &this), [1]);
-    this.read_with(cx, |p, _| assert!(p.terminals.visible));
+    this.read_with(cx, |p, _| assert!(p.terminals.is_visible()));
 
     // Typed text goes through the input handler, Enter through the key path.
     cx.update_window(window.into(), |_, window, cx| {
@@ -115,7 +115,7 @@ async fn terminals_open_split_run_commands_and_close(cx: &mut TestAppContext) {
     assert_eq!(panes(cx, &this), [2]);
     act(cx, window, NewTerminal);
     assert_eq!(panes(cx, &this), [2, 1]);
-    this.read_with(cx, |p, _| assert_eq!(p.terminals.active, 1));
+    this.read_with(cx, |p, _| assert_eq!(p.terminals.active(), 1));
 
     // A shell that exits closes its terminal; the trash button's command kills one.
     cx.update_window(window.into(), |_, window, cx| {
@@ -134,11 +134,11 @@ async fn terminals_open_split_run_commands_and_close(cx: &mut TestAppContext) {
     })
     .unwrap();
     act(cx, window, ToggleTerminal);
-    this.read_with(cx, |p, _| assert!(!p.terminals.visible));
+    this.read_with(cx, |p, _| assert!(!p.terminals.is_visible()));
     act(cx, window, ToggleTerminal);
-    this.read_with(cx, |p, _| assert!(p.terminals.visible));
+    this.read_with(cx, |p, _| assert!(p.terminals.is_visible()));
     act(cx, window, KillTerminal);
     assert!(panes(cx, &this).is_empty());
-    this.read_with(cx, |p, _| assert!(!p.terminals.visible));
+    this.read_with(cx, |p, _| assert!(!p.terminals.is_visible()));
     let _ = std::fs::remove_dir_all(&root);
 }
