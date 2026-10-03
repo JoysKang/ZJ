@@ -58,6 +58,8 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `languages.rs`：文件名 / 扩展名到语法的映射；新增语法要同时打开 Kit 的 feature 并在 `SAMPLES` 里加样例。
   - `diff_doc.rs`：在后台把全上下文补丁还原成两侧全文，做行对齐、语法高亮和字符级差异；`prototype/diff_view.rs`：只切片现成数据的虚拟化左右 / 内联 Diff 编辑器；`prototype/diff_ops.rs`：行选择、复制、概览标尺和块 / 行级暂存；`partial_patch.rs`：从全上下文补丁生成只含所选行的补丁。
   - `prototype/scm_actions.rs`：Git 写操作确认与结果展示；`git_service/src/write.rs`：仓库锁内校验及有界执行。
+  - `prototype/graph_view.rs`：编辑区里的 Git 图（纯函数的车道布局、分页提交列表、提交详情、打开提交 Diff）。
+  - `session.rs`：重启时恢复的窗口记录（`session.json`，每个窗口的文件夹和位置大小）。
   - Agent 面板（docs/adr/0004）：`agent_model.rs` 放不依赖 GPUI 的逻辑（会话分组和时间、`@` 引用、附件、从历史恢复）；`markdown.rs` 是回复用的小型 Markdown（代码块用编辑器的语法高亮，在后台完成）；`secrets.rs` 解析 Agent 的环境变量（`$变量名` 或 macOS 钥匙串 `keychain:账户名`，设置里不存明文密钥）。`prototype/agent.rs` 是会话、事件、历史持久化、权限规则和审阅的状态与逻辑；`agent_panel.rs`（对话、卡片、输入框、设置）、`agent_history.rs`（会话列表）、`agent_search.rs`（⌘J 搜索）、`agent_review.rs`（编辑区里逐处接受 / 拒绝）只做渲染和交互。转圈只在面板可见、窗口在前台、有会话运行时才有定时器。
   - `symbols.rs`：tree-sitter tags / locals 查询做定义、引用和文件大纲（查询在 `crates/app/queries/`）；`symbol_index.rs`：首次跳转时后台建立的工作区符号索引；`prototype/navigation.rs`：转到定义、符号列表、查找引用和前进后退。不跑语言服务器，见 docs/adr/0002。
 - `vendor/`：打过补丁的 GPUI macOS 渲染器和窗口层（`gpui-pre-apple` / `gpui-pre-macos`，用 `[patch.crates-io]` 指向）。改动都标 `ZJ patch`，说明在 `vendor/README.md`，理由和测量方法在 docs/adr/0005；`ZJ_GPU_LOWMEM=0` 恢复上游行为。升级 GPUI 时要先处理这里。
