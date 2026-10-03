@@ -68,8 +68,8 @@ pub const EXTRA: &[(&str, &[u8])] = &[
     // Terminal panel: split.
     embed!("icons/square-split-horizontal.svg"),
     embed!("icons/code.svg"),
-    // Rendered at 3× from logo/zj-sprig*.svg: the dry-brush filter needs a browser-grade
-    // rasterizer at this size.
+    // Rendered from logo/zj-sprig*.svg: the dry-brush filter needs a browser-grade rasterizer
+    // at this size. 2× of the 160×150 display size keeps each decoded bitmap at ~0.4 MB.
     embed!("logo/zj-sprig.png"),
     embed!("logo/zj-sprig-dark.png"),
     embed!("file-icons/default_folder.svg"),
