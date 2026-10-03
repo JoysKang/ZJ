@@ -271,6 +271,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 Some("WorkspaceEditor"),
             ),
             KeyBinding::new(
+                "secondary-shift-p",
+                prototype::ShowAllCommands,
+                Some("WorkspaceEditor"),
+            ),
+            KeyBinding::new(
                 "secondary-b",
                 prototype::ToggleSidebar,
                 Some("WorkspaceEditor"),
@@ -424,6 +429,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 ])),
             ]),
             Menu::new("查看").items([
+                MenuItem::action("命令面板…", prototype::ShowAllCommands),
+                MenuItem::separator(),
                 MenuItem::action("放大", prototype::ZoomIn),
                 MenuItem::action("缩小", prototype::ZoomOut),
                 MenuItem::action("重置缩放", prototype::ZoomReset),

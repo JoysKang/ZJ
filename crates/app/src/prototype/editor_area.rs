@@ -1,7 +1,9 @@
 //! Editor area: VS Code-style tabs, breadcrumbs, the editor itself, and the welcome page.
 
 use super::SINGLE_LINE;
-use super::{NewWindow, OpenFile, OpenFolder, Pane, Prototype, QuickOpenFile, ToggleSidebar};
+use super::{
+    NewWindow, OpenFile, OpenFolder, Pane, Prototype, QuickOpenFile, ShowAllCommands, ToggleSidebar,
+};
 use crate::{file_icons, theme};
 use gpui_kit::{
     assets::IconName,
@@ -417,6 +419,12 @@ impl Prototype {
                         "转到文件",
                         &["⌘", "P"],
                         Box::new(QuickOpenFile),
+                    ))
+                    .child(item(
+                        "welcome-commands",
+                        "显示所有命令",
+                        &["⇧", "⌘", "P"],
+                        Box::new(ShowAllCommands),
                     ))
                     .child(item(
                         "welcome-open-file",

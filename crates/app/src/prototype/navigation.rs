@@ -436,6 +436,7 @@ impl Prototype {
                     },
                     detail: format!("{relative}:{}", target.line + 1),
                     icon: PickIcon::File(crate::file_icons::for_file(&file)),
+                    keys: Vec::new(),
                     pick: Pick::Jump(target),
                 }
             })
@@ -601,6 +602,7 @@ impl Prototype {
                         label: target.name.clone(),
                         detail: format!("{} · 第 {} 行", target.kind.label(), target.line + 1),
                         icon: PickIcon::Symbol(target.kind),
+                        keys: Vec::new(),
                         pick: Pick::Jump(target),
                     })
                     .collect();

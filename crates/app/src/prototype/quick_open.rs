@@ -20,11 +20,13 @@ use gpui_kit::{
 use std::{path::PathBuf, time::Duration};
 use workspace_editor_core::RepoId;
 
-/// A row of a symbol, location or branch list.
+/// A row of a symbol, location, command or branch list. `keys` are keycap labels of the
+/// command's shortcut (empty when it has none or the row is not a command).
 pub(super) struct PickItem {
     pub label: String,
     pub detail: String,
     pub icon: PickIcon,
+    pub keys: Vec<String>,
     pub pick: Pick,
 }
 
@@ -67,14 +69,30 @@ pub(super) enum Pick {
     /// `:N:C` in the file search: 0-based line and column; `None` (no file, or the line is
     /// out of range) keeps the panel open, as in VS Code.
     Line(Option<(u32, u32)>),
+    /// A `>` command palette row: the index into [`super::commands::COMMANDS`].
+    Command(usize),
+}
+
+/// The ⌘P panel's state: file search, command palette (`>`) or go to line (`:`).
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum LauncherMode {
+    Files,
+    Commands,
+    Line,
 }
 
 pub(super) struct QuickOpen {
     pub(super) input: Entity<InputState>,
-    /// Opened as the file search (⌘P), where a `:` prefix switches to going to a line.
+    /// Opened as the file search (⌘P), where a `>` / `:` prefix switches to commands / lines.
     launcher: bool,
+    /// The launcher's prefix state (always `Files` for pickers over a fixed list).
+    mode: LauncherMode,
+    /// Keycap labels of each command's shortcut, resolved when the panel opened.
+    command_keys: Vec<Vec<String>>,
+    /// What had focus when the panel opened; a command is dispatched with it restored.
+    previous_focus: Option<FocusHandle>,
     results: Vec<PathBuf>,
-    /// `Some` for a symbol / location list: the items and the indexes matching the query.
+    /// `Some` for a symbol / location / command list: the items and the matching indexes.
     pub(super) items: Option<(Vec<PickItem>, Vec<usize>)>,
     empty_note: &'static str,
     selected: usize,
@@ -109,9 +127,12 @@ impl Prototype {
             self.update_quick_open(window, cx);
             return;
         }
+        // Shortcut labels and command dispatch need the focus the panel takes away.
+        let previous_focus = window.focused(cx);
+        let command_keys = super::commands::shortcut_keys(window, cx);
         let input = cx.new(|cx| {
-            let mut input =
-                InputState::new(window, cx).placeholder("按名称搜索文件（输入 : 转到行）");
+            let mut input = InputState::new(window, cx)
+                .placeholder("按名称搜索文件（输入 : 转到行，> 执行命令）");
             input.set_value(prefix.to_string(), window, cx);
             input
         });
@@ -128,6 +149,9 @@ impl Prototype {
         self.quick_open = Some(QuickOpen {
             input,
             launcher: true,
+            mode: LauncherMode::Files,
+            command_keys,
+            previous_focus,
             results: Vec::new(),
             items: None,
             empty_note: "",
@@ -165,6 +189,9 @@ impl Prototype {
         self.quick_open = Some(QuickOpen {
             input,
             launcher: false,
+            mode: LauncherMode::Files,
+            command_keys: Vec::new(),
+            previous_focus: None,
             results: Vec::new(),
             items: Some((items, all)),
             empty_note,
@@ -183,6 +210,7 @@ impl Prototype {
             label,
             detail: String::new(),
             icon: PickIcon::None,
+            keys: Vec::new(),
             pick: Pick::Line(line),
         };
         let Some((_, editor)) = self.active_document() else {
@@ -224,29 +252,91 @@ impl Prototype {
             })
     }
 
-    /// Empty query lists open files, most recent first; otherwise fuzzy results from the index.
+    /// Empty query lists open files, most recent first; otherwise fuzzy results from the
+    /// index. In the ⌘P launcher a `>` prefix lists commands and `:` goes to a line.
     pub(super) fn update_quick_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(quick) = self.quick_open.as_ref().filter(|quick| quick.launcher) {
-            let query = quick.input.read(cx).value();
-            if let Some(line) = query.strip_prefix(':') {
-                let item = self.line_item(line, cx);
+            let value = quick.input.read(cx).value().to_string();
+            let mode = if value.starts_with('>') {
+                LauncherMode::Commands
+            } else if value.starts_with(':') {
+                LauncherMode::Line
+            } else {
+                LauncherMode::Files
+            };
+            if mode != quick.mode {
+                let input = quick.input.clone();
+                input.update(cx, |input, cx| {
+                    input.set_placeholder(
+                        match mode {
+                            LauncherMode::Files => "按名称搜索文件（输入 : 转到行，> 执行命令）",
+                            LauncherMode::Commands => "输入命令名称",
+                            LauncherMode::Line => "转到行（:行 或 :行:列）",
+                        },
+                        window,
+                        cx,
+                    );
+                });
                 if let Some(quick) = self.quick_open.as_mut() {
-                    quick.generation += 1;
-                    quick.task = None;
-                    quick.selected = 0;
-                    quick.items = Some((vec![item], vec![0]));
+                    quick.mode = mode;
                 }
-                cx.notify();
-                return;
             }
-            if let Some(quick) = self.quick_open.as_mut() {
-                quick.items = None;
+            match mode {
+                LauncherMode::Line => {
+                    let item = self.line_item(value.strip_prefix(':').unwrap_or_default(), cx);
+                    if let Some(quick) = self.quick_open.as_mut() {
+                        quick.generation += 1;
+                        quick.task = None;
+                        quick.selected = 0;
+                        quick.items = Some((vec![item], vec![0]));
+                    }
+                    cx.notify();
+                    return;
+                }
+                LauncherMode::Commands => {
+                    let items = self
+                        .quick_open
+                        .as_ref()
+                        .map(|quick| {
+                            super::commands::COMMANDS
+                                .iter()
+                                .enumerate()
+                                .map(|(i, command)| PickItem {
+                                    label: command.name.into(),
+                                    detail: String::new(),
+                                    icon: PickIcon::None,
+                                    keys: quick.command_keys.get(i).cloned().unwrap_or_default(),
+                                    pick: Pick::Command(i),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if let Some(quick) = self.quick_open.as_mut() {
+                        quick.generation += 1;
+                        quick.task = None;
+                        quick.selected = 0;
+                        quick.items = Some((items, Vec::new()));
+                    }
+                }
+                LauncherMode::Files => {
+                    if let Some(quick) = self.quick_open.as_mut() {
+                        quick.items = None;
+                    }
+                }
             }
         }
+        let history = self.command_history.clone();
         if let Some(quick) = self.quick_open.as_mut()
             && let Some((items, filtered)) = &mut quick.items
         {
-            let query = crate::fuzzy::query_chars(&quick.input.read(cx).value());
+            let value = quick.input.read(cx).value();
+            let text: &str = &value;
+            let text = if quick.launcher && quick.mode == LauncherMode::Commands {
+                text.strip_prefix('>').unwrap_or(text)
+            } else {
+                text
+            };
+            let query = crate::fuzzy::query_chars(text);
             let mut scored: Vec<(i32, usize)> = items
                 .iter()
                 .enumerate()
@@ -268,6 +358,16 @@ impl Prototype {
                 scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
             }
             *filtered = scored.into_iter().map(|(_, i)| i).collect();
+            if query.is_empty() && quick.launcher && quick.mode == LauncherMode::Commands {
+                // 空查询时最近用过的命令在前，其余按命令表顺序（稳定排序）。
+                let rank = |i: usize| {
+                    history
+                        .iter()
+                        .position(|name| *name == items[i].label)
+                        .unwrap_or(usize::MAX)
+                };
+                filtered.sort_by_key(|i| rank(*i));
+            }
             quick.selected = 0;
             cx.notify();
             return;
@@ -346,6 +446,7 @@ impl Prototype {
                     label: String::new(),
                     detail: String::new(),
                     icon: PickIcon::Lucide(IconName::Plus),
+                    keys: Vec::new(),
                     pick: Pick::CreateBranch {
                         repo: repo.clone(),
                         start: start.clone(),
@@ -369,6 +470,7 @@ impl Prototype {
                         } else {
                             IconName::Tag
                         }),
+                        keys: Vec::new(),
                         pick: Pick::CreateTag {
                             repo: repo.clone(),
                             commit: commit.clone(),
@@ -389,10 +491,28 @@ impl Prototype {
             if let Some(Pick::Line(None)) = pick {
                 return;
             }
+            let focus = self
+                .quick_open
+                .as_ref()
+                .and_then(|quick| quick.previous_focus.clone());
             self.quick_open = None;
             match pick {
                 Some(Pick::Jump(target)) => self.jump_to(target, true, window, cx),
                 Some(Pick::Line(Some((line, column)))) => self.go_to_line(line, column, window, cx),
+                Some(Pick::Command(index)) => {
+                    let command = &super::commands::COMMANDS[index];
+                    let action = (command.action)();
+                    self.command_history.retain(|name| *name != command.name);
+                    self.command_history.insert(0, command.name);
+                    self.command_history.truncate(20);
+                    // Restore the focus the panel took, so context-sensitive commands
+                    // (editor commands, the Agent panel) dispatch where the user was.
+                    match focus {
+                        Some(focus) => focus.focus(window, cx),
+                        None => self.focus_active_editor(window, cx),
+                    }
+                    window.dispatch_action(action, cx);
+                }
                 Some(Pick::Checkout {
                     repo,
                     branch,
@@ -710,6 +830,32 @@ impl Prototype {
                     })
                     .child(item.detail.replace(SINGLE_LINE, "⏎")),
             )
+            .when(!item.keys.is_empty(), |row| {
+                // The keycaps of the command's shortcut, the Welcome page's style.
+                row.child(
+                    h_flex()
+                        .flex_shrink_0()
+                        .gap_1()
+                        .children(item.keys.iter().map(|key| {
+                            div()
+                                .min_w(theme::KEYCAP)
+                                .h(theme::KEYCAP)
+                                .px_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(theme::RADIUS)
+                                .bg(colors.keycap)
+                                .text_size(theme::TEXT_SECTION)
+                                .text_color(if selected {
+                                    colors.selected_fg
+                                } else {
+                                    colors.muted
+                                })
+                                .child(key.clone())
+                        })),
+                )
+            })
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.confirm_quick_open(Some(index), window, cx)
             }))

@@ -37,6 +37,11 @@ mod agent_review;
 pub use agent_review::{AcceptAgentChange, RejectAgentChange};
 mod agent_search;
 mod chrome;
+mod commands;
+pub use commands::ShowAllCommands;
+#[cfg(test)]
+#[path = "prototype/commands_ui_tests.rs"]
+mod commands_ui_tests;
 mod diff_ops;
 pub use diff_ops::{CopyDiff, SelectAllDiff};
 mod diff_view;
@@ -342,6 +347,8 @@ pub struct Prototype {
     sidebar: Sidebar,
     sidebar_visible: bool,
     quick_open: Option<quick_open::QuickOpen>,
+    /// 命令面板里最近执行的命令名称，新的在前（只在内存，不持久化）。
+    command_history: Vec<&'static str>,
     active: Pane,
     documents: Vec<Document>,
     owners: DocumentOwners,
@@ -554,6 +561,7 @@ impl Prototype {
             sidebar: Sidebar::Explorer,
             sidebar_visible: true,
             quick_open: None,
+            command_history: Vec::new(),
             active: Pane::Welcome,
             documents: Vec::new(),
             owners,
@@ -1962,6 +1970,9 @@ impl Render for Prototype {
             }))
             .on_action(cx.listener(|this, _: &QuickOpenFile, window, cx| {
                 this.open_quick_open(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowAllCommands, window, cx| {
+                this.open_quick_open_with(">", window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &ZoomIn, window, cx| this.zoom(Some(1.), window, cx)))

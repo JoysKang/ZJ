@@ -505,6 +505,7 @@ impl Prototype {
             label: String::new(),
             detail: String::new(),
             icon: PickIcon::Lucide(IconName::Tag),
+            keys: Vec::new(),
             pick: Pick::TagName {
                 repo: repo.clone(),
                 commit,
@@ -583,6 +584,7 @@ impl Prototype {
             label: String::new(),
             detail: String::new(),
             icon: PickIcon::Lucide(IconName::Plus),
+            keys: Vec::new(),
             pick: Pick::CreateBranch {
                 repo: group.repo.id.clone(),
                 start,
@@ -655,6 +657,7 @@ fn branch_items(repo: &RepoId, branches: Vec<Branch>) -> Vec<PickItem> {
         label: String::new(),
         detail: String::new(),
         icon: PickIcon::Lucide(IconName::Plus),
+        keys: Vec::new(),
         pick: Pick::CreateBranch {
             repo: repo.clone(),
             start: None,
@@ -704,6 +707,7 @@ fn branch_items(repo: &RepoId, branches: Vec<Branch>) -> Vec<PickItem> {
             } else {
                 IconName::GitBranch
             }),
+            keys: Vec::new(),
             pick,
         });
     }
