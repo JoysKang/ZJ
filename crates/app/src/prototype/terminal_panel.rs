@@ -159,9 +159,13 @@ impl Prototype {
         let Some(new) = self.spawn_terminal(window, cx) else {
             return;
         };
-        self.terminals.groups[group].panes.insert(pane + 1, new);
+        let Some(target) = self.terminals.groups.get_mut(group) else {
+            return;
+        };
+        let at = (pane + 1).min(target.panes.len());
+        target.panes.insert(at, new);
         self.terminals.visible = true;
-        self.focus_terminal(group, pane + 1, window, cx);
+        self.focus_terminal(group, at, window, cx);
         cx.notify();
     }
 

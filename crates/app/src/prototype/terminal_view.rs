@@ -156,8 +156,8 @@ impl TerminalView {
                 Event::TextAreaSizeRequest(format) => {
                     let size = self.terminal.size();
                     let window = alacritty_terminal::event::WindowSize {
-                        num_lines: size.lines as u16,
-                        num_cols: size.columns as u16,
+                        num_lines: size.lines.min(u16::MAX as usize) as u16,
+                        num_cols: size.columns.min(u16::MAX as usize) as u16,
                         cell_width: size.cell_width as u16,
                         cell_height: size.cell_height as u16,
                     };

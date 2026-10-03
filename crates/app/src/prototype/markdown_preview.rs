@@ -198,6 +198,7 @@ impl Prototype {
                     return;
                 };
                 if doc.version != version {
+                    eprintln!("event=markdown_refresh_stale id={id:?}");
                     return;
                 }
                 let Some(md) = doc.markdown.as_mut() else {
@@ -263,7 +264,10 @@ impl Prototype {
                 let Some(index) = md.blocks.iter().position(|b| b.range.start == start) else {
                     return;
                 };
-                (Some(index), md.blocks[index].range.clone(), "")
+                let Some(range) = md.blocks.get(index).map(|b| b.range.clone()) else {
+                    return;
+                };
+                (Some(index), range, "")
             }
             None => (
                 None,

@@ -26,6 +26,10 @@ pub use alacritty_terminal::{
 /// Scrollback kept per terminal, VS Code's default (`terminal.integrated.scrollback`).
 const SCROLLBACK: usize = 1000;
 
+/// In-flight emulator events per terminal. The bound keeps a stalled UI from piling up
+/// events without limit; a full channel applies backpressure to the pty reader instead.
+const EVENTS: usize = 4096;
+
 /// Forwards the emulator's events to the view's task; the channel is the view's only wakeup,
 /// so an idle terminal costs no timer.
 #[derive(Clone)]
@@ -33,7 +37,14 @@ pub struct Listener(async_channel::Sender<Event>);
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
-        let _ = self.0.try_send(event);
+        // Wakeup is a coalescible repaint hint (the view re-reads the grid on any event), so
+        // dropping it on a full channel loses nothing; anything else is a state transition
+        // that must not be lost, so it blocks the reader until the view catches up.
+        if matches!(event, Event::Wakeup) {
+            let _ = self.0.try_send(event);
+        } else {
+            let _ = self.0.send_blocking(event);
+        }
     }
 }
 
@@ -94,7 +105,7 @@ impl Terminal {
     /// its own thread until the shell exits or the terminal is dropped.
     pub fn spawn(cwd: Option<PathBuf>, shell: Option<Shell>) -> io::Result<Self> {
         let size = Size::default();
-        let (sender, events) = async_channel::unbounded();
+        let (sender, events) = async_channel::bounded(EVENTS);
         let listener = Listener(sender);
         let config = Config {
             scrolling_history: SCROLLBACK,
