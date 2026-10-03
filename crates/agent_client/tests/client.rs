@@ -634,6 +634,91 @@ fn launch_errors_are_friendly() {
     );
 }
 
+#[test]
+fn prompts_wait_for_a_login_then_continue() {
+    let ws = Workspace::new("login");
+    let auth = ws.path("auth");
+    let auth_env = auth.to_string_lossy().into_owned();
+    let client = AgentClient::start(options(&ws, &[("FAKE_AUTH", &auth_env)])).unwrap();
+    let events = Events::of(&client);
+    client.prompt(text("echo hi")).unwrap();
+    let required = |seen: &[AgentEvent]| match seen.last() {
+        Some(AgentEvent::AuthRequired { methods }) => methods.clone(),
+        other => panic!("{other:?}"),
+    };
+    let methods = required(&events.until(|e| matches!(e, AgentEvent::AuthRequired { .. })));
+    assert_eq!(methods[0].id, "fake-login");
+    assert!(!methods[0].terminal);
+    if cfg!(target_os = "macos") {
+        assert!(
+            methods
+                .iter()
+                .any(|m| m.id == "fake-terminal" && m.terminal)
+        );
+    }
+    assert!(client.is_busy());
+    // Not signed in yet: asked again.
+    client.retry_login();
+    required(&events.until(|e| matches!(e, AgentEvent::AuthRequired { .. })));
+    client.login("fake-login");
+    let seen = events.turn();
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, AgentEvent::SessionStarted { .. }))
+    );
+    assert_eq!(outcome(&seen), TurnOutcome::EndTurn);
+    assert_eq!(message(&seen), "hi");
+    assert!(auth.exists());
+    client.shutdown();
+
+    std::fs::remove_file(&auth).unwrap();
+    let client = AgentClient::start(options(&ws, &[("FAKE_AUTH", &auth_env)])).unwrap();
+    let events = Events::of(&client);
+    client.prompt(text("echo hi")).unwrap();
+    events.until(|e| matches!(e, AgentEvent::AuthRequired { .. }));
+    client.cancel();
+    assert_eq!(outcome(&events.turn()), TurnOutcome::Cancelled);
+    assert!(!client.is_busy());
+}
+
+#[test]
+fn prompts_refused_for_a_login_are_sent_again() {
+    let ws = Workspace::new("login-prompt");
+    let auth = ws.path("auth");
+    let auth_env = auth.to_string_lossy().into_owned();
+    let client = AgentClient::start(options(
+        &ws,
+        &[("FAKE_AUTH", &auth_env), ("FAKE_AUTH_AT", "prompt")],
+    ))
+    .unwrap();
+    let events = Events::of(&client);
+    client.prompt(text("echo hi")).unwrap();
+    let seen = events.until(|e| matches!(e, AgentEvent::AuthRequired { .. }));
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, AgentEvent::SessionStarted { .. }))
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TurnEnded { .. }))
+    );
+    assert!(client.is_busy());
+    client.retry_login();
+    events.until(|e| matches!(e, AgentEvent::AuthRequired { .. }));
+    client.login("fake-login");
+    let seen = events.turn();
+    assert_eq!(outcome(&seen), TurnOutcome::EndTurn);
+    assert_eq!(message(&seen), "hi");
+    // Same session: no second `session/new`.
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, AgentEvent::SessionStarted { .. }))
+    );
+    client.shutdown();
+}
+
 fn write_script(path: &Path, body: &str) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();

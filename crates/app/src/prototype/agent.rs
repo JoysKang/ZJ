@@ -1122,6 +1122,22 @@ impl Prototype {
         }));
     }
 
+    // ----- login ---------------------------------------------------------------------------
+
+    pub(super) fn agent_login(&mut self, key: u64, method: &str, cx: &mut Context<Self>) {
+        if let Some(client) = self.agent.session_mut(key).and_then(|s| s.client.as_ref()) {
+            client.login(method);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn agent_retry_login(&mut self, key: u64, cx: &mut Context<Self>) {
+        if let Some(client) = self.agent.session_mut(key).and_then(|s| s.client.as_ref()) {
+            client.retry_login();
+        }
+        cx.notify();
+    }
+
     // ----- permissions --------------------------------------------------------------------
 
     pub(super) fn agent_answer(

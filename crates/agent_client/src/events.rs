@@ -66,8 +66,14 @@ pub enum AgentEvent {
     Exited {
         reason: ExitReason,
     },
-    /// A first-use install step (downloading Node.js, installing the adapter); each message
-    /// replaces the previous one.
+    /// The agent needs a login before it can start a session. Answer with
+    /// [`AgentClient::login`](crate::AgentClient::login) (and, for a terminal method, with
+    /// [`AgentClient::retry_login`](crate::AgentClient::retry_login) once the user is done).
+    /// A pending prompt waits and continues after the login.
+    AuthRequired {
+        methods: Vec<AuthChoice>,
+    },
+    /// A first-use install or login step; each message replaces the previous one.
     Progress {
         message: String,
     },
@@ -87,6 +93,15 @@ pub struct AgentInfo {
     pub image: bool,
     /// Authentication methods the agent advertises (login happens in the agent).
     pub auth_methods: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthChoice {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    /// Runs in Terminal.app instead of through `authenticate`.
+    pub terminal: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

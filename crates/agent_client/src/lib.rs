@@ -1,14 +1,17 @@
 //! ACP (Agent Client Protocol) client for ZJ's agent panel. No GPUI.
 //!
-//! - [`registry`]: built-in presets (Claude Code, Codex, Gemini CLI, Claude Code · DeepSeek)
-//!   and user-defined agents; launch resolution with friendly errors (Node.js missing, …).
+//! - [`registry`]: built-in presets (Claude Code, Codex, Claude Code · DeepSeek) and
+//!   user-defined agents; launch resolution with friendly errors. [`provision`] installs npm
+//!   adapters (and Node.js when needed) into ZJ's data directory on first use.
 //! - [`AgentClient`]: one supervisor thread per agent. The process starts on first use in its
 //!   own process group with a sanitized environment, speaks ACP v1 over stdio, streams typed
 //!   [`AgentEvent`]s, stops after an idle timeout and restarts on the next prompt (restoring
 //!   the session with `session/load` when the agent supports it).
 //! - Client capabilities: `fs/read_text_file` (open buffers first, then disk) and
 //!   `fs/write_text_file` ([`WriteMode::Direct`] or [`WriteMode::AcceptFirst`] through the
-//!   [`ShadowStore`]). `terminal/*` is not advertised in v1.
+//!   [`ShadowStore`]). `terminal/*` is not advertised in v1. When a session needs a login,
+//!   [`AgentEvent::AuthRequired`] lists the agent's methods; `terminal` ones run in
+//!   Terminal.app.
 //!
 //! Logging follows the workspace rule: `event=… key=value`, never message content, file
 //! content, environment values or the agent's stderr.
@@ -16,6 +19,7 @@
 mod client;
 mod events;
 pub mod fs;
+mod login;
 mod process;
 pub mod provision;
 pub mod registry;

@@ -2,11 +2,15 @@
 //! ACP connection, stops the process when idle and restarts it on the next prompt.
 
 use crate::{
-    events::{self, AgentEvent, AgentInfo, ExitReason, Modes, PermissionId, TurnId, TurnOutcome},
+    events::{
+        self, AgentEvent, AgentInfo, AuthChoice, ExitReason, Modes, PermissionId, TurnId,
+        TurnOutcome,
+    },
     fs::{BufferProvider, Workspace, read_disk, window, write_atomic},
+    login,
     process::{AgentProcess, describe},
     provision::{self, InstallError},
-    registry::{AgentPreset, LaunchPlan, SearchPath},
+    registry::{AgentPreset, LaunchPlan, ResolvedLaunch, SearchPath},
     shadow::ShadowStore,
 };
 use agent_client_protocol::{
@@ -122,6 +126,8 @@ const MAX_LINE: usize = 32 * 1024 * 1024;
 const MAX_SNAPSHOTS: usize = 256;
 /// How long a read waits for the editor's unsaved buffer.
 const BUFFER_TIMEOUT: Duration = Duration::from_secs(5);
+/// `authenticate` may wait for the user to finish signing in in the browser.
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 enum Command {
     Connect,
@@ -131,6 +137,8 @@ enum Command {
     },
     Cancel,
     SetMode(String),
+    Login(String),
+    RetryLogin,
     Shutdown,
 }
 
@@ -153,6 +161,9 @@ struct Shared {
     events: async_channel::Sender<AgentEvent>,
     /// Wakes the session loop when a turn finishes (re-arms the idle timer).
     turn_done: async_channel::Sender<()>,
+    /// A prompt the agent refused with "auth required" (sent before `turn_done`): the turn
+    /// stays open, the session loop asks for a login and sends it again.
+    parked: Mutex<Option<(TurnId, Vec<PromptPart>)>>,
     shadow: ShadowStore,
     permissions: Mutex<HashMap<PermissionId, oneshot::Sender<Option<String>>>>,
     next_permission: AtomicU64,
@@ -286,6 +297,7 @@ impl AgentClient {
             write_mode: Mutex::new(options.write_mode),
             events: events_tx,
             turn_done: done_tx,
+            parked: Mutex::new(None),
             shadow: ShadowStore::default(),
             permissions: Mutex::new(HashMap::new()),
             next_permission: AtomicU64::new(1),
@@ -349,6 +361,17 @@ impl AgentClient {
         self.shared.install_cancel.store(true, Ordering::Relaxed);
         self.shared.cancel_permissions();
         let _ = self.commands.try_send(Command::Cancel);
+    }
+
+    /// Signs in with one of the methods from [`AgentEvent::AuthRequired`]: `authenticate` for
+    /// agent methods (e.g. Codex opens the browser), Terminal.app for terminal methods.
+    pub fn login(&self, method_id: impl Into<String>) {
+        let _ = self.commands.try_send(Command::Login(method_id.into()));
+    }
+
+    /// Tries the session again after a login finished elsewhere (in the terminal).
+    pub fn retry_login(&self) {
+        let _ = self.commands.try_send(Command::RetryLogin);
     }
 
     /// Answers a permission request with one of its option ids (`None` = dismissed, sent as
@@ -473,7 +496,8 @@ async fn supervise(
     while let Ok(command) = commands.recv().await {
         let first = match command {
             Command::Shutdown => return,
-            Command::Connect => None,
+            // The process exited while a login was pending: start over (asks again).
+            Command::Connect | Command::Login(_) | Command::RetryLogin => None,
             Command::Prompt { turn, parts } => Some((turn, parts)),
             // No process: nothing to cancel or switch.
             Command::Cancel | Command::SetMode(_) => continue,
@@ -563,6 +587,7 @@ async fn run_process(
             match connect(
                 shared.clone(),
                 transport,
+                &launch,
                 commands,
                 turn_done,
                 first,
@@ -695,6 +720,7 @@ fn fs_error(e: io::Error) -> sdk::Error {
 async fn connect(
     shared: Arc<Shared>,
     transport: Transport,
+    launch: &ResolvedLaunch,
     commands: &async_channel::Receiver<Command>,
     turn_done: &async_channel::Receiver<()>,
     first: Option<(TurnId, Vec<PromptPart>)>,
@@ -741,7 +767,16 @@ async fn connect(
             sdk::on_receive_request!(),
         )
         .connect_with(transport, async move |cx: ConnectionTo<Agent>| {
-            run_session(session_shared, cx, commands, turn_done, first, resume).await
+            run_session(
+                session_shared,
+                cx,
+                launch,
+                commands,
+                turn_done,
+                first,
+                resume,
+            )
+            .await
         })
         .await
 }
@@ -757,9 +792,10 @@ async fn with_timeout<T>(future: impl Future<Output = T>, limit: Duration) -> Op
 async fn run_session(
     shared: Arc<Shared>,
     cx: ConnectionTo<Agent>,
+    launch: &ResolvedLaunch,
     commands: &async_channel::Receiver<Command>,
     turn_done: &async_channel::Receiver<()>,
-    first: Option<(TurnId, Vec<PromptPart>)>,
+    mut first: Option<(TurnId, Vec<PromptPart>)>,
     resume: &mut Option<acp::SessionId>,
 ) -> Result<End, sdk::Error> {
     let name = shared.preset.display_name.clone();
@@ -781,7 +817,8 @@ async fn run_session(
             .write_text_file(true))
         // Not advertised in v1: agents run commands with their own tools, behind permission
         // requests, instead of in an editor-owned terminal.
-        .terminal(false);
+        .terminal(false)
+        .auth(acp::AuthCapabilities::new().terminal(login::SUPPORTED));
     let request = acp::InitializeRequest::new(ProtocolVersion::V1)
         .client_capabilities(capabilities)
         .client_info(acp::Implementation::new("zj", env!("CARGO_PKG_VERSION")).title("ZJ"));
@@ -869,8 +906,8 @@ async fn run_session(
     }
     let session = match session {
         Some(session) => session,
-        None => {
-            let request = acp::NewSessionRequest::new(root)
+        None => loop {
+            let request = acp::NewSessionRequest::new(root.clone())
                 .mcp_servers(Vec::new())
                 .meta(meta.clone());
             match with_timeout(cx.send_request(request).block_task(), timeout).await {
@@ -890,7 +927,20 @@ async fn run_session(
                             modes: started_modes.clone(),
                         })
                         .await;
-                    response.session_id
+                    break response.session_id;
+                }
+                Some(Err(e))
+                    if e.code == acp::ErrorCode::AuthRequired && !init.auth_methods.is_empty() =>
+                {
+                    let wait = Login {
+                        shared: &shared,
+                        cx: &cx,
+                        launch,
+                        methods: &init.auth_methods,
+                    };
+                    if let Some(end) = wait.run(commands, &mut first).await {
+                        return Ok(end);
+                    }
                 }
                 Some(Err(e)) => {
                     return fail(
@@ -901,13 +951,14 @@ async fn run_session(
                 }
                 None => return fail(shared, format!("「{name}」新建会话超时")).await,
             }
-        }
+        },
     };
     *resume = Some(session.clone());
     enforce_mode(&shared, &cx, &session, started_modes.as_ref()).await;
 
+    let can_login = !init.auth_methods.is_empty();
     if let Some((turn, parts)) = first {
-        start_prompt(&shared, &cx, &session, turn, parts)?;
+        start_prompt(&shared, &cx, &session, turn, parts, can_login)?;
     }
     loop {
         let busy = shared.turn.lock().unwrap().is_some();
@@ -927,8 +978,8 @@ async fn run_session(
         futures::select! {
             command = command => match command {
                 Err(_) | Ok(Command::Shutdown) => return Ok(End::Shutdown),
-                Ok(Command::Connect) => {}
-                Ok(Command::Prompt { turn, parts }) => start_prompt(&shared, &cx, &session, turn, parts)?,
+                Ok(Command::Connect | Command::Login(_) | Command::RetryLogin) => {}
+                Ok(Command::Prompt { turn, parts }) => start_prompt(&shared, &cx, &session, turn, parts, can_login)?,
                 Ok(Command::Cancel) => {
                     shared.cancel_permissions();
                     cx.send_notification(acp::CancelNotification::new(session.clone()))?;
@@ -944,19 +995,189 @@ async fn run_session(
                     })?;
                 }
             },
-            _ = done => {}
+            _ = done => {
+                let parked = shared.parked.lock().unwrap().take();
+                if let Some(prompt) = parked {
+                    let mut pending = Some(prompt);
+                    let wait = Login {
+                        shared: &shared,
+                        cx: &cx,
+                        launch,
+                        methods: &init.auth_methods,
+                    };
+                    if let Some(end) = wait.run(commands, &mut pending).await {
+                        return Ok(end);
+                    }
+                    if let Some((turn, parts)) = pending {
+                        start_prompt(&shared, &cx, &session, turn, parts, can_login)?;
+                    }
+                }
+            }
             _ = idle => return Ok(End::Idle),
             _ = closed => return Ok(End::Closed),
         }
     }
 }
 
+/// Waiting for the user to sign in after `session/new` or `session/prompt` answered "auth
+/// required".
+struct Login<'a> {
+    shared: &'a Arc<Shared>,
+    cx: &'a ConnectionTo<Agent>,
+    launch: &'a ResolvedLaunch,
+    methods: &'a [acp::AuthMethod],
+}
+
+impl Login<'_> {
+    /// `None`: try the session again. A prompt sent meanwhile is kept in `first`.
+    async fn run(
+        &self,
+        commands: &async_channel::Receiver<Command>,
+        first: &mut Option<(TurnId, Vec<PromptPart>)>,
+    ) -> Option<End> {
+        let shared = self.shared;
+        eprintln!("event=agent_auth_required agent={}", shared.preset.id);
+        let methods = self
+            .methods
+            .iter()
+            .map(|m| AuthChoice {
+                id: m.id().to_string(),
+                name: m.name().to_string(),
+                description: m.description().map(str::to_string),
+                terminal: matches!(m, acp::AuthMethod::Terminal(_)),
+            })
+            .collect();
+        shared.emit(AgentEvent::AuthRequired { methods }).await;
+        loop {
+            let command = commands.recv().fuse();
+            let idle = Timer::after(shared.idle_timeout).fuse();
+            let closed = self.cx.incoming_closed().fuse();
+            futures::pin_mut!(command, idle, closed);
+            let command = futures::select! {
+                command = command => command,
+                _ = idle => {
+                    shared
+                        .finish_turn(None, TurnOutcome::Failed("等待登录超时".into()))
+                        .await;
+                    return Some(End::Idle);
+                }
+                _ = closed => return Some(End::Closed),
+            };
+            match command {
+                Err(_) | Ok(Command::Shutdown) => return Some(End::Shutdown),
+                Ok(Command::Connect | Command::SetMode(_)) => {}
+                Ok(Command::Prompt { turn, parts }) => {
+                    first.get_or_insert((turn, parts));
+                }
+                Ok(Command::Cancel) => {
+                    shared.finish_turn(None, TurnOutcome::Cancelled).await;
+                    return Some(End::Idle);
+                }
+                Ok(Command::RetryLogin) => return None,
+                Ok(Command::Login(id)) => {
+                    if let Some(end) = self.login(&id, commands, first).await {
+                        return end;
+                    }
+                }
+            }
+        }
+    }
+
+    /// `Some(None)`: signed in, retry; `Some(Some(end))`: stop; `None`: keep waiting.
+    async fn login(
+        &self,
+        id: &str,
+        commands: &async_channel::Receiver<Command>,
+        first: &mut Option<(TurnId, Vec<PromptPart>)>,
+    ) -> Option<Option<End>> {
+        let shared = self.shared;
+        let error = |message: String| shared.emit(AgentEvent::Error { message });
+        let progress = |message: String| shared.emit(AgentEvent::Progress { message });
+        let Some(method) = self.methods.iter().find(|m| m.id().to_string() == id) else {
+            error(format!("没有这种登录方式：{id}")).await;
+            return None;
+        };
+        eprintln!("event=agent_login agent={} method={id}", shared.preset.id);
+        if let acp::AuthMethod::Terminal(terminal) = method {
+            let keep: Vec<&str> = shared
+                .preset
+                .local_cli
+                .iter()
+                .map(|cli| cli.env.as_str())
+                .collect();
+            let script = login::script(
+                self.launch,
+                &terminal.args,
+                &terminal.env,
+                &keep,
+                shared.workspace.root(),
+            );
+            match login::open_in_terminal(&script) {
+                Ok(_) => {
+                    progress(format!(
+                        "已在「终端」里打开「{}」的登录，完成后点「已登录，重试」",
+                        method.name()
+                    ))
+                    .await
+                }
+                Err(e) => error(format!("无法打开「终端」：{e}")).await,
+            }
+            return None;
+        }
+        progress(format!(
+            "正在用「{}」登录，请按提示在浏览器里完成",
+            method.name()
+        ))
+        .await;
+        let request = self
+            .cx
+            .send_request(acp::AuthenticateRequest::new(id.to_string()))
+            .block_task()
+            .fuse();
+        let timeout = Timer::after(LOGIN_TIMEOUT).fuse();
+        futures::pin_mut!(request, timeout);
+        loop {
+            let command = commands.recv().fuse();
+            futures::pin_mut!(command);
+            futures::select! {
+                result = request => {
+                    return match result {
+                        Ok(_) => Some(None),
+                        Err(e) => {
+                            error(format!("登录失败：{}", error_text(&e))).await;
+                            None
+                        }
+                    };
+                }
+                _ = timeout => {
+                    error("登录超时，请重试".into()).await;
+                    return None;
+                }
+                command = command => match command {
+                    Err(_) | Ok(Command::Shutdown) => return Some(Some(End::Shutdown)),
+                    Ok(Command::Cancel) => {
+                        shared.finish_turn(None, TurnOutcome::Cancelled).await;
+                        return Some(Some(End::Idle));
+                    }
+                    Ok(Command::Prompt { turn, parts }) => {
+                        first.get_or_insert((turn, parts));
+                    }
+                    Ok(_) => {}
+                },
+            }
+        }
+    }
+}
+
+/// `can_login`: the agent offered login methods, so an "auth required" answer parks the
+/// prompt (see [`Shared::parked`]) instead of failing the turn.
 fn start_prompt(
     shared: &Arc<Shared>,
     cx: &ConnectionTo<Agent>,
     session: &acp::SessionId,
     turn: TurnId,
     parts: Vec<PromptPart>,
+    can_login: bool,
 ) -> Result<(), sdk::Error> {
     let blocks = prompt_blocks(&parts, shared.embedded_context.load(Ordering::Relaxed));
     let request = cx.send_request(acp::PromptRequest::new(session.clone(), blocks));
@@ -964,6 +1185,11 @@ fn start_prompt(
     cx.spawn(async move {
         let outcome = match request.block_task().await {
             Ok(response) => events::turn_outcome(&response.stop_reason),
+            Err(e) if can_login && e.code == acp::ErrorCode::AuthRequired => {
+                *shared.parked.lock().unwrap() = Some((turn, parts));
+                let _ = shared.turn_done.send(()).await;
+                return Ok(());
+            }
             Err(e) => TurnOutcome::Failed(error_text(&e)),
         };
         shared.finish_turn(Some(turn), outcome).await;

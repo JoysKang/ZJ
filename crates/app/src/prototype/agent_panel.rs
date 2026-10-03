@@ -22,7 +22,9 @@ use gpui_kit::{
 };
 use workspace_editor_agent::{
     Glyph, PermissionKind, PlanStatus, ToolKind, ToolStatus,
-    thread::{ChangeOrigin, Item, PermissionCard, PermissionState, ToolCard},
+    thread::{
+        ChangeOrigin, Item, LoginCard, LoginState, PermissionCard, PermissionState, ToolCard,
+    },
 };
 
 /// The agent's monochrome Lucide glyph on its tinted tile.
@@ -829,6 +831,7 @@ impl Prototype {
             }
             Item::Plan(entries) => self.render_plan(session.key, entries, compact, cx),
             Item::Permission(card) => self.render_permission(session, card, compact, &fonts, cx),
+            Item::Login(card) => self.render_login(session, i, card, cx),
             Item::Notice { text, error } => h_flex()
                 .gap_2()
                 .items_start()
@@ -1353,6 +1356,115 @@ impl Prototype {
             .when(!collapsed, |card| {
                 card.child(v_flex().px_3().pb_2().children(items))
             })
+            .into_any_element()
+    }
+
+    fn render_login(
+        &self,
+        session: &LiveSession,
+        index: usize,
+        card: &LoginCard,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = theme::colors(cx);
+        let agent = session.preset.display_name.clone();
+        if card.state != LoginState::Pending {
+            let (icon, color, text) = match card.state {
+                LoginState::Done => (
+                    IconName::CircleCheck,
+                    colors.added,
+                    format!("已登录「{agent}」"),
+                ),
+                _ => (IconName::Ban, colors.muted, "登录已取消".to_string()),
+            };
+            return h_flex()
+                .gap_2()
+                .text_size(theme::TEXT_CAPTION)
+                .text_color(colors.muted)
+                .child(
+                    Icon::new(icon)
+                        .size(theme::SMALL_ICON_SIZE)
+                        .text_color(color),
+                )
+                .child(text)
+                .into_any_element();
+        }
+        let key = session.key;
+        let base = (index as u64) << 8;
+        let buttons = card.methods.iter().enumerate().map(|(n, method)| {
+            let id = method.id.clone();
+            let button = Button::new(("agent-login", base | n as u64))
+                .xsmall()
+                .icon(if method.terminal {
+                    IconName::SquareTerminal
+                } else {
+                    IconName::Globe
+                })
+                .label(method.name.clone())
+                .on_click(cx.listener(move |this, _, _, cx| this.agent_login(key, &id, cx)));
+            let button = if n == 0 {
+                button.primary()
+            } else {
+                button.outline()
+            };
+            match &method.description {
+                Some(tip) => button.tooltip(tip.clone()),
+                None => button,
+            }
+        });
+        let has_terminal = card.methods.iter().any(|m| m.terminal);
+        let hint = if has_terminal {
+            "选择登录方式。终端方式会打开「终端」窗口，完成后点「已登录，重试」"
+        } else {
+            "选择登录方式，按提示在浏览器里完成；完成后会自动继续"
+        };
+        v_flex()
+            .w_full()
+            .gap_2()
+            .p_3()
+            .rounded(theme::RADIUS_LARGE)
+            .border_1()
+            .border_color(colors.attention_border)
+            .bg(colors.card)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .text_size(theme::TEXT_CAPTION)
+                    .child(
+                        Icon::new(IconName::ShieldAlert)
+                            .size(theme::SMALL_ICON_SIZE)
+                            .text_color(colors.attention),
+                    )
+                    .child(div().flex_1().child(if card.retried {
+                        format!("{agent} 仍未登录")
+                    } else {
+                        format!("{agent} 需要登录")
+                    })),
+            )
+            .child(
+                div()
+                    .text_size(theme::TEXT_SECTION)
+                    .text_color(colors.muted)
+                    .child(hint),
+            )
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .children(buttons)
+                    .when(has_terminal, |row| {
+                        row.child(
+                            Button::new(("agent-login-retry", base))
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::RefreshCw)
+                                .label("已登录，重试")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.agent_retry_login(key, cx)
+                                })),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 

@@ -5,8 +5,9 @@
 //! (`dropped` counts them) and come back from the history database on demand.
 
 use crate::events::{
-    AgentCommand, AgentEvent, ExitReason, Modes, PermissionId, PermissionKind, PermissionRequest,
-    PlanEntry, ToolCall, ToolCallPatch, ToolContent, ToolKind, ToolStatus, TurnId, TurnOutcome,
+    AgentCommand, AgentEvent, AuthChoice, ExitReason, Modes, PermissionId, PermissionKind,
+    PermissionRequest, PlanEntry, ToolCall, ToolCallPatch, ToolContent, ToolKind, ToolStatus,
+    TurnId, TurnOutcome,
 };
 use crate::shadow::diff_hunks;
 use std::{
@@ -52,6 +53,21 @@ pub struct PermissionCard {
     pub state: PermissionState,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoginState {
+    Pending,
+    Done,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoginCard {
+    pub methods: Vec<AuthChoice>,
+    pub state: LoginState,
+    /// The agent still asked for a login after a retry.
+    pub retried: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Item {
     User {
@@ -71,6 +87,7 @@ pub enum Item {
     Tool(ToolCard),
     Plan(Vec<PlanEntry>),
     Permission(PermissionCard),
+    Login(LoginCard),
     Notice {
         text: String,
         error: bool,
@@ -258,6 +275,23 @@ impl Thread {
         }
     }
 
+    fn pending_login(&mut self) -> Option<&mut LoginCard> {
+        self.items.iter_mut().rev().find_map(|item| match item {
+            Item::Login(card) if card.state == LoginState::Pending => Some(card),
+            _ => None,
+        })
+    }
+
+    fn close_login(&mut self, state: LoginState) -> bool {
+        match self.pending_login() {
+            Some(card) => {
+                card.state = state;
+                true
+            }
+            None => false,
+        }
+    }
+
     fn end_streaming(&mut self) {
         for item in self.items.iter_mut().rev().take(4) {
             match item {
@@ -404,6 +438,19 @@ impl Thread {
     /// that ends while it is hidden leaves it unread).
     pub fn apply(&mut self, event: &AgentEvent, visible: bool) {
         self.version += 1;
+        // A login asked for by `session/prompt` ends without `SessionStarted`: the resent
+        // prompt producing output is the sign it worked.
+        if matches!(
+            event,
+            AgentEvent::MessageChunk { .. }
+                | AgentEvent::ThoughtChunk { .. }
+                | AgentEvent::ToolCall(_)
+                | AgentEvent::Plan(_)
+                | AgentEvent::PermissionRequested(_)
+        ) && self.close_login(LoginState::Done)
+        {
+            self.status = Status::Running;
+        }
         match event {
             AgentEvent::Starting { .. } | AgentEvent::Ready(_) => {}
             AgentEvent::SessionStarted {
@@ -417,6 +464,13 @@ impl Thread {
                     .is_some_and(|old| old != session_id);
                 self.session_id = Some(session_id.clone());
                 self.modes = modes.clone();
+                if self.close_login(LoginState::Done) {
+                    self.status = if self.turn.is_some() {
+                        Status::Running
+                    } else {
+                        Status::Idle
+                    };
+                }
                 if changed && !resumed {
                     self.push(Item::Notice {
                         text:
@@ -535,6 +589,10 @@ impl Thread {
                 self.turn = None;
                 self.end_streaming();
                 self.cancel_permissions();
+                self.close_login(match outcome {
+                    TurnOutcome::Cancelled | TurnOutcome::Failed(_) => LoginState::Cancelled,
+                    _ => LoginState::Done,
+                });
                 for item in self.items.iter_mut() {
                     if let Item::Tool(card) = item
                         && matches!(
@@ -582,7 +640,25 @@ impl Thread {
                     self.unread = true;
                 }
             }
+            AgentEvent::AuthRequired { methods } => {
+                self.end_streaming();
+                match self.pending_login() {
+                    Some(card) => {
+                        card.methods = methods.clone();
+                        card.retried = true;
+                    }
+                    None => self.push(Item::Login(LoginCard {
+                        methods: methods.clone(),
+                        state: LoginState::Pending,
+                        retried: false,
+                    })),
+                }
+                self.status = Status::Awaiting;
+            }
             AgentEvent::Exited { reason } => {
+                if self.close_login(LoginState::Cancelled) && self.turn.is_none() {
+                    self.status = Status::Idle;
+                }
                 if let ExitReason::Crashed { stderr_tail, .. } = reason {
                     let tail: String = stderr_tail
                         .lines()
@@ -651,6 +727,62 @@ mod tests {
                 kind: PermissionKind::AllowOnce,
             }],
         }
+    }
+
+    #[test]
+    fn login_cards_wait_then_close() {
+        let mut t = Thread::new();
+        t.push_user("hi".into(), vec![], 1);
+        let required = AgentEvent::AuthRequired {
+            methods: vec![AuthChoice {
+                id: "chat-gpt".into(),
+                name: "ChatGPT".into(),
+                description: None,
+                terminal: false,
+            }],
+        };
+        t.apply(&required, true);
+        assert_eq!(t.status, Status::Awaiting);
+        t.apply(&required, true);
+        let logins = |t: &Thread| {
+            t.items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::Login(card) => Some(card.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(logins(&t).len(), 1);
+        assert!(logins(&t)[0].retried);
+        t.apply(
+            &AgentEvent::SessionStarted {
+                session_id: "s".into(),
+                resumed: false,
+                modes: None,
+            },
+            true,
+        );
+        assert_eq!(logins(&t)[0].state, LoginState::Done);
+        assert_eq!(t.status, Status::Running);
+
+        t.apply(&required, true);
+        t.apply(
+            &AgentEvent::TurnEnded {
+                turn: 1,
+                outcome: TurnOutcome::Cancelled,
+            },
+            true,
+        );
+        assert_eq!(logins(&t)[1].state, LoginState::Cancelled);
+        assert_eq!(t.status, Status::Idle);
+
+        // Asked for by the prompt: the resent prompt's output closes the card.
+        t.push_user("again".into(), vec![], 2);
+        t.apply(&required, true);
+        t.apply(&AgentEvent::MessageChunk { text: "ok".into() }, true);
+        assert_eq!(logins(&t)[2].state, LoginState::Done);
+        assert_eq!(t.status, Status::Running);
     }
 
     #[test]

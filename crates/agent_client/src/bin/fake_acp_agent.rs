@@ -6,6 +6,10 @@
 //! turn for the panel's screenshots and e2e test: reads, a plan, edits from
 //! `$FAKE_DEMO/edits/<path with / as __>`, then a command that needs approval).
 //! `FAKE_LOAD_SESSION=1` advertises `loadSession` (history is replayed on load).
+//! `FAKE_AUTH=<file>`: `session/new` needs a login until the file exists; `authenticate`
+//! with `fake-login` creates it, and a `fake-terminal` method is offered to clients that
+//! support terminal logins. With `FAKE_AUTH_AT=prompt` the session starts and
+//! `session/prompt` asks for the login instead (like claude-agent-acp).
 
 use agent_client_protocol::{
     self as sdk, Agent, Client, ConnectionTo, Responder, Stdio, schema::v1 as acp,
@@ -459,6 +463,11 @@ fn main() -> sdk::Result<()> {
     let on_mode = state.clone();
     // FAKE_BYPASS_DEFAULT=1: like a user whose Claude settings default to bypassPermissions.
     let bypass_default = std::env::var_os("FAKE_BYPASS_DEFAULT").is_some();
+    let auth_file = std::env::var_os("FAKE_AUTH").map(std::path::PathBuf::from);
+    let at_prompt = std::env::var("FAKE_AUTH_AT").is_ok_and(|v| v == "prompt");
+    let new_auth = auth_file.clone().filter(|_| !at_prompt);
+    let prompt_auth = auth_file.clone().filter(|_| at_prompt);
+    let login_file = auth_file.clone();
     async_io::block_on(
         Agent
             .builder()
@@ -467,8 +476,22 @@ fn main() -> sdk::Result<()> {
                 async move |request: acp::InitializeRequest,
                             responder: Responder<acp::InitializeResponse>,
                             _cx| {
+                    let mut methods = Vec::new();
+                    if auth_file.is_some() {
+                        methods.push(acp::AuthMethod::Agent(acp::AuthMethodAgent::new(
+                            "fake-login",
+                            "Fake login",
+                        )));
+                        if request.client_capabilities.auth.terminal {
+                            methods.push(acp::AuthMethod::Terminal(
+                                acp::AuthMethodTerminal::new("fake-terminal", "Fake terminal")
+                                    .args(vec!["login".into()]),
+                            ));
+                        }
+                    }
                     responder.respond(
                         acp::InitializeResponse::new(request.protocol_version)
+                            .auth_methods(methods)
                             .agent_capabilities(
                                 acp::AgentCapabilities::new()
                                     .load_session(load)
@@ -486,6 +509,9 @@ fn main() -> sdk::Result<()> {
                             responder: Responder<acp::NewSessionResponse>,
                             _cx| {
                     assert!(request.mcp_servers.is_empty());
+                    if new_auth.as_ref().is_some_and(|f| !f.exists()) {
+                        return responder.respond_with_error(sdk::Error::auth_required());
+                    }
                     *on_new.meta.lock().unwrap() = serde_json::to_string(&request.meta).unwrap();
                     let n = on_new.sessions.fetch_add(1, Ordering::SeqCst);
                     *on_new.cwd.lock().unwrap() = request.cwd.clone();
@@ -546,6 +572,20 @@ fn main() -> sdk::Result<()> {
                 },
                 sdk::on_receive_request!(),
             )
+            .on_receive_request(
+                async move |request: acp::AuthenticateRequest,
+                            responder: Responder<acp::AuthenticateResponse>,
+                            _cx| {
+                    if request.method_id.to_string() != "fake-login" {
+                        return responder.respond_with_error(sdk::Error::invalid_params());
+                    }
+                    if let Some(file) = &login_file {
+                        std::fs::write(file, "ok").unwrap();
+                    }
+                    responder.respond(acp::AuthenticateResponse::new())
+                },
+                sdk::on_receive_request!(),
+            )
             .on_receive_notification(
                 async move |_n: acp::CancelNotification, _cx| {
                     on_cancel.cancelled.store(true, Ordering::SeqCst);
@@ -557,6 +597,9 @@ fn main() -> sdk::Result<()> {
                 async move |request: acp::PromptRequest,
                             responder: Responder<acp::PromptResponse>,
                             cx: ConnectionTo<Client>| {
+                    if prompt_auth.as_ref().is_some_and(|f| !f.exists()) {
+                        return responder.respond_with_error(sdk::Error::auth_required());
+                    }
                     let state = on_prompt.clone();
                     let task_cx = cx.clone();
                     cx.spawn(run_prompt(state, request, responder, task_cx))
