@@ -6,6 +6,7 @@ mod file_icons;
 mod file_ops;
 mod files;
 mod fuzzy;
+mod indent;
 mod languages;
 mod markdown;
 mod markdown_blocks;

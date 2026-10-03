@@ -13,6 +13,7 @@
 use super::{
     DiffSource, DiffTab, Document, DocumentOwner, DocumentOwners, Pane, Prototype, language_for,
 };
+use crate::indent::{self, Indent};
 use crate::replace;
 use crate::save::{self, Answer, AutoSave, DiskState, OnDisk, SaveError};
 use crate::theme;
@@ -23,7 +24,7 @@ use gpui_kit::{
         Sizable,
         button::{Button, ButtonVariants},
         h_flex,
-        input::{EditorState, InputEvent},
+        input::{EditorState, InputEvent, TabSize},
     },
     prelude::FluentBuilder,
     *,
@@ -244,6 +245,7 @@ impl Prototype {
         id: DocumentId,
         path: &Path,
         text: String,
+        indent: Indent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (Entity<EditorState>, Subscription) {
@@ -255,6 +257,7 @@ impl Prototype {
             let mut state = EditorState::new(window, cx)
                 .language(language)
                 .searchable(false)
+                .tab_size(tab_size(indent))
                 .default_value(text);
             if !untitled {
                 super::navigation::attach(&mut state, path, view);
@@ -291,7 +294,9 @@ impl Prototype {
                 .filter(|owner| owner.path.is_relative())
                 .map(|owner| owner.path.clone()),
         );
-        let (editor, subscription) = self.document_editor(id, &path, String::new(), window, cx);
+        let indent = indent::language_default(&path);
+        let (editor, subscription) =
+            self.document_editor(id, &path, String::new(), indent, window, cx);
         self.documents
             .push(Document::new(id, path.clone(), editor, subscription));
         self.owners.borrow_mut().insert(
@@ -594,12 +599,18 @@ impl Prototype {
             this.update_in(cx, |this, window, cx| match result {
                 Ok(state) => {
                     let (language, language_name) = language_for(&path);
+                    let mut was_untitled = false;
                     if let Some(doc) = this.document_mut(id) {
+                        was_untitled = doc.untitled;
                         doc.path = path.clone();
                         doc.untitled = false;
                         doc.language = language_name;
                         doc.editor
                             .update(cx, |state, cx| state.set_highlighter(language, cx));
+                    }
+                    // An untitled buffer only had the plain-text default; now it has a language.
+                    if was_untitled {
+                        this.set_indent(id, indent::language_default(&path), cx);
                     }
                     this.markdown_path_changed(id, language, cx);
                     if let Some(owner) = this.owners.borrow_mut().get_mut(&id) {
@@ -1008,6 +1019,21 @@ impl Prototype {
         cx.notify();
     }
 
+    /// The status bar's indentation menu: changes how this buffer indents, not its text.
+    pub(super) fn set_indent(&mut self, id: DocumentId, indent: Indent, cx: &mut Context<Self>) {
+        let Some(doc) = self.document_mut(id) else {
+            return;
+        };
+        doc.indent = indent;
+        doc.editor
+            .update(cx, |state, cx| state.set_tab_size(tab_size(indent), cx));
+        eprintln!(
+            "event=indent_changed hard_tabs={} width={}",
+            indent.hard_tabs, indent.width
+        );
+        cx.notify();
+    }
+
     fn relist_folder(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self.expanded.contains(&dir) || self.root.as_deref() == Some(dir.as_path()) {
             self.reload_directory(dir, window, cx);
@@ -1074,6 +1100,7 @@ impl Document {
         subscription: Subscription,
     ) -> Self {
         let language = language_for(&path).1;
+        let indent = indent::language_default(&path);
         Self {
             id,
             path,
@@ -1084,6 +1111,7 @@ impl Document {
             language,
             crlf: false,
             bom: false,
+            indent,
             disk: None,
             untitled: true,
             version: 0,
@@ -1105,6 +1133,13 @@ impl Document {
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned()
+    }
+}
+
+fn tab_size(indent: Indent) -> TabSize {
+    TabSize {
+        tab_size: indent.width,
+        hard_tabs: indent.hard_tabs,
     }
 }
 

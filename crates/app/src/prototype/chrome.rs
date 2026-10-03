@@ -1,13 +1,15 @@
 //! Window chrome: the unified title bar with its command center.
 
 use super::{Pane, Prototype};
+use crate::indent::Indent;
 use crate::theme;
 use gpui_kit::{
     assets::IconName,
     component::{
         Icon, Sizable, TitleBar,
-        button::{Button, ButtonVariants},
+        button::{Button, ButtonCustomVariant, ButtonVariants},
         h_flex,
+        menu::{DropdownMenu, PopupMenuItem},
     },
     prelude::FluentBuilder,
     *,
@@ -342,6 +344,9 @@ impl Prototype {
                 )))
             })
             .when_some(document, |bar, doc| {
+                bar.child(self.render_indent_status(doc.id, doc.indent, cx))
+            })
+            .when_some(document, |bar, doc| {
                 bar.child(status_item("status-encoding", colors).child(if doc.bom {
                     "UTF-8 BOM"
                 } else {
@@ -376,5 +381,65 @@ impl Prototype {
             .child(left)
             .child(right)
             .into_any_element()
+    }
+
+    /// 空格: 4 / 制表符长度: 4 (VS Code's wording), opening a menu for this buffer only.
+    fn render_indent_status(
+        &self,
+        id: workspace_editor_core::DocumentId,
+        indent: Indent,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let colors = theme::colors(cx);
+        let label = if indent.hard_tabs {
+            format!("制表符长度: {}", indent.width)
+        } else {
+            format!("空格: {}", indent.width)
+        };
+        let weak = cx.weak_entity();
+        Button::new("status-indent")
+            .custom(
+                ButtonCustomVariant::new(cx)
+                    .foreground(colors.muted)
+                    .hover(colors.hover)
+                    .active(colors.hover),
+            )
+            .h_full()
+            .px_2()
+            .rounded_none()
+            .flex_shrink_0()
+            .accessibility_label(label.clone())
+            .child(div().text_size(theme::TEXT_CAPTION).child(label))
+            .tooltip("选择缩进")
+            .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
+                let item = |label: String, checked: bool, next: Indent| {
+                    let weak = weak.clone();
+                    PopupMenuItem::new(label)
+                        .checked(checked)
+                        .on_click(move |_, _, cx| {
+                            let _ = weak.update(cx, |this, cx| this.set_indent(id, next, cx));
+                        })
+                };
+                let mut menu = menu
+                    .item(item(
+                        "使用空格缩进".into(),
+                        !indent.hard_tabs,
+                        Indent::spaces(indent.width),
+                    ))
+                    .item(item(
+                        "使用制表符缩进".into(),
+                        indent.hard_tabs,
+                        Indent::tabs(indent.width),
+                    ))
+                    .separator();
+                for width in [2, 4, 8] {
+                    menu = menu.item(item(
+                        format!("宽度 {width}"),
+                        indent.width == width,
+                        Indent { width, ..indent },
+                    ));
+                }
+                menu
+            })
     }
 }

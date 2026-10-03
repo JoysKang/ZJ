@@ -87,6 +87,9 @@ pub use tab_menu::{
     RevealActiveInExplorer, RevealActiveInFinder,
 };
 #[cfg(test)]
+#[path = "prototype/indent_ui_tests.rs"]
+mod indent_ui_tests;
+#[cfg(test)]
 #[path = "prototype/tab_menu_ui_tests.rs"]
 mod tab_menu_ui_tests;
 mod welcome;
@@ -143,6 +146,8 @@ struct Document {
     language: &'static str,
     crlf: bool,
     bom: bool,
+    /// Tab key and indent width of this buffer (the status bar can change it).
+    indent: crate::indent::Indent,
     /// The file as last loaded or saved (`None` for untitled buffers).
     disk: Option<crate::save::DiskState>,
     /// Untitled-N: saving asks for a path.
@@ -1093,14 +1098,19 @@ impl Prototype {
         self.file_generation += 1;
         let generation = self.file_generation;
         self.message = format!("正在打开 {}", path.display());
-        let job = cx.background_spawn(async move { files::text_file(root.as_deref(), &path) });
+        let job = cx.background_spawn(async move {
+            let loaded = files::text_file(root.as_deref(), &path)?;
+            let root = root.and_then(|root| std::fs::canonicalize(root).ok());
+            let indent = crate::indent::resolve(&loaded.path, root.as_deref(), &loaded.text);
+            Ok::<_, std::io::Error>((loaded, indent))
+        });
         self.file_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = job.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 if this.file_generation != generation {
                     return;
                 }
-                let loaded = match result {
+                let (loaded, indent) = match result {
                     Ok(loaded) => loaded,
                     Err(error) => {
                         this.message = format!("打开失败：{error}");
@@ -1155,8 +1165,9 @@ impl Prototype {
                 let (language, language_name) = language_for(&loaded.path);
                 let path = loaded.path.clone();
                 let (editor, subscription) =
-                    this.document_editor(id, &path, loaded.text, window, cx);
+                    this.document_editor(id, &path, loaded.text, indent, window, cx);
                 this.documents.push(Document {
+                    indent,
                     readonly: loaded.readonly,
                     bytes: loaded.bytes,
                     language: language_name,
