@@ -551,6 +551,14 @@ impl Prototype {
             })
             .when(unread, |m| m.child("· 完成，未读"))
             .when(status == RowStatus::Error, |m| m.child("· 出错"));
+        // Rows without anything for the second line stay one line tall.
+        let two_line = !compact
+            && (other_workspace
+                || s.branch.is_some()
+                || s.lines_added > 0
+                || s.lines_removed > 0
+                || unread
+                || status == RowStatus::Error);
         let row = h_flex()
             .id(("agent-session", id.0 as u64))
             .group(group.clone())
@@ -561,10 +569,10 @@ impl Prototype {
             .rounded(theme::RADIUS_LARGE)
             .cursor_pointer()
             .map(|row| {
-                if compact {
-                    row.h(theme::AGENT_HISTORY_ROW_COMPACT)
-                } else {
+                if two_line {
                     row.h(theme::AGENT_HISTORY_ROW).items_start().pt_2()
+                } else {
+                    row.h(theme::AGENT_HISTORY_ROW_COMPACT)
                 }
             })
             .map(|row| {
@@ -580,7 +588,7 @@ impl Prototype {
                     .flex_1()
                     .min_w_0()
                     .child(h_flex().gap_2().child(title_el).child(right))
-                    .when(!compact, |c| c.child(meta)),
+                    .when(two_line, |c| c.child(meta)),
             )
             .child(hover_actions)
             .on_click(
