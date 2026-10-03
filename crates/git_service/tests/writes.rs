@@ -427,3 +427,37 @@ fn amend_keeps_or_replaces_the_message_and_commit_push_publishes() {
     assert_eq!(git(&root, &["show", "HEAD:added.txt"]), "new\n");
     assert!(git(&root, &["status", "--porcelain"]).is_empty());
 }
+
+#[test]
+fn outgoing_lists_the_commits_the_upstream_lacks() {
+    let fixture = fixture();
+    let root = fixture.0.join("a");
+    let service = GitService::new(1, Duration::from_secs(10)).unwrap();
+    let cancel = AtomicBool::new(false);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "pushed"]);
+    let repo = service.identify(&root, &cancel).unwrap();
+    // No upstream: Git's error is shown, not an empty list.
+    assert!(service.outgoing(&repo, 10, &cancel).is_err());
+    let bare = fixture.0.join("remote.git");
+    fs::create_dir(&bare).unwrap();
+    git(&bare, &["init", "--bare"]);
+    git(&root, &["remote", "add", "origin", bare.to_str().unwrap()]);
+    git(&root, &["push", "-u", "origin", "main"]);
+    assert_eq!(service.outgoing(&repo, 10, &cancel).unwrap(), Vec::new());
+    for subject in ["one", "two 中文", "three"] {
+        git(&root, &["commit", "--allow-empty", "-m", subject]);
+    }
+    let commits = service.outgoing(&repo, 10, &cancel).unwrap();
+    let subjects: Vec<_> = commits.iter().map(|c| c.subject.as_str()).collect();
+    assert_eq!(subjects, ["three", "two 中文", "one"]);
+    assert_eq!(
+        commits[0].short,
+        git(&root, &["rev-parse", "--short", "HEAD"]).trim()
+    );
+    assert_eq!(
+        commits[0].time.to_string(),
+        git(&root, &["log", "-1", "--format=%at"]).trim()
+    );
+    assert_eq!(service.outgoing(&repo, 2, &cancel).unwrap().len(), 2);
+}

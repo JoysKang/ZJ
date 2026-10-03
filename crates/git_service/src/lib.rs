@@ -1,8 +1,10 @@
 //! Bounded, cancellable system Git operations, serialized by worktree identity.
 
+mod log;
 mod ls_files;
 mod status;
 mod write;
+pub use log::{Commit, parse_log};
 pub use ls_files::{ListedKind, parse_ls_files};
 pub use status::{Change, ChangeKind, Status, parse_status};
 pub use write::{WriteOperation, WriteRequest};
@@ -458,6 +460,30 @@ impl GitService {
         }
         status.version = write::worktree_version(repo, &status, after)?;
         Ok(status)
+    }
+
+    /// Commits on HEAD that its upstream does not have, newest first, at most `limit`.
+    pub fn outgoing(
+        &self,
+        repo: &Repository,
+        limit: usize,
+        cancel: &AtomicBool,
+    ) -> io::Result<Vec<Commit>> {
+        let output = self.run(
+            &repo.worktree,
+            &[
+                "log".into(),
+                "-z".into(),
+                "--no-color".into(),
+                "--no-show-signature".into(),
+                format!("--max-count={limit}").into(),
+                "--format=%h%x00%at%x00%s".into(),
+                "@{upstream}..HEAD".into(),
+                "--".into(),
+            ],
+            cancel,
+        )?;
+        parse_log(&output)
     }
 
     /// Lists tracked and non-ignored untracked files below `dir`, relative to `dir`.

@@ -1,6 +1,7 @@
 //! Source Control view, VS Code's multi-repository layout: every repository is a section with
 //! its branch and actions in the header, its own message box and 提交 button, then its
-//! "暂存的更改" / "更改" groups. Clean repositories are compact headers listed last (or hidden).
+//! "暂存的更改" / "更改" groups, then "未推送的提交". Clean repositories are listed last (or
+//! hidden), as compact headers unless they have commits to push.
 //! File row actions appear on hover; the status letter stays at the right edge.
 
 use super::SINGLE_LINE;
@@ -58,13 +59,9 @@ fn hover_actions(group: SharedString) -> Div {
 }
 
 impl Prototype {
-    /// The "···" menu of a repository: push and whole-repository operations.
-    fn scm_menu(&self, g: usize, menu: PopupMenu, view: WeakEntity<Self>) -> PopupMenu {
-        let stage = self.scm_paths(g, None, DiffSide::Worktree);
-        let unstage = self.scm_paths(g, None, DiffSide::Staged);
-        let discard = self.scm_discard(g, None);
+    fn scm_push(&self, g: usize) -> Option<WriteRequest> {
         let group = &self.groups[g];
-        let push = group
+        group
             .status
             .as_ref()
             .and_then(|status| status.as_ref().ok())
@@ -74,7 +71,15 @@ impl Prototype {
                 generation: 0,
                 expected: status.clone(),
                 operation: WriteOperation::Push,
-            });
+            })
+    }
+
+    /// The "···" menu of a repository: push and whole-repository operations.
+    fn scm_menu(&self, g: usize, menu: PopupMenu, view: WeakEntity<Self>) -> PopupMenu {
+        let stage = self.scm_paths(g, None, DiffSide::Worktree);
+        let unstage = self.scm_paths(g, None, DiffSide::Staged);
+        let discard = self.scm_discard(g, None);
+        let push = self.scm_push(g);
         let refresh = view.clone();
         menu.item(PopupMenuItem::new("刷新").on_click(move |_, window, cx| {
             let _ = refresh.update(cx, |this, cx| this.refresh(window, cx));
@@ -204,6 +209,9 @@ impl Prototype {
             Row::Group(_) | Row::Commit(_) => unreachable!("handled above"),
             Row::Heading(g, side, count) => self.scm_heading_row(g, side, count, base, hover, cx),
             Row::File(g, i, side) => self.scm_file_row(index, g, i, side, base, hover, cx),
+            Row::Outgoing(g) => self.scm_outgoing_row(g, base, cx),
+            Row::OutgoingCommit(g, i) => self.scm_outgoing_commit_row(g, i, base, cx),
+            Row::OutgoingNote(g) => self.scm_outgoing_note_row(g, base, cx),
         };
         div()
             .w_full()
@@ -257,7 +265,6 @@ impl Prototype {
         let can_commit = matches!(&group.status, Some(Ok(status))
             if !status.changes.is_empty()
                 && !status.changes.iter().any(|c| c.kind == ChangeKind::Conflict));
-        let clean = group.clean();
         let label = format!("仓库 {name} · {}", detail.as_deref().unwrap_or_default());
         let mut title = soft_breaks(&name);
         let name_len = title.len();
@@ -275,7 +282,8 @@ impl Prototype {
         let tooltip = worktree.display().to_string();
         let id = group.repo.id.clone();
         let weak = cx.weak_entity();
-        let expanded = group.expanded && !clean;
+        let expandable = group.expandable();
+        let expanded = group.expanded && expandable;
         let left = h_flex()
             .min_w_0()
             .flex_shrink(1.)
@@ -287,6 +295,8 @@ impl Prototype {
                     .flex()
                     .items_center()
                     .flex_shrink_0()
+                    // Nothing to open: keep the column, drop the chevron.
+                    .when(!expandable, |slot| slot.invisible())
                     .child(chevron(expanded, colors.muted)),
             )
             .child(
@@ -401,7 +411,7 @@ impl Prototype {
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 let group = &mut this.groups[g];
-                if !group.clean() {
+                if group.expandable() {
                     group.expanded = !group.expanded;
                 }
                 this.scm_repo = Some(group.repo.id.clone());
@@ -605,6 +615,164 @@ impl Prototype {
             .into_any_element()
     }
 
+    /// "未推送的提交", VS Code's 同步更改 as a section: the commits only this clone has.
+    fn scm_outgoing_row(
+        &self,
+        g: usize,
+        base: Stateful<Div>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = theme::colors(cx);
+        let group = &self.groups[g];
+        let collapsed = group.outgoing_collapsed;
+        let ahead = group.ahead();
+        let upstream = group
+            .status
+            .as_ref()
+            .and_then(|s| s.as_ref().ok())
+            .and_then(|s| s.upstream.clone())
+            .unwrap_or_default();
+        let push = self.scm_push(g);
+        base.pl(theme::TREE_BASE)
+            .text_color(colors.foreground)
+            .role(Role::TreeItem)
+            .aria_expanded(!collapsed)
+            .child(chevron(!collapsed, colors.muted))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child("未推送的提交"),
+            )
+            .child(
+                Button::new(("scm-push", g))
+                    .xsmall()
+                    .ghost()
+                    .icon(IconName::ArrowUp)
+                    .label("推送")
+                    .tooltip(format!("推送到 {upstream}"))
+                    .disabled(push.is_none())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        if let Some(request) = push.clone() {
+                            this.request_git_write(request, window, cx);
+                        }
+                    })),
+            )
+            .child(count_badge(ahead, colors))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let group = &mut this.groups[g];
+                group.outgoing_collapsed = !group.outgoing_collapsed;
+                this.rebuild_rows();
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    fn scm_outgoing_commit_row(
+        &self,
+        g: usize,
+        i: usize,
+        base: Stateful<Div>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = theme::colors(cx);
+        let Some(commit) = self.groups[g].outgoing.as_ref().ok().and_then(|c| c.get(i)) else {
+            return base.into_any_element();
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let ms = commit.time.saturating_mul(1000);
+        let time = crate::agent_model::relative_time(ms, now, crate::agent_model::local_offset(ms));
+        let subject = commit.subject.replace(SINGLE_LINE, "⏎");
+        let empty = subject.trim().is_empty();
+        let tooltip = format!("{} {}", commit.short, commit.subject);
+        base.pl(theme::TREE_BASE + theme::TREE_STEP + theme::TWISTY_WIDTH)
+            .cursor_default()
+            .aria_label(format!("未推送的提交 · {} · {}", commit.short, subject))
+            .child(
+                Icon::new(IconName::GitCommitHorizontal)
+                    .size(theme::ICON_SIZE)
+                    .text_color(colors.muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .pl_1()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_color(if empty {
+                        colors.muted
+                    } else {
+                        colors.foreground
+                    })
+                    .child(if empty {
+                        "（没有提交说明）".into()
+                    } else {
+                        subject
+                    }),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(theme::TEXT_CAPTION)
+                    .text_color(colors.muted)
+                    .child(commit.short.clone()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .pl_1()
+                    .text_size(theme::TEXT_CAPTION)
+                    .text_color(colors.muted)
+                    .child(time),
+            )
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+            })
+            .into_any_element()
+    }
+
+    fn scm_outgoing_note_row(
+        &self,
+        g: usize,
+        base: Stateful<Div>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = theme::colors(cx);
+        let group = &self.groups[g];
+        let (text, color) = match &group.outgoing {
+            Err(error) => (format!("无法列出未推送的提交：{error}"), colors.deleted),
+            Ok(listed) => (
+                format!(
+                    "还有 {} 个更早的提交没有列出",
+                    group.ahead().saturating_sub(listed.len())
+                ),
+                colors.muted,
+            ),
+        };
+        base.pl(theme::TREE_BASE + theme::TREE_STEP + theme::TWISTY_WIDTH)
+            .cursor_default()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(theme::TEXT_CAPTION)
+                    .text_color(color)
+                    .child(text),
+            )
+            .into_any_element()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn scm_file_row(
         &self,
@@ -801,6 +969,10 @@ fn soft_breaks(text: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+#[path = "scm_ui_tests.rs"]
+mod ui_tests;
 
 #[cfg(test)]
 mod tests {

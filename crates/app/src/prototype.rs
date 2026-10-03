@@ -22,8 +22,8 @@ use std::{
 };
 use workspace_editor_core::{DocumentId, RepoId, Repository};
 use workspace_editor_git::{
-    ChangeKind, DiffSide, Discovery, GitService, Operation, Request, Status, WriteOperation,
-    WriteRequest,
+    ChangeKind, Commit, DiffSide, Discovery, GitService, Operation, Request, Status,
+    WriteOperation, WriteRequest,
 };
 
 mod agent;
@@ -190,6 +190,9 @@ struct Group {
     write_task: Option<Task<()>>,
     write_pending: bool,
     write_message: String,
+    /// Commits the upstream does not have, loaded with the status (empty when none).
+    outgoing: Result<Vec<Commit>, String>,
+    outgoing_collapsed: bool,
 }
 impl Group {
     /// A repository whose status loaded and has nothing to commit; it is listed compactly
@@ -197,7 +200,23 @@ impl Group {
     fn clean(&self) -> bool {
         matches!(&self.status, Some(Ok(status)) if status.changes.is_empty())
     }
+
+    /// Commits ahead of the upstream (0 without one).
+    fn ahead(&self) -> usize {
+        match &self.status {
+            Some(Ok(status)) if status.upstream.is_some() => status.ahead,
+            _ => 0,
+        }
+    }
+
+    /// Whether the header opens: there are changes, or commits to push.
+    fn expandable(&self) -> bool {
+        !self.clean() || self.ahead() > 0
+    }
 }
+
+/// Unpushed commits listed under a repository; older ones are counted, not listed.
+const OUTGOING_LIMIT: usize = 100;
 
 /// Line breaks in file names would break single-line rows; they are shown as ⏎.
 const SINGLE_LINE: [char; 2] = ['\n', '\r'];
@@ -247,10 +266,15 @@ enum Row {
     Commit(usize),
     Heading(usize, DiffSide, usize),
     File(usize, usize, DiffSide),
+    /// "未推送的提交" with the push button.
+    Outgoing(usize),
+    OutgoingCommit(usize, usize),
+    /// Under the commits: why they could not be listed, or how many older ones are not.
+    OutgoingNote(usize),
 }
 enum Event {
     Repo(Repository),
-    Status(RepoId, Result<Status, String>),
+    Status(RepoId, Result<Status, String>, Result<Vec<Commit>, String>),
     Issue(String),
     Excluded,
     Done,
@@ -1225,7 +1249,18 @@ impl Prototype {
                             let result = service
                                 .status(&repo, generation, cancel)
                                 .map_err(|e| e.to_string());
-                            if sender.send(Event::Status(repo.id, result)).is_err() {
+                            let outgoing = match &result {
+                                Ok(status) if status.upstream.is_some() && status.ahead > 0 => {
+                                    service
+                                        .outgoing(&repo, OUTGOING_LIMIT, cancel)
+                                        .map_err(|e| e.to_string())
+                                }
+                                _ => Ok(Vec::new()),
+                            };
+                            if sender
+                                .send(Event::Status(repo.id, result, outgoing))
+                                .is_err()
+                            {
                                 break;
                             }
                         }
@@ -1292,10 +1327,12 @@ impl Prototype {
                                             write_task: None,
                                             write_pending: false,
                                             write_message: String::new(),
+                                            outgoing: Ok(Vec::new()),
+                                            outgoing_collapsed: false,
                                         });
                                     }
                                 }
-                                Event::Status(id, status) => {
+                                Event::Status(id, status, outgoing) => {
                                     if let Some(group) =
                                         this.groups.iter_mut().find(|g| g.repo.id == id)
                                     {
@@ -1313,6 +1350,7 @@ impl Prototype {
                                             });
                                         }
                                         group.status = Some(status.map(Arc::new));
+                                        group.outgoing = outgoing;
                                     }
                                 }
                                 Event::Issue(issue) => {
@@ -1393,7 +1431,7 @@ impl Prototype {
         for g in order {
             let group = &self.groups[g];
             self.rows.push(Row::Group(g));
-            if !group.expanded || group.clean() {
+            if !group.expanded || !group.expandable() {
                 continue;
             }
             if let Some(Ok(status)) = &group.status {
@@ -1419,6 +1457,18 @@ impl Prototype {
                     if !collapsed {
                         self.rows
                             .extend(changes.into_iter().map(|i| Row::File(g, i, side)));
+                    }
+                }
+            }
+            let ahead = group.ahead();
+            if ahead > 0 {
+                self.rows.push(Row::Outgoing(g));
+                if !group.outgoing_collapsed {
+                    let listed = group.outgoing.as_ref().map_or(0, Vec::len);
+                    self.rows
+                        .extend((0..listed).map(|i| Row::OutgoingCommit(g, i)));
+                    if group.outgoing.is_err() || listed < ahead {
+                        self.rows.push(Row::OutgoingNote(g));
                     }
                 }
             }
