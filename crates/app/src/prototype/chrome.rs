@@ -234,6 +234,18 @@ impl Prototype {
                         })),
                 )
             })
+            // VS Code Git Graph's status bar item; labelled, so it does not read as a second
+            // branch icon.
+            .when_some(active, |bar, g| {
+                bar.child(
+                    status_item("status-graph", colors)
+                        .child(icon(IconName::GitGraph))
+                        .child("Git 图")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_git_graph(g, window, cx);
+                        })),
+                )
+            })
             .when(!self.issues.is_empty(), |bar| {
                 let first = self.issues.first().cloned().unwrap_or_default();
                 bar.child(
