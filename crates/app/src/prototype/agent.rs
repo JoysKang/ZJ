@@ -160,6 +160,7 @@ impl LiveSession {
 /// The `@` file picker under the composer.
 pub(super) struct Mention {
     pub range: std::ops::Range<usize>,
+    pub query: String,
     pub results: Vec<PathBuf>,
     pub selected: usize,
     generation: u64,
@@ -1398,13 +1399,21 @@ impl Prototype {
             .rev()
             .map(|d| d.path.clone())
             .collect();
+        let shown_query = query.clone();
         let task = cx.spawn_in(window, async move |this, cx| {
             let results = match index {
                 Some(index) if !query.is_empty() => {
                     cx.background_spawn(async move { index.search(&query, show_hidden).paths })
                         .await
                 }
-                _ => recent,
+                // No index (no folder, or still building): filter the open files by name.
+                _ => {
+                    let query = query.to_lowercase();
+                    recent
+                        .into_iter()
+                        .filter(|path| agent_model::file_name(path).to_lowercase().contains(&query))
+                        .collect()
+                }
             };
             let _ = this.update(cx, |this, cx| {
                 if let Some(mention) = this.agent.mention.as_mut()
@@ -1425,6 +1434,7 @@ impl Prototype {
             .unwrap_or_default();
         self.agent.mention = Some(Mention {
             range,
+            query: shown_query,
             results,
             selected: 0,
             generation,

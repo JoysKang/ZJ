@@ -115,6 +115,27 @@ fn temp_root(name: &str) -> PathBuf {
 }
 
 #[gpui_kit::test]
+async fn mention_without_a_folder_says_so(cx: &mut TestAppContext) {
+    let (handle, this) = open(cx, None);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |this, cx| this.agent_focus_composer(window, cx));
+        window.input("@ma", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    this.read_with(cx, |p, _| {
+        let mention = p.agent.mention.as_ref().expect("the @ picker is open");
+        assert_eq!(mention.query, "ma");
+        assert!(mention.results.is_empty());
+        assert_eq!(
+            p.agent_mention_hint(),
+            "没有打开文件夹，也没有打开的文件可以引用"
+        );
+    });
+}
+
+#[gpui_kit::test]
 async fn enter_sends_every_turn(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = temp_root("send");

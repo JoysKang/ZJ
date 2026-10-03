@@ -2107,6 +2107,25 @@ impl Prototype {
         composer.into_any_element()
     }
 
+    /// What the `@` picker says when it has no files to show.
+    pub(super) fn agent_mention_hint(&self) -> &'static str {
+        let query = self.agent.mention.as_ref().map_or("", |m| m.query.as_str());
+        if self.root.is_none() {
+            // Without a folder there is no index; only open files can be referenced.
+            if self.documents.is_empty() {
+                "没有打开文件夹，也没有打开的文件可以引用"
+            } else {
+                "已打开的文件里没有匹配的（没有打开文件夹）"
+            }
+        } else if self.index.is_none() {
+            "正在建立文件索引…"
+        } else if query.is_empty() {
+            "输入文件名的一部分"
+        } else {
+            "没有匹配的文件"
+        }
+    }
+
     fn render_mention_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let mention = self.agent.mention.as_ref()?;
         let colors = theme::colors(cx);
@@ -2119,11 +2138,7 @@ impl Prototype {
                     .items_center()
                     .text_size(theme::TEXT_CAPTION)
                     .text_color(colors.muted)
-                    .child(if self.index.is_none() {
-                        "正在建立文件索引…"
-                    } else {
-                        "输入文件名的一部分"
-                    })
+                    .child(self.agent_mention_hint())
                     .into_any_element(),
             ]
         } else {
