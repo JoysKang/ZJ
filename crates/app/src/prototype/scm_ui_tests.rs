@@ -5,7 +5,7 @@ use super::super::*;
 // `gpui_kit::*` also exports a `test` macro; `#[gpui_kit::test]` expands to the built-in one.
 #[allow(unused_imports)]
 use core::prelude::v1::test;
-use gpui_kit::{TestAppContext, WindowBounds, WindowOptions, base::Root};
+use gpui_kit::{TestAppContext, WindowBounds, WindowOptions, base::Root, test::TestWindowExt};
 
 fn git(dir: &std::path::Path, args: &[&str]) {
     let output = std::process::Command::new("git")
@@ -57,8 +57,8 @@ fn fixture(name: &str, ahead: usize) -> PathBuf {
     std::fs::canonicalize(repo).unwrap()
 }
 
-fn open(cx: &mut TestAppContext, root: PathBuf) -> Entity<Prototype> {
-    let (_, this) = cx.update(|cx| {
+fn open(cx: &mut TestAppContext, root: PathBuf) -> (WindowHandle<Root>, Entity<Prototype>) {
+    let (window, this) = cx.update(|cx| {
         gpui_kit::init(cx);
         cx.set_global(crate::settings::Settings::default());
         cx.set_global(crate::watch::WatchService::default());
@@ -86,7 +86,7 @@ fn open(cx: &mut TestAppContext, root: PathBuf) -> Entity<Prototype> {
         cx.executor().advance_clock(Duration::from_millis(50));
         cx.run_until_parked();
         if this.read_with(cx, |p, _| p.refresh_completed && !p.loading) {
-            return this;
+            return (window, this);
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -119,7 +119,7 @@ fn rows(cx: &mut TestAppContext, this: &Entity<Prototype>) -> Vec<String> {
 async fn a_clean_repository_with_unpushed_commits_lists_them(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let repo = fixture("ahead", 2);
-    let this = open(cx, repo.clone());
+    let (_, this) = open(cx, repo.clone());
     assert_eq!(
         rows(cx, &this),
         [
@@ -145,8 +145,150 @@ async fn a_clean_repository_with_unpushed_commits_lists_them(cx: &mut TestAppCon
 async fn a_clean_repository_in_sync_does_not_open(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let repo = fixture("synced", 0);
-    let this = open(cx, repo.clone());
+    let (_, this) = open(cx, repo.clone());
     assert_eq!(rows(cx, &this), ["repo"]);
     this.read_with(cx, |p, _| assert!(!p.groups[0].expandable()));
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+/// Waits until `done` holds (the picker lists branches after a real Git call).
+fn settle(cx: &mut TestAppContext, mut done: impl FnMut(&mut TestAppContext) -> bool) {
+    for _ in 0..200 {
+        cx.executor().advance_clock(Duration::from_millis(50));
+        cx.run_until_parked();
+        if done(cx) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the operation never settled");
+}
+
+#[gpui_kit::test]
+async fn the_branch_button_checks_out_and_creates_branches(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("branches", 0);
+    let other = repo.parent().unwrap().join("other");
+    let bare = repo.parent().unwrap().join("remote.git");
+    git(
+        repo.parent().unwrap(),
+        &[
+            "clone",
+            "-q",
+            "-b",
+            "main",
+            bare.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    git(&other, &["switch", "-q", "-c", "feature"]);
+    git(&other, &["push", "-q", "origin", "feature"]);
+    git(&repo, &["switch", "-q", "-c", "local"]);
+    git(&repo, &["switch", "-q", "main"]);
+    git(&repo, &["fetch", "-q", "--prune"]);
+    let (window, this) = open(cx, repo.clone());
+
+    // The branch picker: 创建新分支… first, then local branches, then remote ones.
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_branch_picker(0, window, cx));
+    })
+    .unwrap();
+    settle(cx, |cx| {
+        this.read_with(cx, |p, _| {
+            p.quick_open
+                .as_ref()
+                .is_some_and(|q| q.items.as_ref().is_some_and(|(items, _)| !items.is_empty()))
+        })
+    });
+    let items: Vec<String> = this.read_with(cx, |p, _| {
+        p.quick_open
+            .as_ref()
+            .unwrap()
+            .items
+            .as_ref()
+            .unwrap()
+            .0
+            .iter()
+            .map(|item| format!("{}|{}", item.label, item.detail))
+            .collect()
+    });
+    assert!(items[0].starts_with("|"));
+    let branches: Vec<&str> = items[1..]
+        .iter()
+        .map(|i| i.split('|').next().unwrap())
+        .collect();
+    assert_eq!(branches, ["local", "main", "origin/feature", "origin/main"]);
+    assert!(items.iter().any(|i| i.contains("当前分支")));
+    assert!(items.iter().any(|i| i.contains("远程分支")));
+
+    // The query filters (input events land between window updates); confirming
+    // "origin/feature" creates the tracking local branch.
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.input("feat", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let filtered: Vec<String> = this.read_with(cx, |p, _| {
+        let (items, filtered) = p.quick_open.as_ref().unwrap().items.as_ref().unwrap();
+        filtered.iter().map(|i| items[*i].label.clone()).collect()
+    });
+    assert_eq!(filtered, ["origin/feature", ""]);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("enter", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    settle(cx, |cx| {
+        this.read_with(cx, |p, _| {
+            p.groups[0]
+                .status
+                .as_ref()
+                .and_then(|s| s.as_ref().ok())
+                .is_some_and(|s| s.branch.as_deref() == Some("feature"))
+        })
+    });
+    assert_eq!(git_out(&repo, &["branch", "--show-current"]), "feature");
+
+    // 创建分支… asks for the name, then creates and switches to it.
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_create_branch(0, window, cx));
+        window.render_frame(cx);
+        window.input("topic", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("enter", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    settle(cx, |cx| {
+        this.read_with(cx, |p, _| {
+            p.groups[0]
+                .status
+                .as_ref()
+                .and_then(|s| s.as_ref().ok())
+                .is_some_and(|s| s.branch.as_deref() == Some("topic"))
+        })
+    });
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
 }

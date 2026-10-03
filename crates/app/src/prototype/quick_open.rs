@@ -7,6 +7,7 @@ use super::navigation::Target;
 use crate::symbols::Kind;
 use crate::{file_icons, theme};
 use gpui_kit::{
+    assets::IconName,
     component::{
         Sizable, h_flex,
         input::{Input, InputEvent, InputState},
@@ -16,25 +17,46 @@ use gpui_kit::{
     *,
 };
 use std::{path::PathBuf, time::Duration};
+use workspace_editor_core::RepoId;
 
-/// A row of a symbol or location list.
+/// A row of a symbol, location or branch list.
 pub(super) struct PickItem {
     pub label: String,
     pub detail: String,
     pub icon: PickIcon,
-    pub target: Target,
+    pub pick: Pick,
 }
 
 pub(super) enum PickIcon {
     File(&'static str),
     Symbol(Kind),
+    Lucide(IconName),
+}
+
+/// What choosing a row does.
+#[derive(Clone)]
+pub(super) enum Pick {
+    Jump(Target),
+    /// Switches the repository to a branch (`remote`: creates the tracking local branch).
+    Checkout {
+        repo: RepoId,
+        branch: String,
+        remote: bool,
+    },
+    /// A new branch named by the query. Listed whatever is typed, first.
+    CreateBranch {
+        repo: RepoId,
+        start: Option<String>,
+    },
+    /// The checked-out branch: nothing to do.
+    Close,
 }
 
 pub(super) struct QuickOpen {
-    input: Entity<InputState>,
+    pub(super) input: Entity<InputState>,
     results: Vec<PathBuf>,
     /// `Some` for a symbol / location list: the items and the indexes matching the query.
-    items: Option<(Vec<PickItem>, Vec<usize>)>,
+    pub(super) items: Option<(Vec<PickItem>, Vec<usize>)>,
     empty_note: &'static str,
     selected: usize,
     generation: u64,
@@ -128,6 +150,11 @@ impl Prototype {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, item)| {
+                    if let Pick::CreateBranch { .. } = item.pick {
+                        // First with an empty query (nothing is sorted then), after real
+                        // matches otherwise, so Enter on a typed branch checks it out.
+                        return Some((i32::MIN, i));
+                    }
                     let key = item.label.to_lowercase();
                     crate::fuzzy::score(&query, &key, 0).map(|score| (score, i))
                 })
@@ -202,13 +229,42 @@ impl Prototype {
         if let Some(quick) = self.quick_open.as_ref()
             && let Some((items, filtered)) = &quick.items
         {
-            let target = filtered
+            let pick = filtered
                 .get(index.unwrap_or(quick.selected))
-                .map(|i| items[*i].target.clone());
+                .map(|i| items[*i].pick.clone());
+            let query = quick.input.read(cx).value().trim().to_string();
+            if let Some(Pick::CreateBranch { repo, start }) = &pick
+                && query.is_empty()
+            {
+                // As in VS Code, the name is asked for next.
+                let item = PickItem {
+                    label: String::new(),
+                    detail: String::new(),
+                    icon: PickIcon::Lucide(IconName::Plus),
+                    pick: Pick::CreateBranch {
+                        repo: repo.clone(),
+                        start: start.clone(),
+                    },
+                };
+                self.open_picker(vec![item], "新分支名称".into(), "", window, cx);
+                return;
+            }
             self.quick_open = None;
-            match target {
-                Some(target) => self.jump_to(target, true, window, cx),
-                None => self.focus_active_editor(window, cx),
+            match pick {
+                Some(Pick::Jump(target)) => self.jump_to(target, true, window, cx),
+                Some(Pick::Checkout {
+                    repo,
+                    branch,
+                    remote,
+                }) => {
+                    self.focus_active_editor(window, cx);
+                    self.scm_checkout(&repo, branch, remote, window, cx);
+                }
+                Some(Pick::CreateBranch { repo, start }) => {
+                    self.focus_active_editor(window, cx);
+                    self.scm_create_branch(&repo, query, start, window, cx);
+                }
+                Some(Pick::Close) | None => self.focus_active_editor(window, cx),
             }
             cx.notify();
             return;
@@ -405,6 +461,29 @@ impl Prototype {
                     .text_color(color)
                     .into_any_element()
             }
+            PickIcon::Lucide(name) => gpui_kit::component::Icon::new(name)
+                .size(theme::ICON_SIZE)
+                .text_color(if selected {
+                    colors.selected_fg
+                } else {
+                    colors.muted
+                })
+                .into_any_element(),
+        };
+        let label = match &item.pick {
+            Pick::CreateBranch { .. } => {
+                let query = self
+                    .quick_open
+                    .as_ref()
+                    .map(|quick| quick.input.read(cx).value().trim().to_string())
+                    .unwrap_or_default();
+                if query.is_empty() {
+                    "创建新分支…".to_string()
+                } else {
+                    format!("创建新分支“{query}”")
+                }
+            }
+            _ => item.label.clone(),
         };
         h_flex()
             .id(("pick-row", index))
@@ -427,7 +506,7 @@ impl Prototype {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .child(item.label.replace(SINGLE_LINE, "⏎")),
+                    .child(label.replace(SINGLE_LINE, "⏎")),
             )
             .child(
                 div()

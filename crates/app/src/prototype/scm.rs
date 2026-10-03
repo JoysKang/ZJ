@@ -74,29 +74,61 @@ impl Prototype {
             })
     }
 
-    /// The "···" menu of a repository: push and whole-repository operations.
+    /// The "···" menu of a repository: VS Code's 拉取 / 推送 / 签出到… / 抓取, then
+    /// whole-repository operations.
     fn scm_menu(&self, g: usize, menu: PopupMenu, view: WeakEntity<Self>) -> PopupMenu {
         let stage = self.scm_paths(g, None, DiffSide::Worktree);
         let unstage = self.scm_paths(g, None, DiffSide::Staged);
         let discard = self.scm_discard(g, None);
         let push = self.scm_push(g);
-        let refresh = view.clone();
-        menu.item(PopupMenuItem::new("刷新").on_click(move |_, window, cx| {
-            let _ = refresh.update(cx, |this, cx| this.refresh(window, cx));
-        }))
-        .separator()
-        .when_some(push, |menu, request| {
-            menu.item(git_menu_item("推送", request, view.clone()))
-        })
-        .when_some(stage, |menu, request| {
-            menu.item(git_menu_item("暂存所有更改", request, view.clone()))
-        })
-        .when_some(unstage, |menu, request| {
-            menu.item(git_menu_item("取消暂存所有更改", request, view.clone()))
-        })
-        .when_some(discard, |menu, request| {
-            menu.item(git_menu_item("放弃所有更改…", request, view.clone()))
-        })
+        let upstream = self.groups[g]
+            .status
+            .as_ref()
+            .and_then(|s| s.as_ref().ok())
+            .is_some_and(|s| s.upstream.is_some());
+        let pull = self
+            .scm_request(g, WriteOperation::Pull)
+            .filter(|_| upstream);
+        let fetch = self.scm_request(g, WriteOperation::Fetch);
+        let idle = !self.groups[g].write_pending;
+        let (refresh, checkout, create) = (view.clone(), view.clone(), view.clone());
+        let item = |label: &str, request: Option<WriteRequest>| match request {
+            Some(request) => git_menu_item(label, request, view.clone()),
+            None => PopupMenuItem::new(label.to_string()).disabled(true),
+        };
+        menu.item(item("拉取", pull))
+            .item(item("推送", push))
+            .item(
+                PopupMenuItem::new("签出到…")
+                    .disabled(!idle)
+                    .on_click(move |_, window, cx| {
+                        let _ =
+                            checkout.update(cx, |this, cx| this.open_branch_picker(g, window, cx));
+                    }),
+            )
+            .item(
+                PopupMenuItem::new("创建分支…")
+                    .disabled(!idle)
+                    .on_click(move |_, window, cx| {
+                        let _ =
+                            create.update(cx, |this, cx| this.open_create_branch(g, window, cx));
+                    }),
+            )
+            .item(item("抓取", fetch))
+            .separator()
+            .when_some(stage, |menu, request| {
+                menu.item(git_menu_item("暂存所有更改", request, view.clone()))
+            })
+            .when_some(unstage, |menu, request| {
+                menu.item(git_menu_item("取消暂存所有更改", request, view.clone()))
+            })
+            .when_some(discard, |menu, request| {
+                menu.item(git_menu_item("放弃所有更改…", request, view.clone()))
+            })
+            .separator()
+            .item(PopupMenuItem::new("刷新").on_click(move |_, window, cx| {
+                let _ = refresh.update(cx, |this, cx| this.refresh(window, cx));
+            }))
     }
 
     /// The Source Control title bar's "···": options for the whole list.
@@ -245,27 +277,31 @@ impl Prototype {
             .and_then(|root| worktree.parent()?.strip_prefix(root).ok())
             .map(|path| path.to_string_lossy().replace(SINGLE_LINE, "⏎"))
             .filter(|path| !path.is_empty());
-        // The branch (with ↑N / ↓M when non-zero against its upstream), or the error.
-        let (detail, error) = match &group.status {
-            None => (None, false),
-            Some(Err(error)) => (Some(format!("错误：{error}")), true),
-            Some(Ok(status)) => {
-                let mut branch = status.branch.as_deref().unwrap_or("未知分支").to_string();
-                if status.upstream.is_some() {
-                    if status.ahead > 0 {
-                        branch.push_str(&format!("\u{a0}\u{a0}↑{}", status.ahead));
-                    }
-                    if status.behind > 0 {
-                        branch.push_str(&format!("\u{a0}\u{a0}↓{}", status.behind));
-                    }
-                }
-                (Some(branch), false)
-            }
+        // VS Code's two status items: the branch (opens 签出到…) and, with an upstream,
+        // 同步更改 with ↓M ↑N; or the error.
+        let status = group.status.as_ref().and_then(|s| s.as_ref().ok());
+        let error = match &group.status {
+            Some(Err(error)) => Some(format!("错误：{error}")),
+            _ => None,
         };
+        let branch = status.map(|s| s.branch.as_deref().unwrap_or("未知分支").to_string());
+        let sync = status
+            .and_then(|s| Some((s.upstream.clone()?, s.behind, s.ahead)))
+            .map(|(upstream, behind, ahead)| {
+                let counts = (behind > 0 || ahead > 0).then(|| format!("{behind}↓ {ahead}↑"));
+                (upstream, counts)
+            });
         let can_commit = matches!(&group.status, Some(Ok(status))
             if !status.changes.is_empty()
                 && !status.changes.iter().any(|c| c.kind == ChangeKind::Conflict));
-        let label = format!("仓库 {name} · {}", detail.as_deref().unwrap_or_default());
+        let label = format!(
+            "仓库 {name} · {}{}",
+            error.as_deref().or(branch.as_deref()).unwrap_or_default(),
+            sync.as_ref()
+                .and_then(|(_, counts)| counts.as_ref())
+                .map(|counts| format!(" · {counts}"))
+                .unwrap_or_default()
+        );
         let mut title = soft_breaks(&name);
         let name_len = title.len();
         if let Some(parent) = &parent {
@@ -320,21 +356,14 @@ impl Prototype {
                     .font_weight(FontWeight::MEDIUM)
                     .child(title_text),
             );
+        let pending = group.write_pending;
         let actions = h_flex()
             .flex_shrink_0()
             .h(theme::ROW_HEIGHT)
             .gap_0p5()
             .child(
-                action(("scm-repo-refresh", g), IconName::RefreshCw, "刷新").on_click(cx.listener(
-                    |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.refresh(window, cx)
-                    },
-                )),
-            )
-            .child(
                 action(("scm-repo-commit", g), IconName::Check, "提交")
-                    .disabled(group.write_pending || !can_commit)
+                    .disabled(pending || !can_commit)
                     .on_click(cx.listener({
                         let id = id.clone();
                         move |this, _, window, cx| {
@@ -342,6 +371,14 @@ impl Prototype {
                             this.scm_commit(id.clone(), CommitMode::Commit, window, cx)
                         }
                     })),
+            )
+            .child(
+                action(("scm-repo-refresh", g), IconName::RotateCw, "刷新").on_click(cx.listener(
+                    |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.refresh(window, cx)
+                    },
+                )),
             )
             .child(
                 action(("scm-repo-more", g), IconName::Ellipsis, "更多操作").dropdown_menu(
@@ -354,38 +391,89 @@ impl Prototype {
                     },
                 ),
             );
+        // A status item: icon and caption text that wraps, with its own hover.
+        let item = |id: (&'static str, usize), icon: IconName, text: Option<String>| {
+            h_flex()
+                .id(id)
+                .min_w_0()
+                .flex_shrink(1.)
+                .items_start()
+                .gap_1()
+                .px_1()
+                .my(theme::SCM_LINE_PAD)
+                .rounded(theme::RADIUS)
+                .text_size(theme::TEXT_CAPTION)
+                .line_height(theme::SCM_DETAIL_LINE)
+                .text_color(colors.muted)
+                .when(!pending, |item| item.hover(|item| item.bg(colors.keycap)))
+                .when(pending, |item| item.opacity(0.5).cursor_default())
+                .child(
+                    div()
+                        .h(theme::SCM_DETAIL_LINE)
+                        .flex()
+                        .items_center()
+                        .flex_shrink_0()
+                        .child(
+                            Icon::new(icon)
+                                .size(theme::SMALL_ICON_SIZE)
+                                .text_color(colors.muted),
+                        ),
+                )
+                .when_some(text, |item, text| {
+                    item.child(div().min_w_0().child(soft_breaks(&text)))
+                })
+        };
         let right = h_flex()
             .ml_auto()
             .min_w_0()
             .flex_shrink(1.)
             .items_start()
             .gap_1()
-            .when_some(detail, |right, detail| {
+            .when_some(error, |right, error| {
                 right.child(
-                    h_flex()
+                    div()
                         .min_w_0()
                         .flex_shrink(1.)
-                        .items_start()
-                        .gap_1()
+                        .py(theme::SCM_LINE_PAD)
                         .text_size(theme::TEXT_CAPTION)
                         .line_height(theme::SCM_DETAIL_LINE)
-                        .py(theme::SCM_LINE_PAD)
-                        .text_color(if error { colors.deleted } else { colors.muted })
-                        .when(!error, |line| {
-                            line.child(
-                                div()
-                                    .h(theme::SCM_DETAIL_LINE)
-                                    .flex()
-                                    .items_center()
-                                    .flex_shrink_0()
-                                    .child(
-                                        Icon::new(IconName::GitBranch)
-                                            .size(theme::SMALL_ICON_SIZE)
-                                            .text_color(colors.muted),
-                                    ),
-                            )
+                        .text_color(colors.deleted)
+                        .child(soft_breaks(&error)),
+                )
+            })
+            .when_some(branch, |right, branch| {
+                let tooltip = format!("{branch}，签出分支…");
+                right.child(
+                    item(("scm-repo-branch", g), IconName::GitBranch, Some(branch))
+                        .tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(tooltip.clone())
+                                .build(window, cx)
                         })
-                        .child(div().min_w_0().child(soft_breaks(&detail))),
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            if !this.groups.get(g).is_some_and(|g| g.write_pending) {
+                                this.open_branch_picker(g, window, cx);
+                            }
+                        })),
+                )
+            })
+            .when_some(sync, |right, (upstream, counts)| {
+                let tooltip = match &counts {
+                    Some(counts) => format!("同步更改 {counts}（{upstream}）"),
+                    None => format!("同步更改（{upstream}）"),
+                };
+                right.child(
+                    item(("scm-repo-sync", g), IconName::RefreshCw, counts)
+                        .tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(tooltip.clone())
+                                .build(window, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            if let Some(request) = this.scm_request(g, WriteOperation::Sync) {
+                                this.request_git_write(request, window, cx);
+                            }
+                        })),
                 )
             })
             .child(actions);

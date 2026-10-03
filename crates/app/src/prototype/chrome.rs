@@ -120,6 +120,15 @@ impl Prototype {
 
     /// Branch of the repository that contains the active file, or of the workspace root.
     pub(super) fn active_branch(&self) -> Option<String> {
+        let group = &self.groups[self.active_group()?];
+        match &group.status {
+            Some(Ok(status)) => status.branch.clone(),
+            _ => None,
+        }
+    }
+
+    /// The repository that contains the active file, or the workspace root.
+    pub(super) fn active_group(&self) -> Option<usize> {
         let path = match self.active {
             Pane::Document(id) => self
                 .documents
@@ -130,14 +139,9 @@ impl Prototype {
             Pane::Welcome => None,
         }
         .or_else(|| self.root.clone())?;
-        self.groups
-            .iter()
-            .filter(|group| path.starts_with(&group.repo.worktree))
-            .max_by_key(|group| group.repo.worktree.as_os_str().len())
-            .and_then(|group| match &group.status {
-                Some(Ok(status)) => status.branch.clone(),
-                _ => None,
-            })
+        (0..self.groups.len())
+            .filter(|g| path.starts_with(&self.groups[*g].repo.worktree))
+            .max_by_key(|g| self.groups[*g].repo.worktree.as_os_str().len())
     }
 
     /// (waiting for approval and the agent's name when there is one, running, done unread).
@@ -177,18 +181,55 @@ impl Prototype {
                 .size(theme::SMALL_ICON_SIZE)
                 .text_color(colors.muted)
         };
+        // As in VS Code: the branch opens 签出到…; with an upstream, 同步更改 shows ↓M ↑N.
+        let active = self.active_group();
+        let sync = active.and_then(|g| {
+            let status = self.groups[g].status.as_ref()?.as_ref().ok()?;
+            let upstream = status.upstream.clone()?;
+            Some((g, upstream, status.behind, status.ahead))
+        });
         let left = h_flex()
             .h_full()
             .min_w_0()
-            .when_some(self.active_branch(), |bar, branch| {
+            .when_some(active.zip(self.active_branch()), |bar, (g, branch)| {
                 bar.child(
                     status_item("status-branch", colors)
                         .child(icon(IconName::GitBranch))
-                        .child(branch)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.sidebar = super::Sidebar::SourceControl;
-                            this.sidebar_visible = true;
-                            cx.notify();
+                        .child(branch.clone())
+                        .tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(format!(
+                                "{branch}，签出分支…"
+                            ))
+                            .build(window, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if !this.groups.get(g).is_some_and(|g| g.write_pending) {
+                                this.open_branch_picker(g, window, cx);
+                            }
+                        })),
+                )
+            })
+            .when_some(sync, |bar, (g, upstream, behind, ahead)| {
+                let pending = self.groups[g].write_pending;
+                let counts = (behind > 0 || ahead > 0).then(|| format!("{behind}↓ {ahead}↑"));
+                let tooltip = match &counts {
+                    Some(counts) => format!("同步更改 {counts}（{upstream}）"),
+                    None => format!("同步更改（{upstream}）"),
+                };
+                bar.child(
+                    status_item("status-sync", colors)
+                        .child(icon(IconName::RefreshCw))
+                        .when_some(counts, |item, counts| item.child(counts))
+                        .when(pending, |item| item.opacity(0.5))
+                        .tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(tooltip.clone())
+                                .build(window, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let sync = workspace_editor_git::WriteOperation::Sync;
+                            if let Some(request) = this.scm_request(g, sync) {
+                                this.request_git_write(request, window, cx);
+                            }
                         })),
                 )
             })

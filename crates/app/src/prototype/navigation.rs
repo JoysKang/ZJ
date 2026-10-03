@@ -2,7 +2,7 @@
 //! back / forward (⌃- / ⌃⇧-), without language servers: tree-sitter queries in
 //! [`crate::symbols`] plus the lazily built [`SymbolIndex`]. All parsing runs off the UI thread.
 
-use super::quick_open::{PickIcon, PickItem};
+use super::quick_open::{Pick, PickIcon, PickItem};
 use super::{Pane, Prototype};
 use crate::{
     symbol_index::{self, Location, SymbolIndex},
@@ -414,7 +414,7 @@ impl Prototype {
                     },
                     detail: format!("{relative}:{}", target.line + 1),
                     icon: PickIcon::File(crate::file_icons::for_file(&file)),
-                    target,
+                    pick: Pick::Jump(target),
                 }
             })
             .collect();
@@ -547,7 +547,7 @@ impl Prototype {
                         label: target.name.clone(),
                         detail: format!("{} · 第 {} 行", target.kind.label(), target.line + 1),
                         icon: PickIcon::Symbol(target.kind),
-                        target,
+                        pick: Pick::Jump(target),
                     })
                     .collect();
                 this.open_picker(

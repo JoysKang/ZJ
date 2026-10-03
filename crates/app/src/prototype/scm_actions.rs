@@ -1,6 +1,9 @@
 //! UI intent captures repository identity, paths and the displayed version before prompting.
+use super::quick_open::{Pick, PickIcon, PickItem};
 use super::*;
+use gpui_kit::assets::IconName;
 use std::path::Path;
+use workspace_editor_git::Branch;
 
 /// The 提交 button and its menu.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -216,6 +219,18 @@ impl Prototype {
                 ),
                 "推送",
             )),
+            // VS Code asks before syncing too (git.confirmSync).
+            WriteOperation::Sync => Some((
+                "同步更改？".to_string(),
+                format!(
+                    "仓库：{}\n此操作将从“{}”拉取 {} 个提交，再向其推送 {} 个提交；不强制覆盖远程历史。",
+                    request.repo.worktree.display(),
+                    request.expected.upstream.as_deref().unwrap_or("未配置上游"),
+                    request.expected.behind,
+                    request.expected.ahead
+                ),
+                "同步",
+            )),
             _ => None,
         };
         if let Some((title, detail, action)) = warning {
@@ -260,6 +275,7 @@ impl Prototype {
         request.generation = self.write_generation;
         let version = request.generation;
         let id = request.repo.id.clone();
+        let worktree = request.repo.worktree.clone();
         let submitted_message = match &request.operation {
             WriteOperation::Commit { message, .. } => Some(message.clone()),
             _ => None,
@@ -269,6 +285,29 @@ impl Prototype {
             WriteOperation::Push | WriteOperation::Commit { push: true, .. } => "已推送",
             _ => "",
         };
+        // Started from the repository header or the status bar, where the commit box (and
+        // the message under it) may not be showing: progress goes to the status bar and a
+        // failure to a dialog.
+        let progress = match &request.operation {
+            WriteOperation::Fetch => Some(("正在抓取…".to_string(), "抓取失败".to_string())),
+            WriteOperation::Pull => Some(("正在拉取…".into(), "拉取失败".into())),
+            WriteOperation::Sync => Some(("正在同步…".into(), "同步失败".into())),
+            WriteOperation::Checkout { branch, .. } => {
+                Some((format!("正在签出 {branch}…"), format!("无法签出 {branch}")))
+            }
+            WriteOperation::CreateBranch { name, .. } => Some((
+                format!("正在创建分支 {name}…"),
+                format!("无法创建分支 {name}"),
+            )),
+            _ => None,
+        }
+        .map(|(text, failed)| {
+            let name = request.repo.worktree.file_name().unwrap_or_default();
+            (format!("{}：{text}", name.to_string_lossy()), failed)
+        });
+        if let Some((text, _)) = &progress {
+            self.message = text.clone();
+        }
         group.write_pending = true;
         group.write_message.clear();
         let service = self.service.clone();
@@ -284,6 +323,22 @@ impl Prototype {
                 }
             });
             let _ = this.update_in(cx, |this, window, cx| {
+                if let Some((text, failed)) = &progress {
+                    if this.message == *text {
+                        this.message.clear();
+                    }
+                    if let Err(error) = &result {
+                        let detail = format!("仓库：{}\n{error}", worktree.display());
+                        // The answer does not matter; the dialog is informational.
+                        let _answer = window.prompt(
+                            PromptLevel::Critical,
+                            failed,
+                            Some(&detail),
+                            &["确定"],
+                            cx,
+                        );
+                    }
+                }
                 if let Some(group) = this.groups.iter_mut().find(|g| g.repo.id == id) {
                     group.write_pending = false;
                     group.write_message = match result {
@@ -345,6 +400,144 @@ impl Prototype {
         self.request_git_write(request, window, cx);
     }
 
+    /// A whole-repository write against the displayed status; `None` while another write runs
+    /// or when the status did not load.
+    pub(super) fn scm_request(&self, g: usize, operation: WriteOperation) -> Option<WriteRequest> {
+        let group = self.groups.get(g)?;
+        if group.write_pending {
+            return None;
+        }
+        let status = group.status.as_ref()?.as_ref().ok()?;
+        Some(WriteRequest {
+            repo: group.repo.clone(),
+            generation: 0,
+            expected: status.clone(),
+            operation,
+        })
+    }
+
+    fn scm_request_for(
+        &mut self,
+        repo: &RepoId,
+        operation: WriteOperation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(g) = self.groups.iter().position(|g| &g.repo.id == repo) else {
+            return;
+        };
+        match self.scm_request(g, operation) {
+            Some(request) => self.request_git_write(request, window, cx),
+            None => {
+                self.message = "仓库正在执行 Git 操作，或状态没有加载".into();
+                cx.notify();
+            }
+        }
+    }
+
+    pub(super) fn scm_checkout(
+        &mut self,
+        repo: &RepoId,
+        branch: String,
+        remote: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.scm_request_for(
+            repo,
+            WriteOperation::Checkout { branch, remote },
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn scm_create_branch(
+        &mut self,
+        repo: &RepoId,
+        name: String,
+        start: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.scm_request_for(
+            repo,
+            WriteOperation::CreateBranch { name, start },
+            window,
+            cx,
+        );
+    }
+
+    /// Asks for the name of a branch to create at HEAD (or at `start`) and switch to.
+    pub(super) fn open_create_branch_at(
+        &mut self,
+        g: usize,
+        start: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group) = self.groups.get(g) else {
+            return;
+        };
+        let placeholder = match &start {
+            Some(start) => format!("新分支名称（从 {}）", &start[..start.len().min(7)]),
+            None => "新分支名称".to_string(),
+        };
+        let item = PickItem {
+            label: String::new(),
+            detail: String::new(),
+            icon: PickIcon::Lucide(IconName::Plus),
+            pick: Pick::CreateBranch {
+                repo: group.repo.id.clone(),
+                start,
+            },
+        };
+        self.open_picker(vec![item], placeholder, "", window, cx);
+    }
+
+    pub(super) fn open_create_branch(
+        &mut self,
+        g: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_create_branch_at(g, None, window, cx);
+    }
+
+    /// VS Code's 签出到…: 创建新分支… first, then local branches, then remote-tracking ones,
+    /// each most recently committed first.
+    pub(super) fn open_branch_picker(
+        &mut self,
+        g: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group) = self.groups.get(g) else {
+            return;
+        };
+        let repo = group.repo.clone();
+        let service = self.service.clone();
+        let job = cx.background_spawn({
+            let repo = repo.clone();
+            async move { service.branches(&repo, &AtomicBool::new(false)) }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let branches = job.await;
+            let _ = this.update_in(cx, |this, window, cx| match branches {
+                Ok(branches) => {
+                    let items = branch_items(&repo.id, branches);
+                    let name = repo.worktree.file_name().unwrap_or_default();
+                    let placeholder = format!("选择要签出的分支（{}）", name.to_string_lossy());
+                    this.open_picker(items, placeholder, "没有匹配的分支", window, cx);
+                }
+                Err(error) => {
+                    this.message = format!("无法列出分支：{error}");
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn scm_open_file(
         &mut self,
         path: &Path,
@@ -353,4 +546,69 @@ impl Prototype {
     ) {
         self.open_file(path.to_path_buf(), self.root.clone(), window, cx);
     }
+}
+
+fn branch_items(repo: &RepoId, branches: Vec<Branch>) -> Vec<PickItem> {
+    let local: HashSet<&str> = branches
+        .iter()
+        .filter(|b| !b.remote)
+        .map(|b| b.name.as_str())
+        .collect();
+    let mut items = vec![PickItem {
+        label: String::new(),
+        detail: String::new(),
+        icon: PickIcon::Lucide(IconName::Plus),
+        pick: Pick::CreateBranch {
+            repo: repo.clone(),
+            start: None,
+        },
+    }];
+    let (locals, remotes): (Vec<&Branch>, Vec<&Branch>) = branches.iter().partition(|b| !b.remote);
+    for branch in locals.into_iter().chain(remotes) {
+        let subject = branch.subject.replace(SINGLE_LINE, " ");
+        let pick = if branch.head {
+            Pick::Close
+        } else if branch.remote {
+            // A remote branch whose local branch already exists switches to that one.
+            match branch.name.split_once('/') {
+                Some((_, name)) if local.contains(name) => Pick::Checkout {
+                    repo: repo.clone(),
+                    branch: name.to_string(),
+                    remote: false,
+                },
+                _ => Pick::Checkout {
+                    repo: repo.clone(),
+                    branch: branch.name.clone(),
+                    remote: true,
+                },
+            }
+        } else {
+            Pick::Checkout {
+                repo: repo.clone(),
+                branch: branch.name.clone(),
+                remote: false,
+            }
+        };
+        let kind = match (branch.head, branch.remote) {
+            (true, _) => "当前分支",
+            (_, true) => "远程分支",
+            _ => "",
+        };
+        let detail = [kind, &branch.short, &subject]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        items.push(PickItem {
+            label: branch.name.clone(),
+            detail,
+            icon: PickIcon::Lucide(if branch.remote {
+                IconName::Cloud
+            } else {
+                IconName::GitBranch
+            }),
+            pick,
+        });
+    }
+    items
 }
