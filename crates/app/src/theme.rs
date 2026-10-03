@@ -131,6 +131,19 @@ pub const SCM_DETAIL_LINE: Pixels = px(20.);
 /// Centers a `SCM_DETAIL_LINE` line inside a `ROW_HEIGHT` row.
 pub const SCM_LINE_PAD: Pixels = px(2.);
 
+// Git Graph (editor-area commit graph).
+/// Horizontal space per branch lane.
+pub const GRAPH_LANE: Pixels = px(14.);
+/// Diameter of a commit node; HEAD adds a ring two strokes out.
+pub const GRAPH_NODE: Pixels = px(8.);
+/// Lane line thickness.
+pub const GRAPH_STROKE: Pixels = px(1.6);
+/// Author column; hashes and dates take what remains.
+pub const GRAPH_AUTHOR: Pixels = px(140.);
+pub const GRAPH_TIME: Pixels = px(84.);
+/// The details view under the graph never takes more than this much height.
+pub const GRAPH_DETAILS_MAX: Pixels = px(300.);
+
 // Agent panel (docs/adr/0004, design in ZJ-agent-ui-design.md).
 /// Below this width the panel switches to the compact density (direction C).
 pub const AGENT_COMPACT_WIDTH: Pixels = px(360.);
@@ -555,6 +568,8 @@ pub struct Colors {
     pub glyphs: [(Hsla, Hsla); 5],
     /// The editor's "file changed on disk" banner: the git-modified hue, faint.
     pub banner: Hsla,
+    /// Git Graph lane colors, cycled as lanes are created (lines and nodes, never text).
+    pub graph_lanes: [Hsla; 8],
 }
 
 fn hsla(hex: u32) -> Hsla {
@@ -622,6 +637,11 @@ impl Palette {
             ]
             .map(|c| (hsla(c), hsla(c).opacity(0.18))),
             banner: hsla(self.modified).opacity(0.16),
+            // Git Graph's palette works on both dark and light backgrounds.
+            graph_lanes: [
+                0x0085d9, 0xd9008f, 0x00d0a0, 0xd98500, 0xa000d9, 0x00b8d9, 0xd0a000, 0xd94545,
+            ]
+            .map(hsla),
         }
     }
 }

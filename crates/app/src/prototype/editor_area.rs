@@ -15,6 +15,8 @@ struct TabSpec {
     key: usize,
     pane: Pane,
     icon: &'static str,
+    /// A Lucide icon instead of a file-type icon (the Git Graph tab).
+    lucide: Option<IconName>,
     label: String,
     tooltip: String,
     dirty: bool,
@@ -89,6 +91,7 @@ impl Prototype {
                 match pane {
                     Pane::Document(id) => this.close_document(id, window, cx),
                     Pane::Diff => this.close_preview(window, cx),
+                    Pane::Graph => this.close_graph(window, cx),
                     Pane::Welcome => {}
                 }
             }));
@@ -122,7 +125,17 @@ impl Prototype {
                     tab.bg(colors.tabs).text_color(colors.muted)
                 }
             })
-            .child(file_icons::icon(spec.icon))
+            .child(match spec.lucide {
+                Some(name) => Icon::new(name)
+                    .size(theme::FILE_ICON_SIZE)
+                    .text_color(if active {
+                        colors.foreground
+                    } else {
+                        colors.muted
+                    })
+                    .into_any_element(),
+                None => file_icons::icon(spec.icon).into_any_element(),
+            })
             .child(
                 div()
                     .pl_1()
@@ -174,6 +187,7 @@ impl Prototype {
                     key: index,
                     pane: Pane::Document(doc.id),
                     icon: file_icons::for_file(&name),
+                    lucide: None,
                     label: name,
                     tooltip: doc.path.to_string_lossy().into_owned(),
                     dirty: doc.dirty,
@@ -189,6 +203,7 @@ impl Prototype {
                 icon: file_icons::for_file(
                     &diff.path.file_name().unwrap_or_default().to_string_lossy(),
                 ),
+                lucide: None,
                 label: diff.label.clone(),
                 tooltip: diff.tooltip.clone(),
                 dirty: false,
@@ -196,6 +211,19 @@ impl Prototype {
                     workspace_editor_agent::thread::ChangeOrigin::Proposed => "Agent 建议",
                     workspace_editor_agent::thread::ChangeOrigin::Written => "Agent 修改",
                 }),
+                deleted: false,
+            });
+        }
+        if let Some(graph) = &self.graph {
+            specs.push(TabSpec {
+                key: usize::MAX - 1,
+                pane: Pane::Graph,
+                icon: "",
+                lucide: Some(IconName::GitGraph),
+                label: "Git 图".to_string(),
+                tooltip: format!("Git 图 · {}", graph.repo.worktree.display()),
+                dirty: false,
+                note: None,
                 deleted: false,
             });
         }
@@ -239,7 +267,7 @@ impl Prototype {
                     "Diff · 只读"
                 }),
             ),
-            Pane::Welcome => (None, None),
+            Pane::Welcome | Pane::Graph => (None, None),
         };
         let Some(path) = path else {
             return div().into_any_element();
@@ -396,6 +424,7 @@ impl Prototype {
         let content = match self.active {
             Pane::Welcome => return self.render_welcome(cx),
             Pane::Diff => self.render_diff(cx),
+            Pane::Graph => self.render_graph(cx),
             Pane::Document(id) => match self.documents.iter().find(|doc| doc.id == id) {
                 Some(doc) => Editor::new(&doc.editor)
                     .bordered(false)

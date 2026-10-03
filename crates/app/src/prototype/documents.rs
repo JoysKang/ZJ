@@ -310,6 +310,7 @@ impl Prototype {
         match self.active {
             Pane::Document(id) => self.close_document(id, window, cx),
             Pane::Diff => self.close_preview(window, cx),
+            Pane::Graph => self.close_graph(window, cx),
             Pane::Welcome => self.close_window_after_confirm(window, cx),
         }
     }

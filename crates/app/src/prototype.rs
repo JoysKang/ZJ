@@ -48,6 +48,7 @@ pub use documents::{
 mod editor_area;
 mod explorer_ops;
 mod find_widget;
+mod graph_view;
 pub use explorer_ops::{
     CopyFiles, CopyPath, CopyRelativePath, CutFiles, Delete as DeleteFile, NewFile, NewFolder,
     PasteFiles, Rename as RenameFile, RevealInFinder,
@@ -97,11 +98,13 @@ enum Sidebar {
     SourceControl,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Pane {
     Welcome,
     Document(DocumentId),
     Diff,
+    /// The Git Graph tab (one at a time, like the diff preview).
+    Graph,
 }
 
 struct Document {
@@ -362,6 +365,8 @@ pub struct Prototype {
     diff_scroll: UniformListScrollHandle,
     preview_title: String,
     preview_diff: Option<DiffTab>,
+    /// The Git Graph tab's state (opened from a repository's header).
+    graph: Option<graph_view::GitGraph>,
     preview_stale: bool,
     generation: u64,
     cancel: Arc<AtomicBool>,
@@ -550,6 +555,7 @@ impl Prototype {
             diff_scroll: UniformListScrollHandle::new(),
             preview_title: String::new(),
             preview_diff: None,
+            graph: None,
             preview_stale: false,
             generation: 0,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -848,7 +854,7 @@ impl Prototype {
                 .find(|doc| doc.id == id)
                 .map(|doc| doc.editor.clone()),
             Pane::Diff => self.preview.clone(),
-            Pane::Welcome => None,
+            Pane::Welcome | Pane::Graph => None,
         }
     }
 

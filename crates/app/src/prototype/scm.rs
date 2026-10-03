@@ -91,7 +91,8 @@ impl Prototype {
             .filter(|_| upstream);
         let fetch = self.scm_request(g, WriteOperation::Fetch);
         let idle = !self.groups[g].write_pending;
-        let (refresh, checkout, create) = (view.clone(), view.clone(), view.clone());
+        let (refresh, checkout, create, graph) =
+            (view.clone(), view.clone(), view.clone(), view.clone());
         let item = |label: &str, request: Option<WriteRequest>| match request {
             Some(request) => git_menu_item(label, request, view.clone()),
             None => PopupMenuItem::new(label.to_string()).disabled(true),
@@ -115,6 +116,9 @@ impl Prototype {
                     }),
             )
             .item(item("抓取", fetch))
+            .item(PopupMenuItem::new("Git 图").on_click(move |_, window, cx| {
+                let _ = graph.update(cx, |this, cx| this.open_git_graph(g, window, cx));
+            }))
             .separator()
             .when_some(stage, |menu, request| {
                 menu.item(git_menu_item("暂存所有更改", request, view.clone()))
@@ -371,6 +375,14 @@ impl Prototype {
                             this.scm_commit(id.clone(), CommitMode::Commit, window, cx)
                         }
                     })),
+            )
+            .child(
+                action(("scm-repo-graph", g), IconName::GitGraph, "Git 图").on_click(cx.listener(
+                    move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.open_git_graph(g, window, cx);
+                    },
+                )),
             )
             .child(
                 action(("scm-repo-refresh", g), IconName::RotateCw, "刷新").on_click(cx.listener(

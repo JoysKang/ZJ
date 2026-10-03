@@ -356,6 +356,7 @@ impl Prototype {
                     };
                 }
                 this.refresh(window, cx);
+                this.graph_reload(&id, window, cx);
                 cx.notify();
             });
         }));

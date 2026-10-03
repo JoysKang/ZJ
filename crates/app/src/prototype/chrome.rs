@@ -136,6 +136,7 @@ impl Prototype {
                 .find(|doc| doc.id == id)
                 .map(|doc| doc.path.clone()),
             Pane::Diff => self.preview_diff.as_ref().map(|diff| diff.path.clone()),
+            Pane::Graph => self.graph.as_ref().map(|graph| graph.repo.worktree.clone()),
             Pane::Welcome => None,
         }
         .or_else(|| self.root.clone())?;
