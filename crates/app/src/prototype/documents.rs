@@ -53,6 +53,9 @@ gpui_kit::actions!(
     ]
 );
 
+// VS Code's 查看: 切换自动换行.
+gpui_kit::actions!(view, [ToggleSoftWrap]);
+
 /// Untitled buffers have no file, so no device / inode: they get ids from a device number
 /// no real file system uses.
 const UNTITLED_DEVICE: u64 = u64::MAX;
@@ -258,6 +261,7 @@ impl Prototype {
                 .language(language)
                 .searchable(false)
                 .tab_size(tab_size(indent))
+                .soft_wrap(soft_wrap_default(language))
                 .default_value(text);
             if !untitled {
                 super::navigation::attach(&mut state, path, view);
@@ -611,6 +615,7 @@ impl Prototype {
                     // An untitled buffer only had the plain-text default; now it has a language.
                     if was_untitled {
                         this.set_indent(id, indent::language_default(&path), cx);
+                        this.set_soft_wrap(id, soft_wrap_default(language), window, cx);
                     }
                     this.markdown_path_changed(id, language, cx);
                     if let Some(owner) = this.owners.borrow_mut().get_mut(&id) {
@@ -1034,6 +1039,30 @@ impl Prototype {
         cx.notify();
     }
 
+    /// ⌥Z: wraps long lines of the active buffer or stops wrapping them (not remembered).
+    pub(super) fn toggle_soft_wrap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(doc) = self.active_document_id().and_then(|id| self.document(id)) {
+            self.set_soft_wrap(doc.id, !doc.soft_wrap, window, cx);
+        }
+    }
+
+    fn set_soft_wrap(
+        &mut self,
+        id: DocumentId,
+        wrap: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(doc) = self.document_mut(id) else {
+            return;
+        };
+        doc.soft_wrap = wrap;
+        doc.editor
+            .update(cx, |state, cx| state.set_soft_wrap(wrap, window, cx));
+        eprintln!("event=soft_wrap_changed enabled={wrap}");
+        cx.notify();
+    }
+
     fn relist_folder(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self.expanded.contains(&dir) || self.root.as_deref() == Some(dir.as_path()) {
             self.reload_directory(dir, window, cx);
@@ -1099,7 +1128,7 @@ impl Document {
         editor: Entity<EditorState>,
         subscription: Subscription,
     ) -> Self {
-        let language = language_for(&path).1;
+        let (language_id, language) = language_for(&path);
         let indent = indent::language_default(&path);
         Self {
             id,
@@ -1112,6 +1141,7 @@ impl Document {
             crlf: false,
             bom: false,
             indent,
+            soft_wrap: soft_wrap_default(language_id),
             disk: None,
             untitled: true,
             version: 0,
@@ -1134,6 +1164,11 @@ impl Document {
             .to_string_lossy()
             .into_owned()
     }
+}
+
+/// Prose wraps by default, code does not.
+fn soft_wrap_default(language: &str) -> bool {
+    matches!(language, "markdown" | "plain")
 }
 
 fn tab_size(indent: Indent) -> TabSize {

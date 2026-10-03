@@ -43,7 +43,7 @@ mod diff_view;
 mod documents;
 pub use documents::{
     AutoSaveAfterDelay, AutoSaveOff, AutoSaveOnFocusChange, CloseEditor, NewUntitled,
-    OpenDocuments, Quit, Save, SaveAll, SaveAs, ToggleLineEnding, quit,
+    OpenDocuments, Quit, Save, SaveAll, SaveAs, ToggleLineEnding, ToggleSoftWrap, quit,
 };
 mod editor_area;
 mod explorer_ops;
@@ -89,6 +89,9 @@ pub use tab_menu::{
 #[cfg(test)]
 #[path = "prototype/indent_ui_tests.rs"]
 mod indent_ui_tests;
+#[cfg(test)]
+#[path = "prototype/soft_wrap_ui_tests.rs"]
+mod soft_wrap_ui_tests;
 #[cfg(test)]
 #[path = "prototype/tab_menu_ui_tests.rs"]
 mod tab_menu_ui_tests;
@@ -148,6 +151,8 @@ struct Document {
     bom: bool,
     /// Tab key and indent width of this buffer (the status bar can change it).
     indent: crate::indent::Indent,
+    /// Long lines wrap at the editor's width.
+    soft_wrap: bool,
     /// The file as last loaded or saved (`None` for untitled buffers).
     disk: Option<crate::save::DiskState>,
     /// Untitled-N: saving asks for a path.
@@ -1910,6 +1915,9 @@ impl Render for Prototype {
             }))
             .on_action(cx.listener(|this, _: &ToggleLineEnding, window, cx| {
                 this.toggle_line_ending(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSoftWrap, window, cx| {
+                this.toggle_soft_wrap(window, cx)
             }))
             .on_action(cx.listener(|this, _: &AutoSaveOff, window, cx| {
                 this.set_auto_save(crate::save::AutoSave::Off, window, cx)

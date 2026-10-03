@@ -228,6 +228,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 prototype::ToggleMarkdownPreview,
                 Some("WorkspaceEditor"),
             ),
+            KeyBinding::new("alt-z", prototype::ToggleSoftWrap, Some("WorkspaceEditor")),
             KeyBinding::new("secondary-q", prototype::Quit, None),
             KeyBinding::new("cmd-o", prototype::OpenFile, Some("WorkspaceEditor")),
             // VS Code: ⌘⇧O is go to symbol; open folder moves to ⌘K ⌘O.
@@ -422,6 +423,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 MenuItem::action("放大", prototype::ZoomIn),
                 MenuItem::action("缩小", prototype::ZoomOut),
                 MenuItem::action("重置缩放", prototype::ZoomReset),
+                MenuItem::separator(),
+                MenuItem::action("自动换行", prototype::ToggleSoftWrap),
                 MenuItem::separator(),
                 MenuItem::action("显示 / 隐藏点文件", prototype::ToggleHiddenFiles),
                 MenuItem::separator(),
