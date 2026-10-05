@@ -49,6 +49,8 @@ gpui_kit::actions!(
 
 /// VS Code stops counting here and shows "19999+".
 const MAX_MATCHES: usize = 19_999;
+/// How long typing in the document must pause before the open find widget searches again.
+const FIND_REFRESH_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 
 pub(super) struct FindState {
     pub open: bool,
@@ -70,6 +72,8 @@ pub(super) struct FindState {
     error: Option<String>,
     /// After a replacement, the next match at or after this offset becomes current.
     resume_at: Option<usize>,
+    /// A search again after the document changed, once typing pauses.
+    refresh: Option<Task<()>>,
     /// The document the matches belong to, and its highlight collection.
     target: Option<(DocumentId, RangeDecorationCollection)>,
     _subscriptions: Vec<Subscription>,
@@ -99,6 +103,7 @@ impl FindState {
             preserve_case: false,
             scope: None,
             scope_mark: None,
+            refresh: None,
             matches: Vec::new(),
             current: None,
             error: None,
@@ -310,6 +315,19 @@ impl Prototype {
                 self.find.target = Some((id, collection));
             }
         }
+    }
+
+    /// The document changed while the widget is open: search again once typing pauses
+    /// rather than on every key (a whole-document search of a large file costs more than a
+    /// frame). The highlights move with the edits meanwhile.
+    pub(super) fn find_document_changed(&mut self, cx: &mut Context<Self>) {
+        if !self.find.open {
+            return;
+        }
+        self.find.refresh = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FIND_REFRESH_DELAY).await;
+            let _ = this.update(cx, |this, cx| this.find_update(false, cx));
+        }));
     }
 
     /// Enter / ⇧Enter, ↑ ↓, ⌘G / ⌘⇧G.

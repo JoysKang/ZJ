@@ -50,6 +50,9 @@ async fn find_in_selection_follows_edits_above_it(cx: &mut TestAppContext) {
         });
     })
     .unwrap();
+    // The widget searches again once typing pauses.
+    cx.executor()
+        .advance_clock(super::FIND_REFRESH_DELAY + std::time::Duration::from_millis(10));
     cx.run_until_parked();
     assert_eq!(
         this.read_with(cx, |p, _| p.find.matches.clone()),

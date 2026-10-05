@@ -277,7 +277,7 @@ impl Prototype {
                     this.document_changed(id, window, cx);
                     this.markdown_buffer_changed(id, cx);
                     if this.active == Pane::Document(id) {
-                        this.find_update(false, cx);
+                        this.find_document_changed(cx);
                     }
                     cx.notify();
                 }
