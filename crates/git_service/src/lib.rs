@@ -300,6 +300,10 @@ impl GitService {
                         match pipe.write(remaining) {
                             Ok(n) => remaining = &remaining[n..],
                             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                            // Git exited (or closed stdin) before reading it all, e.g. a hook
+                            // rejected the commit; its exit status and stderr say why.
+                            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => remaining = &[],
                             Err(e) => return Err(e),
                         }
                     }
@@ -1051,6 +1055,27 @@ mod lock_tests {
         ] {
             assert!(!is_routing_variable(key), "{key}");
         }
+    }
+
+    #[test]
+    fn unread_input_reports_the_git_error_not_a_broken_pipe() {
+        let dir = std::env::temp_dir().join(format!("zj-epipe-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let service = GitService::new(1, Duration::from_secs(10)).unwrap();
+        // Larger than any pipe buffer; Git exits on the bad option without reading stdin.
+        let input = vec![b'x'; 4 << 20];
+        let error = service
+            .run_with_input(
+                &dir,
+                &["hash-object".into(), "--zj-no-such-option".into()],
+                &AtomicBool::new(false),
+                false,
+                Some(&input),
+            )
+            .unwrap_err()
+            .to_string();
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(error.contains("zj-no-such-option"), "{error}");
     }
 
     #[test]
