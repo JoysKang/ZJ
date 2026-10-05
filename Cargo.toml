@@ -52,6 +52,7 @@ debug = 1
 [patch.crates-io]
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
+gpui-base = { path = "vendor/gpui-base" }
 
 # Agent 相关依赖原来单独按体积优化（docs/adr/0004）：dist 已整体 opt-level = "s"，
 # 逐包覆盖不再需要。
