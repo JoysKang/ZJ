@@ -191,11 +191,15 @@ def measure_cold_start(binary, folder, env, runs):
     return statistics.median(wall), statistics.median(reported), max(wall)
 
 
-def measure_idle(binary, folder, env, seconds):
-    app = App(binary, [folder], env)
+def measure_idle(binary, folder, env, seconds, file=None, show_categories=False):
+    """One window idle; with `file` a document is shown, otherwise the welcome page (whose
+    logo cursor blinks while the window is in front)."""
+    app = App(binary, [folder, *([file] if file else [])], env)
     try:
         app.wait_for("event=first_frame", timeout=15)
         app.wait_for("event=refresh_finished", timeout=30)
+        if file:
+            app.wait_for("event=document_opened", timeout=30)
         time.sleep(10)
         footprints = []
         interval = 0.2
@@ -210,6 +214,9 @@ def measure_idle(binary, folder, env, seconds):
             footprints.append(footprint_mb(app.process.pid))
         cpu.sort()
         p95 = cpu[int(len(cpu) * 0.95) - 1] if cpu else 0.0
+        if show_categories:
+            for dirty, name in categories(app.process.pid):
+                print(f"    {dirty:8.1f} MB  {name}")
         return statistics.median(footprints), p95
     finally:
         app.stop()
@@ -318,18 +325,27 @@ def main():
         report["cold_start_reported_ms"] = reported
         report["cold_start_worst_ms"] = worst
         print(f"冷启动到首帧：中位 {wall:.0f} ms（应用自报 {reported:.0f} ms，最慢 {worst:.0f} ms）")
-        idle, cpu = measure_idle(args.binary, folders[0], env, args.idle_seconds)
+        # The budget's idle CPU is without the blinking logo cursor: a document is shown.
+        idle, cpu = measure_idle(args.binary, folders[0], env, args.idle_seconds, files[0],
+                                 show_categories=args.breakdown)
         report["idle_footprint_mb"] = idle
         report["idle_cpu_p95_percent"] = cpu
-        print(f"空闲 footprint（1 个窗口）：{idle:.1f} MB；空闲 CPU p95：{cpu:.3f}%")
+        print(f"空闲（1 个窗口，打开一个文件）：{idle:.1f} MB；CPU p95：{cpu:.3f}%")
+        welcome, blink_cpu = measure_idle(args.binary, folders[0], env, args.idle_seconds,
+                                          show_categories=args.breakdown)
+        report["idle_welcome_footprint_mb"] = welcome
+        report["idle_welcome_cpu_p95_percent"] = blink_cpu
+        print(f"空闲（1 个窗口，欢迎页，光标可能在闪）：{welcome:.1f} MB；CPU p95：{blink_cpu:.3f}%")
         many = measure_many(args.binary, folders, files, env, show_categories=args.breakdown)
         report["three_windows_20_docs_mb"] = many
         print(f"3 个窗口 + {len(files)} 个文档：{many:.1f} MB")
         if args.breakdown:
-            windows_only = measure_many(args.binary, folders, [], env)
+            windows_only = measure_many(args.binary, folders, [], env, show_categories=True)
             report["three_windows_no_docs_mb"] = windows_only
             print(f"3 个窗口、不开文件：{windows_only:.1f} MB")
-            docs_only = measure_many(args.binary, [folders[0]], files, env)
+            # One folder that holds all the files (their common parent).
+            docs_only = measure_many(args.binary, [folders[0].parent], files, env,
+                                     show_categories=True)
             report["one_window_20_docs_mb"] = docs_only
             print(f"1 个窗口 + {len(files)} 个文档：{docs_only:.1f} MB")
         if not args.skip_latency:
