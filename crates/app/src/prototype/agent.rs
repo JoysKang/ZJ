@@ -1752,16 +1752,13 @@ impl Prototype {
             };
             let rows = store.list(&scope, &base, 2000)?;
             let count = |scope: &Scope, archived: Archived| {
-                store
-                    .list(
-                        scope,
-                        &Filter {
-                            archived,
-                            ..Default::default()
-                        },
-                        100_000,
-                    )
-                    .map(|r| r.len())
+                store.count(
+                    scope,
+                    &Filter {
+                        archived,
+                        ..Default::default()
+                    },
+                )
             };
             let here = match &root {
                 Some(root) => count(&Scope::Workspace(root.clone()), Archived::Exclude)?,

@@ -557,6 +557,19 @@ impl History {
     }
 
     /// Pinned sessions first (by pin order), then most recently updated.
+    /// How many sessions `list` would return without a limit.
+    pub fn count(&self, scope: &Scope, filter: &Filter) -> Result<usize> {
+        self.read(|conn| {
+            let (where_sql, values) = filter_sql(scope, filter);
+            let sql = format!(
+                "SELECT COUNT(*) FROM sessions s JOIN workspaces w ON w.id = s.workspace_id{where_sql}"
+            );
+            let count: i64 =
+                conn.query_row(&sql, rusqlite::params_from_iter(values), |r| r.get(0))?;
+            Ok(count as usize)
+        })
+    }
+
     pub fn list(
         &self,
         scope: &Scope,

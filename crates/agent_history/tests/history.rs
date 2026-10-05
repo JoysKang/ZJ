@@ -308,6 +308,19 @@ fn archive_and_filters() {
         }),
         vec![old]
     );
+    // count agrees with list for the same scope and filter.
+    for filter in [
+        Filter::default(),
+        Filter {
+            archived: Archived::Only,
+            ..Default::default()
+        },
+    ] {
+        assert_eq!(
+            h.count(&Scope::All, &filter).unwrap(),
+            h.list(&Scope::All, &filter, 100).unwrap().len()
+        );
+    }
     assert_eq!(
         list(Filter {
             archived: Archived::Include,
