@@ -13,6 +13,7 @@ mod markdown;
 mod markdown_blocks;
 mod partial_patch;
 mod platform;
+mod recovery;
 mod refresh_plan;
 mod replace;
 mod save;
@@ -462,6 +463,10 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // ⌘Q asks about unsaved changes window by window before quitting.
         cx.on_action(|_: &workbench::Quit, cx| workbench::quit(cx));
         session::track(cx);
+        // Before the windows open: they restore what an abnormal exit left unsaved.
+        if let Some(dir) = recovery::dir() {
+            workbench::recovery::install(dir, cx);
+        }
         // 新建窗口 from the menu bar when no window is open to handle it.
         let empty = service.clone();
         cx.on_action(move |_: &workbench::NewWindow, cx| open_empty_window(empty.clone(), cx));

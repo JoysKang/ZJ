@@ -83,6 +83,7 @@ pub use markdown_preview::ToggleMarkdownPreview;
 mod auto_save_ui_tests;
 pub mod navigation;
 mod quick_open;
+pub(crate) mod recovery;
 #[cfg(test)]
 #[path = "workbench/reopen_ui_tests.rs"]
 mod reopen_ui_tests;
@@ -194,6 +195,16 @@ struct Document {
     agent_read: Option<u64>,
     auto_save: crate::save::Debounce,
     auto_save_task: Option<Task<()>>,
+    /// The recovery snapshot key of an untitled buffer (made on its first snapshot, or kept
+    /// from the snapshot it was restored from).
+    untitled_key: Option<String>,
+    /// Edits waiting for their recovery snapshot (`recovery::SNAPSHOT_DELAY`).
+    snapshot: crate::save::Debounce,
+    snapshot_task: Option<Task<()>>,
+    /// The key of this buffer's snapshot on disk, if one was written.
+    snapshot_on_disk: Option<String>,
+    /// Restored from a snapshot at launch: the recovery banner shows until 保留 / a save.
+    recovered: bool,
     /// Markdown files: the live preview (`None` for other languages).
     markdown: Option<markdown_preview::MarkdownPreview>,
     _subscription: Subscription,
@@ -637,6 +648,14 @@ impl Workbench {
         if this.agent.visible {
             this.agent_ensure_session();
         }
+        // Snapshots an abnormal exit left: first each window takes its folder's, then (one
+        // round later, once every window has had its turn) the first takes the rest.
+        cx.defer_in(window, |this, window, cx| {
+            this.claim_recovery(false, window, cx);
+            cx.defer_in(window, |this, window, cx| {
+                this.claim_recovery(true, window, cx)
+            });
+        });
         eprintln!("event=window_opened number={number}");
         this
     }
@@ -1160,81 +1179,97 @@ impl Workbench {
                         return;
                     }
                 };
-                let id = loaded.id;
-                if let Some(existing) = this
-                    .documents
-                    .iter()
-                    .find(|doc| doc.id == id || doc.path == loaded.path)
-                    .map(|doc| doc.id)
-                {
-                    this.select_pane(Pane::Document(existing), window, cx);
-                    this.message = "已定位到打开的标签；保留缓冲区内容".into();
+                if this.install_loaded(loaded, indent, window, cx).is_some() {
                     this.apply_pending_place(window, cx);
-                    return;
                 }
-                let owner = this
-                    .owners
-                    .borrow()
-                    .iter()
-                    .find(|(key, owner)| **key == id || owner.path == loaded.path)
-                    .map(|(id, owner)| (*id, owner.clone()));
-                if let Some((existing, owner)) = owner {
-                    if cx
-                        .update_window(owner.window, |_, window, cx| {
-                            owner
-                                .view
-                                .update(cx, |this, cx| {
-                                    this.select_pane(Pane::Document(existing), window, cx)
-                                })
-                                .map(|_| window.activate_window())
-                        })
-                        .is_ok_and(|result| result.is_ok())
-                    {
-                        this.message = "文件已在另一窗口打开，已定位到原窗口".into();
-                        cx.notify();
-                        return;
-                    }
-                    this.owners.borrow_mut().remove(&existing);
-                }
-                if this.documents.len() >= 20
-                    || this.documents.iter().map(|doc| doc.bytes).sum::<usize>() + loaded.bytes
-                        > files::MAX_OPEN_BYTES
-                {
-                    this.message = "已达到 20 个文件 / 20 MiB 原文的原型上限，请先关闭标签".into();
-                    cx.notify();
-                    return;
-                }
-                let (language, language_name) = language_for(&loaded.path);
-                let path = loaded.path.clone();
-                let (editor, subscription) =
-                    this.document_editor(id, &path, loaded.text, indent, window, cx);
-                this.documents.push(Document {
-                    indent,
-                    readonly: loaded.readonly,
-                    bytes: loaded.bytes,
-                    language: language_name,
-                    crlf: loaded.crlf,
-                    bom: loaded.bom,
-                    disk: Some(loaded.disk),
-                    untitled: false,
-                    markdown: markdown_preview::MarkdownPreview::for_language(language, false, cx),
-                    ..Document::new(id, path, editor, subscription)
-                });
-                this.owners.borrow_mut().insert(
-                    id,
-                    DocumentOwner {
-                        path: loaded.path,
-                        view: cx.weak_entity(),
-                        window: window.window_handle(),
-                    },
-                );
-                this.message.clear();
-                this.markdown_refresh(id, cx);
-                this.select_pane(Pane::Document(id), window, cx);
-                this.apply_pending_place(window, cx);
             });
         }));
         cx.notify();
+    }
+
+    /// A file read in the background becomes a tab (or focuses the tab that already has it,
+    /// here or in another window). Returns the new tab's document, `None` when the file was
+    /// already open or the open-file limit is reached.
+    fn install_loaded(
+        &mut self,
+        loaded: files::TextFile,
+        indent: crate::indent::Indent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<DocumentId> {
+        let this = self;
+        let id = loaded.id;
+        if let Some(existing) = this
+            .documents
+            .iter()
+            .find(|doc| doc.id == id || doc.path == loaded.path)
+            .map(|doc| doc.id)
+        {
+            this.select_pane(Pane::Document(existing), window, cx);
+            this.message = "已定位到打开的标签；保留缓冲区内容".into();
+            this.apply_pending_place(window, cx);
+            return None;
+        }
+        let owner = this
+            .owners
+            .borrow()
+            .iter()
+            .find(|(key, owner)| **key == id || owner.path == loaded.path)
+            .map(|(id, owner)| (*id, owner.clone()));
+        if let Some((existing, owner)) = owner {
+            if cx
+                .update_window(owner.window, |_, window, cx| {
+                    owner
+                        .view
+                        .update(cx, |this, cx| {
+                            this.select_pane(Pane::Document(existing), window, cx)
+                        })
+                        .map(|_| window.activate_window())
+                })
+                .is_ok_and(|result| result.is_ok())
+            {
+                this.message = "文件已在另一窗口打开，已定位到原窗口".into();
+                cx.notify();
+                return None;
+            }
+            this.owners.borrow_mut().remove(&existing);
+        }
+        if this.documents.len() >= 20
+            || this.documents.iter().map(|doc| doc.bytes).sum::<usize>() + loaded.bytes
+                > files::MAX_OPEN_BYTES
+        {
+            this.message = "已达到 20 个文件 / 20 MiB 原文的原型上限，请先关闭标签".into();
+            cx.notify();
+            return None;
+        }
+        let (language, language_name) = language_for(&loaded.path);
+        let path = loaded.path.clone();
+        let (editor, subscription) =
+            this.document_editor(id, &path, loaded.text, indent, window, cx);
+        this.documents.push(Document {
+            indent,
+            readonly: loaded.readonly,
+            bytes: loaded.bytes,
+            language: language_name,
+            crlf: loaded.crlf,
+            bom: loaded.bom,
+            disk: Some(loaded.disk),
+            untitled: false,
+            markdown: markdown_preview::MarkdownPreview::for_language(language, false, cx),
+            ..Document::new(id, path, editor, subscription)
+        });
+        this.owners.borrow_mut().insert(
+            id,
+            DocumentOwner {
+                path: loaded.path,
+                view: cx.weak_entity(),
+                window: window.window_handle(),
+            },
+        );
+        this.message.clear();
+        this.markdown_refresh(id, cx);
+        this.select_pane(Pane::Document(id), window, cx);
+        Some(id)
     }
 
     fn remove_document(&mut self, id: DocumentId, window: &mut Window, cx: &mut Context<Self>) {
@@ -1248,6 +1283,8 @@ impl Workbench {
                 offset,
             });
         }
+        // Closed after its edits were saved or discarded: nothing to recover.
+        self.forget_snapshot(id, cx);
         self.documents.retain(|doc| doc.id != id);
         self.owners.borrow_mut().remove(&id);
         if self.active == Pane::Document(id) {
@@ -1928,7 +1965,9 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &SaveAll, window, cx| {
                 this.save_all(window, cx).detach()
             }))
-            .on_action(cx.listener(|this, _: &NewUntitled, window, cx| this.new_untitled(window, cx)))
+            .on_action(cx.listener(|this, _: &NewUntitled, window, cx| {
+                this.new_untitled(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &CloseEditor, window, cx| this.close_editor(window, cx)))
             .on_action(cx.listener(|this, _: &ReopenClosedEditor, window, cx| {
                 this.reopen_closed_tab(window, cx)

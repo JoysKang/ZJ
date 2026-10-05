@@ -52,6 +52,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `assets.rs`：内嵌资源；`file_icons.rs`：文件类型到图标的映射。
   - `files.rs`：受限的文件读取、紧凑存储的快速打开路径索引和点文件默认隐藏规则；`fuzzy.rs`：模糊匹配打分。
   - `save.rs`：保存的纯逻辑（同目录临时文件 + fsync + rename、保留权限 / 换行符 / BOM、符号链接写到目标、多硬链接原地写、只读识别、按设备 / inode / 大小 / mtime / 内容哈希判断外部修改、退出询问的状态机、自动保存防抖、比较用的补丁）；`workbench/documents.rs`：保存、另存为、全部保存、Untitled、关闭 / 退出确认、外部修改横幅、自动保存，以及给 Agent 层的 `buffer_text` / `on_buffer_saved`。
+  - 编辑恢复（开发说明 R11 / A16）：`recovery.rs` 是快照记录的纯逻辑（每个未保存缓冲区一个带版本的 JSON，放在设置文件旁的 `recovery/`，临时文件 + rename，权限 0600）；`workbench/recovery.rs` 在编辑停顿 2 秒后经单一后台队列写快照，保存 / 重新加载 / 不保存 / 关窗时删除，退出时同步清空，启动时把异常退出留下的快照恢复进标签（带横幅，可放弃）。只在有待写快照时才有定时器。
   - `settings.rs`：所有窗口共用的设置文件（字号、显示隐藏文件、Diff 布局、隐藏无变更仓库、搜索排除、Dock 图标闪烁、自动保存）。
   - `platform.rs`：少量 macOS 系统接口（“减少动态效果”、Dock 图标替换与闪烁），其他平台为空实现；`workbench/welcome.rs`：欢迎页 logo 上单独绘制的闪烁光标。
   - `file_ops.rs`：资源管理器的新建、重命名、复制、移动和移到废纸篓；`workbench/explorer_ops.rs`：右键菜单、快捷键和行内改名；`workbench/tab_menu.rs`：编辑器标签页的右键菜单、对应快捷键和 ⇧⌘T 重开已关闭标签的栈。

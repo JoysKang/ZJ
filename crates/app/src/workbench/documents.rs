@@ -149,7 +149,11 @@ pub fn quit(cx: &mut App) {
             }
         }
         if flow.should_quit() {
-            cx.update(|cx| cx.quit());
+            cx.update(|cx| {
+                // Every unsaved buffer was saved or discarded: no snapshot should outlive us.
+                super::recovery::forget_everything(cx);
+                cx.quit();
+            });
         }
     })
     .detach();
@@ -202,6 +206,7 @@ impl Workbench {
                 });
             }));
         }
+        self.schedule_snapshot(id, window, cx);
     }
 
     /// files.autoSave = onFocusChange: the window lost focus or another tab was chosen.
@@ -287,7 +292,11 @@ impl Workbench {
     }
 
     /// ⌘N: an empty Untitled-N buffer; saving it asks where.
-    pub(super) fn new_untitled(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn new_untitled(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> DocumentId {
         let id = DocumentId {
             device: UNTITLED_DEVICE,
             inode: NEXT_UNTITLED.fetch_add(1, Ordering::Relaxed),
@@ -313,6 +322,7 @@ impl Workbench {
             },
         );
         self.select_pane(Pane::Document(id), window, cx);
+        id
     }
 
     /// ⌘W: closes the active tab (asking first when it has unsaved edits); with no tab
@@ -465,6 +475,9 @@ impl Workbench {
             doc.deleted = false;
             // Edits made while the write was running keep the tab edited.
             doc.dirty = doc.version != version;
+        }
+        if self.document(id).is_some_and(|doc| !doc.dirty) {
+            self.forget_snapshot(id, cx);
         }
         eprintln!("event=document_saved bytes={}", state.stamp.len);
         self.message = format!(
@@ -746,7 +759,12 @@ impl Workbench {
             let _ = this.update_in(cx, |this, window, cx| {
                 this.closing = false;
                 if close {
-                    // Answered: the window closes without asking again.
+                    // Answered: the window closes without asking again, and nothing of it
+                    // needs recovering.
+                    let ids: Vec<DocumentId> = this.documents.iter().map(|doc| doc.id).collect();
+                    for id in ids {
+                        this.forget_snapshot(id, cx);
+                    }
                     for doc in &mut this.documents {
                         doc.dirty = false;
                     }
@@ -853,6 +871,7 @@ impl Workbench {
         if doc.saving {
             return;
         }
+        let mut snapshot = false;
         match on_disk {
             OnDisk::Same => {}
             OnDisk::Touched(state) => doc.disk = Some(state),
@@ -860,13 +879,19 @@ impl Workbench {
                 if !doc.deleted {
                     doc.deleted = true;
                     doc.unedited_when_deleted = (!doc.dirty).then_some(doc.version);
-                    // The buffer is now the only copy: closing it asks first.
+                    // The buffer is now the only copy: closing it asks first, and it is
+                    // snapshotted like an edit.
                     doc.dirty = true;
+                    snapshot = true;
                 }
             }
             OnDisk::Changed { state, bytes } => {
                 if doc.deleted && doc.unedited_when_deleted == Some(doc.version) {
                     doc.dirty = false;
+                    doc.snapshot.poke();
+                    if let Some(key) = doc.snapshot_on_disk.take() {
+                        super::recovery::remove_snapshot(key, cx);
+                    }
                 }
                 doc.deleted = false;
                 if doc.dirty
@@ -892,6 +917,9 @@ impl Workbench {
                 doc.bom = bom;
                 self.set_buffer_text(id, &text, window, cx);
             }
+        }
+        if snapshot {
+            self.schedule_snapshot(id, window, cx);
         }
     }
 
@@ -964,6 +992,7 @@ impl Workbench {
                             doc.banner = None;
                             doc.deleted = false;
                         }
+                        this.forget_snapshot(id, cx);
                     }
                     Ok((_, None)) => {
                         this.message = "磁盘上的文件不是 UTF-8 文本，未重新加载".into()
@@ -1105,13 +1134,17 @@ impl Workbench {
         let id = self.active_document_id()?;
         let doc = self.document(id)?;
         let colors = theme::colors(cx);
+        let recovered = doc.recovered && doc.banner.is_none() && !doc.deleted;
         let (text, actions): (&str, bool) = if doc.banner.is_some() {
             ("磁盘上的文件已更改。", true)
         } else if doc.deleted {
             ("磁盘上的文件已删除。保存会重新创建它。", false)
+        } else if recovered {
+            ("已恢复上次异常退出前未保存的修改。", false)
         } else {
             return None;
         };
+        let can_discard = recovered && !doc.untitled;
         let button =
             |id: &'static str, label: &'static str| Button::new(id).xsmall().ghost().label(label);
         Some(
@@ -1132,6 +1165,21 @@ impl Workbench {
                         .text_color(colors.modified),
                 )
                 .child(div().flex_1().min_w_0().child(text))
+                .when(recovered, |banner| {
+                    banner
+                        .child(button("recovery-keep", "保留").on_click(
+                            cx.listener(move |this, _, _, cx| this.keep_recovered(id, cx)),
+                        ))
+                        .when(can_discard, |banner| {
+                            banner.child(
+                                button("recovery-discard", "放弃，用磁盘上的版本").on_click(
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.reload_from_disk(id, window, cx)
+                                    }),
+                                ),
+                            )
+                        })
+                })
                 .when(actions, |banner| {
                     banner
                         .child(button("disk-reload", "重新加载").on_click(cx.listener(
@@ -1183,6 +1231,11 @@ impl Document {
             agent_read: None,
             auto_save: Default::default(),
             auto_save_task: None,
+            untitled_key: None,
+            snapshot: Default::default(),
+            snapshot_task: None,
+            snapshot_on_disk: None,
+            recovered: false,
             markdown: None,
             _subscription: subscription,
         }
