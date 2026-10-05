@@ -12,9 +12,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # stripped aarch64 --profile dist 二进制体积上限（字节）。
-  # TODO: 首次在 macOS runner 上运行后，按实测值 + 约 10% 校准；
-  # 当前取 Linux x86_64 dist 实测约 40.7 MB（含 ADR 0001 的语法）+ 约 10%。
-  BINARY_BUDGET_BYTES: "56000000"
+  # 2026-10-06 macOS 实测约 28.5 MB，上限取约 +12%，让体积上涨尽早暴露。
+  # 要超过它，先按 CLAUDE.md 的依赖准入写明增量（超过 200 KB 单独写决策记录），再调这里。
+  BINARY_BUDGET_BYTES: "32000000"
 
 jobs:
   macos:
