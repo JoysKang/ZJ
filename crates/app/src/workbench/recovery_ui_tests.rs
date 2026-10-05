@@ -96,6 +96,18 @@ async fn snapshots_left_by_a_crash_come_back_and_can_be_discarded(cx: &mut TestA
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("a.txt");
     std::fs::write(&path, "on disk").unwrap();
+    // A file outside the window's folder (it was open in a window that is gone).
+    let elsewhere = base.join("elsewhere.txt");
+    std::fs::write(&elsewhere, "outside").unwrap();
+    let outside = Record {
+        key: recovery::file_key(&elsewhere),
+        path: elsewhere.clone(),
+        untitled: false,
+        root: Some(base.join("gone")),
+        text: "outside, edited".into(),
+        written_at: 3,
+    };
+    recovery::apply(&store, &Op::Write(outside)).unwrap();
     let file = Record {
         key: recovery::file_key(&path),
         path: path.clone(),
@@ -117,7 +129,7 @@ async fn snapshots_left_by_a_crash_come_back_and_can_be_discarded(cx: &mut TestA
     cx.update(|cx| super::install(store.clone(), cx));
     let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
     settle(cx, Some(window), |cx| {
-        this.read_with(cx, |p, _| p.documents.len() == 2)
+        this.read_with(cx, |p, _| p.documents.len() == 3)
     });
     let state = |cx: &mut TestAppContext| {
         this.read_with(cx, |p, cx| {
@@ -139,6 +151,7 @@ async fn snapshots_left_by_a_crash_come_back_and_can_be_discarded(cx: &mut TestA
     assert_eq!(
         docs,
         [
+            (false, "outside, edited".to_string(), true, true),
             (false, "unsaved".to_string(), true, true),
             (true, "scratch".to_string(), true, true),
         ]

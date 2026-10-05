@@ -1205,8 +1205,15 @@ impl Workbench {
         then: impl FnOnce(&mut Self, Result<DocumentId, String>, &mut Window, &mut Context<Self>)
         + 'static,
     ) {
-        let root = self.root.clone();
+        let workspace = self.root.clone();
         let job = cx.background_spawn(async move {
+            // These paths were named explicitly (command line, snapshot, last session): a file
+            // outside the folder is read like a file-picker choice, inside it through the
+            // folder's confined walk.
+            let inside = workspace.as_ref().is_some_and(|root| {
+                std::fs::canonicalize(&path).is_ok_and(|path| path.starts_with(root))
+            });
+            let root = workspace.filter(|_| inside);
             let loaded = files::text_file(root.as_deref(), &path)?;
             let root = root.and_then(|root| std::fs::canonicalize(root).ok());
             let indent = crate::indent::resolve(&loaded.path, root.as_deref(), &loaded.text);
