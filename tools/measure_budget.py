@@ -228,7 +228,7 @@ def measure_idle(binary, folder, env, seconds, file=None, show_categories=False)
         app.stop()
 
 
-def categories(pid):
+def categories(pid, top=8):
     """The largest `footprint` categories of the app process (dirty bytes)."""
     out = subprocess.run(["footprint", "-p", str(pid)], capture_output=True, text=True).stdout
     rows = []
@@ -244,7 +244,7 @@ def categories(pid):
             name = " ".join(parts[7:]) if len(parts) > 7 else parts[-1]
             if name != "TOTAL":
                 rows.append((dirty, name))
-    return sorted(rows, reverse=True)[:8]
+    return sorted(rows, reverse=True)[:top]
 
 
 def measure_many(binary, folders, files, env, show_categories=False):
@@ -264,6 +264,35 @@ def measure_many(binary, folders, files, env, show_categories=False):
         return value
     finally:
         app.stop()
+
+
+def measure_per_window(binary, base, env):
+    """What one more window costs: footprint categories with 1 and with 3 empty folders open."""
+    folders = []
+    for index in range(3):
+        folder = base / f"empty{index}"
+        folder.mkdir(exist_ok=True)
+        (folder / "README.md").write_text("empty\n")
+        folders.append(folder)
+    measured = []
+    for count in (1, 3):
+        app = App(binary, folders[:count], env)
+        try:
+            app.wait_for("event=refresh_finished", count=count, timeout=60)
+            time.sleep(10)
+            total = statistics.median(footprint_mb(app.process.pid) for _ in range(10))
+            measured.append((total, dict((name, dirty) for dirty, name in
+                                         categories(app.process.pid, top=None))))
+        finally:
+            app.stop()
+    (one, one_rows), (three, three_rows) = measured
+    print(f"每多一个窗口：{(three - one) / 2:.1f} MB（1 个窗口 {one:.1f} MB，3 个窗口 {three:.1f} MB）")
+    deltas = sorted(((three_rows.get(n, 0) - one_rows.get(n, 0)) / 2, n)
+                    for n in set(one_rows) | set(three_rows))
+    for delta, name in reversed(deltas[-12:]):
+        if delta > 0.05:
+            print(f"    {delta:+8.1f} MB  {name}")
+    return (three - one) / 2
 
 
 def measure_latency(binary, folder, file, env, keys):
@@ -316,6 +345,8 @@ def main():
     parser.add_argument("--skip-latency", action="store_true")
     parser.add_argument("--breakdown", action="store_true",
                         help="also 3 windows without files, 1 window with the files, categories")
+    parser.add_argument("--per-window", action="store_true",
+                        help="also what one more window costs, by footprint category")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if not args.binary.is_file():
@@ -354,6 +385,8 @@ def main():
                                      show_categories=True)
             report["one_window_20_docs_mb"] = docs_only
             print(f"1 个窗口 + {len(files)} 个文档：{docs_only:.1f} MB")
+        if args.per_window:
+            report["per_window_mb"] = measure_per_window(args.binary, base, env)
         if not args.skip_latency:
             try:
                 p50, p99, count = measure_latency(args.binary, folders[0], files[0], env, args.keys)
