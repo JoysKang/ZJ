@@ -44,13 +44,13 @@ impl Prototype {
         let subscription = match cx.global::<WatchService>().subscribe(root) {
             Ok(subscription) => subscription,
             Err(error) => {
-                self.watch_error = Some(format!("文件监听不可用：{error}；请手动刷新"));
+                self.watch.error = Some(format!("文件监听不可用：{error}；请手动刷新"));
                 return;
             }
         };
-        self.watch_error = subscription.take_pending().error;
-        self.watch = Some(subscription.clone());
-        self.watch_task = Some(cx.spawn_in(window, async move |this, cx| {
+        self.watch.error = subscription.take_pending().error;
+        self.watch.subscription = Some(subscription.clone());
+        self.watch.task = Some(cx.spawn_in(window, async move |this, cx| {
             loop {
                 let mut notice = subscription.receive().await;
                 if !notice.changed && notice.error.is_none() {
@@ -58,7 +58,7 @@ impl Prototype {
                 }
                 let started = Instant::now();
                 if this
-                    .update(cx, |this, _| this.watch_debouncing = true)
+                    .update(cx, |this, _| this.watch.debouncing = true)
                     .is_err()
                 {
                     break;
@@ -76,7 +76,7 @@ impl Prototype {
                     (
                         this.repo_roots(),
                         this.index.clone(),
-                        this.ignore_cache.clone(),
+                        this.watch.ignore_cache.clone(),
                         this.service.clone(),
                         this.documents
                             .iter()
@@ -146,9 +146,9 @@ impl Prototype {
                 if this
                     .update_in(cx, |this, window, cx| {
                         if let Some(error) = notice.error {
-                            this.watch_error = Some(format!("文件监听错误：{error}；请手动刷新"));
+                            this.watch.error = Some(format!("文件监听错误：{error}；请手动刷新"));
                         }
-                        this.watch_debouncing = false;
+                        this.watch.debouncing = false;
                         if !open_changed.is_empty() {
                             this.check_disk(Some(&open_changed), window, cx);
                         }
@@ -170,7 +170,7 @@ impl Prototype {
             index,
         } = computed;
         if plan.full {
-            self.workspace_refresh_pending = true;
+            self.watch.refresh_pending = true;
             self.invalidate_preview(cx);
             return;
         }
@@ -188,42 +188,42 @@ impl Prototype {
                 plan.rebuild_index = true;
             }
         }
-        match &mut self.pending_plan {
+        match &mut self.watch.pending_plan {
             Some(pending) => pending.merge(plan),
-            None => self.pending_plan = Some(plan),
+            None => self.watch.pending_plan = Some(plan),
         }
     }
 
     /// The watcher already reports changes; activation only re-queries status (cheap), unless
     /// watching is unavailable.
     pub(super) fn refresh_on_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.watch.is_none() || self.watch_error.is_some() {
-            self.workspace_refresh_pending = true;
+        if self.watch.subscription.is_none() || self.watch.error.is_some() {
+            self.watch.refresh_pending = true;
         } else {
             let repos: HashSet<_> = self.groups.iter().map(|g| g.repo.id.clone()).collect();
             let plan = Plan {
                 repos,
                 ..Default::default()
             };
-            match &mut self.pending_plan {
+            match &mut self.watch.pending_plan {
                 Some(pending) => pending.merge(plan),
-                None => self.pending_plan = Some(plan),
+                None => self.watch.pending_plan = Some(plan),
             }
         }
         self.flush_workspace_refresh(window, cx);
     }
 
     pub(super) fn flush_workspace_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.watch_debouncing
+        if self.watch.debouncing
             || self.loading
             || self.index_task.is_some()
             || !self.tree_tasks.is_empty()
         {
             return;
         }
-        if self.workspace_refresh_pending {
-            self.workspace_refresh_pending = false;
-            self.pending_plan = None;
+        if self.watch.refresh_pending {
+            self.watch.refresh_pending = false;
+            self.watch.pending_plan = None;
             // Re-enumeration preserves expansion and never forces open a manually collapsed path.
             let reveal_pending = self.reveal_pending;
             self.refresh_tree(window, cx);
@@ -232,7 +232,7 @@ impl Prototype {
             self.check_disk(None, window, cx);
             return;
         }
-        let Some(plan) = self.pending_plan.take() else {
+        let Some(plan) = self.watch.pending_plan.take() else {
             return;
         };
         self.apply_files_changed(&plan, window, cx);
@@ -277,4 +277,17 @@ impl Prototype {
         }
         cx.notify();
     }
+}
+
+/// File watching: the shared subscription, the debounce task and refreshes waiting for a quiet moment.
+pub(super) struct WatchState {
+    pub(super) subscription: Option<Arc<crate::watch::Subscription>>,
+    pub(super) task: Option<Task<()>>,
+    pub(super) error: Option<String>,
+    pub(super) debouncing: bool,
+    /// A full refresh (rediscovery, tree and index rebuild) is pending.
+    pub(super) refresh_pending: bool,
+    /// Partial refresh from file watching, applied when the window is not busy.
+    pub(super) pending_plan: Option<crate::refresh_plan::Plan>,
+    pub(super) ignore_cache: Arc<std::sync::Mutex<crate::refresh_plan::IgnoreCache>>,
 }

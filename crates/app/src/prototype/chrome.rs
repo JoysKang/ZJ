@@ -262,7 +262,7 @@ impl Prototype {
                         }),
                 )
             })
-            .when_some(self.watch_error.clone(), |bar, error| {
+            .when_some(self.watch.error.clone(), |bar, error| {
                 bar.child(
                     status_item("status-watch-error", colors)
                         .child(icon(IconName::TriangleAlert))

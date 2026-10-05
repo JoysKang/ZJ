@@ -1,5 +1,5 @@
 use crate::files::{self, Entry, PathIndex};
-use crate::{theme, watch};
+use crate::theme;
 use gpui_kit::{
     component::{
         input::{EditorState, InputEvent, TextareaState},
@@ -438,15 +438,8 @@ pub struct Prototype {
     preview_task: Option<Task<()>>,
     preview_cancel: Arc<AtomicBool>,
     preview_generation: u64,
-    watch: Option<Arc<watch::Subscription>>,
-    watch_task: Option<Task<()>>,
-    watch_error: Option<String>,
-    watch_debouncing: bool,
-    /// A full refresh (rediscovery, tree and index rebuild) is pending.
-    workspace_refresh_pending: bool,
-    /// Partial refresh from file watching, applied when the window is not busy.
-    pending_plan: Option<crate::refresh_plan::Plan>,
-    ignore_cache: Arc<Mutex<crate::refresh_plan::IgnoreCache>>,
+    /// File watching: the shared subscription, the debounce task and refreshes waiting for a quiet moment.
+    watch: workspace_refresh::WatchState,
     /// The agent panel: sessions, thread view, history and the ⌘J search.
     agent: agent::AgentPanel,
     _subscriptions: Vec<Subscription>,
@@ -653,13 +646,15 @@ impl Prototype {
             preview_task: None,
             preview_cancel: Arc::new(AtomicBool::new(false)),
             preview_generation: 0,
-            watch: None,
-            watch_task: None,
-            watch_error: None,
-            watch_debouncing: false,
-            workspace_refresh_pending: false,
-            pending_plan: None,
-            ignore_cache: Default::default(),
+            watch: workspace_refresh::WatchState {
+                subscription: None,
+                task: None,
+                error: None,
+                debouncing: false,
+                refresh_pending: false,
+                pending_plan: None,
+                ignore_cache: Default::default(),
+            },
             agent,
             _subscriptions: vec![appearance, activation, settings, frame],
         };
@@ -1300,7 +1295,7 @@ impl Prototype {
         let generation = self.generation;
         let cancel = self.cancel.clone();
         let service = self.service.clone();
-        let watch = self.watch.clone();
+        let watch = self.watch.subscription.clone();
         let (sender, receiver) = mpsc::sync_channel(64);
         self.loading = true;
         self.excluded = 0;
