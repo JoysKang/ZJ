@@ -438,7 +438,9 @@ impl Workbench {
                             .top(theme::LOGO_CURSOR_TOP)
                             .w(theme::LOGO_CURSOR_WIDTH)
                             .h(theme::LOGO_CURSOR_HEIGHT)
-                            .child(self.welcome_cursor.clone()),
+                            // A steady cursor: anything that blinks keeps the window drawing.
+                            .rounded(theme::LOGO_CURSOR_RADIUS)
+                            .bg(theme::colors(cx).logo_cursor),
                     ),
             )
             .child(

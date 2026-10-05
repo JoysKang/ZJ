@@ -23,7 +23,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 内存看 physical footprint（`footprint -p PID` 或 `tools/sample_resources.py`），并把 Git 子进程算在内。
 
-表中“光标不闪”指编辑器光标和欢迎页 logo 光标都不闪。编辑器光标始终常亮、不闪（`vendor/gpui-base` 的 ZJ patch：Kit 原本每 500 ms 闪一次并整窗重画，会让空闲 CPU 约 3%，并使帧缓冲和路径纹理无法释放）。logo 光标只在欢迎页可见、窗口在前台、系统未开启“减少动态效果”时闪烁（亮 530 ms、灭 530 ms，边缘 120 ms 分 3 步淡入淡出，每秒约 6 帧；只有光标视图重新 render，但每帧仍是整窗重画），其余时候没有定时器。Dock 图标闪烁（设置 `dock_icon_blink`，默认关）是每 530 ms 一次 `setApplicationIconImage`，一个 App 级定时器；开启“减少动态效果”时停止并恢复完整图标。两者都不计入空闲 CPU 预算，但不要再加别的常驻动画。
+表中“光标不闪”指编辑器光标和欢迎页 logo 光标都不闪：两者都常亮。编辑器光标靠 `vendor/gpui-base` 的 ZJ patch（Kit 原本每 500 ms 闪一次并整窗重画）；logo 光标是静态色块。任何闪烁或动画都会让窗口一直出帧，空闲 CPU 上升，渲染器也等不到空闲去归还帧缓冲、停掉 display link（1 个窗口约 190 MB 对 70 MB）。Dock 图标闪烁（设置 `dock_icon_blink`，默认关）是每 530 ms 一次 `setApplicationIconImage`，一个 App 级定时器，不画窗口；开启“减少动态效果”时停止并恢复完整图标。它不计入空闲 CPU 预算，但不要再加别的常驻动画。
 
 ## 依赖准入
 
@@ -55,7 +55,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - 编辑恢复（开发说明 R11 / A16）：`recovery.rs` 是快照记录的纯逻辑（每个未保存缓冲区一个带版本的 JSON，放在设置文件旁的 `recovery/`，临时文件 + rename，权限 0600）；`workbench/recovery.rs` 在编辑停顿 2 秒后经单一后台队列写快照，保存 / 重新加载 / 不保存 / 关窗时删除，退出时同步清空，启动时把异常退出留下的快照恢复进标签（带横幅，可放弃）。只在有待写快照时才有定时器。
   - `settings.rs`：所有窗口共用的设置文件（字号、显示隐藏文件、Diff 布局、隐藏无变更仓库、搜索排除、Dock 图标闪烁、自动保存）。
   - `perf.rs`：给 `tools/measure_budget.py` 用的打点（首帧耗时；`ZJ_LATENCY_LOG=1` 时记录按键到下一帧画完的耗时），平时只有一行首帧日志。
-  - `platform.rs`：少量 macOS 系统接口（“减少动态效果”、Dock 图标替换与闪烁），其他平台为空实现；`workbench/welcome.rs`：欢迎页 logo 上单独绘制的闪烁光标。
+  - `platform.rs`：少量 macOS 系统接口（“减少动态效果”、Dock 图标替换与闪烁），其他平台为空实现。
   - `file_ops.rs`：资源管理器的新建、重命名、复制、移动和移到废纸篓；`workbench/explorer_ops.rs`：右键菜单、快捷键和行内改名；`workbench/tab_menu.rs`：编辑器标签页的右键菜单、对应快捷键和 ⇧⌘T 重开已关闭标签的栈。
   - Markdown 预览：`markdown_blocks.rs` 把文件切成顶层块（纯函数）；`workbench/markdown_preview.rs` 按块用 Kit `TextView` 渲染，点击的块换成源码文本框并直接写回缓冲区，⇧⌘V 切换源码。源码视图下不切分。
   - 终端（docs/adr/0006）：`terminal.rs` 是 `alacritty_terminal` 的衔接层（起 shell、事件、按键编码、ANSI 颜色映射），不依赖界面状态；`workbench/terminal_view.rs` 画网格并处理键鼠和输入法；`workbench/terminal_panel.rs` 是底部面板的分组、拆分和关闭。终端没有定时器，只在 shell 有输出时重画。

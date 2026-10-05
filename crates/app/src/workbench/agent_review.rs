@@ -59,7 +59,6 @@ impl Workbench {
         self.diff.tab = Some(tab);
         self.active = Pane::Diff;
         // The panel stays where it is; the review is the editor's job.
-        self.update_welcome_blink(window, cx);
         self.diff.focus.focus(window, cx);
         self.load_diff(window, cx);
     }

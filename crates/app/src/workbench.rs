@@ -118,7 +118,6 @@ mod soft_wrap_ui_tests;
 #[cfg(test)]
 #[path = "workbench/tab_menu_ui_tests.rs"]
 mod tab_menu_ui_tests;
-mod welcome;
 mod workspace_refresh;
 
 gpui_kit::actions!(
@@ -373,7 +372,6 @@ pub struct Workbench {
     explorer: sidebar::Explorer,
     /// Source Control lists only repositories with changes (settings).
     hide_clean_repos: bool,
-    welcome_cursor: Entity<welcome::WelcomeCursor>,
     /// Source Control rows vary in height (repository rows wrap long branch names), so they
     /// use a measured list instead of `uniform_list`.
     scm_list: ListState,
@@ -481,7 +479,6 @@ impl Workbench {
                 this.agent_follow_settings(cx);
             });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
-            this.update_welcome_blink(window, cx);
             this.agent_update_spin(window, cx);
             if window.is_window_active() {
                 // Files opened from outside the workspace are not watched: look on activation.
@@ -571,7 +568,6 @@ impl Workbench {
                 message: String::new(),
             },
             hide_clean_repos: cx.global::<crate::settings::Settings>().hide_clean_repos,
-            welcome_cursor: cx.new(|_| welcome::WelcomeCursor::new()),
             scm_list: ListState::new(0, ListAlignment::Top, theme::SCM_LIST_OVERDRAW),
             search,
             find,
@@ -648,7 +644,6 @@ impl Workbench {
         this.refresh_tree(window, cx);
         this.focus_handle.focus(window, cx);
         this.refresh(window, cx);
-        this.update_welcome_blink(window, cx);
         if this.agent.visible {
             this.agent_ensure_session();
         }
@@ -885,13 +880,6 @@ impl Workbench {
         }));
     }
 
-    /// The welcome cursor blinks only while the welcome page is shown in the focused window.
-    fn update_welcome_blink(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let blinking = self.active == Pane::Welcome && window.is_window_active();
-        self.welcome_cursor
-            .update(cx, |cursor, cx| cursor.set_blinking(blinking, window, cx));
-    }
-
     /// Changes the settings for every window and reports a failed write in this one.
     fn change_settings(
         &mut self,
@@ -998,7 +986,6 @@ impl Workbench {
         self.active = pane;
         self.explorer.reveal_pending = matches!(pane, Pane::Document(_));
         self.clear_tree_selection_for(pane);
-        self.update_welcome_blink(window, cx);
         self.find_update(false, cx);
         if std::mem::take(&mut self.explorer.focus_on_open) {
             self.explorer.focus.focus(window, cx);
@@ -1828,7 +1815,6 @@ impl Workbench {
                 .unwrap_or(Pane::Welcome);
             self.focus_active_editor(window, cx);
         }
-        self.update_welcome_blink(window, cx);
         cx.notify();
     }
 
@@ -1881,7 +1867,6 @@ impl Workbench {
         self.message.clear();
         self.diff.tab = Some(diff_tab);
         self.active = Pane::Diff;
-        self.update_welcome_blink(window, cx);
         self.focus_handle.focus(window, cx);
         self.load_diff(window, cx);
     }

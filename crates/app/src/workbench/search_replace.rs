@@ -609,7 +609,6 @@ impl Workbench {
         self.message.clear();
         self.diff.tab = Some(tab);
         self.active = Pane::Diff;
-        self.update_welcome_blink(window, cx);
         self.find_update(false, cx);
         self.load_diff(window, cx);
     }

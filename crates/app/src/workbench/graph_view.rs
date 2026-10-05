@@ -338,7 +338,6 @@ impl Workbench {
                 .unwrap_or(Pane::Welcome);
             self.focus_active_editor(window, cx);
         }
-        self.update_welcome_blink(window, cx);
         cx.notify();
     }
 
