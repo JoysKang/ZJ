@@ -529,6 +529,21 @@ impl Prototype {
             }
         });
         crate::session::remember(window, root.as_deref(), true, cx);
+        // A buffer saved in any window may be a file an agent here changed: its review and
+        // line counts compare against what is on disk now.
+        let saved_view = cx.weak_entity();
+        let saved_window = window.window_handle();
+        documents::on_buffer_saved(cx, move |path, cx| {
+            let path = path.to_path_buf();
+            let saved_view = saved_view.clone();
+            // Deferred: the saving window's workbench is still being updated here.
+            cx.defer(move |cx| {
+                let _ = saved_window.update(cx, |_, window, cx| {
+                    let _ =
+                        saved_view.update(cx, |this, cx| this.agent_file_saved(&path, window, cx));
+                });
+            });
+        });
         let frame = cx.observe_window_bounds(window, |this, window, cx| {
             crate::session::remember(window, this.root.as_deref(), false, cx);
         });

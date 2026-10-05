@@ -1552,6 +1552,32 @@ impl Prototype {
 
     // ----- changed files ------------------------------------------------------------------
 
+    /// The user saved `path`: sessions that changed it recount, and an open review of it
+    /// reloads (it compares the snapshot with the file on disk).
+    pub(super) fn agent_file_saved(
+        &mut self,
+        path: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let keys: Vec<u64> = self
+            .agent
+            .sessions
+            .iter()
+            .filter(|s| {
+                s.thread.changed_files.contains_key(path)
+                    || s.client
+                        .as_ref()
+                        .is_some_and(|c| c.snapshot(path).is_some())
+            })
+            .map(|s| s.key)
+            .collect();
+        for key in keys {
+            self.agent_recount(key, window, cx);
+            self.agent_reload_review(key, window, cx);
+        }
+    }
+
     /// Recomputes each changed file's line counts against its review base, in the background.
     pub(super) fn agent_recount(&mut self, key: u64, window: &mut Window, cx: &mut Context<Self>) {
         let store = history(cx);
@@ -1736,14 +1762,13 @@ impl Prototype {
                         100_000,
                     )
                     .map(|r| r.len())
-                    .unwrap_or(0)
             };
             let here = match &root {
-                Some(root) => count(&Scope::Workspace(root.clone()), Archived::Exclude),
+                Some(root) => count(&Scope::Workspace(root.clone()), Archived::Exclude)?,
                 None => 0,
             };
-            let all = count(&Scope::All, Archived::Exclude);
-            let archived = count(&scope, Archived::Only);
+            let all = count(&Scope::All, Archived::Exclude)?;
+            let archived = count(&scope, Archived::Only)?;
             Ok::<_, workspace_editor_agent_history::Error>((rows, (here, all, archived)))
         });
         self.agent.history.task = Some(cx.spawn_in(window, async move |this, cx| {
@@ -1944,7 +1969,16 @@ impl Prototype {
         let limit = HISTORY_PAGE.min(room);
         let job = cx.background_spawn(async move { store.messages_page(id, Some(before), limit) });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(page) = job.await else { return };
+            let page = match job.await {
+                Ok(page) => page,
+                Err(error) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.message = format!("没能读取更早的消息：{error}");
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
             let _ = this.update(cx, |this, cx| {
                 if let Some(session) = this.agent.session_mut(key) {
                     session.oldest_seq = page.first().map(|m| m.seq).or(Some(1));
@@ -2117,12 +2151,26 @@ pub(super) enum HistoryOp {
 }
 
 /// Runs history writes off the UI thread (the first call opens the database).
+/// Queues history writes off the UI thread. A failed write (reported by the writer thread a
+/// little later) shows in the status bar on the next call instead of being dropped.
 fn background_history(
     cx: &mut Context<Prototype>,
     store: Arc<History>,
     work: impl FnOnce(&History) + Send + 'static,
 ) {
-    cx.background_spawn(async move { work(&store) }).detach();
+    let job = cx.background_spawn(async move {
+        work(&store);
+        store.take_error()
+    });
+    cx.spawn(async move |this, cx| {
+        if let Some(error) = job.await {
+            let _ = this.update(cx, |this, cx| {
+                this.message = format!("Agent 会话记录没能保存：{error}");
+                cx.notify();
+            });
+        }
+    })
+    .detach();
 }
 
 type BufferRequest = (PathBuf, async_channel::Sender<Option<String>>);

@@ -93,8 +93,8 @@ pub fn buffer_text(path: &Path, cx: &mut App) -> Option<String> {
     })
 }
 
-/// Runs `hook` with the path of every buffer saved to disk from now on.
-#[allow(dead_code)] // Called by the agent layer.
+/// Runs `hook` with the path of every buffer saved to disk from now on (each workbench window
+/// registers one for its agent sessions; hooks of closed windows do nothing).
 pub fn on_buffer_saved(cx: &mut App, hook: impl Fn(&Path, &mut App) + 'static) {
     cx.default_global::<SavedHooks>().0.push(Rc::new(hook));
 }

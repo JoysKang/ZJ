@@ -762,6 +762,18 @@ fn write_errors_surface_on_flush() {
     assert!(err.to_string().contains("会话历史数据库出错"), "{err}");
     // Reported once.
     h.flush().unwrap();
+    // Without waiting: the error shows on a call after the writer got to it.
+    h.append_message(SessionId(424242), Role::User, "还是没有");
+    let started = Instant::now();
+    let error = loop {
+        if let Some(error) = h.take_error() {
+            break error;
+        }
+        assert!(started.elapsed().as_secs() < 10, "the error never surfaced");
+        thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(error.contains("会话历史数据库出错"), "{error}");
+    assert_eq!(h.take_error(), None);
 }
 
 #[test]

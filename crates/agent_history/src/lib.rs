@@ -437,6 +437,16 @@ impl History {
         self.call(|reply| Op::Delete(writer::DeleteTarget::Workspace(root), reply))
     }
 
+    /// The first write error since the last flush or call, without waiting for the queue
+    /// (errors of writes still queued show up on a later call).
+    pub fn take_error(&self) -> Option<String> {
+        let inner = self.inner().ok()?;
+        let mut errors = inner.errors.lock().unwrap();
+        let first = (!errors.is_empty()).then(|| errors.remove(0));
+        errors.clear();
+        first
+    }
+
     /// Waits until every queued write is committed. Returns the first write error since the
     /// previous flush, if any.
     pub fn flush(&self) -> Result<()> {

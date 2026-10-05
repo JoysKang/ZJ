@@ -6,6 +6,8 @@
 use std::collections::BTreeMap;
 
 pub const KEYCHAIN_SERVICE: &str = "ZJ Agent";
+/// Long enough to answer the Keychain's "allow access" dialog.
+const KEYCHAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The Terminal command that stores a key for `keychain:ACCOUNT` (shown in the settings).
 pub fn keychain_hint(account: &str) -> String {
@@ -23,7 +25,7 @@ fn keychain(account: &str) -> Result<String, String> {
     if !cfg!(target_os = "macos") {
         return Err(format!("钥匙串（keychain:{account}）只在 macOS 上可用"));
     }
-    let output = std::process::Command::new("/usr/bin/security")
+    let mut child = std::process::Command::new("/usr/bin/security")
         .args([
             "find-generic-password",
             "-s",
@@ -33,17 +35,41 @@ fn keychain(account: &str) -> Result<String, String> {
             "-w",
         ])
         .stdin(std::process::Stdio::null())
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .map_err(|e| format!("无法运行 security：{e}"))?;
-    if !output.status.success() {
+    // An unanswered Keychain authorization dialog must not leave the session starting forever.
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < KEYCHAIN_TIMEOUT => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "读取钥匙串 {account} 超时；如果弹出了授权对话框，请允许后重试"
+                ));
+            }
+            Err(e) => return Err(format!("无法等待 security：{e}")),
+        }
+    };
+    let mut stdout = Vec::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        use std::io::Read;
+        pipe.read_to_end(&mut stdout)
+            .map_err(|e| format!("无法读取 security 的输出：{e}"))?;
+    }
+    if !status.success() {
         return Err(format!(
             "钥匙串里没有 {KEYCHAIN_SERVICE} / {account}；可在终端运行：{}",
             keychain_hint(account)
         ));
     }
-    let value = String::from_utf8_lossy(&output.stdout)
-        .trim_end()
-        .to_string();
+    let value = String::from_utf8_lossy(&stdout).trim_end().to_string();
     if value.is_empty() {
         return Err(format!("钥匙串里的 {account} 是空的"));
     }
