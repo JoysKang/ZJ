@@ -194,13 +194,16 @@ def measure_cold_start(binary, folder, env, runs):
 def measure_idle(binary, folder, env, seconds, file=None, show_categories=False):
     """One window idle; with `file` a document is shown, otherwise the welcome page (whose
     logo cursor blinks while the window is in front)."""
-    app = App(binary, [folder, *([file] if file else [])], env)
+    # The frame log tells whether idle CPU comes from frames (a wake-up) or from other work.
+    app = App(binary, [folder, *([file] if file else [])], dict(env, ZJ_FRAME_LOG="1"))
     try:
         app.wait_for("event=first_frame", timeout=15)
         app.wait_for("event=refresh_finished", timeout=30)
         if file:
             app.wait_for("event=document_opened", timeout=30)
         time.sleep(10)
+        frames_before = len(app.events("event=frame"))
+        wakes_before = len(app.events("event=display_link state=woken"))
         footprints = []
         interval = 0.2
         cpu = []
@@ -215,6 +218,9 @@ def measure_idle(binary, folder, env, seconds, file=None, show_categories=False)
         cpu.sort()
         p95 = cpu[int(len(cpu) * 0.95) - 1] if cpu else 0.0
         if show_categories:
+            frames = len(app.events("event=frame")) - frames_before
+            wakes = len(app.events("event=display_link state=woken")) - wakes_before
+            print(f"    测量期间出帧 {frames} 次，display link 被唤醒 {wakes} 次")
             for dirty, name in categories(app.process.pid):
                 print(f"    {dirty:8.1f} MB  {name}")
         return statistics.median(footprints), p95
