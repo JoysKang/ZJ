@@ -168,3 +168,64 @@ async fn snapshots_left_by_a_crash_come_back_and_can_be_discarded(cx: &mut TestA
     assert!(recovery::load_all(&store).0.is_empty());
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[gpui_kit::test]
+async fn restored_tabs_open_the_active_one_and_read_the_rest_when_chosen(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp("tabs");
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(root.join(name), name).unwrap();
+    }
+    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    wait(
+        cx,
+        Some(TICK),
+        None,
+        |cx| loaded(cx, &this),
+        |_| "the folder never finished loading".into(),
+    );
+    let tabs: Vec<PathBuf> = ["a.txt", "b.txt", "c.txt"].map(|n| root.join(n)).to_vec();
+    let active = Some(root.join("b.txt"));
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.restore_tabs(tabs, active, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let names = |cx: &mut TestAppContext| {
+        this.read_with(cx, |p, _| {
+            let open: Vec<String> = p.documents.iter().map(|d| d.name()).collect();
+            let pending: Vec<String> = p
+                .pending_tabs
+                .iter()
+                .map(|t| t.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            (open, pending)
+        })
+    };
+    // Only the active tab was read; the others wait in the tab bar.
+    assert_eq!(
+        names(cx),
+        (vec!["b.txt".into()], vec!["a.txt".into(), "c.txt".into()])
+    );
+    let a = root.join("a.txt");
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_pending_tab(a, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 2)
+    });
+    assert_eq!(
+        names(cx),
+        (vec!["b.txt".into(), "a.txt".into()], vec!["c.txt".into()])
+    );
+    let c = root.join("c.txt");
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.drop_pending_tab(&c, window, cx));
+    })
+    .unwrap();
+    assert_eq!(names(cx).1, Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -407,6 +407,9 @@ pub struct Workbench {
     tab_menu_focus: Option<FocusHandle>,
     /// ⇧⌘T reopens these, most recent first.
     closed_tabs: tab_menu::ClosedTabs,
+    /// Tabs restored from the last session that have not been opened yet: shown in the tab
+    /// bar, read only when chosen (开发说明: clean tabs load on demand).
+    pending_tabs: Vec<PathBuf>,
     terminals: terminal_panel::Terminals,
     generation: u64,
     cancel: Arc<AtomicBool>,
@@ -619,6 +622,7 @@ impl Workbench {
             graph: None,
             tab_menu_focus: None,
             closed_tabs: Default::default(),
+            pending_tabs: Vec::new(),
             terminals: Default::default(),
             generation: 0,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -1002,6 +1006,7 @@ impl Workbench {
         }
         self.observe_cursor(cx);
         self.reveal_current_file(window, cx);
+        self.remember_tabs(false, window, cx);
         cx.notify();
     }
 
@@ -1062,6 +1067,7 @@ impl Workbench {
             self.owners.clone(),
             cx.windows().len(),
             None,
+            Default::default(),
             cx,
         ) {
             self.message = format!("无法新建窗口：{error}");
@@ -1133,6 +1139,7 @@ impl Workbench {
                             this.owners.clone(),
                             cx.windows().len(),
                             None,
+                            Default::default(),
                             cx,
                         ) {
                             this.message = format!("无法打开工作区：{error}");
@@ -1185,6 +1192,107 @@ impl Workbench {
             });
         }));
         cx.notify();
+    }
+
+    /// Opens `path` without the newest-request-wins rule of `open_file` (restoring several
+    /// tabs at launch must not cancel each other), then runs `then` with the new tab.
+    fn open_in_background(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, Result<DocumentId, String>, &mut Window, &mut Context<Self>)
+        + 'static,
+    ) {
+        let root = self.root.clone();
+        let job = cx.background_spawn(async move {
+            let loaded = files::text_file(root.as_deref(), &path)?;
+            let root = root.and_then(|root| std::fs::canonicalize(root).ok());
+            let indent = crate::indent::resolve(&loaded.path, root.as_deref(), &loaded.text);
+            Ok::<_, std::io::Error>((loaded, indent))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = job.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let opened = match result {
+                    Ok((loaded, indent)) => this
+                        .install_loaded(loaded, indent, window, cx)
+                        .ok_or_else(|| "文件已打开，或已达到打开文件的上限".to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
+                then(this, opened, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Reopens the last session's tabs: the active one now, the others when chosen.
+    pub(crate) fn restore_tabs(
+        &mut self,
+        tabs: Vec<PathBuf>,
+        active: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_tabs = tabs
+            .into_iter()
+            .filter(|tab| Some(tab) != active.as_ref())
+            .collect();
+        if let Some(active) = active {
+            self.open_in_background(active, window, cx, |this, opened, _, cx| {
+                if let Err(error) = opened {
+                    this.message = format!("没能重新打开上次的标签：{error}");
+                    cx.notify();
+                }
+            });
+        }
+        cx.notify();
+    }
+
+    /// A restored tab that was not open yet was chosen: read it now.
+    pub(super) fn open_pending_tab(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = self.root.clone();
+        self.open_file(path, root, window, cx);
+    }
+
+    /// × on a restored tab that was never opened.
+    pub(super) fn drop_pending_tab(
+        &mut self,
+        path: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_tabs.retain(|tab| tab != path);
+        self.remember_tabs(true, window, cx);
+        cx.notify();
+    }
+
+    /// Updates the session record of this window's tabs (written when `persist`).
+    fn remember_tabs(&self, persist: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let mut tabs: Vec<PathBuf> = self
+            .documents
+            .iter()
+            .filter(|doc| !doc.untitled)
+            .map(|doc| doc.path.clone())
+            .collect();
+        for pending in &self.pending_tabs {
+            if !tabs.contains(pending) {
+                tabs.push(pending.clone());
+            }
+        }
+        let active = match self.active {
+            Pane::Document(id) => self
+                .document(id)
+                .filter(|doc| !doc.untitled)
+                .map(|doc| doc.path.clone()),
+            _ => None,
+        };
+        crate::session::remember_tabs(window, tabs, active, persist, cx);
     }
 
     /// A file read in the background becomes a tab (or focuses the tab that already has it,
@@ -1242,6 +1350,7 @@ impl Workbench {
             cx.notify();
             return None;
         }
+        let path_for_pending = loaded.path.clone();
         let (language, language_name) = language_for(&loaded.path);
         let path = loaded.path.clone();
         let (editor, subscription) =
@@ -1268,7 +1377,9 @@ impl Workbench {
         );
         this.message.clear();
         this.markdown_refresh(id, cx);
+        this.pending_tabs.retain(|tab| *tab != path_for_pending);
         this.select_pane(Pane::Document(id), window, cx);
+        this.remember_tabs(true, window, cx);
         Some(id)
     }
 
@@ -1287,6 +1398,7 @@ impl Workbench {
         self.forget_snapshot(id, cx);
         self.documents.retain(|doc| doc.id != id);
         self.owners.borrow_mut().remove(&id);
+        self.remember_tabs(true, window, cx);
         if self.active == Pane::Document(id) {
             let pane = self
                 .documents

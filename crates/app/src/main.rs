@@ -43,6 +43,7 @@ fn open_workspace(
     documents: DocumentOwners,
     index: usize,
     bounds: Option<WindowBounds>,
+    (tabs, active): (Vec<PathBuf>, Option<PathBuf>),
     cx: &mut App,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     if cx.windows().len() >= 5 {
@@ -63,7 +64,13 @@ fn open_workspace(
         ..gpui_kit::component::TitleBar::window_options()
     };
     gpui_kit::open_window(options, cx, |window, cx| {
-        cx.new(|cx| Workbench::new(root, service, documents, index + 1, window, cx))
+        cx.new(|cx| {
+            let mut workbench = Workbench::new(root, service, documents, index + 1, window, cx);
+            if !tabs.is_empty() || active.is_some() {
+                workbench.restore_tabs(tabs, active, window, cx);
+            }
+            workbench
+        })
     })?;
     Ok(())
 }
@@ -79,7 +86,15 @@ fn display_bounds(cx: &App) -> Vec<Bounds<Pixels>> {
 fn open_empty_window(service: GitService, cx: &mut App) {
     let documents = cx.global::<workbench::OpenDocuments>().0.clone();
     let index = cx.windows().len();
-    if let Err(e) = open_workspace(None, service, documents, index, None, cx) {
+    if let Err(e) = open_workspace(
+        None,
+        service,
+        documents,
+        index,
+        None,
+        Default::default(),
+        cx,
+    ) {
         eprintln!("无法创建窗口: {e}");
     }
 }
@@ -100,7 +115,8 @@ fn window_closed(id: WindowId, service: GitService, cx: &mut App) {
     let documents = cx.global::<workbench::OpenDocuments>().0.clone();
     // Not from inside the close notification, which runs while GPUI removes the window.
     cx.defer(move |cx| {
-        if let Err(e) = open_workspace(None, service, documents, 0, bounds, cx) {
+        if let Err(e) = open_workspace(None, service, documents, 0, bounds, Default::default(), cx)
+        {
             eprintln!("无法创建窗口: {e}");
         }
     });
@@ -482,7 +498,14 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 .and_then(|frame| frame.window_bounds(&displays));
             let service = service.clone();
             let documents = documents.clone();
-            if let Err(e) = open_workspace(root, service, documents, index, bounds, cx) {
+            // Tabs come back only for the folder they were open in.
+            let tabs = saved
+                .filter(|saved| {
+                    roots.get(index).is_none() || saved.root.as_ref() == roots.get(index)
+                })
+                .map(|saved| (saved.tabs.clone(), saved.active.clone()))
+                .unwrap_or_default();
+            if let Err(e) = open_workspace(root, service, documents, index, bounds, tabs, cx) {
                 eprintln!("无法创建窗口: {e}");
             }
         }

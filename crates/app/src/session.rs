@@ -32,11 +32,15 @@ pub enum FrameState {
     Fullscreen,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SavedWindow {
     /// `None`: a window without a folder.
     pub root: Option<PathBuf>,
     pub frame: Option<Frame>,
+    /// The file tabs, in order (untitled buffers are not files to reopen).
+    pub tabs: Vec<PathBuf>,
+    /// The tab that was active, if it was a file.
+    pub active: Option<PathBuf>,
 }
 
 pub fn path() -> Option<PathBuf> {
@@ -87,6 +91,20 @@ fn from_json(value: &Value) -> Vec<SavedWindow> {
                 .and_then(Value::as_str)
                 .map(PathBuf::from),
             frame: frame_from_json(window),
+            tabs: window
+                .get("tabs")
+                .and_then(Value::as_array)
+                .map(|tabs| {
+                    tabs.iter()
+                        .filter_map(Value::as_str)
+                        .map(PathBuf::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            active: window
+                .get("active")
+                .and_then(Value::as_str)
+                .map(PathBuf::from),
         })
         .collect()
 }
@@ -134,6 +152,14 @@ fn to_json(windows: &[SavedWindow]) -> Value {
                 value["width"] = json!(frame.width);
                 value["height"] = json!(frame.height);
             }
+            if !window.tabs.is_empty() {
+                // Paths that are not UTF-8 cannot round-trip and are left out.
+                let tabs: Vec<&str> = window.tabs.iter().filter_map(|t| t.to_str()).collect();
+                value["tabs"] = json!(tabs);
+            }
+            if let Some(active) = window.active.as_deref().and_then(Path::to_str) {
+                value["active"] = json!(active);
+            }
             value
         })
         .collect();
@@ -152,6 +178,13 @@ pub fn restorable(saved: Vec<SavedWindow>, max: usize) -> Vec<SavedWindow> {
                 .and_then(|root| fs::canonicalize(root).ok())
                 .filter(|root| root.is_dir()),
             frame: window.frame,
+            // Files that are gone are not reopened.
+            tabs: window
+                .tabs
+                .into_iter()
+                .filter(|tab| tab.is_file())
+                .collect(),
+            active: window.active.filter(|active| active.is_file()),
         })
         .collect()
 }
@@ -271,10 +304,8 @@ pub fn remember(window: &Window, root: Option<&Path>, persist: bool, cx: &mut Ap
         return;
     }
     let id = window.window_handle().window_id();
-    let saved = SavedWindow {
-        root: root.map(Path::to_path_buf),
-        frame: Some(Frame::of(window.window_bounds())),
-    };
+    let root = root.map(Path::to_path_buf);
+    let frame = Some(Frame::of(window.window_bounds()));
     let open: Vec<WindowId> = cx
         .windows()
         .iter()
@@ -286,9 +317,47 @@ pub fn remember(window: &Window, root: Option<&Path>, persist: bool, cx: &mut Ap
         .windows
         .retain(|(window, _)| *window == id || open.contains(window));
     match tracker.windows.iter_mut().find(|(window, _)| *window == id) {
-        Some((_, entry)) => *entry = saved,
-        None => tracker.windows.push((id, saved)),
+        // The tabs are kept: `remember_tabs` owns them.
+        Some((_, entry)) => {
+            entry.root = root;
+            entry.frame = frame;
+        }
+        None => tracker.windows.push((
+            id,
+            SavedWindow {
+                root,
+                frame,
+                ..Default::default()
+            },
+        )),
     }
+    if persist {
+        tracker.save();
+    }
+}
+
+/// Records a window's file tabs and the active one. `persist` writes the file (a tab opened
+/// or closed); switching tabs only updates memory until the next write.
+pub fn remember_tabs(
+    window: &Window,
+    tabs: Vec<PathBuf>,
+    active: Option<PathBuf>,
+    persist: bool,
+    cx: &mut App,
+) {
+    if !cx.has_global::<Tracker>() {
+        return;
+    }
+    let id = window.window_handle().window_id();
+    let tracker = cx.global_mut::<Tracker>();
+    let Some((_, entry)) = tracker.windows.iter_mut().find(|(window, _)| *window == id) else {
+        return;
+    };
+    if entry.tabs == tabs && entry.active == active {
+        return;
+    }
+    entry.tabs = tabs;
+    entry.active = active;
     if persist {
         tracker.save();
     }
@@ -323,19 +392,41 @@ mod tests {
             SavedWindow {
                 root: Some(dir.join("a")),
                 frame: Some(frame(FrameState::Windowed)),
+                tabs: vec![dir.join("a/x.rs"), dir.join("a/y.rs")],
+                active: Some(dir.join("a/y.rs")),
             },
             SavedWindow {
                 root: None,
                 frame: Some(frame(FrameState::Maximized)),
+                ..Default::default()
             },
             SavedWindow {
                 root: Some(dir.join("b")),
                 frame: None,
+                ..Default::default()
             },
         ];
         save_to(&path, &windows).unwrap();
         assert_eq!(load_from(&path), windows);
         assert!(!path.with_extension("json.tmp").exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tabs_of_files_that_are_gone_are_not_reopened() {
+        let dir = temp("tabs");
+        fs::write(dir.join("here.rs"), "").unwrap();
+        let restored = restorable(
+            vec![SavedWindow {
+                root: Some(dir.clone()),
+                tabs: vec![dir.join("here.rs"), dir.join("gone.rs")],
+                active: Some(dir.join("gone.rs")),
+                ..Default::default()
+            }],
+            5,
+        );
+        assert_eq!(restored[0].tabs, vec![dir.join("here.rs")]);
+        assert_eq!(restored[0].active, None);
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -360,11 +451,13 @@ mod tests {
             [
                 SavedWindow {
                     root: Some("/x".into()),
-                    frame: None
+                    frame: None,
+                    ..Default::default()
                 },
                 SavedWindow {
                     root: None,
-                    frame: None
+                    frame: None,
+                    ..Default::default()
                 }
             ]
         );
@@ -381,6 +474,7 @@ mod tests {
             .map(|root| SavedWindow {
                 root: Some(root),
                 frame: Some(frame(FrameState::Windowed)),
+                ..Default::default()
             })
             .collect::<Vec<_>>();
         let restored = restorable(saved.clone(), 5);

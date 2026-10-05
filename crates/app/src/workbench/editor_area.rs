@@ -27,6 +27,8 @@ struct TabSpec {
     note: Option<&'static str>,
     /// The file was deleted on disk (VS Code strikes the name through).
     deleted: bool,
+    /// A tab restored from the last session, not read yet: choosing it opens the file.
+    pending: Option<std::path::PathBuf>,
 }
 
 impl Workbench {
@@ -39,8 +41,10 @@ impl Workbench {
 
     fn tab(&self, spec: TabSpec, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
-        let active = self.active == spec.pane;
+        let active = spec.pending.is_none() && self.active == spec.pane;
         let pane = spec.pane;
+        let pending = spec.pending.clone();
+        let close_pending = spec.pending.clone();
         let group: SharedString = format!("tab-{}", spec.key).into();
         let close = div()
             .id(("tab-close", spec.key))
@@ -91,6 +95,10 @@ impl Workbench {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
+                if let Some(path) = &close_pending {
+                    this.drop_pending_tab(path, window, cx);
+                    return;
+                }
                 match pane {
                     Pane::Document(id) => this.close_document(id, window, cx),
                     Pane::Diff => this.close_preview(window, cx),
@@ -183,7 +191,10 @@ impl Workbench {
                     gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
                 }
             })
-            .on_click(cx.listener(move |this, _, window, cx| this.select_pane(pane, window, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| match &pending {
+                Some(path) => this.open_pending_tab(path.clone(), window, cx),
+                None => this.select_pane(pane, window, cx),
+            }))
             .context_menu({
                 let weak = cx.weak_entity();
                 move |menu, _, cx| match weak.upgrade() {
@@ -221,6 +232,7 @@ impl Workbench {
                     dirty: doc.dirty,
                     note: None,
                     deleted: doc.deleted,
+                    pending: None,
                 }
             })
             .collect();
@@ -237,6 +249,7 @@ impl Workbench {
                 dirty: false,
                 note: diff.agent().map(|_| "Agent 修改"),
                 deleted: false,
+                pending: None,
             });
         }
         if let Some(graph) = &self.graph {
@@ -250,6 +263,26 @@ impl Workbench {
                 dirty: false,
                 note: None,
                 deleted: false,
+                pending: None,
+            });
+        }
+        for (index, path) in self.pending_tabs.iter().enumerate() {
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .replace(SINGLE_LINE, "⏎");
+            specs.push(TabSpec {
+                key: usize::MAX / 2 + index,
+                pane: Pane::Welcome,
+                icon: file_icons::for_file(&name),
+                lucide: None,
+                label: name,
+                tooltip: path.to_string_lossy().into_owned(),
+                dirty: false,
+                note: None,
+                deleted: false,
+                pending: Some(path.clone()),
             });
         }
         let tabs: Vec<AnyElement> = specs.into_iter().map(|spec| self.tab(spec, cx)).collect();

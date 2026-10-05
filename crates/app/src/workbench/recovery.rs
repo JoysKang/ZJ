@@ -238,27 +238,13 @@ impl Workbench {
             self.apply_recovered(id, record, window, cx);
             return;
         }
-        let root = self.root.clone();
         let path = record.path.clone();
-        let job = cx.background_spawn(async move {
-            let loaded = files::text_file(root.as_deref(), &path)?;
-            let root = root.and_then(|root| std::fs::canonicalize(root).ok());
-            let indent = crate::indent::resolve(&loaded.path, root.as_deref(), &loaded.text);
-            Ok::<_, std::io::Error>((loaded, indent))
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let result = job.await;
-            let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok((loaded, indent)) => match this.install_loaded(loaded, indent, window, cx) {
-                    Some(id) => this.apply_recovered(id, record, window, cx),
-                    None => {
-                        this.message = format!(
-                            "没能打开 {} 来恢复未保存的修改；恢复记录保留在磁盘上",
-                            record.path.display()
-                        );
-                        cx.notify();
-                    }
-                },
+        self.open_in_background(
+            path,
+            window,
+            cx,
+            move |this, opened, window, cx| match opened {
+                Ok(id) => this.apply_recovered(id, record, window, cx),
                 Err(error) => {
                     this.message = format!(
                         "没能恢复 {}：{error}；恢复记录保留在磁盘上",
@@ -266,9 +252,8 @@ impl Workbench {
                     );
                     cx.notify();
                 }
-            });
-        })
-        .detach();
+            },
+        );
     }
 
     /// Puts a snapshot's text into an opened buffer: edited, with the recovery banner, and
