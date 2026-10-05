@@ -336,7 +336,13 @@ impl GitService {
                     libc::kill(group, libc::SIGTERM);
                 }
                 let asked = Instant::now();
-                while asked.elapsed() < self.grace && !exited(child.id()) {
+                // Hooks inherit the pipes: Git may exit first, and its hooks still need their
+                // turn to clean up, so wait until every holder of the pipes is gone too.
+                while asked.elapsed() < self.grace
+                    && !(exited(child.id()) && output.closed && errors.closed)
+                {
+                    let _ = output.read_available(&mut stdout);
+                    let _ = errors.read_available(&mut stderr);
                     thread::sleep(Duration::from_millis(10));
                 }
             }
