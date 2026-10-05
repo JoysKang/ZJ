@@ -78,6 +78,9 @@ pub use find_widget::{
     ToggleFindInSelection, ToggleFindRegex, ToggleFindWord, TogglePreserveCase,
 };
 pub use markdown_preview::ToggleMarkdownPreview;
+#[cfg(test)]
+#[path = "prototype/auto_save_ui_tests.rs"]
+mod auto_save_ui_tests;
 pub mod navigation;
 mod quick_open;
 #[cfg(test)]

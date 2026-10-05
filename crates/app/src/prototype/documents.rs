@@ -195,7 +195,7 @@ impl Prototype {
                 let _ = this.update_in(cx, |this, window, cx| {
                     let due = this
                         .document(id)
-                        .is_some_and(|doc| doc.dirty && doc.auto_save.fire(ticket));
+                        .is_some_and(|doc| doc.dirty && !doc.deleted && doc.auto_save.fire(ticket));
                     if due {
                         this.save_document(id, false, window, cx).detach();
                     }
@@ -217,7 +217,8 @@ impl Prototype {
         let ids: Vec<DocumentId> = self
             .documents
             .iter()
-            .filter(|doc| doc.dirty && !doc.untitled && !doc.saving)
+            // A file deleted on disk is only recreated by an explicit save.
+            .filter(|doc| doc.dirty && !doc.untitled && !doc.saving && !doc.deleted)
             .filter(|doc| only.is_none_or(|id| doc.id == id))
             .map(|doc| doc.id)
             .collect();
