@@ -40,6 +40,9 @@ pub(crate) struct AgentProcess {
     pub stdout: Option<ChildStdout>,
     stderr: Arc<Mutex<VecDeque<u8>>>,
     reaped: Option<ExitStatus>,
+    /// Set once the group has been killed: a second `terminate` (Drop after an explicit one)
+    /// must not signal a process group ID that may since have been reused.
+    terminated: bool,
 }
 
 impl AgentProcess {
@@ -85,6 +88,7 @@ impl AgentProcess {
             stdout,
             stderr: tail,
             reaped: None,
+            terminated: false,
         })
     }
 
@@ -118,6 +122,10 @@ impl AgentProcess {
 
     /// SIGTERM to the whole group, SIGKILL after a grace period; reaps the leader.
     pub fn terminate(&mut self) -> Option<ExitStatus> {
+        if self.terminated {
+            return self.reaped;
+        }
+        self.terminated = true;
         // Closing stdin first lets well-behaved agents exit on EOF.
         self.stdin.take();
         if self.try_status().is_none() {

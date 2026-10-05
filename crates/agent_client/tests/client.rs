@@ -472,6 +472,20 @@ fn accept_first_keeps_disk_until_accepted() {
         .unwrap();
     events.turn();
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "direct again");
+
+    // A proposal still pending when the mode changes is replaced by the direct write.
+    client.set_write_mode(WriteMode::AcceptFirst);
+    client
+        .prompt(text(&format!("write {} stale proposal", file.display())))
+        .unwrap();
+    events.turn();
+    assert_eq!(shadow.pending_paths(), vec![file.clone()]);
+    client.set_write_mode(WriteMode::Direct);
+    client
+        .prompt(text(&format!("write {} direct wins", file.display())))
+        .unwrap();
+    assert_eq!(message(&events.turn()), "readback:direct wins");
+    assert!(shadow.pending_paths().is_empty());
 }
 
 #[test]
@@ -523,6 +537,8 @@ fn crash_is_reported_and_the_next_prompt_restarts() {
             .iter()
             .any(|e| matches!(e, AgentEvent::UserMessageChunk { .. }))
     );
+    // A replayed edit is history: it takes no "before the agent" snapshot.
+    assert!(client.snapshot_paths().is_empty());
     let second_pid = pid_of(&seen);
     assert_ne!(first_pid, second_pid);
 }
@@ -917,6 +933,26 @@ fn sessions_start_in_ask_mode_and_never_request_bypass() {
     let reply = message(&events.turn());
     assert!(reply.ends_with("modes:default,plan"), "{reply}");
     assert!(!reply.contains("modes:bypass") && !reply.contains(",bypass"));
+    // The agent switching itself to bypass is warned about and switched straight back.
+    client.prompt(text("bypass")).unwrap();
+    let seen = events.turn();
+    assert!(
+        seen.iter().any(
+            |e| matches!(e, AgentEvent::Error { message } if message.contains("已切回 default"))
+        ),
+        "{seen:?}"
+    );
+    assert!(!seen.iter().any(
+        |e| matches!(e, AgentEvent::ModeChanged { mode_id } if mode_id == "bypassPermissions")
+    ));
+    let restored =
+        |e: &AgentEvent| matches!(e, AgentEvent::ModeChanged { mode_id } if mode_id == "default");
+    if !seen.iter().any(restored) {
+        events.until(restored);
+    }
+    client.prompt(text("modes")).unwrap();
+    let reply = message(&events.turn());
+    assert!(reply.ends_with("modes:default,plan,default"), "{reply}");
 }
 
 #[test]
@@ -971,5 +1007,24 @@ fn a_session_from_history_is_resumed_with_load() {
             .turn()
             .iter()
             .any(|e| matches!(e, AgentEvent::SessionStarted { resumed: false, .. }))
+    );
+}
+
+#[test]
+fn dropping_the_client_does_not_wait_out_a_hung_handshake() {
+    let ws = Workspace::new("hang");
+    let mut opts = options(&ws, &[("FAKE_HANG_INIT", "1")]);
+    opts.handshake_timeout = Duration::from_secs(120);
+    let client = AgentClient::start(opts).unwrap();
+    let events = Events::of(&client);
+    client.prompt(text("echo hi")).unwrap();
+    events.until(|e| matches!(e, AgentEvent::Starting { .. }));
+    // The UI thread drops the client when a window closes; it joins the supervisor.
+    let started = std::time::Instant::now();
+    drop(client);
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
     );
 }

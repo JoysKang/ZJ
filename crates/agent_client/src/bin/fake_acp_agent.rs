@@ -11,6 +11,7 @@
 //! with `fake-login` creates it, and a `fake-terminal` method is offered to clients that
 //! support terminal logins. With `FAKE_AUTH_AT=prompt` the session starts and
 //! `session/prompt` asks for the login instead (like claude-agent-acp).
+//! `FAKE_HANG_INIT=1` never answers `initialize` (a hung handshake).
 
 use agent_client_protocol::{
     self as sdk, Agent, Client, ConnectionTo, Responder, Stdio, schema::v1 as acp,
@@ -247,6 +248,16 @@ async fn run_prompt(
             std::process::exit(3);
         }
         "pid" => say(&cx, &session, format!("pid:{}", std::process::id()))?,
+        // The agent switches itself to a mode the client forbids.
+        "bypass" => {
+            cx.send_notification(acp::SessionNotification::new(
+                session.clone(),
+                acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
+                    "bypassPermissions",
+                )),
+            ))?;
+            say(&cx, &session, "bypassed")?;
+        }
         "demo" => {
             let cwd = state.cwd.lock().unwrap().clone();
             stop = demo(&cx, &session, &cwd).await?;
@@ -469,6 +480,7 @@ fn main() -> sdk::Result<()> {
     let new_auth = auth_file.clone().filter(|_| !at_prompt);
     let prompt_auth = auth_file.clone().filter(|_| at_prompt);
     let login_file = auth_file.clone();
+    let hang_init = std::env::var_os("FAKE_HANG_INIT").is_some();
     async_io::block_on(
         Agent
             .builder()
@@ -477,6 +489,9 @@ fn main() -> sdk::Result<()> {
                 async move |request: acp::InitializeRequest,
                             responder: Responder<acp::InitializeResponse>,
                             _cx| {
+                    if hang_init {
+                        std::future::pending::<()>().await;
+                    }
                     let mut methods = Vec::new();
                     if auth_file.is_some() {
                         methods.push(acp::AuthMethod::Agent(acp::AuthMethodAgent::new(
@@ -549,6 +564,18 @@ fn main() -> sdk::Result<()> {
                         ))),
                     )?;
                     say(&cx, &request.session_id, "old answer")?;
+                    notify(
+                        &cx,
+                        &request.session_id,
+                        acp::SessionUpdate::ToolCall(
+                            acp::ToolCall::new("old-edit", "Edit file")
+                                .kind(acp::ToolKind::Edit)
+                                .status(acp::ToolCallStatus::Completed)
+                                .locations(vec![acp::ToolCallLocation::new(
+                                    request.cwd.join("src/replayed.rs"),
+                                )]),
+                        ),
+                    )?;
                     responder.respond(acp::LoadSessionResponse::new())
                 },
                 sdk::on_receive_request!(),

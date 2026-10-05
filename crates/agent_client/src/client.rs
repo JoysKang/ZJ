@@ -179,6 +179,17 @@ struct Shared {
 }
 
 impl Shared {
+    /// Waits for a handshake reply at most `limit`, and not at all once the client stops:
+    /// `stop` joins this thread on the UI thread, so it must not sit out a hung handshake.
+    async fn bounded<T>(&self, future: impl Future<Output = T>, limit: Duration) -> Option<T> {
+        let future = std::pin::pin!(future);
+        let stopping = std::pin::pin!(self.stopping.recv());
+        match with_timeout(futures::future::select(future, stopping), limit).await {
+            Some(Either::Left((value, _))) => Some(value),
+            _ => None,
+        }
+    }
+
     /// The editor's unsaved text for `path`, if any.
     async fn buffer_text(&self, path: &Path) -> io::Result<Option<String>> {
         let Some(buffers) = &self.buffers else {
@@ -735,8 +746,8 @@ async fn connect(
         .builder()
         .name("zj")
         .on_receive_notification(
-            async move |notification: acp::SessionNotification, _cx| {
-                handle_update(&on_update, notification).await;
+            async move |notification: acp::SessionNotification, cx: ConnectionTo<Agent>| {
+                handle_update(&on_update, notification, &cx).await;
                 Ok(())
             },
             sdk::on_receive_notification!(),
@@ -822,7 +833,10 @@ async fn run_session(
     let request = acp::InitializeRequest::new(ProtocolVersion::V1)
         .client_capabilities(capabilities)
         .client_info(acp::Implementation::new("zj", env!("CARGO_PKG_VERSION")).title("ZJ"));
-    let init = match with_timeout(cx.send_request(request).block_task(), timeout).await {
+    let init = match shared
+        .bounded(cx.send_request(request).block_task(), timeout)
+        .await
+    {
         Some(Ok(init)) => init,
         Some(Err(e)) => {
             return fail(shared, format!("「{name}」握手失败：{}", error_text(&e))).await;
@@ -881,7 +895,9 @@ async fn run_session(
         shared.replaying.store(true, Ordering::Relaxed);
         let request =
             acp::LoadSessionRequest::new(previous.clone(), root.clone()).meta(meta.clone());
-        let loaded = with_timeout(cx.send_request(request).block_task(), timeout).await;
+        let loaded = shared
+            .bounded(cx.send_request(request).block_task(), timeout)
+            .await;
         shared.replaying.store(false, Ordering::Relaxed);
         if let Some(Ok(response)) = loaded {
             let raw_current = response
@@ -910,7 +926,10 @@ async fn run_session(
             let request = acp::NewSessionRequest::new(root.clone())
                 .mcp_servers(Vec::new())
                 .meta(meta.clone());
-            match with_timeout(cx.send_request(request).block_task(), timeout).await {
+            match shared
+                .bounded(cx.send_request(request).block_task(), timeout)
+                .await
+            {
                 Some(Ok(response)) => {
                     let raw_current = response
                         .modes
@@ -1220,11 +1239,12 @@ async fn enforce_mode(
     match target {
         Some(target) if target != modes.current => {
             let request = acp::SetSessionModeRequest::new(session.clone(), target.clone());
-            match with_timeout(
-                cx.send_request(request).block_task(),
-                shared.handshake_timeout,
-            )
-            .await
+            match shared
+                .bounded(
+                    cx.send_request(request).block_task(),
+                    shared.handshake_timeout,
+                )
+                .await
             {
                 Some(Ok(_)) => {
                     eprintln!(
@@ -1255,13 +1275,19 @@ async fn enforce_mode(
     }
 }
 
-async fn handle_update(shared: &Shared, notification: acp::SessionNotification) {
+async fn handle_update(
+    shared: &Arc<Shared>,
+    notification: acp::SessionNotification,
+    cx: &ConnectionTo<Agent>,
+) {
     let Some(mut event) = events::from_update(&notification.update) else {
         return;
     };
     // Direct mode reviews diff against the file as it was before the first edit; an edit tool
-    // call announces its paths before it runs.
+    // call announces its paths before it runs. Replayed history (`session/load`) is not about
+    // to edit anything.
     if let AgentEvent::ToolCall(call) = &event
+        && !shared.replaying.load(Ordering::Relaxed)
         && matches!(
             call.kind,
             events::ToolKind::Edit | events::ToolKind::Delete | events::ToolKind::Move
@@ -1274,13 +1300,55 @@ async fn handle_update(shared: &Shared, notification: acp::SessionNotification) 
             }
         }
     }
-    // A mode the preset forbids is never shown as current without a warning.
+    // The agent switched itself to a mode the preset forbids: it is switched straight back
+    // (the UI keeps showing the allowed mode, which becomes true again once that succeeds).
     if let AgentEvent::ModeChanged { mode_id } = &event
         && !shared.preset.modes.allows(mode_id)
     {
-        event = AgentEvent::Error {
-            message: format!("Agent 切换到了跳过审批的模式（{mode_id}），请在模式菜单里改回询问"),
+        eprintln!("event=agent_mode_forbidden agent={}", shared.preset.id);
+        let Some(fallback) = shared.preset.modes.initial.clone() else {
+            event = AgentEvent::Error {
+                message: format!(
+                    "Agent 切换到了跳过审批的模式（{mode_id}），请在模式菜单里改回询问"
+                ),
+            };
+            shared.emit(event).await;
+            return;
         };
+        shared
+            .emit(AgentEvent::Error {
+                message: format!("Agent 切换到了跳过审批的模式（{mode_id}），已切回 {fallback}"),
+            })
+            .await;
+        let request = cx.send_request(acp::SetSessionModeRequest::new(
+            notification.session_id.clone(),
+            fallback.clone(),
+        ));
+        let shared = shared.clone();
+        let spawned = cx.spawn(async move {
+            match request.block_task().await {
+                Ok(_) => {
+                    shared
+                        .emit(AgentEvent::ModeChanged { mode_id: fallback })
+                        .await
+                }
+                Err(e) => {
+                    shared
+                        .emit(AgentEvent::Error {
+                            message: format!(
+                                "未能切回 {fallback}：{}，请在模式菜单里改回询问",
+                                error_text(&e)
+                            ),
+                        })
+                        .await
+                }
+            }
+            Ok(())
+        });
+        if let Err(e) = spawned {
+            eprintln!("event=agent_mode_restore_failed error={}", error_text(&e));
+        }
+        return;
     }
     let history = matches!(
         event,
@@ -1355,6 +1423,11 @@ async fn handle_write(
         WriteMode::Direct => {
             shared.snapshot(&path).await;
             write_atomic(&path, &request.content).map_err(fs_error)?;
+            // A proposal left from accept-first mode is older than this write; keeping it
+            // would make reads and the review show the stale text.
+            if shared.shadow.reject_file(&path) {
+                eprintln!("event=agent_proposal_superseded");
+            }
             shared.emit(AgentEvent::FileWritten { path }).await;
         }
         WriteMode::AcceptFirst => {

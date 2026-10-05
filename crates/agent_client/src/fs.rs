@@ -122,9 +122,19 @@ pub fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
         .file_name()
         .ok_or_else(|| io::Error::other("路径没有文件名"))?
         .to_string_lossy();
-    let tmp = parent.join(format!(".{name}.zj-agent-{}", std::process::id()));
+    // Unique per write: two sessions (or a session and a review) writing the same file at
+    // once must not truncate each other's temporary file.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = parent.join(format!(
+        ".{name}.zj-agent-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let result = (|| {
-        let mut file = fs::File::create(&tmp)?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         if let Ok(meta) = fs::metadata(path) {
