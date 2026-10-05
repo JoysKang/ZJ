@@ -92,7 +92,15 @@ pub(crate) fn run(mut conn: Connection, rx: mpsc::Receiver<Op>, errors: Arc<Mute
         let outcome = (|| -> Result<()> {
             let tx = conn.transaction()?;
             for op in batch {
-                apply(&tx, op, &mut replies, &mut deleted, &errors);
+                // Each op is all or nothing: a message must not be stored without its search
+                // entry, nor a session half deleted, while the rest of the batch commits.
+                tx.execute_batch("SAVEPOINT op")?;
+                let ok = apply(&tx, op, &mut replies, &mut deleted, &errors);
+                tx.execute_batch(if ok {
+                    "RELEASE op"
+                } else {
+                    "ROLLBACK TO op; RELEASE op"
+                })?;
             }
             tx.commit()?;
             Ok(())
@@ -121,10 +129,15 @@ pub(crate) fn run(mut conn: Connection, rx: mpsc::Receiver<Op>, errors: Arc<Mute
     }
 }
 
-fn record(errors: &Mutex<Vec<String>>, result: Result<()>) {
-    if let Err(e) = result {
-        eprintln!("event=agent_history_write_failed");
-        errors.lock().unwrap().push(e.to_string());
+/// Keeps a failed write's error for the next flush; `true` when it succeeded.
+fn record(errors: &Mutex<Vec<String>>, result: Result<()>) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("event=agent_history_write_failed");
+            errors.lock().unwrap().push(e.to_string());
+            false
+        }
     }
 }
 
@@ -134,11 +147,13 @@ fn apply(
     replies: &mut Vec<Reply>,
     deleted: &mut bool,
     errors: &Mutex<Vec<String>>,
-) {
+) -> bool {
     match op {
         Op::CreateSession(new, reply) => {
             let result = create_session(tx, &new);
+            let ok = result.is_ok();
             replies.push(Reply::Created(reply, result));
+            ok
         }
         Op::PutMessage {
             session,
@@ -220,9 +235,14 @@ fn apply(
             if matches!(result, Ok(n) if n > 0) {
                 *deleted = true;
             }
+            let ok = result.is_ok();
             replies.push(Reply::Deleted(reply, result));
+            ok
         }
-        Op::Flush(reply) => replies.push(Reply::Flushed(reply)),
+        Op::Flush(reply) => {
+            replies.push(Reply::Flushed(reply));
+            true
+        }
     }
 }
 

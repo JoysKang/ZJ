@@ -841,3 +841,31 @@ fn a_common_word_still_finds_the_newest_session() {
     let hits = search(&history, "cargo deadlock", Scope::All);
     assert!(hits.iter().any(|hit| hit.session.id == new), "{hits:?}");
 }
+
+#[test]
+fn a_write_failing_halfway_leaves_nothing_behind() {
+    let dir = TempDir::new("halfway");
+    let h = History::new(dir.db());
+    let id = session(&h, "/w/a", "claude-code", "问题");
+    h.flush().unwrap();
+    // Fails put_message after its message row and search entry are written.
+    let conn = rusqlite::Connection::open(dir.db()).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER boom BEFORE UPDATE ON sessions \
+         WHEN (SELECT text FROM messages ORDER BY id DESC LIMIT 1) = 'kaboom' \
+         BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+    )
+    .unwrap();
+    h.append_message(id, Role::Agent, "kaboom");
+    h.append_message(id, Role::Agent, "fine");
+    assert!(h.flush().is_err());
+    let texts: Vec<String> = h
+        .messages(id)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.text)
+        .collect();
+    assert!(!texts.iter().any(|t| t == "kaboom"), "{texts:?}");
+    assert!(texts.iter().any(|t| t == "fine"), "{texts:?}");
+    assert!(search(&h, "kaboom", Scope::All).is_empty());
+}
