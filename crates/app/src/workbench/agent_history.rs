@@ -367,11 +367,7 @@ impl Workbench {
                 .text_color(if selected { fg } else { colors.attention })
                 .child("待批准")
                 .into_any_element(),
-            RowStatus::Running => div()
-                .text_size(theme::TEXT_SECTION)
-                .text_color(if selected { fg } else { colors.running })
-                .child("运行中")
-                .into_any_element(),
+            RowStatus::Running => status_mark(status, self.agent.spin, colors),
             _ => div()
                 .text_size(theme::TEXT_SECTION)
                 .text_color(muted)

@@ -304,22 +304,24 @@ impl Workbench {
                             }),
                     )
                     .when(!compact, |bar| {
-                        bar.when_some(status.label(), |bar, label| {
+                        bar.when(status != RowStatus::None, |bar| {
                             bar.child(
                                 h_flex()
                                     .flex_shrink_0()
                                     .gap_1()
                                     .child(status_mark(status, self.agent.spin, colors))
-                                    .child(
-                                        div()
-                                            .text_color(match status {
-                                                RowStatus::Awaiting => colors.attention,
-                                                RowStatus::Error => colors.deleted,
-                                                RowStatus::Unread => colors.unread,
-                                                _ => colors.muted,
-                                            })
-                                            .child(label),
-                                    ),
+                                    .when_some(status.label(), |mark, label| {
+                                        mark.child(
+                                            div()
+                                                .text_color(match status {
+                                                    RowStatus::Awaiting => colors.attention,
+                                                    RowStatus::Error => colors.deleted,
+                                                    RowStatus::Unread => colors.unread,
+                                                    _ => colors.muted,
+                                                })
+                                                .child(label),
+                                        )
+                                    }),
                             )
                         })
                         .child(

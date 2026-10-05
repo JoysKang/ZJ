@@ -709,19 +709,21 @@ impl Workbench {
                                     .font_weight(FontWeight::MEDIUM)
                                     .child(marked(&s.title, &title_marks, colors)),
                             )
-                            .when_some(status.label(), |row, label| {
+                            .when(status != RowStatus::None, |row| {
                                 row.child(status_mark(status, self.agent.spin, colors))
-                                    .child(
-                                        div()
-                                            .text_size(theme::TEXT_SECTION)
-                                            .text_color(match status {
-                                                RowStatus::Awaiting if !selected => {
-                                                    colors.attention
-                                                }
-                                                _ => muted,
-                                            })
-                                            .child(label),
-                                    )
+                                    .when_some(status.label(), |row, label| {
+                                        row.child(
+                                            div()
+                                                .text_size(theme::TEXT_SECTION)
+                                                .text_color(match status {
+                                                    RowStatus::Awaiting if !selected => {
+                                                        colors.attention
+                                                    }
+                                                    _ => muted,
+                                                })
+                                                .child(label),
+                                        )
+                                    })
                             })
                             .child(
                                 div()

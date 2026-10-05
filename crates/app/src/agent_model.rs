@@ -147,9 +147,10 @@ impl RowStatus {
         }
     }
 
+    /// The words next to the status mark; a running session's spinner says it alone.
     pub fn label(self) -> Option<&'static str> {
         match self {
-            RowStatus::Running => Some("运行中"),
+            RowStatus::Running => None,
             RowStatus::Awaiting => Some("待批准"),
             RowStatus::Unread => Some("完成，未读"),
             RowStatus::Error => Some("出错"),
