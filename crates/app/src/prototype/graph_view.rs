@@ -347,7 +347,8 @@ impl Prototype {
         let Some(graph) = &mut self.graph else {
             return;
         };
-        if graph.loading {
+        // Another page can wait; a reset (new scope, a write) replaces whatever is loading.
+        if graph.loading && !reset {
             return;
         }
         let repo = graph.repo.clone();
@@ -469,14 +470,17 @@ impl Prototype {
                 let Some(graph) = &mut this.graph else {
                     return;
                 };
-                graph.details_loading = false;
-                // The selection may have moved on while the details loaded.
+                // The selection may have moved on while the details loaded; an older answer
+                // neither shows nor ends the newer request's loading state.
                 let still_selected = graph
                     .selected
                     .and_then(|i| graph.commits.get(i))
                     .is_some_and(|commit| commit.hash == hash);
                 if still_selected {
+                    graph.details_loading = false;
                     graph.details = Some(result.map_err(|error| error.to_string()));
+                } else if graph.selected.is_none() {
+                    graph.details_loading = false;
                 }
                 cx.notify();
             });

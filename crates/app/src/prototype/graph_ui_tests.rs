@@ -326,3 +326,43 @@ async fn tags_are_added_and_deleted_from_the_graph(cx: &mut TestAppContext) {
     assert_eq!(git_out(&repo, &["tag", "--list"]), "v0");
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }
+
+#[gpui_kit::test]
+async fn a_new_scope_replaces_a_page_still_loading(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("scope");
+    let (window, this) = open(cx, repo.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_git_graph(0, window, cx));
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| {
+            p.graph
+                .as_ref()
+                .is_some_and(|g| !g.loading && !g.commits.is_empty())
+        })
+    });
+    // "加载更多" is still running when the branch filter changes.
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.graph_load(false, window, cx);
+            p.graph_set_scope(GraphScope::Branch("refs/heads/feature".into()), window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| p.graph.as_ref().is_some_and(|g| !g.loading))
+    });
+    let subjects = this.read_with(cx, |p, _| {
+        p.graph
+            .as_ref()
+            .unwrap()
+            .commits
+            .iter()
+            .map(|commit| commit.subject.clone())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(subjects, ["feat", "one"]);
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
