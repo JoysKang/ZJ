@@ -272,9 +272,9 @@ impl DefinitionProvider for Definitions {
                 return Ok(Vec::new());
             }
             let generation = weak.update(cx, |this, _| {
-                this.nav_generation += 1;
-                this.nav_targets = (this.nav_generation, targets);
-                this.nav_generation
+                this.nav.generation += 1;
+                this.nav.targets = (this.nav.generation, targets);
+                this.nav.generation
             })?;
             // Underline exactly the word under the pointer.
             let source = rope.to_string();
@@ -332,11 +332,11 @@ pub(super) fn attach(state: &mut EditorState, path: &Path, view: WeakEntity<Prot
 impl Prototype {
     /// The workspace symbol index; requesting it starts the background build once.
     pub(super) fn symbol_index(&mut self, cx: &mut Context<Self>) -> Option<Arc<SymbolIndex>> {
-        if self.symbols.is_none() && self.symbols_task.is_none() {
-            self.symbols_requested = true;
+        if self.nav.symbols.is_none() && self.nav.symbols_task.is_none() {
+            self.nav.symbols_requested = true;
             self.build_symbol_index(cx);
         }
-        self.symbols.clone()
+        self.nav.symbols.clone()
     }
 
     pub(super) fn build_symbol_index(&mut self, cx: &mut Context<Self>) {
@@ -344,9 +344,9 @@ impl Prototype {
             // build_index calls back here when the file list is ready.
             return;
         };
-        self.symbols_cancel.store(true, Ordering::Relaxed);
-        self.symbols_cancel = Arc::new(AtomicBool::new(false));
-        let cancel = self.symbols_cancel.clone();
+        self.nav.symbols_cancel.store(true, Ordering::Relaxed);
+        self.nav.symbols_cancel = Arc::new(AtomicBool::new(false));
+        let cancel = self.nav.symbols_cancel.clone();
         let job = cx.background_spawn(async move {
             let index = SymbolIndex::build(paths, &cancel);
             symbol_index::release_free_memory();
@@ -360,12 +360,12 @@ impl Prototype {
             );
             (index, cancel)
         });
-        self.symbols_task = Some(cx.spawn(async move |this, cx| {
+        self.nav.symbols_task = Some(cx.spawn(async move |this, cx| {
             let (index, cancel) = job.await;
             let _ = this.update(cx, |this, _| {
-                this.symbols_task = None;
+                this.nav.symbols_task = None;
                 if !cancel.load(Ordering::Relaxed) {
-                    this.symbols = Some(Arc::new(index));
+                    this.nav.symbols = Some(Arc::new(index));
                 }
             });
         }));
@@ -373,31 +373,31 @@ impl Prototype {
 
     /// Re-parses changed files into the symbol index (file watching).
     pub(super) fn update_symbol_index(&mut self, files: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let Some(index) = self.symbols.clone() else {
+        let Some(index) = self.nav.symbols.clone() else {
             return;
         };
         let files: Vec<PathBuf> = files
             .into_iter()
             .filter(|path| symbol_index::language(path).is_some())
             .collect();
-        if files.is_empty() || self.symbols_task.is_some() {
+        if files.is_empty() || self.nav.symbols_task.is_some() {
             return;
         }
         let job = cx.background_spawn(async move { index.with_changes(&files) });
-        self.symbols_task = Some(cx.spawn(async move |this, cx| {
+        self.nav.symbols_task = Some(cx.spawn(async move |this, cx| {
             let next = job.await;
             let _ = this.update(cx, |this, _| {
-                this.symbols_task = None;
-                this.symbols = Some(Arc::new(next));
+                this.nav.symbols_task = None;
+                this.nav.symbols = Some(Arc::new(next));
             });
         }));
     }
 
     fn follow_targets(&mut self, generation: u64, window: &mut Window, cx: &mut Context<Self>) {
-        if self.nav_targets.0 != generation {
+        if self.nav.targets.0 != generation {
             return;
         }
-        let targets = self.nav_targets.1.clone();
+        let targets = self.nav.targets.1.clone();
         match targets.len() {
             0 => {}
             1 => self.jump_to(targets[0].clone(), true, window, cx),
@@ -468,13 +468,13 @@ impl Prototype {
 
     pub(super) fn remember(&mut self, cx: &App) {
         if let Some(point) = self.here(cx) {
-            if self.nav_back.last() != Some(&point) {
-                self.nav_back.push(point);
+            if self.nav.back.last() != Some(&point) {
+                self.nav.back.push(point);
             }
-            if self.nav_back.len() > MAX_HISTORY {
-                self.nav_back.remove(0);
+            if self.nav.back.len() > MAX_HISTORY {
+                self.nav.back.remove(0);
             }
-            self.nav_forward.clear();
+            self.nav.forward.clear();
         }
     }
 
@@ -516,13 +516,13 @@ impl Prototype {
             place.apply(&editor, window, cx);
             return;
         }
-        self.pending_place = Some((path.clone(), place));
+        self.nav.pending_place = Some((path.clone(), place));
         self.open_file(path, self.root.clone(), window, cx);
     }
 
     /// Applies a jump that was waiting for its file to open.
     pub(super) fn apply_pending_place(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((path, place)) = self.pending_place.take() else {
+        let Some((path, place)) = self.nav.pending_place.take() else {
             return;
         };
         if let Some(doc) = self.documents.iter().find(|doc| doc.path == path) {
@@ -535,21 +535,21 @@ impl Prototype {
     }
 
     pub(super) fn navigate_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(point) = self.nav_back.pop() else {
+        let Some(point) = self.nav.back.pop() else {
             return;
         };
         if let Some(here) = self.here(cx) {
-            self.nav_forward.push(here);
+            self.nav.forward.push(here);
         }
         self.go(point.path, Placement::Offset(point.offset), window, cx);
     }
 
     pub(super) fn navigate_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(point) = self.nav_forward.pop() else {
+        let Some(point) = self.nav.forward.pop() else {
             return;
         };
         if let Some(here) = self.here(cx) {
-            self.nav_back.push(here);
+            self.nav.back.push(here);
         }
         self.go(point.path, Placement::Offset(point.offset), window, cx);
     }
@@ -593,7 +593,7 @@ impl Prototype {
                 .map(|symbol| target(&path, &text, symbol))
                 .collect::<Vec<_>>()
         });
-        self.nav_task = Some(cx.spawn_in(window, async move |this, cx| {
+        self.nav.task = Some(cx.spawn_in(window, async move |this, cx| {
             let targets = job.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 let items = targets
@@ -635,7 +635,7 @@ impl Prototype {
         self.message = "正在查找引用…".into();
         let job =
             cx.background_spawn(async move { references(&path, language, &text, offset, files) });
-        self.nav_task = Some(cx.spawn_in(window, async move |this, cx| {
+        self.nav.task = Some(cx.spawn_in(window, async move |this, cx| {
             let targets = job.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.message.clear();
@@ -704,6 +704,21 @@ impl Placement {
             }
         });
     }
+}
+
+/// Go to definition, references and back / forward: the symbol index and the navigation history.
+pub(super) struct NavState {
+    /// Workspace symbols for cross-file go to definition, built on first use.
+    pub(super) symbols: Option<Arc<crate::symbol_index::SymbolIndex>>,
+    pub(super) symbols_task: Option<Task<()>>,
+    pub(super) symbols_cancel: Arc<AtomicBool>,
+    pub(super) symbols_requested: bool,
+    pub(super) generation: u64,
+    pub(super) targets: (u64, Vec<Target>),
+    pub(super) back: Vec<NavPoint>,
+    pub(super) forward: Vec<NavPoint>,
+    pub(super) task: Option<Task<()>>,
+    pub(super) pending_place: Option<(PathBuf, Placement)>,
 }
 
 #[cfg(test)]

@@ -266,7 +266,7 @@ impl Prototype {
             return;
         };
         // open_file loads in the background and applies the pending placement.
-        self.pending_place = Some((
+        self.nav.pending_place = Some((
             tab.path.clone(),
             super::navigation::Placement::Offset(tab.offset),
         ));

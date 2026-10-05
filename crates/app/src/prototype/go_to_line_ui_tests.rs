@@ -102,7 +102,7 @@ async fn ctrl_g_goes_to_a_line_of_the_active_file(cx: &mut TestAppContext) {
         assert!(editor.read(cx).focus_handle(cx).is_focused(window));
     })
     .unwrap();
-    assert_eq!(this.read_with(cx, |p, _| p.nav_back.len()), 1);
+    assert_eq!(this.read_with(cx, |p, _| p.nav.back.len()), 1);
 
     // Typed into ⌘P: `:2:4` puts the cursor at line 2, character 4.
     cx.update_window(window.into(), |_, window, cx| {

@@ -403,17 +403,8 @@ pub struct Prototype {
     cursor: Option<(u32, u32)>,
     _cursor_observer: Option<Subscription>,
     preview: Option<Entity<EditorState>>,
-    /// Workspace symbols for cross-file go to definition, built on first use.
-    symbols: Option<Arc<crate::symbol_index::SymbolIndex>>,
-    symbols_task: Option<Task<()>>,
-    symbols_cancel: Arc<AtomicBool>,
-    symbols_requested: bool,
-    nav_generation: u64,
-    nav_targets: (u64, Vec<navigation::Target>),
-    nav_back: Vec<navigation::NavPoint>,
-    nav_forward: Vec<navigation::NavPoint>,
-    nav_task: Option<Task<()>>,
-    pending_place: Option<(PathBuf, navigation::Placement)>,
+    /// Go to definition, references and back / forward: the symbol index and the navigation history.
+    nav: navigation::NavState,
     /// The parsed diff editor document; `preview` is only Git's raw text when parsing fails.
     diff_doc: Option<Arc<crate::diff_doc::DiffDoc>>,
     /// Git's own patch lines, for copying exact text and staging selected lines.
@@ -622,16 +613,18 @@ impl Prototype {
             cursor: None,
             _cursor_observer: None,
             preview: None,
-            symbols: None,
-            symbols_task: None,
-            symbols_cancel: Arc::new(AtomicBool::new(false)),
-            symbols_requested: false,
-            nav_generation: 0,
-            nav_targets: (0, Vec::new()),
-            nav_back: Vec::new(),
-            nav_forward: Vec::new(),
-            nav_task: None,
-            pending_place: None,
+            nav: navigation::NavState {
+                symbols: None,
+                symbols_task: None,
+                symbols_cancel: Arc::new(AtomicBool::new(false)),
+                symbols_requested: false,
+                generation: 0,
+                targets: (0, Vec::new()),
+                back: Vec::new(),
+                forward: Vec::new(),
+                task: None,
+                pending_place: None,
+            },
             diff_doc: None,
             diff_raw: None,
             diff_selection: None,
@@ -871,7 +864,7 @@ impl Prototype {
                 this.index_task = None;
                 this.index = Some(Arc::new(index));
                 // A rebuilt file list rebuilds the symbol index if navigation has been used.
-                if this.symbols_requested {
+                if this.nav.symbols_requested {
                     this.build_symbol_index(cx);
                 }
                 this.resume_search(window, cx);
