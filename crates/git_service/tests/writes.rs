@@ -889,3 +889,41 @@ fn a_cancelled_write_asks_git_to_stop_before_killing_it() {
     assert!(marks.join("term").exists());
     assert!(!root.join(".git/index.lock").exists());
 }
+
+#[test]
+fn discard_explains_staged_only_and_conflicted_files() {
+    let fixture = fixture();
+    let root = fixture.0.join("a");
+    let service = GitService::new(2, Duration::from_secs(10)).unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-m", "base"]);
+    fs::write(root.join("src/main.rs"), "staged\n").unwrap();
+    git(&root, &["add", "-A"]);
+    let staged_only = write(&service, &root, WriteOperation::Discard { paths: paths() })
+        .unwrap_err()
+        .to_string();
+    assert!(staged_only.contains("没有工作区更改"), "{staged_only}");
+    assert!(!staged_only.contains("冲突"), "{staged_only}");
+    git(&root, &["commit", "-m", "ours"]);
+    git(&root, &["switch", "-c", "theirs", "HEAD~1"]);
+    fs::write(root.join("src/main.rs"), "theirs\n").unwrap();
+    git(&root, &["commit", "-am", "theirs"]);
+    git(&root, &["switch", "main"]);
+    let merge = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["merge", "theirs"])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(!merge.status.success());
+    let conflicted = write(&service, &root, WriteOperation::Discard { paths: paths() })
+        .unwrap_err()
+        .to_string();
+    assert!(conflicted.contains("冲突"), "{conflicted}");
+    assert!(
+        fs::read_to_string(root.join("src/main.rs"))
+            .unwrap()
+            .starts_with("<<<<<<<")
+    );
+}

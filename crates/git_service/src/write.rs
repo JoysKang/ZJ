@@ -173,10 +173,12 @@ impl GitService {
                         WriteOperation::Unstage { .. } if !selected.staged() => {
                             return Err(error("文件没有暂存更改"));
                         }
-                        WriteOperation::Discard { .. }
-                            if !selected.unstaged() || selected.kind == ChangeKind::Conflict =>
-                        {
+                        WriteOperation::Discard { .. } if selected.kind == ChangeKind::Conflict => {
                             return Err(error("冲突文件不能直接放弃，请先解决冲突"));
+                        }
+                        // Discarding restores the worktree from the index; staged changes stay.
+                        WriteOperation::Discard { .. } if !selected.unstaged() => {
+                            return Err(error("文件没有工作区更改；暂存的更改请先取消暂存"));
                         }
                         WriteOperation::Discard { .. }
                             if selected.kind == ChangeKind::Untracked =>
