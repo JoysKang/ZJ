@@ -656,20 +656,7 @@ impl GitService {
             }
         }
         // A detached HEAD is on no branch; an unborn one has nothing to list.
-        if !matches!(scope, GraphScope::Branch(_))
-            && self
-                .run(
-                    &repo.worktree,
-                    &[
-                        "rev-parse".into(),
-                        "--verify".into(),
-                        "--quiet".into(),
-                        "HEAD".into(),
-                    ],
-                    cancel,
-                )
-                .is_ok()
-        {
+        if !matches!(scope, GraphScope::Branch(_)) && self.verify(repo, "HEAD", cancel)? {
             args.push("HEAD".into());
         }
         args.push("--".into());

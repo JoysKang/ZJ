@@ -339,8 +339,9 @@ impl GitService {
                 } else {
                     format!("refs/heads/{branch}")
                 };
-                self.verify(&request.repo, &full, cancel)
-                    .map_err(|_| error(format!("找不到分支 {branch}")))?;
+                if !self.verify(&request.repo, &full, cancel)? {
+                    return Err(error(format!("找不到分支 {branch}")));
+                }
                 args.push("switch".into());
                 if *remote {
                     args.push("--track".into());
@@ -360,10 +361,7 @@ impl GitService {
                     cancel,
                 )
                 .map_err(|_| error(format!("“{name}”不是有效的分支名")))?;
-                if self
-                    .verify(&request.repo, &format!("refs/heads/{name}"), cancel)
-                    .is_ok()
-                {
+                if self.verify(&request.repo, &format!("refs/heads/{name}"), cancel)? {
                     return Err(error(format!("分支 {name} 已存在")));
                 }
                 args.extend(["switch".into(), "-c".into(), name.into()]);
@@ -371,8 +369,9 @@ impl GitService {
                     if !crate::graph::is_hash(start) {
                         return Err(error("无效的提交"));
                     }
-                    self.verify(&request.repo, &format!("{start}^{{commit}}"), cancel)
-                        .map_err(|_| error("找不到这个提交"))?;
+                    if !self.verify(&request.repo, &format!("{start}^{{commit}}"), cancel)? {
+                        return Err(error("找不到这个提交"));
+                    }
                     args.push(start.into());
                 }
             }
@@ -383,14 +382,15 @@ impl GitService {
                 push,
             } => {
                 self.check_tag_name(&request.repo, name, cancel)?;
-                if self.has_tag(&request.repo, name, cancel) {
+                if self.has_tag(&request.repo, name, cancel)? {
                     return Err(error(format!("标签 {name} 已存在")));
                 }
                 if !crate::graph::is_hash(commit) {
                     return Err(error("无效的提交"));
                 }
-                self.verify(&request.repo, &format!("{commit}^{{commit}}"), cancel)
-                    .map_err(|_| error("找不到这个提交"))?;
+                if !self.verify(&request.repo, &format!("{commit}^{{commit}}"), cancel)? {
+                    return Err(error("找不到这个提交"));
+                }
                 if *push {
                     // Checked before tagging, so a missing remote leaves nothing half done.
                     let remote = self.tag_remote(&request.repo, &current, cancel)?;
@@ -409,7 +409,7 @@ impl GitService {
             }
             WriteOperation::PushTag { name } => {
                 self.check_tag_name(&request.repo, name, cancel)?;
-                if !self.has_tag(&request.repo, name, cancel) {
+                if !self.has_tag(&request.repo, name, cancel)? {
                     return Err(error(format!("找不到标签 {name}")));
                 }
                 let remote = self.tag_remote(&request.repo, &current, cancel)?;
@@ -417,7 +417,7 @@ impl GitService {
             }
             WriteOperation::DeleteTag { name, remote } => {
                 self.check_tag_name(&request.repo, name, cancel)?;
-                if !self.has_tag(&request.repo, name, cancel) {
+                if !self.has_tag(&request.repo, name, cancel)? {
                     return Err(error(format!("找不到标签 {name}")));
                 }
                 if *remote {
@@ -491,8 +491,15 @@ impl GitService {
         })
     }
 
-    fn verify(&self, repo: &Repository, revision: &str, cancel: &AtomicBool) -> io::Result<()> {
-        self.run(
+    /// Whether `revision` names an object. Only `rev-parse --verify --quiet`'s silent exit 1
+    /// means "absent"; a timeout, cancellation or any other Git failure is an error.
+    pub(super) fn verify(
+        &self,
+        repo: &Repository,
+        revision: &str,
+        cancel: &AtomicBool,
+    ) -> io::Result<bool> {
+        let output = self.run_command(
             &repo.worktree,
             &[
                 "rev-parse".into(),
@@ -501,8 +508,10 @@ impl GitService {
                 revision.into(),
             ],
             cancel,
-        )
-        .map(|_| ())
+            // Exit 1 with nothing on stderr comes back as Ok with no output.
+            true,
+        )?;
+        Ok(!output.is_empty())
     }
 
     fn check_tag_name(&self, repo: &Repository, name: &str, cancel: &AtomicBool) -> io::Result<()> {
@@ -521,9 +530,8 @@ impl GitService {
         .map_err(|_| error(format!("“{name}”不是有效的标签名")))
     }
 
-    fn has_tag(&self, repo: &Repository, name: &str, cancel: &AtomicBool) -> bool {
+    fn has_tag(&self, repo: &Repository, name: &str, cancel: &AtomicBool) -> io::Result<bool> {
         self.verify(repo, &format!("refs/tags/{name}"), cancel)
-            .is_ok()
     }
 
     /// Where tags go: the current branch's remote, else the only remote, else `origin`.
