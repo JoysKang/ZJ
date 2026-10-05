@@ -12,6 +12,7 @@ mod languages;
 mod markdown;
 mod markdown_blocks;
 mod partial_patch;
+mod perf;
 mod platform;
 mod recovery;
 mod refresh_plan;
@@ -36,6 +37,16 @@ use workspace_editor_git::GitService;
 
 impl Global for watch::WatchService {}
 
+/// What a new window opens besides its folder.
+#[derive(Default)]
+pub(crate) struct Startup {
+    /// The last session's tabs: `active` is read now, the others when chosen.
+    tabs: Vec<PathBuf>,
+    active: Option<PathBuf>,
+    /// Files from the command line, read now.
+    open: Vec<PathBuf>,
+}
+
 /// `bounds`: a frame restored from the last session; `None` cascades from the default place.
 fn open_workspace(
     root: Option<PathBuf>,
@@ -43,7 +54,7 @@ fn open_workspace(
     documents: DocumentOwners,
     index: usize,
     bounds: Option<WindowBounds>,
-    (tabs, active): (Vec<PathBuf>, Option<PathBuf>),
+    startup: Startup,
     cx: &mut App,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     if cx.windows().len() >= 5 {
@@ -66,8 +77,11 @@ fn open_workspace(
     gpui_kit::open_window(options, cx, |window, cx| {
         cx.new(|cx| {
             let mut workbench = Workbench::new(root, service, documents, index + 1, window, cx);
-            if !tabs.is_empty() || active.is_some() {
-                workbench.restore_tabs(tabs, active, window, cx);
+            if !startup.tabs.is_empty() || startup.active.is_some() {
+                workbench.restore_tabs(startup.tabs, startup.active, window, cx);
+            }
+            for path in startup.open {
+                workbench.open_now(path, window, cx);
             }
             workbench
         })
@@ -124,7 +138,9 @@ fn window_closed(id: WindowId, service: GitService, cx: &mut App) {
 
 #[allow(clippy::print_stdout)] // --help output belongs on stdout.
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    perf::mark_start();
     let mut roots = Vec::new();
+    let mut files = Vec::new();
     let mut windows = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
@@ -141,19 +157,22 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             windows = Some(count);
         } else if arg == "--help" {
             println!(
-                "ZJ [--windows 1..5] [工作区根目录 ...]\n轻量代码编辑器：多仓库源代码管理、并排 / 内联 Diff、文件编辑与保存。"
+                "ZJ [--windows 1..5] [工作区根目录 | 文件 ...]\n轻量代码编辑器：多仓库源代码管理、并排 / 内联 Diff、文件编辑与保存。\n文件在包含它的工作区窗口里打开，否则在第一个窗口。"
             );
             return Ok(());
         } else {
-            let root = std::fs::canonicalize(PathBuf::from(arg))?;
-            if !root.is_dir() {
-                return Err("工作区根必须是目录".into());
+            let path = std::fs::canonicalize(PathBuf::from(arg))?;
+            if path.is_dir() {
+                roots.push(path);
+            } else if path.is_file() {
+                files.push(path);
+            } else {
+                return Err("参数必须是目录或文件".into());
             }
-            roots.push(root);
         }
     }
     // A launch without arguments (Dock, Finder) reopens the windows open at the last quit.
-    let restored = if roots.is_empty() && windows.is_none() {
+    let restored = if roots.is_empty() && files.is_empty() && windows.is_none() {
         session::path()
             .map(|path| session::restorable(session::load_from(&path), 5))
             .unwrap_or_default()
@@ -479,6 +498,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // ⌘Q asks about unsaved changes window by window before quitting.
         cx.on_action(|_: &workbench::Quit, cx| workbench::quit(cx));
         session::track(cx);
+        perf::watch_key_latency(cx);
         // Before the windows open: they restore what an abnormal exit left unsaved.
         if let Some(dir) = recovery::dir() {
             workbench::recovery::install(dir, cx);
@@ -487,7 +507,16 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let empty = service.clone();
         cx.on_action(move |_: &workbench::NewWindow, cx| open_empty_window(empty.clone(), cx));
         let displays = display_bounds(cx);
-        for index in 0..count {
+        // Command-line files go to the window whose folder holds them, else the first.
+        let mut open: Vec<Vec<PathBuf>> = vec![Vec::new(); count];
+        for file in files {
+            let window = roots
+                .iter()
+                .position(|root| file.starts_with(root))
+                .unwrap_or(0);
+            open[window].push(file);
+        }
+        for (index, open) in open.into_iter().enumerate() {
             let saved = restored.get(index);
             let root = roots
                 .get(index)
@@ -499,13 +528,14 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             let service = service.clone();
             let documents = documents.clone();
             // Tabs come back only for the folder they were open in.
-            let tabs = saved
+            let (tabs, active) = saved
                 .filter(|saved| {
                     roots.get(index).is_none() || saved.root.as_ref() == roots.get(index)
                 })
                 .map(|saved| (saved.tabs.clone(), saved.active.clone()))
                 .unwrap_or_default();
-            if let Err(e) = open_workspace(root, service, documents, index, bounds, tabs, cx) {
+            let startup = Startup { tabs, active, open };
+            if let Err(e) = open_workspace(root, service, documents, index, bounds, startup, cx) {
                 eprintln!("无法创建窗口: {e}");
             }
         }

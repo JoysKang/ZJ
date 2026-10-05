@@ -654,6 +654,7 @@ impl Workbench {
         }
         // Snapshots an abnormal exit left: first each window takes its folder's, then (one
         // round later, once every window has had its turn) the first takes the rest.
+        crate::perf::first_frame(window);
         cx.defer_in(window, |this, window, cx| {
             this.claim_recovery(false, window, cx);
             cx.defer_in(window, |this, window, cx| {
@@ -1249,6 +1250,16 @@ impl Workbench {
         cx.notify();
     }
 
+    /// A file from the command line: opened now.
+    pub(crate) fn open_now(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_in_background(path, window, cx, |this, opened, _, cx| {
+            if let Err(error) = opened {
+                this.message = format!("没能打开命令行中的文件：{error}");
+                cx.notify();
+            }
+        });
+    }
+
     /// A restored tab that was not open yet was chosen: read it now.
     pub(super) fn open_pending_tab(
         &mut self,
@@ -1378,6 +1389,7 @@ impl Workbench {
         this.message.clear();
         this.markdown_refresh(id, cx);
         this.pending_tabs.retain(|tab| *tab != path_for_pending);
+        eprintln!("event=document_opened");
         this.select_pane(Pane::Document(id), window, cx);
         this.remember_tabs(true, window, cx);
         Some(id)

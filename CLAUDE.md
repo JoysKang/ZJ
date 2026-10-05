@@ -54,6 +54,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `save.rs`：保存的纯逻辑（同目录临时文件 + fsync + rename、保留权限 / 换行符 / BOM、符号链接写到目标、多硬链接原地写、只读识别、按设备 / inode / 大小 / mtime / 内容哈希判断外部修改、退出询问的状态机、自动保存防抖、比较用的补丁）；`workbench/documents.rs`：保存、另存为、全部保存、Untitled、关闭 / 退出确认、外部修改横幅、自动保存，以及给 Agent 层的 `buffer_text` / `on_buffer_saved`。
   - 编辑恢复（开发说明 R11 / A16）：`recovery.rs` 是快照记录的纯逻辑（每个未保存缓冲区一个带版本的 JSON，放在设置文件旁的 `recovery/`，临时文件 + rename，权限 0600）；`workbench/recovery.rs` 在编辑停顿 2 秒后经单一后台队列写快照，保存 / 重新加载 / 不保存 / 关窗时删除，退出时同步清空，启动时把异常退出留下的快照恢复进标签（带横幅，可放弃）。只在有待写快照时才有定时器。
   - `settings.rs`：所有窗口共用的设置文件（字号、显示隐藏文件、Diff 布局、隐藏无变更仓库、搜索排除、Dock 图标闪烁、自动保存）。
+  - `perf.rs`：给 `tools/measure_budget.py` 用的打点（首帧耗时；`ZJ_LATENCY_LOG=1` 时记录按键到下一帧画完的耗时），平时只有一行首帧日志。
   - `platform.rs`：少量 macOS 系统接口（“减少动态效果”、Dock 图标替换与闪烁），其他平台为空实现；`workbench/welcome.rs`：欢迎页 logo 上单独绘制的闪烁光标。
   - `file_ops.rs`：资源管理器的新建、重命名、复制、移动和移到废纸篓；`workbench/explorer_ops.rs`：右键菜单、快捷键和行内改名；`workbench/tab_menu.rs`：编辑器标签页的右键菜单、对应快捷键和 ⇧⌘T 重开已关闭标签的栈。
   - Markdown 预览：`markdown_blocks.rs` 把文件切成顶层块（纯函数）；`workbench/markdown_preview.rs` 按块用 Kit `TextView` 渲染，点击的块换成源码文本框并直接写回缓冲区，⇧⌘V 切换源码。源码视图下不切分。
@@ -94,6 +95,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo build --profile dist --locked          # 产物在 target/dist/workspace-editor
 python3 tools/check_git_deadlines.py
+python3 tools/measure_budget.py            # macOS：对照上面的资源预算测冷启动、空闲内存 / CPU、3 窗口 + 20 文档、按键延迟
 python3 tools/fixtures.py /tmp/zj-fixture-f  # 生成临时夹具，目标路径必须尚不存在
 ```
 
