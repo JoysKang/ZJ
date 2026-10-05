@@ -244,3 +244,8 @@ useless_conversion = "allow"
 [lints.clippy.style]
 level = "allow"
 priority = -1
+
+# ZJ patch: crates.io dependencies build with --cap-lints, but path dependencies don't. Our
+# change (src/input/base/blink_cursor.rs) is described in vendor/README.md.
+[lints.rust]
+warnings = "allow"

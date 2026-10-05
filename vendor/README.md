@@ -1,6 +1,6 @@
 # vendor/
 
-Patched copies of two GPUI crates that only build on macOS. The root `Cargo.toml` points
+Patched copies of GPUI crates: two that only build on macOS, and GPUI Kit's `gpui-base`. The root `Cargo.toml` points
 crates.io at them with `[patch.crates-io]`. They are not workspace members, so this project's
 fmt / clippy settings don't apply to them.
 
@@ -8,6 +8,7 @@ fmt / clippy settings don't apply to them.
 | --- | --- | --- |
 | `gpui-pre-apple/` | `gpui-pre-apple 0.3.7` (Zed's `gpui_apple`, zed@1a28cff) | Metal renderer and sprite atlas |
 | `gpui-pre-macos/` | `gpui-pre-macos 0.3.7` (Zed's `gpui_macos`, zed@1a28cff) | NSWindow / NSView, frame pacing |
+| `gpui-base/` | `gpui-base 0.7.0` (GPUI Kit) | Input / editor engine (steady cursor) |
 
 The first commit, "build(gpui): 原样引入 …", copies the crates.io sources as they are (without
 `Cargo.lock` and `.cargo_vcs_info.json`). Every later change is marked with a `ZJ patch` comment;
@@ -48,6 +49,16 @@ measure it are in [docs/adr/0005-gpu-memory.md](../docs/adr/0005-gpu-memory.md).
 - `src/gpui_apple.rs`: `pub mod zj_low_memory;`.
 - `Cargo.toml`: `[lints.rust] warnings = "allow"`. Path dependencies don't get `--cap-lints`, and
   upstream prints about 1200 deprecation warnings.
+
+`gpui-base` (GPUI Kit 0.7.0, the input and editor engine):
+
+- `src/input/base/blink_cursor.rs`: the cursor is steady. `start` shows it without a timer and
+  `pause` (every keystroke) only repaints when it was hidden; `stop` (blur) hides it as before.
+  Upstream blinks every 500 ms, and each blink repaints the whole window: an idle focused
+  editor then costs about 3% CPU, and the renderer never goes 3 s without a frame, so it keeps
+  its spare drawable and path textures (about 190 MB instead of 67 MB, one window). There is
+  no switch for it in Kit. `crates/app` tests that an idle focused editor does not repaint.
+- `Cargo.toml`: the same lint override.
 
 `gpui-pre-macos`:
 

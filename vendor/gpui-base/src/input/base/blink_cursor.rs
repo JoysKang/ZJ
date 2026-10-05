@@ -35,8 +35,18 @@ impl BlinkCursor {
     }
 
     /// Start the blinking
+    ///
+    /// ZJ patch: the cursor is steady instead (CLAUDE.md: an idle editor draws nothing). It
+    /// shows while the input is focused, with no timer: a blinking cursor repaints the whole
+    /// window twice a second, which keeps the CPU busy and the renderer from giving back its
+    /// spare drawable. `blink` is no longer reached.
     pub(crate) fn start(&mut self, cx: &mut Context<Self>) {
-        self.blink(self.epoch, cx);
+        self.next_epoch();
+        self.paused = false;
+        if !self.visible {
+            self.visible = true;
+            cx.notify();
+        }
     }
 
     /// Stop the blinking and clear the blink state, so the next [`Self::start`]
@@ -95,26 +105,12 @@ impl BlinkCursor {
             return;
         }
 
-        self.paused = true;
-        self.visible = true;
-        cx.notify();
-
-        // Every pause replaces the pending timer, keeping repeated input visible.
-        let epoch = self.next_epoch();
-        self._task = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(PAUSE_DELAY).await;
-
-            if let Some(this) = this.upgrade() {
-                this.update(cx, |this, cx| {
-                    if epoch != this.epoch {
-                        return;
-                    }
-
-                    this.paused = false;
-                    this.blink(epoch, cx);
-                });
-            }
-        });
+        // ZJ patch: a steady cursor is already visible; keystrokes neither repaint for it nor
+        // start a timer that would resume blinking.
+        if !self.visible {
+            self.visible = true;
+            cx.notify();
+        }
     }
 }
 

@@ -210,3 +210,48 @@ async fn an_open_ignored_file_follows_changes_on_disk(cx: &mut TestAppContext) {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[gpui_kit::test]
+async fn a_focused_editor_is_still_when_nothing_happens(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-steady-caret-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("a.rs");
+    std::fs::write(&path, "fn main() {}\n").unwrap();
+    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    wait(
+        cx,
+        Some(TICK),
+        None,
+        |cx| loaded(cx, &this),
+        |_| "the folder never finished loading".into(),
+    );
+    let folder = Some(root.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(path, folder, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        window.activate_window();
+        editor.update(cx, |state, cx| state.focus(window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    // The steady caret (vendor/gpui-base ZJ patch): no blink timer repaints an idle editor.
+    let repaints = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counter = repaints.clone();
+    let _watch = cx.update(|cx| cx.observe(&editor, move |_, _| counter.set(counter.get() + 1)));
+    for _ in 0..6 {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+    }
+    assert_eq!(repaints.get(), 0, "the idle editor repainted");
+    let _ = std::fs::remove_dir_all(&root);
+}

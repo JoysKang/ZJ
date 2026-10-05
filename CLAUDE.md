@@ -23,7 +23,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 内存看 physical footprint（`footprint -p PID` 或 `tools/sample_resources.py`），并把 Git 子进程算在内。
 
-表中“光标不闪”指编辑器光标和欢迎页 logo 光标都不闪。logo 光标只在欢迎页可见、窗口在前台、系统未开启“减少动态效果”时闪烁（亮 530 ms、灭 530 ms，边缘 120 ms 分 3 步淡入淡出，每秒约 6 帧；只有光标视图重新 render，但每帧仍是整窗重画），其余时候没有定时器。Dock 图标闪烁（设置 `dock_icon_blink`，默认关）是每 530 ms 一次 `setApplicationIconImage`，一个 App 级定时器；开启“减少动态效果”时停止并恢复完整图标。两者都不计入空闲 CPU 预算，但不要再加别的常驻动画。
+表中“光标不闪”指编辑器光标和欢迎页 logo 光标都不闪。编辑器光标始终常亮、不闪（`vendor/gpui-base` 的 ZJ patch：Kit 原本每 500 ms 闪一次并整窗重画，会让空闲 CPU 约 3%，并使帧缓冲和路径纹理无法释放）。logo 光标只在欢迎页可见、窗口在前台、系统未开启“减少动态效果”时闪烁（亮 530 ms、灭 530 ms，边缘 120 ms 分 3 步淡入淡出，每秒约 6 帧；只有光标视图重新 render，但每帧仍是整窗重画），其余时候没有定时器。Dock 图标闪烁（设置 `dock_icon_blink`，默认关）是每 530 ms 一次 `setApplicationIconImage`，一个 App 级定时器；开启“减少动态效果”时停止并恢复完整图标。两者都不计入空闲 CPU 预算，但不要再加别的常驻动画。
 
 ## 依赖准入
 
@@ -74,7 +74,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `session.rs`：重启时恢复的窗口记录（`session.json`，每个窗口的文件夹、位置大小、文件标签和激活的标签；重启时只读入激活的标签，其余标签点开时才读）。
   - Agent 面板（docs/adr/0004）：`agent_model.rs` 放不依赖 GPUI 的逻辑（会话分组和时间、`@` 引用、附件、从历史恢复）；`markdown.rs` 是回复用的小型 Markdown（代码块用编辑器的语法高亮，在后台完成）；`secrets.rs` 解析 Agent 的环境变量（`$变量名` 或 macOS 钥匙串 `keychain:账户名`，设置里不存明文密钥）。`workbench/agent.rs` 是会话与面板视图的状态，其余逻辑按主题放在 `workbench/agent/`（`turns` 发送与事件泵、`permissions` 权限与规则、`composer` 引用与附件、`changes` 改动文件、`history` 会话历史、`buffers` 给 Agent 的未保存缓冲区）；`agent_panel.rs`（标题、会话条、切换器；`agent_panel/` 下是对话行、卡片、改动文件、输入框、设置）、`agent_history.rs`（会话列表）、`agent_search.rs`（⌘J 搜索）、`agent_review.rs`（编辑区里逐处接受 / 拒绝）只做渲染和交互。转圈只在面板可见、窗口在前台、有会话运行时才有定时器。
   - `symbols.rs`：tree-sitter tags / locals 查询做定义、引用和文件大纲（查询在 `crates/app/queries/`）；`symbol_index.rs`：首次跳转时后台建立的工作区符号索引；`workbench/navigation.rs`：转到定义、符号列表、查找引用、转到行（⌃G，命令中心里的 `:行:列`）和前进后退。不跑语言服务器，见 docs/adr/0002。
-- `vendor/`：打过补丁的 GPUI macOS 渲染器和窗口层（`gpui-pre-apple` / `gpui-pre-macos`，用 `[patch.crates-io]` 指向）。改动都标 `ZJ patch`，说明在 `vendor/README.md`，理由和测量方法在 docs/adr/0005；`ZJ_GPU_LOWMEM=0` 恢复上游行为。升级 GPUI 时要先处理这里。
+- `vendor/`：打过补丁的 GPUI macOS 渲染器和窗口层（`gpui-pre-apple` / `gpui-pre-macos`），以及 GPUI Kit 的 `gpui-base`（编辑器光标常亮），都用 `[patch.crates-io]` 指向。改动都标 `ZJ patch`，说明在 `vendor/README.md`，理由和测量方法在 docs/adr/0005；`ZJ_GPU_LOWMEM=0` 恢复上游行为。升级 GPUI 时要先处理这里。
 - UI 的 render 回调里不做 IO、不跑 Git 命令、不做全文解析；这些都通过 `background_spawn` 执行，结果带 generation 校验。
 
 ## 视觉规则
