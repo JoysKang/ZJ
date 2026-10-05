@@ -207,6 +207,12 @@ impl gpui_kit::Global for Settings {}
 
 impl Settings {
     pub fn path() -> Option<PathBuf> {
+        // Tests change settings through the UI; they must never write the user's file.
+        if cfg!(test) {
+            return Some(
+                std::env::temp_dir().join(format!("zj-test-settings-{}.json", std::process::id())),
+            );
+        }
         if let Some(path) = std::env::var_os("ZJ_SETTINGS") {
             return Some(PathBuf::from(path));
         }
@@ -359,6 +365,12 @@ pub fn update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tests_never_touch_the_users_settings_file() {
+        let path = Settings::path().unwrap();
+        assert!(path.starts_with(std::env::temp_dir()), "{}", path.display());
+    }
 
     #[test]
     fn settings_round_trip_and_tolerate_bad_files() {
