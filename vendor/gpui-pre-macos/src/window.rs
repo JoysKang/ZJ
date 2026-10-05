@@ -3330,7 +3330,10 @@ extern "C" fn step(view: *mut c_void) {
         };
         drop(lock);
         callback(options);
-        window_state.lock().request_frame_callback = Some(callback);
+        let mut lock = window_state.lock();
+        lock.request_frame_callback = Some(callback);
+        // ZJ patch: an idle visible window gives back its spare drawable.
+        lock.renderer.zj_trim_idle();
     }
 }
 

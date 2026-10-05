@@ -33,6 +33,9 @@ measure it are in [docs/adr/0005-gpu-memory.md](../docs/adr/0005-gpu-memory.md).
     shrunk to 1 × 1, which drops the pooled drawables, and the path textures are freed. When the
     window is minimized or the app is hidden, the layer's contents are cleared as well. Nothing
     is drawn while released.
+  - `zj_trim_idle`: a visible window that has not drawn for 3 s resizes its layer away and
+    back, which empties the drawable pool; the presented frame stays in the layer's contents.
+    The macOS window calls it on every display-link tick.
   - One sprite atlas is shared by all window renderers on the same device. It is held weakly,
     so it is freed with the last window.
   - Headless renderers keep upstream behaviour.
@@ -52,6 +55,7 @@ measure it are in [docs/adr/0005-gpu-memory.md](../docs/adr/0005-gpu-memory.md).
   - `windowDidChangeOcclusionState` calls `zj_release_surfaces` when the window stops being
     visible. It passes `Hidden::Gone` when the window is miniaturized or `NSApp.isHidden`, and
     `Occluded` otherwise.
+  - `step` (the display-link tick) calls `zj_trim_idle` after the frame callback.
   - When the window is visible again, it calls `zj_restore_surfaces` and sets `zj_force_present`.
     The next display-link `step` then passes `require_presentation: true`, so GPUI presents the
     last scene again even if nothing changed.

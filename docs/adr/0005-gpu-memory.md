@@ -88,3 +88,12 @@ log stream --predicate 'process == "ZJ"' --level error
 ```
 
 应该没有输出（尤其不应出现 `failed to retrieve next drawable`）。还要目测：切换窗口、从 Dock 恢复、切换桌面、⌘H 后再切回时，窗口内容立即正确、没有闪白；打开带箭头的弹出框（会画路径）后正常显示，10 秒后再看 Owned unmapped (graphics) 是否回落。
+
+## 更新（2026-10-05）：空闲时归还备用 drawable
+
+实测（1 个窗口，3456 × 2168 设备像素，接近全屏）：footprint 97–105 MB，其中 IOSurface 58 MB，是两块 29.2 MB 的 `CAMetalLayer Display Drawable`（`vmmap -v` 确认，另有一块 16 KB）；窗口缩小后 64 MB / 23 MB；`ZJ_GPU_LOWMEM=0` 时同尺寸 73 MB / 35 MB。除去 drawable，基线约 41 MB。
+
+编辑器大部分时间是静止的，而双缓冲的第二块 drawable 只在连续出帧时有用。决定：可见窗口 3 秒没有新帧时，把 layer 的 drawableSize 缩到 1 × 1 再恢复，清空 drawable 池；已呈现的一帧留在 layer contents 里，仍在屏幕上。下一帧再取新的 drawable。预计全屏时空闲 footprint −1 S（约 29 MB），回到约 70 MB。
+
+风险：恢复后第一帧要分配一块新的 IOSurface（预计 1–2 ms），落在停顿 3 秒后的第一次按键上；缩放 drawableSize 期间是否会让屏幕上的内容闪一下，没有文档保证，需要实测。验证：空闲 5 秒后 `vmmap -v $(pgrep -x ZJ) | grep 'Display Drawable'` 应只剩一块；停顿后连续打字、滚动、切换标签时没有闪烁或白帧；`log stream` 没有 `failed to retrieve next drawable`。不行就用 `ZJ_GPU_LOWMEM=0` 对比，或去掉 `step` 里的调用。
+

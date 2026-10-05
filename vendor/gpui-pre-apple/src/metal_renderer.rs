@@ -154,6 +154,8 @@ struct ZjLowMemory {
     /// The window can't be seen and its surfaces were given back.
     released: bool,
     path_clock: zj_low_memory::PathTextureClock,
+    /// When an idle visible window gives back its spare drawable.
+    idle: zj_low_memory::IdleTrim,
 }
 
 /// ZJ patch: one sprite atlas for all windows on the same device (upstream: one per window, so
@@ -428,6 +430,7 @@ impl MetalRenderer {
                 drawable_size: Size::default(),
                 released: false,
                 path_clock: Default::default(),
+                idle: Default::default(),
             },
         }
     }
@@ -509,6 +512,38 @@ impl MetalRenderer {
             unsafe {
                 let _: () = msg_send![layer.as_ref(), setContents: ptr::null_mut::<AnyObject>()];
             }
+        }
+    }
+
+    /// ZJ patch: called on every display-link tick of a visible window. After
+    /// `SPARE_DRAWABLE_IDLE` without a frame, resizing the layer away and back empties its
+    /// drawable pool; the presented frame stays in the layer's contents (still on screen), and
+    /// the next frame takes a new drawable.
+    pub fn zj_trim_idle(&mut self) {
+        if !self.zj.enabled || self.zj.released {
+            return;
+        }
+        if !self.zj.idle.should_trim(Instant::now()) {
+            return;
+        }
+        let Some(layer) = &self.layer else {
+            return;
+        };
+        let size = self.zj.drawable_size;
+        if size.width.0 <= 0 || size.height.0 <= 0 {
+            return;
+        }
+        let tiny = NSSize {
+            width: 1.,
+            height: 1.,
+        };
+        let real = NSSize {
+            width: size.width.0 as f64,
+            height: size.height.0 as f64,
+        };
+        unsafe {
+            let _: () = msg_send![layer.as_ref(), setDrawableSize: tiny];
+            let _: () = msg_send![layer.as_ref(), setDrawableSize: real];
         }
     }
 
@@ -646,6 +681,8 @@ impl MetalRenderer {
             command_buffer.present_drawable(drawable);
             command_buffer.commit();
         }
+        // ZJ patch: the idle clock for giving back the spare drawable.
+        self.zj.idle.frame(Instant::now());
     }
 
     fn render_frame(

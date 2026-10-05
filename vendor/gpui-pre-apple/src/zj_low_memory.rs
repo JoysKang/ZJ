@@ -9,7 +9,9 @@
 //!   after `PATH_TEXTURE_IDLE` without paths;
 //! - while the window can't be seen, the drawable pool and the path textures are given back
 //!   (and, when minimized or the app is hidden, the last presented frame too);
-//! - one sprite atlas is shared by all windows instead of one per window.
+//! - one sprite atlas is shared by all windows instead of one per window;
+//! - a visible window that has not drawn for `SPARE_DRAWABLE_IDLE` gives back the spare
+//!   drawable; the presented one stays on screen (`IdleTrim`).
 //!
 //! `ZJ_GPU_LOWMEM=0` turns all of it off (upstream behaviour) for A/B measurements.
 
@@ -27,6 +29,10 @@ pub const UPSTREAM_DRAWABLE_COUNT: u64 = 3;
 pub const LOW_MEMORY_DRAWABLE_COUNT: u64 = 2;
 /// How long the path textures stay allocated after the last frame that drew a path.
 pub const PATH_TEXTURE_IDLE: Duration = Duration::from_secs(10);
+/// How long a visible window keeps its spare drawable after its last frame. An editor sits
+/// idle most of the time; the spare is a full window-sized surface (29 MB at 3456 × 2168), and
+/// the next frame allocates one again.
+pub const SPARE_DRAWABLE_IDLE: Duration = Duration::from_secs(3);
 
 /// Whether a value of `ZJ_GPU_LOWMEM` leaves the low-memory mode on (the default).
 pub fn enabled_from(value: Option<&str>) -> bool {
@@ -87,6 +93,34 @@ impl PathTextureClock {
     }
 }
 
+/// Decides when a visible window gives back its spare drawable: once per idle period, after
+/// `SPARE_DRAWABLE_IDLE` without a frame.
+#[derive(Debug, Default)]
+pub struct IdleTrim {
+    last_frame: Option<Instant>,
+    trimmed: bool,
+}
+
+impl IdleTrim {
+    /// A frame was presented.
+    pub fn frame(&mut self, now: Instant) {
+        self.last_frame = Some(now);
+        self.trimmed = false;
+    }
+
+    /// Called on every display-link tick; `true` once the window has been idle long enough.
+    pub fn should_trim(&mut self, now: Instant) -> bool {
+        let Some(last) = self.last_frame else {
+            return false;
+        };
+        if self.trimmed || now.saturating_duration_since(last) < SPARE_DRAWABLE_IDLE {
+            return false;
+        }
+        self.trimmed = true;
+        true
+    }
+}
+
 /// How much of a window's surfaces can go while it is not visible.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hidden {
@@ -125,6 +159,23 @@ mod tests {
         }
         assert_eq!(drawable_count(true), 2);
         assert_eq!(drawable_count(false), 3);
+    }
+
+    #[test]
+    fn the_spare_drawable_goes_once_per_idle_period() {
+        let start = Instant::now();
+        let mut trim = IdleTrim::default();
+        // Nothing drawn yet: nothing to give back.
+        assert!(!trim.should_trim(start + SPARE_DRAWABLE_IDLE * 2));
+        trim.frame(start);
+        assert!(!trim.should_trim(start + SPARE_DRAWABLE_IDLE / 2));
+        assert!(trim.should_trim(start + SPARE_DRAWABLE_IDLE));
+        // Only once until the next frame.
+        assert!(!trim.should_trim(start + SPARE_DRAWABLE_IDLE * 3));
+        let later = start + SPARE_DRAWABLE_IDLE * 4;
+        trim.frame(later);
+        assert!(!trim.should_trim(later + SPARE_DRAWABLE_IDLE / 2));
+        assert!(trim.should_trim(later + SPARE_DRAWABLE_IDLE));
     }
 
     #[test]
