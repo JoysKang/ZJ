@@ -230,15 +230,23 @@ fn term_rows(conn: &Connection, term: &Term) -> Result<Vec<RowHit>> {
 
 /// Matching rowids only: computing bm25() for thousands of rows costs more than the whole
 /// rest of the search, and per-session aggregation ranks well enough without it.
+/// Session documents (negative rowids) and messages are capped separately, messages newest
+/// first, so a common word cannot crowd out titles or the recent sessions.
 fn fts_rows(conn: &Connection, table: &str, phrase: &str) -> Result<Vec<RowHit>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {table}.rowid, m.session_id FROM {table} \
-         LEFT JOIN messages m ON m.id = {table}.rowid \
-         WHERE {table} MATCH ?1 LIMIT {ROWS_PER_TERM}"
-    ))?;
-    let raw: Vec<(i64, Option<i64>)> = stmt
-        .query_map([phrase], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
+    let mut raw: Vec<(i64, Option<i64>)> = Vec::new();
+    for filter in [
+        format!("{table}.rowid < 0"),
+        format!("{table}.rowid > 0 ORDER BY {table}.rowid DESC"),
+    ] {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {table}.rowid, m.session_id FROM {table} \
+             LEFT JOIN messages m ON m.id = {table}.rowid \
+             WHERE {table} MATCH ?1 AND {filter} LIMIT {ROWS_PER_TERM}"
+        ))?;
+        for row in stmt.query_map([phrase], |r| Ok((r.get(0)?, r.get(1)?)))? {
+            raw.push(row?);
+        }
+    }
     let mut rows = Vec::with_capacity(raw.len());
     for (rowid, owner) in raw {
         let (session, doc) = if rowid > 0 {

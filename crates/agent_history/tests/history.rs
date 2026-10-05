@@ -800,3 +800,19 @@ fn long_threads_page_backwards() {
     assert_eq!((older[0].seq, older[9].seq), (5, 14));
     assert_eq!(h.messages_page(id, Some(5), 10).unwrap().len(), 5);
 }
+
+#[test]
+fn a_common_word_still_finds_the_newest_session() {
+    let dir = TempDir::new("common");
+    let history = History::new(dir.db());
+    // More matches for "cargo" than one term keeps, all in an old session.
+    let old = session(&history, "/w/a", "claude-code", "旧会话");
+    for i in 0..20_050 {
+        history.append_message(old, Role::Agent, format!("cargo build {i}"));
+    }
+    let new = session(&history, "/w/a", "claude-code", "新会话");
+    history.append_message(new, Role::Agent, "cargo deadlock in the reader");
+    history.flush().unwrap();
+    let hits = search(&history, "cargo deadlock", Scope::All);
+    assert!(hits.iter().any(|hit| hit.session.id == new), "{hits:?}");
+}
