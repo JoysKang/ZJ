@@ -248,7 +248,8 @@ pub fn rule_matches(request: &PermissionRequest, rules: &[String]) -> bool {
         return false;
     };
     // Chained or substituted commands never match a prefix rule.
-    if ["&&", "||", ";", "|", "`", "$(", ">", "<", "\n"]
+    // `&` also covers `&&` and background jobs; `|` covers `||`.
+    if ["&", "|", ";", "`", "$(", ">", "<", "\n", "\r"]
         .iter()
         .any(|s| command.contains(s))
     {
@@ -976,6 +977,9 @@ mod tests {
             "cargo testing",
             "cargo build",
             "cargo test && rm -rf /",
+            "cargo test & rm -rf ~",
+            "cargo test || curl x",
+            "cargo test\rrm -rf ~",
             "cargo test; curl x",
             "cargo test $(whoami)",
         ] {
