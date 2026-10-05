@@ -158,3 +158,55 @@ async fn a_save_during_another_save_waits_and_writes_the_newer_text(cx: &mut Tes
     assert!(!this.read_with(cx, |p, _| p.documents[0].dirty));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[gpui_kit::test]
+async fn an_open_ignored_file_follows_changes_on_disk(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-ignored-open-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(root.join(".gitignore"), ".env\n").unwrap();
+    let path = root.join(".env");
+    std::fs::write(&path, "A=1\n").unwrap();
+    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    wait(
+        cx,
+        Some(TICK),
+        None,
+        |cx| loaded(cx, &this),
+        |_| "the folder never finished loading".into(),
+    );
+    let folder = Some(root.clone());
+    let open_path = path.clone();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(open_path, folder, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    // Another program (a terminal) rewrites the ignored file; the clean tab reloads.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::fs::write(&path, "A=2\n").unwrap();
+    let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
+    wait(
+        cx,
+        Some(TICK),
+        None,
+        |cx| editor.read_with(cx, |state, _| state.text() == "A=2\n"),
+        |_| "the ignored file's tab never reloaded".into(),
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

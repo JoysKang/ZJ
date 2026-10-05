@@ -12,7 +12,7 @@ use crate::{
 };
 use gpui_kit::*;
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
@@ -72,18 +72,30 @@ impl Prototype {
                         break;
                     }
                 }
-                let Ok((roots, base, cache, service)) = this.update(cx, |this, _| {
+                let Ok((roots, base, cache, service, open)) = this.update(cx, |this, _| {
                     (
                         this.repo_roots(),
                         this.index.clone(),
                         this.ignore_cache.clone(),
                         this.service.clone(),
+                        this.documents
+                            .iter()
+                            .filter(|doc| !doc.untitled)
+                            .map(|doc| doc.path.clone())
+                            .collect::<BTreeSet<_>>(),
                     )
                 }) else {
                     break;
                 };
                 let overflow = notice.overflow;
                 let paths = std::mem::take(&mut notice.paths);
+                // Open tabs follow their files even when Git ignores them (.env, target/…)
+                // or the refresh itself waits for a build to finish.
+                let open_changed: BTreeSet<_> = paths
+                    .iter()
+                    .filter(|p| open.contains(*p))
+                    .cloned()
+                    .collect();
                 let computed = cx
                     .background_spawn(async move {
                         if overflow {
@@ -137,6 +149,9 @@ impl Prototype {
                             this.watch_error = Some(format!("文件监听错误：{error}；请手动刷新"));
                         }
                         this.watch_debouncing = false;
+                        if !open_changed.is_empty() {
+                            this.check_disk(Some(&open_changed), window, cx);
+                        }
                         this.queue_plan(computed, window, cx);
                         this.flush_workspace_refresh(window, cx);
                     })

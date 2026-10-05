@@ -814,13 +814,21 @@ impl Prototype {
         }
         let work = cx.background_spawn(async move {
             jobs.into_iter()
-                .map(|(id, path, known)| (id, save::check(&path, &known)))
+                .map(|(id, path, known)| (id, known, save::check(&path, &known)))
                 .collect::<Vec<_>>()
         });
         cx.spawn_in(window, async move |this, cx| {
             let results = work.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                for (id, result) in results {
+                for (id, known, result) in results {
+                    // A save (or another check) finished meanwhile: this answer compares the
+                    // disk with a state that is no longer the tab's.
+                    let current = this
+                        .document(id)
+                        .is_some_and(|doc| doc.disk == Some(known) && !doc.saving);
+                    if !current {
+                        continue;
+                    }
                     match result {
                         Ok(on_disk) => this.on_disk_changed(id, on_disk, window, cx),
                         Err(error) => eprintln!("event=disk_check_failed error={error}"),
