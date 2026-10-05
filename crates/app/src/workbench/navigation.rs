@@ -138,13 +138,11 @@ fn resolve(
         .into_iter()
         .filter(|location| location.path != path)
         .collect();
-    // A Rust call does not mean a TypeScript function of the same name.
-    if others
-        .iter()
-        .any(|l| symbol_index::language(&l.path) == Some(language))
-    {
-        others.retain(|l| symbol_index::language(&l.path) == Some(language));
-    }
+    // A Python name never means a Rust function of the same name, even when the workspace
+    // has no Python definition of it (an imported library's `settings`).
+    others.retain(|l| {
+        symbol_index::language(&l.path).is_some_and(|other| same_family(other, language))
+    });
     symbol_index::rank(path, text, &mut others);
     // `db::connect` / `net.connect`: a qualifier naming one candidate's module decides it.
     if let Some(qualifier) = qualifier(text, here.start) {
@@ -721,6 +719,19 @@ pub(super) struct NavState {
     pub(super) pending_place: Option<(PathBuf, Placement)>,
 }
 
+/// Languages whose files refer to each other's definitions: C and C++ share headers, and
+/// JavaScript and TypeScript import each other.
+fn same_family(a: &str, b: &str) -> bool {
+    fn family(language: &str) -> &str {
+        match language {
+            "c" | "cpp" => "c",
+            "javascript" | "typescript" | "tsx" => "js",
+            other => other,
+        }
+    }
+    family(a) == family(b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AtomicBool, Path, SymbolIndex, parse_line_query, references, resolve};
@@ -781,6 +792,30 @@ mod tests {
             resolve(&main, "rust", source, offset, Some(&index)).len(),
             2
         );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_name_without_a_definition_in_its_language_goes_nowhere_else() {
+        let root = std::env::temp_dir().join(format!("zj-nav-lang-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        let rust = root.join("src/settings.rs");
+        fs::write(&rust, "pub struct Settings;\npub fn settings() {}\n").unwrap();
+        let header = root.join("src/util.h");
+        fs::write(&header, "int helper(void);\n").unwrap();
+        let index = SymbolIndex::build(vec![rust, header.clone()], &AtomicBool::new(false));
+        // Django's `settings` is a library module: no Python definition in the workspace.
+        let app = root.join("app.py");
+        let source = "from django.conf import settings\n\nprint(settings.DEBUG)\n";
+        let offset = source.rfind("settings").unwrap() + 1;
+        assert!(resolve(&app, "python", source, offset, Some(&index)).is_empty());
+        // C++ still finds the C header's declaration.
+        let main = root.join("src/main.cpp");
+        let source = "#include \"util.h\"\nint main() { return helper(); }\n";
+        let offset = source.rfind("helper").unwrap() + 1;
+        let targets = resolve(&main, "cpp", source, offset, Some(&index));
+        assert!(targets.iter().any(|t| t.path == header), "{targets:?}");
         fs::remove_dir_all(&root).unwrap();
     }
 
