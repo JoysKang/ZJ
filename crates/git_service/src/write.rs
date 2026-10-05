@@ -141,6 +141,7 @@ impl GitService {
         let writer = Self {
             shared: self.shared.clone(),
             timeout: Duration::from_secs(120),
+            grace: Duration::from_secs(1),
         };
         let mut tag_push = None;
         let conflicted = current

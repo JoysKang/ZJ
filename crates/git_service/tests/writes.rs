@@ -6,7 +6,9 @@ use std::{
     sync::atomic::AtomicBool,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use workspace_editor_git::{GitService, WriteOperation, WriteRequest};
+use workspace_editor_git::{
+    DiffSide, GitService, Operation, Request, WriteOperation, WriteRequest,
+};
 
 struct Fixture(PathBuf);
 impl Drop for Fixture {
@@ -797,4 +799,93 @@ fn tags_are_created_pushed_and_deleted() {
     assert!(tags(&root).is_empty());
     assert_eq!(tags(&bare), ["v2"]);
     assert!(write(&service, &root, delete("v2", false)).is_err());
+}
+
+#[test]
+fn patches_keep_a_b_prefixes_whatever_the_user_config_says() {
+    let fixture = fixture();
+    let root = fixture.0.join("a");
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-qm", "init"]);
+    fs::write(root.join("src/main.rs"), "changed\n").unwrap();
+    fs::write(root.join("new.txt"), "new\n").unwrap();
+    let service = GitService::new(2, Duration::from_secs(10)).unwrap();
+    let cancel = AtomicBool::new(false);
+    let repo = service.identify(&root, &cancel).unwrap();
+    for (key, value) in [("diff.noprefix", "true"), ("diff.mnemonicPrefix", "true")] {
+        git(&root, &["config", key, value]);
+        for operation in [
+            Operation::Diff {
+                side: DiffSide::Worktree,
+                path: "src/main.rs".into(),
+                original_path: None,
+            },
+            Operation::UntrackedDiff {
+                path: "new.txt".into(),
+            },
+        ] {
+            let reply = service
+                .execute(
+                    &Request {
+                        repo: repo.clone(),
+                        generation: 1,
+                        operation,
+                    },
+                    &cancel,
+                )
+                .unwrap();
+            let patch = String::from_utf8(reply.output).unwrap();
+            assert!(patch.contains("+++ b/"), "{key}: {patch}");
+        }
+        git(&root, &["config", "--unset", key]);
+    }
+}
+
+#[test]
+fn a_cancelled_write_asks_git_to_stop_before_killing_it() {
+    let fixture = fixture();
+    let root = fixture.0.join("a");
+    let service = GitService::new(2, Duration::from_secs(10)).unwrap();
+    write(&service, &root, WriteOperation::Stage { paths: paths() }).unwrap();
+    // SIGTERM lets Git and its hooks clean up (Git removes index.lock on it, not on SIGKILL).
+    let marks = fixture.0.join("marks");
+    fs::create_dir(&marks).unwrap();
+    let hook = root.join(".git/hooks/pre-commit");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\ntrap 'touch {0}/term; exit 1' TERM\ntouch {0}/started\nsleep 30 &\nwait\n",
+            marks.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    let cancel = AtomicBool::new(false);
+    let repo = service.identify(&root, &cancel).unwrap();
+    let expected = service.status(&repo, 1, &cancel).unwrap();
+    let request = WriteRequest {
+        repo,
+        expected: expected.into(),
+        operation: WriteOperation::Commit {
+            message: "never".into(),
+            amend: false,
+            push: false,
+            all: false,
+        },
+        generation: 2,
+    };
+    let started = std::time::Instant::now();
+    let result = std::thread::scope(|scope| {
+        let commit = scope.spawn(|| service.write(&request, &cancel).map(|_| ()));
+        while !marks.join("started").exists() && started.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        commit.join().unwrap()
+    });
+    assert!(marks.join("started").exists(), "the hook never ran");
+    assert!(result.is_err());
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(marks.join("term").exists());
+    assert!(!root.join(".git/index.lock").exists());
 }

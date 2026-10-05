@@ -36,6 +36,10 @@ use workspace_editor_core::{GitMarker, RepoId, Repository, git_marker, is_exclud
 const OUTPUT_LIMIT: usize = 16_000_000;
 /// Diffs carry the whole file so the diff editor can rebuild both sides.
 const FULL_CONTEXT: &str = "--unified=1000000";
+/// Patch paths always start with `a/` and `b/`: partial staging and `git apply -p1` rely on
+/// it, whatever `diff.noprefix` or `diff.mnemonicPrefix` the user has set.
+const SRC_PREFIX: &str = "--src-prefix=a/";
+const DST_PREFIX: &str = "--dst-prefix=b/";
 const ERROR_LIMIT: usize = 32_000;
 
 #[derive(Clone, Copy, Debug)]
@@ -100,6 +104,9 @@ struct Shared {
 pub struct GitService {
     shared: Arc<Shared>,
     timeout: Duration,
+    /// How long a timed-out or cancelled Git gets after SIGTERM before SIGKILL. Writes need it:
+    /// Git removes `index.lock` on SIGTERM but not on SIGKILL. Read queries take no locks.
+    grace: Duration,
 }
 
 /// Serializes operations on one repository. Waiters sleep on the condvar and wake as soon as
@@ -129,6 +136,52 @@ impl Drop for Permit<'_> {
     }
 }
 
+/// Variables that point Git at another repository, work tree or index.
+fn is_routing_variable(key: &str) -> bool {
+    matches!(
+        key,
+        "GIT_DIR"
+            | "GIT_WORK_TREE"
+            | "GIT_INDEX_FILE"
+            | "GIT_COMMON_DIR"
+            | "GIT_OBJECT_DIRECTORY"
+            | "GIT_ALTERNATE_OBJECT_DIRECTORIES"
+            | "GIT_NAMESPACE"
+            | "GIT_PREFIX"
+            | "GIT_CEILING_DIRECTORIES"
+            | "GIT_DISCOVERY_ACROSS_FILESYSTEM"
+            | "GIT_LITERAL_PATHSPECS"
+            | "GIT_GLOB_PATHSPECS"
+            | "GIT_NOGLOB_PATHSPECS"
+            | "GIT_ICASE_PATHSPECS"
+            | "GIT_QUARANTINE_PATH"
+    ) || key.starts_with("GIT_CONFIG_KEY_")
+        || key.starts_with("GIT_CONFIG_VALUE_")
+        || key == "GIT_CONFIG_COUNT"
+        || key == "GIT_CONFIG_PARAMETERS"
+}
+
+/// Whether the child has exited, without reaping it (it stays a zombie holding its PID).
+fn exited(pid: u32) -> bool {
+    // SAFETY: an all-zero siginfo_t is valid; waitid only writes into it.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a valid out pointer; WNOWAIT leaves the child waitable for `wait`.
+    let found = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    } == 0;
+    #[cfg(target_os = "linux")]
+    // SAFETY: waitid filled a SIGCHLD record, whose si_pid is set (0 when nothing exited).
+    let pid = unsafe { info.si_pid() };
+    #[cfg(not(target_os = "linux"))]
+    let pid = info.si_pid;
+    found && pid != 0
+}
+
 fn error(message: impl Into<String>) -> io::Error {
     io::Error::other(message.into())
 }
@@ -149,6 +202,7 @@ impl GitService {
                 repo_locks: Mutex::new(HashMap::new()),
             }),
             timeout,
+            grace: Duration::ZERO,
         })
     }
 
@@ -197,9 +251,10 @@ impl GitService {
         let _permit = self.permit(cancel)?;
         let started = Instant::now();
         let mut command = Command::new("git");
-        // A desktop launch must not inherit another shell's repository/index routing.
+        // A desktop launch must not inherit another shell's repository/index routing; the rest
+        // (GIT_SSH_COMMAND, GIT_ASKPASS, GIT_CONFIG_GLOBAL, ...) is the user's and stays.
         for (key, _) in std::env::vars_os() {
-            if key.to_str().is_some_and(|key| key.starts_with("GIT_")) {
+            if key.to_str().is_some_and(is_routing_variable) {
                 command.env_remove(key);
             }
         }
@@ -270,9 +325,21 @@ impl GitService {
             }
         })();
         if result.is_err() {
-            // SAFETY: process_group(0) gave this child its own group; a negative PID targets that group.
+            let group = -(child.id() as i32);
+            if !self.grace.is_zero() {
+                // SAFETY: process_group(0) gave this child its own group; a negative PID targets that group.
+                unsafe {
+                    libc::kill(group, libc::SIGTERM);
+                }
+                let asked = Instant::now();
+                while asked.elapsed() < self.grace && !exited(child.id()) {
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+            // Not reaped yet, so the group ID cannot have been reused; helpers die with it.
+            // SAFETY: as above; the leader is at worst a zombie that still owns the group ID.
             unsafe {
-                libc::kill(-(child.id() as i32), libc::SIGKILL);
+                libc::kill(group, libc::SIGKILL);
             }
             let _ = child.wait();
         }
@@ -376,6 +443,8 @@ impl GitService {
                             "--no-textconv".into(),
                             "--no-color".into(),
                             FULL_CONTEXT.into(),
+                            SRC_PREFIX.into(),
+                            DST_PREFIX.into(),
                             "--".into(),
                             path.as_os_str().to_owned(),
                         ],
@@ -400,6 +469,8 @@ impl GitService {
                             "--no-textconv".into(),
                             "--no-color".into(),
                             FULL_CONTEXT.into(),
+                            SRC_PREFIX.into(),
+                            DST_PREFIX.into(),
                             "--".into(),
                             "/dev/null".into(),
                             path.as_os_str().to_owned(),
@@ -431,7 +502,11 @@ impl GitService {
                     "--no-textconv".into(),
                     "--no-color".into(),
                     FULL_CONTEXT.into(),
+                    SRC_PREFIX.into(),
+                    DST_PREFIX.into(),
                 ];
+                // A staged rename shows as one entry even with `diff.renames=false`.
+                args.push("-M".into());
                 if matches!(side, DiffSide::Staged) {
                     args.push("--cached".into());
                 }
@@ -465,6 +540,8 @@ impl GitService {
                     "--no-color".into(),
                     "-M".into(),
                     FULL_CONTEXT.into(),
+                    SRC_PREFIX.into(),
+                    DST_PREFIX.into(),
                     base.into(),
                     commit.into(),
                     "--".into(),
@@ -955,6 +1032,26 @@ impl Output {
 #[cfg(test)]
 mod lock_tests {
     use super::*;
+
+    #[test]
+    fn only_routing_variables_are_cleared() {
+        for key in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_CONFIG_KEY_0",
+        ] {
+            assert!(is_routing_variable(key), "{key}");
+        }
+        for key in [
+            "GIT_SSH_COMMAND",
+            "GIT_ASKPASS",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_EXEC_PATH",
+        ] {
+            assert!(!is_routing_variable(key), "{key}");
+        }
+    }
 
     #[test]
     fn waiter_wakes_on_release_and_honours_cancel() {
