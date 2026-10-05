@@ -58,6 +58,19 @@ impl Default for AgentSettings {
 }
 
 impl AgentSettings {
+    /// The variables to resolve (`$NAME`, `keychain:`, plaintext secrets refused) for agent
+    /// `id`: a custom agent's own `env`, overridden by `agent.env`.
+    pub fn env_for(&self, id: &str) -> BTreeMap<String, String> {
+        let mut env = self
+            .custom
+            .iter()
+            .find(|custom| custom.id == id)
+            .map(|custom| custom.env.clone())
+            .unwrap_or_default();
+        env.extend(self.env.get(id).cloned().unwrap_or_default());
+        env
+    }
+
     fn from_json(value: Option<&Value>) -> Self {
         let defaults = Self::default();
         let Some(value) = value else {
@@ -416,6 +429,19 @@ mod tests {
         .unwrap();
         let loaded = Settings::load_from(&path);
         assert_eq!(loaded.editor_font_size, EDITOR_FONT_MAX);
+        // A custom agent's env goes through the same resolution as agent.env.
+        let mut agent = changed.agent.clone();
+        agent.custom[0].env = BTreeMap::from([
+            ("OPENAI_API_KEY".into(), "sk-plain".into()),
+            ("MODE".into(), "fast".into()),
+        ]);
+        agent.env.insert(
+            "opencode".into(),
+            BTreeMap::from([("MODE".into(), "slow".into())]),
+        );
+        let env = agent.env_for("opencode");
+        assert_eq!(env["MODE"], "slow");
+        assert!(crate::secrets::resolve(&env, |_| None).is_err());
         assert!(!loaded.show_hidden);
         fs::remove_dir_all(dir).unwrap();
     }

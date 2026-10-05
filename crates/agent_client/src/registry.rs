@@ -256,7 +256,8 @@ pub struct UserAgentConfig {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
-    /// Literal values; `"$NAME"` copies `NAME` from ZJ's environment.
+    /// Literal values; `"$NAME"` copies `NAME` from ZJ's environment. The app resolves these
+    /// like `agent.env` before launch (`keychain:ACCOUNT`, plaintext secrets refused).
     #[serde(default)]
     pub env: BTreeMap<String, String>,
 }

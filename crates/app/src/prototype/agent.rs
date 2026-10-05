@@ -677,7 +677,7 @@ impl Prototype {
         session.root = Some(root.clone());
         let preset = session.preset.clone();
         let resume = session.resume.clone();
-        let overrides = settings.env.get(&preset.id).cloned().unwrap_or_default();
+        let overrides = settings.env_for(&preset.id);
         let write_mode = if settings.accept_first {
             WriteMode::AcceptFirst
         } else {
