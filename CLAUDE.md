@@ -51,27 +51,27 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `theme.rs`：唯一允许写字面尺寸和颜色的地方。
   - `assets.rs`：内嵌资源；`file_icons.rs`：文件类型到图标的映射。
   - `files.rs`：受限的文件读取、紧凑存储的快速打开路径索引和点文件默认隐藏规则；`fuzzy.rs`：模糊匹配打分。
-  - `save.rs`：保存的纯逻辑（同目录临时文件 + fsync + rename、保留权限 / 换行符 / BOM、符号链接写到目标、多硬链接原地写、只读识别、按设备 / inode / 大小 / mtime / 内容哈希判断外部修改、退出询问的状态机、自动保存防抖、比较用的补丁）；`prototype/documents.rs`：保存、另存为、全部保存、Untitled、关闭 / 退出确认、外部修改横幅、自动保存，以及给 Agent 层的 `buffer_text` / `on_buffer_saved`。
+  - `save.rs`：保存的纯逻辑（同目录临时文件 + fsync + rename、保留权限 / 换行符 / BOM、符号链接写到目标、多硬链接原地写、只读识别、按设备 / inode / 大小 / mtime / 内容哈希判断外部修改、退出询问的状态机、自动保存防抖、比较用的补丁）；`workbench/documents.rs`：保存、另存为、全部保存、Untitled、关闭 / 退出确认、外部修改横幅、自动保存，以及给 Agent 层的 `buffer_text` / `on_buffer_saved`。
   - `settings.rs`：所有窗口共用的设置文件（字号、显示隐藏文件、Diff 布局、隐藏无变更仓库、搜索排除、Dock 图标闪烁、自动保存）。
-  - `platform.rs`：少量 macOS 系统接口（“减少动态效果”、Dock 图标替换与闪烁），其他平台为空实现；`prototype/welcome.rs`：欢迎页 logo 上单独绘制的闪烁光标。
-  - `file_ops.rs`：资源管理器的新建、重命名、复制、移动和移到废纸篓；`prototype/explorer_ops.rs`：右键菜单、快捷键和行内改名；`prototype/tab_menu.rs`：编辑器标签页的右键菜单、对应快捷键和 ⇧⌘T 重开已关闭标签的栈。
-  - Markdown 预览：`markdown_blocks.rs` 把文件切成顶层块（纯函数）；`prototype/markdown_preview.rs` 按块用 Kit `TextView` 渲染，点击的块换成源码文本框并直接写回缓冲区，⇧⌘V 切换源码。源码视图下不切分。
-  - 终端（docs/adr/0006）：`terminal.rs` 是 `alacritty_terminal` 的衔接层（起 shell、事件、按键编码、ANSI 颜色映射），不依赖界面状态；`prototype/terminal_view.rs` 画网格并处理键鼠和输入法；`prototype/terminal_panel.rs` 是底部面板的分组、拆分和关闭。终端没有定时器，只在 shell 有输出时重画。
-  - `text_search.rs`：全文搜索（glob 包含 / 排除、默认排除、二进制与大文件跳过、结果上限）；`prototype/search_view.rs`：搜索视图；`prototype/search_replace.rs`：搜索视图里的替换（行内预览、替换前 Diff、原子写入、跳过搜索后改过的文件、撤销）。
-  - `replace.rs`：查找替换的共同规则（Aa / ab / .*、`$1` 与大小写转义、保留大小写、CRLF、不跨行）；`prototype/find_widget.rs`：编辑器右上角的查找替换浮层（⌘F / ⌥⌘F）。
+  - `platform.rs`：少量 macOS 系统接口（“减少动态效果”、Dock 图标替换与闪烁），其他平台为空实现；`workbench/welcome.rs`：欢迎页 logo 上单独绘制的闪烁光标。
+  - `file_ops.rs`：资源管理器的新建、重命名、复制、移动和移到废纸篓；`workbench/explorer_ops.rs`：右键菜单、快捷键和行内改名；`workbench/tab_menu.rs`：编辑器标签页的右键菜单、对应快捷键和 ⇧⌘T 重开已关闭标签的栈。
+  - Markdown 预览：`markdown_blocks.rs` 把文件切成顶层块（纯函数）；`workbench/markdown_preview.rs` 按块用 Kit `TextView` 渲染，点击的块换成源码文本框并直接写回缓冲区，⇧⌘V 切换源码。源码视图下不切分。
+  - 终端（docs/adr/0006）：`terminal.rs` 是 `alacritty_terminal` 的衔接层（起 shell、事件、按键编码、ANSI 颜色映射），不依赖界面状态；`workbench/terminal_view.rs` 画网格并处理键鼠和输入法；`workbench/terminal_panel.rs` 是底部面板的分组、拆分和关闭。终端没有定时器，只在 shell 有输出时重画。
+  - `text_search.rs`：全文搜索（glob 包含 / 排除、默认排除、二进制与大文件跳过、结果上限）；`workbench/search_view.rs`：搜索视图；`workbench/search_replace.rs`：搜索视图里的替换（行内预览、替换前 Diff、原子写入、跳过搜索后改过的文件、撤销）。
+  - `replace.rs`：查找替换的共同规则（Aa / ab / .*、`$1` 与大小写转义、保留大小写、CRLF、不跨行）；`workbench/find_widget.rs`：编辑器右上角的查找替换浮层（⌘F / ⌥⌘F）。
   - `watch.rs`：共用原生文件监听、路径引用回收和有界事件信号（带变更路径，超出上限退化为全量刷新）；不持有界面实体。
   - `refresh_plan.rs`：把一批变更路径算成最小刷新（只刷受影响仓库的状态、只重列变化的目录、增量更新索引）；被 Git 忽略的路径（target/、node_modules）按目录缓存判定后丢弃，构建期间不刷新。
-  - `prototype.rs`：工作台的状态和逻辑（成组的状态放在各自模块的子结构体里：`sidebar::Explorer`、`diff_view::DiffPane`、`navigation::NavState`、`workspace_refresh::WatchState`）；`prototype/` 下是各区域的渲染（`chrome` 标题栏与状态栏、`sidebar` 侧栏与资源管理器、`scm`、`editor_area`、`quick_open`、`commands` 命令面板的命令表），以及 `workspace_refresh` 的事件刷新编排。
+  - `workbench.rs`：工作台的状态和逻辑（成组的状态放在各自模块的子结构体里：`sidebar::Explorer`、`diff_view::DiffPane`、`navigation::NavState`、`workspace_refresh::WatchState`）；`workbench/` 下是各区域的渲染（`chrome` 标题栏与状态栏、`sidebar` 侧栏与资源管理器、`scm`、`editor_area`、`quick_open`、`commands` 命令面板的命令表），以及 `workspace_refresh` 的事件刷新编排。
   - `diff_syntax.rs`：重新注册 diff 语法，让新增 / 删除有独立的颜色。
   - `languages.rs`：文件名 / 扩展名到语法的映射；新增语法要同时打开 Kit 的 feature 并在 `SAMPLES` 里加样例。
-  - `editing.rs`：行编辑命令的纯逻辑（⌘/ 行注释、⌥↑↓ 移动行、⇧⌥↑↓ 复制行、⌘D 选词和下一个匹配，按 VS Code 规则），不依赖 GPUI；`prototype/edit_commands.rs` 接到文档编辑器上（`DocumentEditor > Input` 键上下文，只用 Kit 公开的主选区）。
+  - `editing.rs`：行编辑命令的纯逻辑（⌘/ 行注释、⌥↑↓ 移动行、⇧⌥↑↓ 复制行、⌘D 选词和下一个匹配，按 VS Code 规则），不依赖 GPUI；`workbench/edit_commands.rs` 接到文档编辑器上（`DocumentEditor > Input` 键上下文，只用 Kit 公开的主选区）。
   - `indent.rs`：每个文件的缩进（`.editorconfig` > 按内容猜测 > 语言默认），不依赖 GPUI；`.editorconfig` 在后台打开文件时一起读，状态栏的缩进菜单只改当前文档。
-  - `diff_doc.rs`：在后台把全上下文补丁还原成两侧全文，做行对齐、语法高亮和字符级差异；`prototype/diff_view.rs`：只切片现成数据的虚拟化左右 / 内联 Diff 编辑器；`prototype/diff_ops.rs`：行选择、复制、概览标尺和块 / 行级暂存；`partial_patch.rs`：从全上下文补丁生成只含所选行的补丁。
-  - `prototype/scm_actions.rs`：Git 写操作确认与结果展示；`git_service/src/write.rs`：仓库锁内校验及有界执行。
-  - `prototype/graph_view.rs`：编辑区里的 Git 图（纯函数的车道布局、分页提交列表、提交详情、打开提交 Diff）。
+  - `diff_doc.rs`：在后台把全上下文补丁还原成两侧全文，做行对齐、语法高亮和字符级差异；`workbench/diff_view.rs`：只切片现成数据的虚拟化左右 / 内联 Diff 编辑器；`workbench/diff_ops.rs`：行选择、复制、概览标尺和块 / 行级暂存；`partial_patch.rs`：从全上下文补丁生成只含所选行的补丁。
+  - `workbench/scm_actions.rs`：Git 写操作确认与结果展示；`git_service/src/write.rs`：仓库锁内校验及有界执行。
+  - `workbench/graph_view.rs`：编辑区里的 Git 图（纯函数的车道布局、分页提交列表、提交详情、打开提交 Diff）。
   - `session.rs`：重启时恢复的窗口记录（`session.json`，每个窗口的文件夹和位置大小）。
-  - Agent 面板（docs/adr/0004）：`agent_model.rs` 放不依赖 GPUI 的逻辑（会话分组和时间、`@` 引用、附件、从历史恢复）；`markdown.rs` 是回复用的小型 Markdown（代码块用编辑器的语法高亮，在后台完成）；`secrets.rs` 解析 Agent 的环境变量（`$变量名` 或 macOS 钥匙串 `keychain:账户名`，设置里不存明文密钥）。`prototype/agent.rs` 是会话与面板视图的状态，其余逻辑按主题放在 `prototype/agent/`（`turns` 发送与事件泵、`permissions` 权限与规则、`composer` 引用与附件、`changes` 改动文件、`history` 会话历史、`buffers` 给 Agent 的未保存缓冲区）；`agent_panel.rs`（标题、会话条、切换器；`agent_panel/` 下是对话行、卡片、改动文件、输入框、设置）、`agent_history.rs`（会话列表）、`agent_search.rs`（⌘J 搜索）、`agent_review.rs`（编辑区里逐处接受 / 拒绝）只做渲染和交互。转圈只在面板可见、窗口在前台、有会话运行时才有定时器。
-  - `symbols.rs`：tree-sitter tags / locals 查询做定义、引用和文件大纲（查询在 `crates/app/queries/`）；`symbol_index.rs`：首次跳转时后台建立的工作区符号索引；`prototype/navigation.rs`：转到定义、符号列表、查找引用、转到行（⌃G，命令中心里的 `:行:列`）和前进后退。不跑语言服务器，见 docs/adr/0002。
+  - Agent 面板（docs/adr/0004）：`agent_model.rs` 放不依赖 GPUI 的逻辑（会话分组和时间、`@` 引用、附件、从历史恢复）；`markdown.rs` 是回复用的小型 Markdown（代码块用编辑器的语法高亮，在后台完成）；`secrets.rs` 解析 Agent 的环境变量（`$变量名` 或 macOS 钥匙串 `keychain:账户名`，设置里不存明文密钥）。`workbench/agent.rs` 是会话与面板视图的状态，其余逻辑按主题放在 `workbench/agent/`（`turns` 发送与事件泵、`permissions` 权限与规则、`composer` 引用与附件、`changes` 改动文件、`history` 会话历史、`buffers` 给 Agent 的未保存缓冲区）；`agent_panel.rs`（标题、会话条、切换器；`agent_panel/` 下是对话行、卡片、改动文件、输入框、设置）、`agent_history.rs`（会话列表）、`agent_search.rs`（⌘J 搜索）、`agent_review.rs`（编辑区里逐处接受 / 拒绝）只做渲染和交互。转圈只在面板可见、窗口在前台、有会话运行时才有定时器。
+  - `symbols.rs`：tree-sitter tags / locals 查询做定义、引用和文件大纲（查询在 `crates/app/queries/`）；`symbol_index.rs`：首次跳转时后台建立的工作区符号索引；`workbench/navigation.rs`：转到定义、符号列表、查找引用、转到行（⌃G，命令中心里的 `:行:列`）和前进后退。不跑语言服务器，见 docs/adr/0002。
 - `vendor/`：打过补丁的 GPUI macOS 渲染器和窗口层（`gpui-pre-apple` / `gpui-pre-macos`，用 `[patch.crates-io]` 指向）。改动都标 `ZJ patch`，说明在 `vendor/README.md`，理由和测量方法在 docs/adr/0005；`ZJ_GPU_LOWMEM=0` 恢复上游行为。升级 GPUI 时要先处理这里。
 - UI 的 render 回调里不做 IO、不跑 Git 命令、不做全文解析；这些都通过 `background_spawn` 执行，结果带 generation 校验。
 

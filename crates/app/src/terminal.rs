@@ -1,5 +1,5 @@
 //! The integrated terminal's backend: a shell on a pty, emulated by `alacritty_terminal`
-//! (docs/adr/0006). This side owns the process and the grid; `prototype/terminal_view.rs`
+//! (docs/adr/0006). This side owns the process and the grid; `workbench/terminal_view.rs`
 //! draws the grid and turns keys and mouse input into bytes for the shell.
 
 use alacritty_terminal::{

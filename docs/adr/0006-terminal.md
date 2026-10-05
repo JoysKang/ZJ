@@ -9,7 +9,7 @@
 ## 决定
 
 - 仿真和 pty 用 `alacritty_terminal =0.26.0`（`default-features = false`，不带 serde）：Alacritty 自己在用、持续维护；Zed 的终端也是基于它。
-- 自己只写界面衔接：`crates/app/src/terminal.rs` 起 shell、转发事件、按键编码成 xterm 序列、把 ANSI 颜色映射到主题；`prototype/terminal_view.rs` 用 canvas 画网格（同色同样式的连续字符合并成一段排版，背景块合并成矩形）、光标、选区、输入法预编辑，处理鼠标选择和滚轮；`prototype/terminal_panel.rs` 是底部面板（分组、拆分、关闭）。
+- 自己只写界面衔接：`crates/app/src/terminal.rs` 起 shell、转发事件、按键编码成 xterm 序列、把 ANSI 颜色映射到主题；`workbench/terminal_view.rs` 用 canvas 画网格（同色同样式的连续字符合并成一段排版，背景块合并成矩形）、光标、选区、输入法预编辑，处理鼠标选择和滚轮；`workbench/terminal_panel.rs` 是底部面板（分组、拆分、关闭）。
 - 默认 shell 是 `$SHELL`（login shell），工作目录是窗口打开的文件夹；只给 shell 设 `TERM=xterm-256color`、`COLORTERM=truecolor`、`TERM_PROGRAM=ZJ`，不改 ZJ 自己的环境。回滚 1000 行（VS Code 默认值）。
 - 没有定时器：光标不闪，读线程有输出时通过 channel 唤醒视图，一批事件只重画一次。面板隐藏时终端进程保留，不重画。
 - 快捷键：⌃` 显示 / 隐藏面板（没有终端时新建一个），⌃⇧` 新建，⌘\ 在终端里向右拆分；面板按钮还有关闭当前终端。shell 退出时自动关掉对应的终端，最后一个关掉时面板隐藏。

@@ -1,5 +1,5 @@
 //! Splits a Markdown file into its top-level blocks for the live preview
-//! (`prototype/markdown_preview.rs`): every block renders on its own and turns into its source
+//! (`workbench/markdown_preview.rs`): every block renders on its own and turns into its source
 //! when clicked. The parser is the one Kit's `TextView` already uses.
 
 use ::markdown::{ParseOptions, mdast::Node};

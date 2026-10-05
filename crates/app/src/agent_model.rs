@@ -1,6 +1,6 @@
 //! Agent panel logic that does not need GPUI: time buckets and labels for the session list,
 //! the composer's `@` mention and attachments, restoring threads from history, and how a
-//! tool call is summarized on its card. Rendering lives in `prototype/agent_*.rs`.
+//! tool call is summarized on its card. Rendering lives in `workbench/agent_*.rs`.
 
 use std::{ops::Range, path::PathBuf};
 use workspace_editor_agent::{

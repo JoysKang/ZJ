@@ -8,6 +8,7 @@
 - **Agent 写入**：2026-10-05 去掉了「先审阅再写入」，只保留直接写入加改动前快照的审阅（ADR 0004 文末）。
 - **资源**：最近的 macOS 记录里，空闲 footprint 约 165–168 MB（1 个窗口），超过 CLAUDE.md 的 100 MB 上限；dist 二进制约 35.4 MB，超过 30 MB 目标。冷启动、按键到画面 p99、3 窗口 + 20 文档尚无 macOS 实测。
 - **未完成**：编辑恢复日志（R11 / A16）、重启后恢复文件标签（R01）、Markdown 本地图片（A19）、大文件受限查看（A18）、手动补充仓库（R03）；G1 及 A01–A19 逐项验收待实机进行。
+- **代码结构**：2026-10-05 起界面模块 `prototype` 改名为 `workbench`（`crates/app/src/workbench.rs`、`workbench/`，类型 `Workbench`）；下面较早的记录里仍是旧名。
 - **Linux 上的测试**：`edit_commands_ui_tests` 的 3 个测试在 Linux 上失败（⌘ 键映射不同），CI 在 macOS 上运行，不受影响。
 
 ## 首批实现（2026 年 9 月 30 日）
