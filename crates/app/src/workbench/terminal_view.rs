@@ -166,7 +166,9 @@ impl TerminalView {
             }
         }
         if let Some(title) = self.terminal.take_title() {
-            self.title = title.unwrap_or_else(shell_name);
+            self.title = title
+                .map(|title| crate::terminal::tab_title(&title).to_string())
+                .unwrap_or_else(shell_name);
             cx.emit(TerminalEvent::TitleChanged);
         }
         if self.terminal.exited() && !self.exited {

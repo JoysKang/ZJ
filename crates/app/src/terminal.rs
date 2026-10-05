@@ -9,7 +9,7 @@ use alacritty_terminal::{
     sync::FairMutex,
     term::{Config, Term, TermMode, color::COUNT},
     tty,
-    vte::ansi::{Color, NamedColor, Rgb},
+    vte::ansi::{Color, CursorShape as AnsiCursorShape, CursorStyle, NamedColor, Rgb},
 };
 use gpui_kit::{Hsla, Keystroke, Rgba};
 use std::{
@@ -178,6 +178,12 @@ impl Terminal {
         let (listener, events) = Listener::new();
         let config = Config {
             scrolling_history: SCROLLBACK,
+            // A thin bar like the editor's; programs can still ask for a block (vim's normal
+            // mode does).
+            default_cursor_style: CursorStyle {
+                shape: AnsiCursorShape::Beam,
+                blinking: false,
+            },
             ..Config::default()
         };
         let term = Arc::new(FairMutex::new(Term::new(config, &size, listener.clone())));
@@ -352,6 +358,22 @@ fn control_byte(key: &str) -> Option<u8> {
     }
 }
 
+/// The tab label for a title the shell set: the path only, without the `user@host:` prefix
+/// that oh-my-zsh, bash and others put in front of it.
+pub fn tab_title(title: &str) -> &str {
+    let title = title.trim();
+    match title.split_once(':') {
+        Some((who, path))
+            if who.contains('@')
+                && !who.contains(char::is_whitespace)
+                && !path.trim().is_empty() =>
+        {
+            path.trim()
+        }
+        _ => title,
+    }
+}
+
 /// The 16 ANSI colors, then the default foreground, background and cursor.
 #[derive(Clone, Copy)]
 pub struct Palette {
@@ -503,6 +525,16 @@ mod tests {
         assert_eq!(bytes("a", normal), None);
         assert_eq!(bytes("shift-a", normal), None);
         assert_eq!(bytes("cmd-c", normal), None);
+    }
+
+    #[test]
+    fn tab_titles_drop_user_and_host() {
+        assert_eq!(tab_title("joys@MacBook-Pro: ~/ZJ"), "~/ZJ");
+        assert_eq!(tab_title("joys@mbp:~/work/a b"), "~/work/a b");
+        assert_eq!(tab_title("vim main.rs"), "vim main.rs");
+        assert_eq!(tab_title("~/ZJ"), "~/ZJ");
+        assert_eq!(tab_title("ssh: user@host"), "ssh: user@host");
+        assert_eq!(tab_title("joys@mbp:"), "joys@mbp:");
     }
 
     #[test]
