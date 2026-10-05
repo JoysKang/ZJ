@@ -207,23 +207,50 @@ pub fn copy_into(source: &Path, dir: &Path) -> io::Result<PathBuf> {
         return Err(io::Error::other("不能把文件夹复制到它自己里面"));
     }
     let target = unique_name(dir, name);
-    copy_recursive(source, &target)?;
+    let mut skipped = 0;
+    copy_recursive(source, &target, &mut skipped)?;
+    if skipped > 0 {
+        return Err(skipped_message(skipped, "已复制其余内容"));
+    }
     Ok(target)
 }
 
-fn copy_recursive(source: &Path, target: &Path) -> io::Result<()> {
+fn skipped_message(skipped: usize, rest: &str) -> io::Error {
+    io::Error::other(format!(
+        "跳过了 {skipped} 个无法复制的套接字或设备文件，{rest}"
+    ))
+}
+
+/// Copies regular files, folders and symlinks (as links); recreates named pipes instead of
+/// reading them, which would block until a writer appears. Sockets and devices cannot be
+/// copied and are counted in `skipped`.
+fn copy_recursive(source: &Path, target: &Path, skipped: &mut usize) -> io::Result<()> {
+    use std::os::unix::fs::FileTypeExt;
     let metadata = fs::symlink_metadata(source)?;
-    if metadata.file_type().is_symlink() {
+    let kind = metadata.file_type();
+    if kind.is_symlink() {
         std::os::unix::fs::symlink(fs::read_link(source)?, target)
-    } else if metadata.is_dir() {
+    } else if kind.is_dir() {
         fs::create_dir(target)?;
         for entry in fs::read_dir(source)? {
             let entry = entry?;
-            copy_recursive(&entry.path(), &target.join(entry.file_name()))?;
+            copy_recursive(&entry.path(), &target.join(entry.file_name()), skipped)?;
         }
         fs::set_permissions(target, metadata.permissions())
-    } else {
+    } else if kind.is_fifo() {
+        let path =
+            std::ffi::CString::new(target.as_os_str().as_bytes()).map_err(io::Error::other)?;
+        let mode = (metadata.permissions().mode() & 0o7777) as libc::mode_t;
+        // SAFETY: `path` is a valid NUL-terminated string that outlives the call.
+        if unsafe { libc::mkfifo(path.as_ptr(), mode) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    } else if kind.is_file() {
         fs::copy(source, target).map(|_| ())
+    } else {
+        *skipped += 1;
+        Ok(())
     }
 }
 
@@ -244,7 +271,11 @@ pub fn move_into(source: &Path, dir: &Path) -> io::Result<PathBuf> {
         Ok(()) => Ok(target),
         // Another volume: copy, then remove the original.
         Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
-            copy_recursive(source, &target)?;
+            let mut skipped = 0;
+            copy_recursive(source, &target, &mut skipped)?;
+            if skipped > 0 {
+                return Err(skipped_message(skipped, "已复制其余内容，原位置保持不变"));
+            }
             if fs::symlink_metadata(source)?.is_dir() {
                 fs::remove_dir_all(source)?;
             } else {
@@ -495,6 +526,42 @@ mod tests {
         assert!(!renamed.exists());
         assert_eq!(move_into(&moved, &root.join("dest")).unwrap(), moved);
         assert!(move_into(&root.join("dest"), &root.join("dest/pkg")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copying_a_folder_recreates_pipes_and_reports_sockets() {
+        use std::os::unix::fs::FileTypeExt;
+        let root = std::env::temp_dir().join(format!("zj-ops-special-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("pkg")).unwrap();
+        fs::create_dir_all(root.join("dest")).unwrap();
+        fs::write(root.join("pkg/lib.rs"), "fn x() {}").unwrap();
+        let fifo = std::ffi::CString::new(root.join("pkg/pipe").to_str().unwrap()).unwrap();
+        // SAFETY: `fifo` is a valid NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o640) }, 0);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let (folder, dest) = (root.join("pkg"), root.join("dest"));
+        std::thread::spawn(move || {
+            let _ = sender.send(copy_into(&folder, &dest));
+        });
+        let copied = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("copying a pipe blocked")
+            .unwrap();
+        let pipe = fs::symlink_metadata(copied.join("pipe")).unwrap();
+        assert!(pipe.file_type().is_fifo());
+        assert_eq!(pipe.permissions().mode() & 0o777, 0o640);
+        assert_eq!(
+            fs::read_to_string(copied.join("lib.rs")).unwrap(),
+            "fn x() {}"
+        );
+        // A socket cannot be copied: the rest is, and the skip is reported.
+        let socket = std::os::unix::net::UnixListener::bind(root.join("pkg/sock")).unwrap();
+        let error = copy_into(&root.join("pkg"), &root.join("dest")).unwrap_err();
+        assert!(error.to_string().contains("1 个"), "{error}");
+        assert!(root.join("dest/pkg copy/lib.rs").is_file());
+        drop(socket);
         fs::remove_dir_all(root).unwrap();
     }
 

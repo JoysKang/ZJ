@@ -8,7 +8,7 @@ use std::{
     fs,
     io::Read,
     ops::Range,
-    os::unix::ffi::OsStrExt,
+    os::unix::{ffi::OsStrExt, fs::OpenOptionsExt},
     path::{Path, PathBuf},
     sync::{
         Mutex,
@@ -371,7 +371,14 @@ pub fn run(
                     };
                     let path = root.join(&relative);
                     buffer.clear();
-                    let Ok(file) = fs::File::open(&path) else {
+                    // Non-blocking, so a named pipe (or a symlink to one) opens at once and
+                    // is skipped below instead of waiting for a writer; reads of regular
+                    // files are unaffected.
+                    let Ok(file) = fs::OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(&path)
+                    else {
                         continue;
                     };
                     let metadata = file.metadata().ok();
@@ -607,6 +614,33 @@ mod tests {
             listed.as_millis(),
             started.elapsed().as_millis()
         );
+    }
+
+    #[test]
+    fn skips_pipes_instead_of_blocking() {
+        let root = std::env::temp_dir().join(format!("zj-search-fifo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.txt"), "needle\n").unwrap();
+        let fifo = std::ffi::CString::new(root.join("pipe").to_str().unwrap()).unwrap();
+        // SAFETY: `fifo` is a valid NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        // Tracked symlinks are listed as files; one may point at a pipe.
+        std::os::unix::fs::symlink("pipe", root.join("link")).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let dir = root.clone();
+        std::thread::spawn(move || {
+            let matcher = Matcher::new(&options("needle")).unwrap();
+            let progress = Progress::default();
+            let files = vec!["pipe".into(), "link".into(), "a.txt".into()];
+            run(&dir, files, &matcher, &progress, &AtomicBool::new(false));
+            let _ = sender.send(progress.results.into_inner().unwrap().len());
+        });
+        let found = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("searching a pipe blocked");
+        assert_eq!(found, 1);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

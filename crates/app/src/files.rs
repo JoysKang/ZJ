@@ -420,7 +420,8 @@ impl Builder<'_> {
                     {
                         pending.push(path);
                     }
-                } else {
+                } else if kind.is_file() {
+                    // Pipes, sockets and devices are not files to open or search.
                     self.push(path);
                 }
             }
@@ -628,6 +629,24 @@ mod tests {
             "explicitly selected\n"
         );
         fs::remove_file(outside).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn walk_indexes_only_regular_files() {
+        let root = std::env::temp_dir().join(format!("zj-special-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/main.rs"), "").unwrap();
+        let fifo = std::ffi::CString::new(root.join("src/pipe").to_str().unwrap()).unwrap();
+        // SAFETY: `fifo` is a valid NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let socket = std::os::unix::net::UnixListener::bind(root.join("src/sock")).unwrap();
+        let not_git = |_: &Path, _: &AtomicBool| Err(io::Error::other("not a worktree"));
+        let index = PathIndex::build(&root, &AtomicBool::new(false), &not_git);
+        let keys: Vec<_> = (0..index.len()).map(|i| index.key(i).0).collect();
+        assert_eq!(keys, ["src/main.rs"]);
+        drop(socket);
         fs::remove_dir_all(root).unwrap();
     }
 
