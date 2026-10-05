@@ -107,3 +107,5 @@ log stream --predicate 'process == "ZJ"' --level error
 
 旧的 `tools/sample_resources.py` 把 `proc_pid_rusage` 的 CPU 时间当纳秒用；`measure_budget.py` 按 `mach_timebase_info` 换算（Apple Silicon 上约 ×41.7），之前记录的约 0.02% 空闲 CPU 应按约 0.8% 理解。
 
+实测（停掉 display link、logo 光标常亮后）：1 个窗口打开文件空闲 76.7 MB、CPU p95 0.016%；欢迎页 53.9 MB、0.024%；3 窗口 + 20 文档 194.8 MB；3 窗口不开文件 113.7 MB。打开文件时仍有约 20 MB 的 Owned unmapped (graphics)，是路径中间纹理：它的 10 秒闲置检查只在画帧时执行，空闲窗口不再画帧，就一直留着。现在空闲归还 drawable 时一并释放。
+

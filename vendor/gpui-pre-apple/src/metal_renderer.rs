@@ -518,7 +518,7 @@ impl MetalRenderer {
     /// ZJ patch: called on every display-link tick of a visible window. After
     /// `SPARE_DRAWABLE_IDLE` without a frame, resizing the layer away and back empties its
     /// drawable pool; the presented frame stays in the layer's contents (still on screen), and
-    /// the next frame takes a new drawable.
+    /// the next frame takes a new drawable. The path textures are freed as well.
     pub fn zj_trim_idle(&mut self) {
         if !self.zj.enabled || self.zj.released {
             return;
@@ -526,6 +526,10 @@ impl MetalRenderer {
         if !self.zj.idle.should_trim(Instant::now()) {
             return;
         }
+        // The path textures go too: their own idle check runs when a frame is drawn, and an
+        // idle window draws none. The next frame that draws a path allocates them again.
+        self.path_intermediate_texture = None;
+        self.path_intermediate_msaa_texture = None;
         let Some(layer) = &self.layer else {
             return;
         };

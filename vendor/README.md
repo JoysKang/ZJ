@@ -35,7 +35,8 @@ measure it are in [docs/adr/0005-gpu-memory.md](../docs/adr/0005-gpu-memory.md).
     window is minimized or the app is hidden, the layer's contents are cleared as well. Nothing
     is drawn while released.
   - `zj_trim_idle`: a visible window that has not drawn for 3 s resizes its layer away and
-    back, which empties the drawable pool; the presented frame stays in the layer's contents.
+    back, which empties the drawable pool (the presented frame stays in the layer's contents),
+    and frees the path textures (their own 10 s check only runs when a frame is drawn).
     The macOS window calls it on every display-link tick.
   - One sprite atlas is shared by all window renderers on the same device. It is held weakly,
     so it is freed with the last window.
