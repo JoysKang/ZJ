@@ -4,7 +4,6 @@
 //! Bounded: at most [`MAX_ITEMS`] items stay in memory; older ones are dropped from the front
 //! (`dropped` counts them) and come back from the history database on demand.
 
-use crate::diff::diff_hunks;
 use crate::events::{
     AgentCommand, AgentEvent, AuthChoice, ExitReason, Modes, PermissionId, PermissionKind,
     PermissionRequest, PlanEntry, ToolCall, ToolCallPatch, ToolContent, ToolKind, ToolStatus,
@@ -134,13 +133,6 @@ pub struct Thread {
     progress_shown: bool,
 }
 
-fn diff_stats(old: Option<&str>, new: &str) -> (usize, usize) {
-    let old = old.unwrap_or("");
-    diff_hunks(old, new)
-        .iter()
-        .fold((0, 0), |(a, r), h| (a + h.after.len(), r + h.base.len()))
-}
-
 fn clip(mut text: String) -> String {
     if text.len() > MAX_TOOL_TEXT {
         let mut cut = MAX_TOOL_TEXT;
@@ -179,10 +171,11 @@ impl ToolCard {
         let (mut added, mut removed) = (0, 0);
         for content in &self.call.content {
             if let ToolContent::Diff {
-                old_text, new_text, ..
+                added: a,
+                removed: r,
+                ..
             } = content
             {
-                let (a, r) = diff_stats(old_text.as_deref(), new_text);
                 added += a;
                 removed += r;
             }
@@ -393,14 +386,14 @@ impl Thread {
             return;
         }
         for content in &card.call.content {
-            if let ToolContent::Diff { path, old_text, .. } = content {
+            if let ToolContent::Diff { path, new_file, .. } = content {
                 let entry = self
                     .changed_files
                     .entry(path.clone())
                     .or_insert(FileChange {
                         added: 0,
                         removed: 0,
-                        new_file: old_text.is_none(),
+                        new_file: *new_file,
                     });
                 // Until the app recomputes against the snapshot, show the call's own counts.
                 if entry.added == 0 && entry.removed == 0 {
@@ -806,8 +799,9 @@ mod tests {
                 }],
                 content: vec![ToolContent::Diff {
                     path: "/w/a.rs".into(),
-                    old_text: Some("a\nb\n".into()),
-                    new_text: "a\nB\nc\n".into(),
+                    new_file: false,
+                    added: 2,
+                    removed: 1,
                 }],
             }),
             true,

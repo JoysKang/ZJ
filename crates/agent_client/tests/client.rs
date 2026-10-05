@@ -243,8 +243,9 @@ fn tool_calls_carry_kind_locations_and_diffs() {
         call.content,
         vec![ToolContent::Diff {
             path: target,
-            old_text: Some("old\n".into()),
-            new_text: "new\n".into(),
+            new_file: false,
+            added: 1,
+            removed: 1,
         }]
     );
     let update = seen

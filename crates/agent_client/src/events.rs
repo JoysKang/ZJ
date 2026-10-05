@@ -137,10 +137,14 @@ pub struct Location {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ToolContent {
     Text(String),
+    /// An edit, summarized when the event is converted (off the UI thread): the texts can be
+    /// whole files, and the panel only shows the path and the line counts.
     Diff {
         path: PathBuf,
-        old_text: Option<String>,
-        new_text: String,
+        /// The agent created the file (no old text).
+        new_file: bool,
+        added: usize,
+        removed: usize,
     },
     Terminal {
         id: String,
@@ -292,11 +296,16 @@ fn contents(content: &[acp::ToolCallContent]) -> Vec<ToolContent> {
         .iter()
         .map(|c| match c {
             acp::ToolCallContent::Content(c) => ToolContent::Text(content_text(&c.content)),
-            acp::ToolCallContent::Diff(d) => ToolContent::Diff {
-                path: d.path.clone(),
-                old_text: d.old_text.clone(),
-                new_text: d.new_text.clone(),
-            },
+            acp::ToolCallContent::Diff(d) => {
+                let (added, removed) =
+                    crate::review::line_counts(d.old_text.as_deref().unwrap_or(""), &d.new_text);
+                ToolContent::Diff {
+                    path: d.path.clone(),
+                    new_file: d.old_text.is_none(),
+                    added,
+                    removed,
+                }
+            }
             acp::ToolCallContent::Terminal(t) => ToolContent::Terminal {
                 id: t.terminal_id.to_string(),
             },

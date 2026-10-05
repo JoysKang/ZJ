@@ -392,7 +392,7 @@ pub fn tool_summary(call: &ToolCall) -> (&'static str, String) {
         && call
             .content
             .iter()
-            .any(|c| matches!(c, ToolContent::Diff { old_text: None, .. }));
+            .any(|c| matches!(c, ToolContent::Diff { new_file: true, .. }));
     let verb = match call.kind {
         ToolKind::Read => "读取",
         ToolKind::Edit if creates => "新建",
