@@ -154,18 +154,70 @@ pub fn rename(path: &Path, name: &str) -> io::Result<PathBuf> {
     if target == path {
         return Ok(target);
     }
-    if let Ok(existing) = fs::symlink_metadata(&target) {
-        let source = fs::symlink_metadata(path)?;
-        use std::os::unix::fs::MetadataExt;
-        if (existing.dev(), existing.ino()) != (source.dev(), source.ino()) {
-            return Err(exists_message(
-                io::Error::from(io::ErrorKind::AlreadyExists),
-                &target,
-            ));
+    match rename_no_replace(path, &target) {
+        Ok(()) => Ok(target),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            // A case-only rename on a case-insensitive volume finds the file itself.
+            let (existing, source) = (fs::symlink_metadata(&target)?, fs::symlink_metadata(path)?);
+            if (existing.dev(), existing.ino()) != (source.dev(), source.ino()) {
+                return Err(exists_message(error, &target));
+            }
+            fs::rename(path, &target)?;
+            Ok(target)
         }
+        Err(error) => Err(error),
     }
-    fs::rename(path, &target)?;
-    Ok(target)
+}
+
+/// Renames `from` to `to` unless `to` exists, atomically where the filesystem supports it
+/// (`renameat2(RENAME_NOREPLACE)` on Linux, `renamex_np(RENAME_EXCL)` on macOS), so an entry
+/// created after the caller chose the name is never replaced. Elsewhere it checks first.
+fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    match rename_exclusive(from, to) {
+        // The filesystem (or kernel) cannot rename exclusively.
+        Err(error)
+            if error.raw_os_error().is_some_and(|code| {
+                [libc::EINVAL, libc::ENOSYS, libc::ENOTSUP, libc::EOPNOTSUPP].contains(&code)
+            }) =>
+        {
+            if fs::symlink_metadata(to).is_ok() {
+                return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+            }
+            fs::rename(from, to)
+        }
+        result => result,
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn rename_exclusive(from: &Path, to: &Path) -> io::Result<()> {
+    let from = std::ffi::CString::new(from.as_os_str().as_bytes()).map_err(io::Error::other)?;
+    let to = std::ffi::CString::new(to.as_os_str().as_bytes()).map_err(io::Error::other)?;
+    #[cfg(target_os = "linux")]
+    // SAFETY: both paths are valid NUL-terminated strings that outlive the call, and
+    // `AT_FDCWD` makes them relative to the working directory (they are absolute anyway).
+    let status = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    #[cfg(target_os = "macos")]
+    // SAFETY: both paths are valid NUL-terminated strings that outlive the call.
+    let status = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn rename_exclusive(_: &Path, _: &Path) -> io::Result<()> {
+    Err(io::Error::from_raw_os_error(libc::ENOSYS))
 }
 
 /// `name`, then `name copy`, `name copy 2`, … before the extension (Finder's convention), the
@@ -266,11 +318,22 @@ pub fn move_into(source: &Path, dir: &Path) -> io::Result<PathBuf> {
     if dir.starts_with(source) {
         return Err(io::Error::other("不能把文件夹移动到它自己里面"));
     }
-    let target = unique_name(dir, name);
-    match fs::rename(source, &target) {
-        Ok(()) => Ok(target),
+    // The name is free when chosen; if something takes it before the rename, pick again.
+    let mut attempts = 0;
+    let target = loop {
+        let target = unique_name(dir, name);
+        match rename_no_replace(source, &target) {
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists && attempts < 3 => {
+                attempts += 1;
+            }
+            result => break result.map(|()| target),
+        }
+    };
+    match target {
+        Ok(target) => Ok(target),
         // Another volume: copy, then remove the original.
         Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {
+            let target = unique_name(dir, name);
             let mut skipped = 0;
             copy_recursive(source, &target, &mut skipped)?;
             if skipped > 0 {
@@ -282,6 +345,9 @@ pub fn move_into(source: &Path, dir: &Path) -> io::Result<PathBuf> {
                 fs::remove_file(source)?;
             }
             Ok(target)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            Err(exists_message(error, &dir.join(name)))
         }
         Err(error) => Err(error),
     }
@@ -526,6 +592,25 @@ mod tests {
         assert!(!renamed.exists());
         assert_eq!(move_into(&moved, &root.join("dest")).unwrap(), moved);
         assert!(move_into(&root.join("dest"), &root.join("dest/pkg")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn renames_never_replace_an_entry_that_appeared_later() {
+        let root = std::env::temp_dir().join(format!("zj-ops-noreplace-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.md"), "a").unwrap();
+        // The name was free when the Explorer checked it; another program created it since.
+        fs::write(root.join("b.md"), "b").unwrap();
+        let error = rename_no_replace(&root.join("a.md"), &root.join("b.md")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(root.join("b.md")).unwrap(), "b");
+        assert_eq!(fs::read_to_string(root.join("a.md")).unwrap(), "a");
+        let error = rename(&root.join("a.md"), "b.md").unwrap_err();
+        assert_eq!(error.to_string(), "“b.md”已存在");
+        rename_no_replace(&root.join("a.md"), &root.join("c.md")).unwrap();
+        assert_eq!(fs::read_to_string(root.join("c.md")).unwrap(), "a");
         fs::remove_dir_all(root).unwrap();
     }
 
