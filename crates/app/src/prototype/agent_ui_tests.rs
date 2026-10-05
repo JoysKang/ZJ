@@ -1,4 +1,5 @@
-//! The agent panel in a headless window: typing and sending from the composer.
+//! The agent panel in a headless window with the fake ACP agent: sending from the composer,
+//! permissions and 始终允许 rules, reviewing and rejecting a change, reopening a stored session.
 
 use super::super::test_support::{empty_store, open_window, wait};
 use super::*;
@@ -189,5 +190,219 @@ async fn without_a_folder_the_session_runs_in_the_default_workspace(cx: &mut Tes
         assert_eq!(p.agent_scope_label(false, cx), "默认工作区");
         assert_eq!(workspace_label(&workspace, cx), "默认工作区");
     });
+    let _ = std::fs::remove_dir_all(data);
+}
+
+/// Waits (real time) until `done` holds for the window's workbench.
+fn until(
+    cx: &mut TestAppContext,
+    this: &Entity<Prototype>,
+    what: &str,
+    done: impl Fn(&Prototype) -> bool,
+) {
+    let what = what.to_string();
+    wait(
+        cx,
+        None,
+        None,
+        |cx| this.read_with(cx, |p, _| done(p)),
+        move |_| format!("never: {what}"),
+    );
+}
+
+/// The agent replies of the current session, joined.
+fn replies(cx: &mut TestAppContext, this: &Entity<Prototype>) -> String {
+    this.read_with(cx, |p, _| {
+        p.agent
+            .current()
+            .map(|s| {
+                s.thread
+                    .items
+                    .iter()
+                    .filter_map(|item| match item {
+                        Item::Agent { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("|")
+            })
+            .unwrap_or_default()
+    })
+}
+
+fn pending_permission(p: &Prototype) -> Option<(u64, workspace_editor_agent::PermissionId)> {
+    let session = p.agent.current()?;
+    let card = session.thread.pending_permissions().next()?;
+    Some((session.key, card.request.id))
+}
+
+#[gpui_kit::test]
+async fn a_permission_waits_for_the_user_and_allow_once_continues(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("permission-once");
+    let (handle, this) = open(cx, Some(root.clone()));
+    send(cx, handle, &this, "permission");
+    until(cx, &this, "a permission request", |p| {
+        pending_permission(p).is_some()
+    });
+    this.read_with(cx, |p, _| {
+        assert_eq!(
+            p.agent.current().unwrap().row_status(),
+            agent_model::RowStatus::Awaiting
+        );
+    });
+    let (key, id) = this.read_with(cx, |p, _| pending_permission(p).unwrap());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_answer(key, id, PermissionChoice::Once, window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, &this);
+    assert!(replies(cx, &this).contains("selected:allow"));
+    // Allowing once adds no rule.
+    let rules = cx.read(|cx| cx.global::<crate::settings::Settings>().agent.allow.clone());
+    assert!(rules.is_empty(), "{rules:?}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn always_allow_saves_a_rule_that_answers_the_next_request(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("permission-always");
+    let (handle, this) = open(cx, Some(root.clone()));
+    send(cx, handle, &this, "permission");
+    until(cx, &this, "a permission request", |p| {
+        pending_permission(p).is_some()
+    });
+    let (key, id) = this.read_with(cx, |p, _| pending_permission(p).unwrap());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_answer(
+                key,
+                id,
+                PermissionChoice::Always("cargo test".into()),
+                window,
+                cx,
+            )
+        });
+    })
+    .unwrap();
+    settle(cx, &this);
+    let rules = cx.read(|cx| cx.global::<crate::settings::Settings>().agent.allow.clone());
+    assert_eq!(
+        rules.get(&root.display().to_string()),
+        Some(&vec!["cargo test".to_string()]),
+        "{rules:?}"
+    );
+    // The same command again is answered by the rule: the session never waits.
+    send(cx, handle, &this, "permission");
+    settle(cx, &this);
+    assert_eq!(replies(cx, &this).matches("selected:allow").count(), 2);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn rejecting_a_hunk_in_the_review_restores_the_file_and_the_tab(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("review");
+    let path = root.join("a.txt");
+    std::fs::write(&path, "one").unwrap();
+    let (handle, this) = open(cx, Some(root.clone()));
+    let folder = Some(root.clone());
+    let open_path = path.clone();
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(open_path, folder, window, cx));
+    })
+    .unwrap();
+    until(cx, &this, "the file opens", |p| p.documents.len() == 1);
+    send(cx, handle, &this, &format!("write {} ONE", path.display()));
+    settle(cx, &this);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "ONE");
+    let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
+    let buffer = |cx: &mut TestAppContext| editor.read_with(cx, |s, _| s.text().to_string());
+    wait(
+        cx,
+        None,
+        None,
+        |cx| buffer(cx) == "ONE",
+        |_| "the tab never followed the agent's write".into(),
+    );
+    let key = this.read_with(cx, |p, _| {
+        let session = p.agent.current().unwrap();
+        assert!(session.thread.changed_files.contains_key(&path));
+        session.key
+    });
+    let review_path = path.clone();
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_open_review(key, review_path, window, cx)
+        });
+    })
+    .unwrap();
+    until(cx, &this, "the review loads", |p| p.diff_doc.is_some());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.agent_review_hunk(0, false, window, cx));
+    })
+    .unwrap();
+    wait(
+        cx,
+        None,
+        None,
+        |cx| std::fs::read_to_string(&path).unwrap() == "one" && buffer(cx) == "one",
+        |_| "rejecting did not restore the file and the tab".into(),
+    );
+    until(cx, &this, "the file leaves the changed list", |p| {
+        p.agent
+            .current()
+            .is_some_and(|s| !s.thread.changed_files.contains_key(&path))
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn a_stored_session_reopens_with_its_messages(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let data = temp_root("restore");
+    let root = data.join("work");
+    std::fs::create_dir_all(&root).unwrap();
+    let history = Arc::new(History::new(data.join("history.sqlite")));
+    let store = AgentStore {
+        history: Some(history.clone()),
+        default_workspace: None,
+    };
+    let (handle, this) = open_with(cx, Some(root.clone()), store);
+    send(cx, handle, &this, "echo 从历史恢复");
+    settle(cx, &this);
+    until(cx, &this, "the session is stored", |p| {
+        p.agent.current().is_some_and(|s| s.db.is_some())
+    });
+    let id = this.read_with(cx, |p, _| p.agent.current().unwrap().db.unwrap());
+    history.flush().unwrap();
+    // Close the live session, then open it again from the history list.
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent.sessions.clear();
+            p.agent.current = None;
+            p.agent_open_stored(id, window, cx);
+        });
+    })
+    .unwrap();
+    until(cx, &this, "the stored session opens", |p| {
+        p.agent.current().is_some_and(|s| s.db == Some(id))
+    });
+    wait(
+        cx,
+        None,
+        None,
+        |cx| sent(cx, &this).0 == ["echo 从历史恢复"] && replies(cx, &this).contains("从历史恢复"),
+        |cx| {
+            format!(
+                "restored messages: {:?} / {}",
+                sent(cx, &this).0,
+                replies(cx, &this)
+            )
+        },
+    );
     let _ = std::fs::remove_dir_all(data);
 }
