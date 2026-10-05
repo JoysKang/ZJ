@@ -95,5 +95,7 @@ log stream --predicate 'process == "ZJ"' --level error
 
 编辑器大部分时间是静止的，而双缓冲的第二块 drawable 只在连续出帧时有用。决定：可见窗口 3 秒没有新帧时，把 layer 的 drawableSize 缩到 1 × 1 再恢复，清空 drawable 池；已呈现的一帧留在 layer contents 里，仍在屏幕上。下一帧再取新的 drawable。预计全屏时空闲 footprint −1 S（约 29 MB），回到约 70 MB。
 
+实测（同一窗口尺寸，空闲 10 秒）：footprint 97–105 MB → 67 MB，IOSurface 58 MB → 29 MB，`vmmap -v` 只剩一块 Display Drawable。停顿后打字、滚动、切换标签和桌面时没有看到闪烁或延迟，`log stream` 没有错误。
+
 风险：恢复后第一帧要分配一块新的 IOSurface（预计 1–2 ms），落在停顿 3 秒后的第一次按键上；缩放 drawableSize 期间是否会让屏幕上的内容闪一下，没有文档保证，需要实测。验证：空闲 5 秒后 `vmmap -v $(pgrep -x ZJ) | grep 'Display Drawable'` 应只剩一块；停顿后连续打字、滚动、切换标签时没有闪烁或白帧；`log stream` 没有 `failed to retrieve next drawable`。不行就用 `ZJ_GPU_LOWMEM=0` 对比，或去掉 `step` 里的调用。
 
