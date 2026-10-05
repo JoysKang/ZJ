@@ -598,6 +598,10 @@ pub struct Colors {
     pub strong_border: Hsla,
     pub mark_bg: Hsla,
     pub mark_fg: Hsla,
+    /// Small icon buttons inside list rows (VS Code `toolbar.hoverBackground` /
+    /// `toolbar.activeBackground`): the text color, faint, so they show on a hovered row too.
+    pub control_hover: Hsla,
+    pub control_active: Hsla,
     /// Selected filter chips: accent tint and border.
     pub chip_on: Hsla,
     pub chip_on_border: Hsla,
@@ -665,6 +669,8 @@ impl Palette {
             mark_bg: hsla(self.mark).opacity(self.mark_alpha),
             mark_fg: hsla(self.mark_fg),
             chip_on: hsla(self.accent).opacity(0.16),
+            control_hover: hsla(self.foreground).opacity(0.12),
+            control_active: hsla(self.foreground).opacity(0.2),
             chip_on_border: hsla(self.accent).opacity(0.45),
             glyphs: [
                 self.glyph_claude,

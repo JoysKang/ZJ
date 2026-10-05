@@ -39,11 +39,18 @@ pub(super) fn count_badge(count: usize, colors: theme::Colors) -> impl IntoEleme
         .child(count.to_string())
 }
 
-/// A small icon button for row actions.
-fn action(id: impl Into<ElementId>, icon: IconName, label: &'static str) -> Button {
+/// A small icon button for row actions. Kit's ghost hover is the list hover color, which a
+/// hovered row already has, so these get their own hover and pressed colors.
+fn action(id: impl Into<ElementId>, icon: IconName, label: &'static str, cx: &App) -> Button {
+    let colors = theme::colors(cx);
     Button::new(id)
         .xsmall()
-        .ghost()
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .foreground(colors.foreground)
+                .hover(colors.control_hover)
+                .active(colors.control_active),
+        )
         .icon(icon)
         .tooltip(label)
         .accessibility_label(label)
@@ -139,7 +146,7 @@ impl Workbench {
     pub(super) fn scm_more(&self, cx: &mut Context<Self>) -> AnyElement {
         let weak = cx.weak_entity();
         let hide = self.hide_clean_repos;
-        action("scm-more-button", IconName::Ellipsis, "更多操作")
+        action("scm-more-button", IconName::Ellipsis, "更多操作", cx)
             .dropdown_menu(move |menu, _, _| {
                 let (toggle, collapse, refresh) = (weak.clone(), weak.clone(), weak.clone());
                 menu.item(
@@ -366,7 +373,7 @@ impl Workbench {
             .h(theme::ROW_HEIGHT)
             .gap_0p5()
             .child(
-                action(("scm-repo-commit", g), IconName::Check, "提交")
+                action(("scm-repo-commit", g), IconName::Check, "提交", cx)
                     .disabled(pending || !can_commit)
                     .on_click(cx.listener({
                         let id = id.clone();
@@ -377,15 +384,15 @@ impl Workbench {
                     })),
             )
             .child(
-                action(("scm-repo-graph", g), IconName::GitGraph, "Git 图").on_click(cx.listener(
-                    move |this, _, window, cx| {
+                action(("scm-repo-graph", g), IconName::GitGraph, "Git 图", cx).on_click(
+                    cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.open_git_graph(g, window, cx);
-                    },
-                )),
+                    }),
+                ),
             )
             .child(
-                action(("scm-repo-more", g), IconName::Ellipsis, "更多操作").dropdown_menu(
+                action(("scm-repo-more", g), IconName::Ellipsis, "更多操作", cx).dropdown_menu(
                     move |menu, _, cx| {
                         let view = weak.clone();
                         match weak.upgrade() {
@@ -672,7 +679,7 @@ impl Workbench {
                 hover_actions(hover)
                     .when_some(discard, |actions, request| {
                         actions.child(
-                            action(("scm-discard-all", g), IconName::Undo2, "放弃所有更改")
+                            action(("scm-discard-all", g), IconName::Undo2, "放弃所有更改", cx)
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
                                     this.request_git_write(request.clone(), window, cx);
@@ -685,7 +692,7 @@ impl Workbench {
                             DiffSide::Worktree => (IconName::Plus, "暂存所有更改"),
                         };
                         actions.child(
-                            action(("scm-all", g * 2 + side as usize), icon, label).on_click(
+                            action(("scm-all", g * 2 + side as usize), icon, label, cx).on_click(
                                 cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
                                     this.request_git_write(request.clone(), window, cx);
@@ -974,7 +981,7 @@ impl Workbench {
             .child(
                 hover_actions(hover)
                     .child(
-                        action(("scm-open", index), IconName::File, "打开文件").on_click(
+                        action(("scm-open", index), IconName::File, "打开文件", cx).on_click(
                             cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.scm_open_file(&open_file, window, cx);
@@ -983,7 +990,7 @@ impl Workbench {
                     )
                     .when_some(discard, |actions, request| {
                         actions.child(
-                            action(("scm-discard", index), IconName::Undo2, discard_label)
+                            action(("scm-discard", index), IconName::Undo2, discard_label, cx)
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
                                     this.request_git_write(request.clone(), window, cx);
@@ -992,7 +999,7 @@ impl Workbench {
                     })
                     .when_some(toggle, |actions, request| {
                         actions.child(
-                            action(("scm-stage", index), toggle_icon, toggle_label).on_click(
+                            action(("scm-stage", index), toggle_icon, toggle_label, cx).on_click(
                                 cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
                                     this.request_git_write(request.clone(), window, cx);
