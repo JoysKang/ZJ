@@ -78,7 +78,9 @@ measure it are in [docs/adr/0005-gpu-memory.md](../docs/adr/0005-gpu-memory.md).
     last scene again even if nothing changed.
 - `Cargo.toml`: the same lint override.
 
-`ZJ_GPU_LOWMEM=0` switches all of this off at startup, for A/B measurements.
+`ZJ_GPU_LOWMEM=0` switches all of this off at startup, for A/B measurements. `ZJ_FRAME_LOG=1` logs
+every presented frame and every display-link stop / wake (`event=frame`, `event=display_link`),
+to find what wakes an idle window.
 
 ## Checking on Linux
 

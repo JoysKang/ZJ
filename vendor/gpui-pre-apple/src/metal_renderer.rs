@@ -693,6 +693,13 @@ impl MetalRenderer {
         }
         // ZJ patch: the idle clock for giving back the spare drawable.
         self.zj.idle.frame(Instant::now());
+        if zj_low_memory::frame_log() {
+            eprintln!(
+                "event=frame t_ms={} paths={}",
+                zj_low_memory::log_clock_ms(),
+                !scene.paths.is_empty()
+            );
+        }
     }
 
     fn render_frame(

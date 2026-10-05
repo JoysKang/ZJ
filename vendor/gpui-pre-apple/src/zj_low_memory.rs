@@ -22,6 +22,9 @@ use std::time::{Duration, Instant};
 
 /// Environment variable that disables the low-memory mode when set to `0` / `false` / `off`.
 pub const ENV: &str = "ZJ_GPU_LOWMEM";
+/// `ZJ_FRAME_LOG=1`: log every presented frame and every display-link stop / wake, to find
+/// what wakes an idle window (`event=frame`, `event=display_link state=…`).
+pub const FRAME_LOG_ENV: &str = "ZJ_FRAME_LOG";
 /// Upstream: triple buffering.
 pub const UPSTREAM_DRAWABLE_COUNT: u64 = 3;
 /// Double buffering. With `displaySyncEnabled` still on, a frame that takes longer than one
@@ -50,6 +53,18 @@ pub fn enabled_from(value: Option<&str>) -> bool {
 pub fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| enabled_from(std::env::var(ENV).ok().as_deref()))
+}
+
+/// Whether `ZJ_FRAME_LOG` is set (read once per process).
+pub fn frame_log() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os(FRAME_LOG_ENV).is_some_and(|v| v != "0"))
+}
+
+/// Milliseconds since the first call, for the frame log.
+pub fn log_clock_ms() -> u128 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis()
 }
 
 /// The drawable count for the layer.

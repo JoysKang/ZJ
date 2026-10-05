@@ -3352,6 +3352,12 @@ extern "C" fn step(view: *mut c_void) {
         if lock.renderer.zj_idle() && !lock.zj_force_present {
             lock.stop_display_link();
             lock.zj_link_paused = true;
+            if gpui_apple::zj_low_memory::frame_log() {
+                eprintln!(
+                    "event=display_link state=paused t_ms={}",
+                    gpui_apple::zj_low_memory::log_clock_ms()
+                );
+            }
         }
     }
 }
@@ -3365,6 +3371,12 @@ fn zj_wake_display_link(state: &Weak<Mutex<MacWindowState>>) {
     match state.try_lock() {
         Some(mut lock) => {
             if lock.zj_link_paused {
+                if gpui_apple::zj_low_memory::frame_log() {
+                    eprintln!(
+                        "event=display_link state=woken t_ms={}",
+                        gpui_apple::zj_low_memory::log_clock_ms()
+                    );
+                }
                 lock.start_display_link();
             }
         }
