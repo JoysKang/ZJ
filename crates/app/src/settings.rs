@@ -3,7 +3,8 @@
 //! macOS: `~/Library/Application Support/ZJ/settings.json`; elsewhere
 //! `$XDG_CONFIG_HOME/zj/settings.json` (or `~/.config/zj/settings.json`). `ZJ_SETTINGS`
 //! overrides the path (tests, screenshots). A missing or unreadable file means defaults; a
-//! write failure is reported in the window that made the change.
+//! write failure (including refusing to overwrite a file that is not valid JSON) is reported in
+//! the window that made the change.
 
 use gpui_kit::AppContext as _;
 use serde_json::{Value, json};
@@ -11,6 +12,10 @@ use std::{
     collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use workspace_editor_agent::registry::UserAgentConfig;
 
@@ -275,16 +280,56 @@ impl Settings {
         })
     }
 
-    /// Writes through a temporary file and a rename, so a crash never leaves half a file.
+    /// Writes through a temporary file and a rename, so a crash never leaves half a file. Keys
+    /// this version does not know are kept. A file that is not a JSON object is left alone and
+    /// reported, so a typo made by hand never costs the rest of the settings.
     pub fn save_to(&self, path: &Path) -> io::Result<()> {
+        let mut merged = match fs::read(path) {
+            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+                Ok(Value::Object(map)) => map,
+                Ok(_) => return Err(io::Error::other("设置文件不是 JSON 对象，未覆盖")),
+                Err(error) => {
+                    return Err(io::Error::other(format!(
+                        "设置文件不是有效的 JSON（{error}），未覆盖"
+                    )));
+                }
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Default::default(),
+            Err(error) => return Err(error),
+        };
+        if let Value::Object(known) = self.to_json() {
+            merged.extend(known);
+        }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let temporary = path.with_extension("json.tmp");
-        let text = serde_json::to_vec_pretty(&self.to_json()).map_err(io::Error::other)?;
+        let text = serde_json::to_vec_pretty(&Value::Object(merged)).map_err(io::Error::other)?;
         fs::write(&temporary, text)?;
         fs::rename(&temporary, path)
     }
+}
+
+/// Orders background writes: each change takes a number, and a write that finds a newer one
+/// already on disk is skipped, so rapid changes (⌘= ⌘= ⌘=) never leave an older value behind.
+static NEXT_WRITE: AtomicU64 = AtomicU64::new(1);
+static WRITTEN: Mutex<u64> = Mutex::new(0);
+
+fn save_in_order(
+    written: &Mutex<u64>,
+    settings: &Settings,
+    path: &Path,
+    write: u64,
+) -> io::Result<()> {
+    let mut written = written
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if *written > write {
+        return Ok(());
+    }
+    settings.save_to(path)?;
+    *written = write;
+    Ok(())
 }
 
 /// Changes the settings for every window and saves them in the background. Returns the
@@ -298,9 +343,10 @@ pub fn update(
     crate::theme::apply_editor_font(settings.editor_font_size, cx);
     cx.set_global(settings.clone());
     cx.refresh_windows();
+    let write = NEXT_WRITE.fetch_add(1, Ordering::Relaxed);
     cx.background_spawn(async move {
         match Settings::path() {
-            Some(path) => settings.save_to(&path),
+            Some(path) => save_in_order(&WRITTEN, &settings, &path, write),
             None => Err(io::Error::other("找不到设置目录（HOME 未设置）")),
         }
     })
@@ -349,6 +395,20 @@ mod tests {
         assert!(!path.with_extension("json.tmp").exists());
         fs::write(&path, "{ not json").unwrap();
         assert_eq!(Settings::load_from(&path), Settings::default());
+        // A hand-made typo is reported, not replaced by defaults.
+        assert!(Settings::default().save_to(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{ not json");
+        // Keys from other versions survive a write.
+        fs::write(&path, r#"{"future_key": [1, 2], "show_hidden": false}"#).unwrap();
+        changed.save_to(&path).unwrap();
+        let written: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written["future_key"], json!([1, 2]));
+        assert_eq!(Settings::load_from(&path), changed);
+        // An older write that lands after a newer one is skipped.
+        let written = Mutex::new(0);
+        save_in_order(&written, &changed, &path, 2).unwrap();
+        save_in_order(&written, &Settings::default(), &path, 1).unwrap();
+        assert_eq!(Settings::load_from(&path), changed);
         fs::write(
             &path,
             r#"{"editor_font_size": 99, "show_hidden": "yes", "x": 1}"#,
