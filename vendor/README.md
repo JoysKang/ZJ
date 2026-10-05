@@ -66,7 +66,12 @@ measure it are in [docs/adr/0005-gpu-memory.md](../docs/adr/0005-gpu-memory.md).
   - `windowDidChangeOcclusionState` calls `zj_release_surfaces` when the window stops being
     visible. It passes `Hidden::Gone` when the window is miniaturized or `NSApp.isHidden`, and
     `Occluded` otherwise.
-  - `step` (the display-link tick) calls `zj_trim_idle` after the frame callback.
+  - `step` (the display-link tick) calls `zj_trim_idle` after the frame callback, and once the
+    window is idle (its spare drawable given back, no forced present pending) stops the display
+    link.
+  - `frame_waker` (GPUI calls it when an idle window has something to draw: a notify, an input,
+    a next-frame callback) starts the link again. It uses `try_lock`; when the window state is
+    held by one of its own callbacks, the wake runs on the main queue next.
   - When the window is visible again, it calls `zj_restore_surfaces` and sets `zj_force_present`.
     The next display-link `step` then passes `require_presentation: true`, so GPUI presents the
     last scene again even if nothing changed.

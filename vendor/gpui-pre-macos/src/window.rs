@@ -670,6 +670,9 @@ struct MacWindowState {
     /// ZJ patch: the renderer gave back its surfaces while the window was hidden, so the next
     /// display-link frame must present the last scene again even if nothing changed.
     zj_force_present: bool,
+    /// ZJ patch: the display link was stopped because the window is idle; `frame_waker`
+    /// starts it again when GPUI has something to draw.
+    zj_link_paused: bool,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
     visibility_callback: Option<Box<dyn FnMut(WindowVisibility)>>,
@@ -836,6 +839,7 @@ impl MacWindowState {
 
     fn start_display_link(&mut self) {
         self.stop_display_link();
+        self.zj_link_paused = false;
         unsafe {
             if !self
                 .native_window
@@ -1110,6 +1114,7 @@ impl MacWindow {
                 ),
                 request_frame_callback: None,
                 zj_force_present: false,
+                zj_link_paused: false,
                 event_callback: None,
                 activate_callback: None,
                 visibility_callback: None,
@@ -2013,6 +2018,15 @@ impl PlatformWindow for MacWindow {
                 .styleMask()
                 .contains(NSWindowStyleMask::NSFullScreenWindowMask)
         }
+    }
+
+    // ZJ patch: GPUI calls this when an idle window has something to draw again.
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        if !gpui_apple::zj_low_memory::enabled() {
+            return None;
+        }
+        let state = Arc::downgrade(&self.0);
+        Some(Rc::new(move || zj_wake_display_link(&state)))
     }
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
@@ -3332,9 +3346,43 @@ extern "C" fn step(view: *mut c_void) {
         callback(options);
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);
-        // ZJ patch: an idle visible window gives back its spare drawable.
+        // ZJ patch: an idle visible window gives back its spare drawable, then stops ticking
+        // until GPUI wakes it through `frame_waker` (an input, a notify, a next-frame callback).
         lock.renderer.zj_trim_idle();
+        if lock.renderer.zj_idle() && !lock.zj_force_present {
+            lock.stop_display_link();
+            lock.zj_link_paused = true;
+        }
     }
+}
+
+/// ZJ patch: restarts a display link that was stopped for idleness. The window state may be
+/// locked by the caller's own window callback; then the wake runs on the main queue next.
+fn zj_wake_display_link(state: &Weak<Mutex<MacWindowState>>) {
+    let Some(state) = state.upgrade() else {
+        return;
+    };
+    match state.try_lock() {
+        Some(mut lock) => {
+            if lock.zj_link_paused {
+                lock.start_display_link();
+            }
+        }
+        None => {
+            let context = Box::into_raw(Box::new(Arc::downgrade(&state)));
+            // SAFETY: the callback takes ownership of `context` (a leaked Box) and frees it.
+            unsafe {
+                DispatchQueue::main()
+                    .exec_async_f(context as *mut c_void, zj_wake_display_link_async);
+            }
+        }
+    }
+}
+
+extern "C" fn zj_wake_display_link_async(context: *mut c_void) {
+    // SAFETY: `context` is the Box made by `zj_wake_display_link`, consumed exactly once here.
+    let state = unsafe { Box::from_raw(context as *mut Weak<Mutex<MacWindowState>>) };
+    zj_wake_display_link(&state);
 }
 
 extern "C" fn valid_attributes_for_marked_text(_: &Object, _: Sel) -> id {

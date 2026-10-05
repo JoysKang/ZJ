@@ -99,3 +99,11 @@ log stream --predicate 'process == "ZJ"' --level error
 
 风险：恢复后第一帧要分配一块新的 IOSurface（预计 1–2 ms），落在停顿 3 秒后的第一次按键上；缩放 drawableSize 期间是否会让屏幕上的内容闪一下，没有文档保证，需要实测。验证：空闲 5 秒后 `vmmap -v $(pgrep -x ZJ) | grep 'Display Drawable'` 应只剩一块；停顿后连续打字、滚动、切换标签时没有闪烁或白帧；`log stream` 没有 `failed to retrieve next drawable`。不行就用 `ZJ_GPU_LOWMEM=0` 对比，或去掉 `step` 里的调用。
 
+## 更新（2026-10-06）：编辑器光标常亮、空闲时停掉 display link
+
+`tools/measure_budget.py --breakdown` 的实测显示，窗口在前台、编辑器有焦点时，Kit 的光标每 500 ms 闪一次并整窗重画：空闲 CPU p95 约 3%，渲染器等不到 3 秒无新帧，1 个窗口约 194 MB，3 窗口 + 20 文档 336 MB。`vendor/gpui-base` 打补丁让光标常亮后，分别降到 78 MB 和 190 MB，但空闲 CPU p95 仍有约 1.2%。
+
+剩下的来自 display link：窗口可见时它每次刷新（ProMotion 上每秒 120 次）都回调 `step`，即使什么都不画。GPUI 支持按需出帧的平台（`PlatformWindow::frame_waker`，窗口变脏、`on_next_frame` 时调用），macOS 层原来没有实现。现在空闲 3 秒、备用 drawable 已归还后停掉 display link，`frame_waker` 再启动它。预计空闲 CPU 接近 0；风险是漏掉唤醒导致窗口不刷新，需要实测（输入、悬停、窗口切换、终端输出、Agent 回复、Git 刷新）。`ZJ_GPU_LOWMEM=0` 恢复原行为。
+
+旧的 `tools/sample_resources.py` 把 `proc_pid_rusage` 的 CPU 时间当纳秒用；`measure_budget.py` 按 `mach_timebase_info` 换算（Apple Silicon 上约 ×41.7），之前记录的约 0.02% 空闲 CPU 应按约 0.8% 理解。
+

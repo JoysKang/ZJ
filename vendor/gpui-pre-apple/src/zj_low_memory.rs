@@ -11,7 +11,9 @@
 //!   (and, when minimized or the app is hidden, the last presented frame too);
 //! - one sprite atlas is shared by all windows instead of one per window;
 //! - a visible window that has not drawn for `SPARE_DRAWABLE_IDLE` gives back the spare
-//!   drawable; the presented one stays on screen (`IdleTrim`).
+//!   drawable; the presented one stays on screen (`IdleTrim`). The macOS window then also
+//!   stops its display link until GPUI wakes it (`MacWindow::frame_waker`), so an idle window
+//!   costs no CPU.
 //!
 //! `ZJ_GPU_LOWMEM=0` turns all of it off (upstream behaviour) for A/B measurements.
 
@@ -108,6 +110,11 @@ impl IdleTrim {
         self.trimmed = false;
     }
 
+    /// The window has been idle long enough to have given back its spare drawable.
+    pub fn is_idle(&self) -> bool {
+        self.trimmed
+    }
+
     /// Called on every display-link tick; `true` once the window has been idle long enough.
     pub fn should_trim(&mut self, now: Instant) -> bool {
         let Some(last) = self.last_frame else {
@@ -170,10 +177,12 @@ mod tests {
         trim.frame(start);
         assert!(!trim.should_trim(start + SPARE_DRAWABLE_IDLE / 2));
         assert!(trim.should_trim(start + SPARE_DRAWABLE_IDLE));
-        // Only once until the next frame.
+        // Only once until the next frame; idle until then.
+        assert!(trim.is_idle());
         assert!(!trim.should_trim(start + SPARE_DRAWABLE_IDLE * 3));
         let later = start + SPARE_DRAWABLE_IDLE * 4;
         trim.frame(later);
+        assert!(!trim.is_idle());
         assert!(!trim.should_trim(later + SPARE_DRAWABLE_IDLE / 2));
         assert!(trim.should_trim(later + SPARE_DRAWABLE_IDLE));
     }

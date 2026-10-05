@@ -547,6 +547,12 @@ impl MetalRenderer {
         }
     }
 
+    /// ZJ patch: the window has been idle long enough that its display link can stop (until
+    /// GPUI asks for a frame again).
+    pub fn zj_idle(&self) -> bool {
+        self.zj.enabled && !self.zj.released && self.zj.idle.is_idle()
+    }
+
     /// ZJ patch: the window is visible again. Returns whether the window has to present a
     /// frame (its layer was shrunk, or its contents cleared, while hidden).
     pub fn zj_restore_surfaces(&mut self) -> bool {
