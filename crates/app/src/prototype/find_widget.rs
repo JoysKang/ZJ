@@ -61,6 +61,10 @@ pub(super) struct FindState {
     preserve_case: bool,
     /// 在选区中查找: matches are limited to this byte range of the document.
     scope: Option<Range<usize>>,
+    /// The scope as an editor decoration, which the editor moves with every edit; `scope` is
+    /// read back from it before each search. Created before the match highlights so the
+    /// matches paint over it.
+    scope_mark: Option<RangeDecorationCollection>,
     matches: Vec<Range<usize>>,
     current: Option<usize>,
     error: Option<String>,
@@ -94,6 +98,7 @@ impl FindState {
             regex: false,
             preserve_case: false,
             scope: None,
+            scope_mark: None,
             matches: Vec::new(),
             current: None,
             error: None,
@@ -179,15 +184,19 @@ impl Prototype {
             return;
         }
         self.find.open = false;
-        self.find.scope = None;
         self.clear_find_highlights(cx);
         self.focus_active_editor(window, cx);
         cx.notify();
     }
 
+    /// Removes the match highlights and the 在选区中查找 scope.
     fn clear_find_highlights(&mut self, cx: &mut App) {
         if let Some((_, collection)) = self.find.target.take() {
             collection.dispose(cx);
+        }
+        self.find.scope = None;
+        if let Some(mark) = self.find.scope_mark.take() {
+            mark.dispose(cx);
         }
     }
 
@@ -212,8 +221,11 @@ impl Prototype {
             .is_some_and(|(target, _)| *target != id)
         {
             self.clear_find_highlights(cx);
-            self.find.scope = None;
             self.find.current = None;
+        }
+        // Edits since the last search moved the scope with the text.
+        if let Some(mark) = &self.find.scope_mark {
+            self.find.scope = mark.get_ranges(cx).into_iter().next();
         }
         let text = editor.read(cx).text().to_string();
         let query = self.find.query(cx);
@@ -276,14 +288,7 @@ impl Prototype {
         cx: &mut Context<Self>,
     ) {
         let colors = theme::colors(cx);
-        let mut decorations = Vec::with_capacity(self.find.matches.len() + 3);
-        if let Some(scope) = &self.find.scope {
-            decorations.push(
-                RangeDecoration::new(scope.clone())
-                    .with_style(RangeDecorationStyle::Fill)
-                    .with_color(colors.selection),
-            );
-        }
+        let mut decorations = Vec::with_capacity(self.find.matches.len());
         for (index, range) in self.find.matches.iter().enumerate() {
             let color = if Some(index) == self.find.current {
                 colors.find_current
@@ -431,11 +436,24 @@ impl Prototype {
 
     /// 在选区中查找: limit the search to the current selection (or turn it off).
     pub(super) fn toggle_find_in_selection(&mut self, cx: &mut Context<Self>) {
-        if self.find.scope.take().is_none()
-            && let Some((_, editor, _)) = self.find_document()
-        {
+        let was_on = self.find.scope.take().is_some();
+        if let Some(mark) = self.find.scope_mark.take() {
+            mark.dispose(cx);
+        }
+        if !was_on && let Some((_, editor, _)) = self.find_document() {
             let selection = editor.read(cx).selected_range();
             if selection.start < selection.end {
+                let colors = theme::colors(cx);
+                // Match highlights are recreated after the scope so they paint over it.
+                if let Some((_, collection)) = self.find.target.take() {
+                    collection.dispose(cx);
+                }
+                let scope = RangeDecoration::new(selection.clone())
+                    .with_style(RangeDecorationStyle::Fill)
+                    .with_color(colors.selection);
+                self.find.scope_mark = Some(editor.update(cx, |state, cx| {
+                    state.create_range_decorations_collection(vec![scope], cx)
+                }));
                 self.find.scope = Some(selection);
             }
         }
@@ -688,3 +706,7 @@ impl Prototype {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "find_ui_tests.rs"]
+mod find_ui_tests;
