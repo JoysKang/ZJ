@@ -1,6 +1,6 @@
 //! Git failures must not read as "absent". Runs alone in its own process: it puts a wrapper
-//! around `git` first on PATH that fails every `rev-parse --verify` the way a broken
-//! repository or a timed-out query would.
+//! around `git` first on PATH that fails every `rev-parse --verify` and ignored-file listing
+//! the way a broken repository or a timed-out query would.
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -9,7 +9,7 @@ use std::{
     sync::atomic::AtomicBool,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use workspace_editor_git::{GitService, GraphScope, WriteOperation, WriteRequest};
+use workspace_editor_git::{Discovery, GitService, GraphScope, WriteOperation, WriteRequest};
 
 struct Fixture(PathBuf);
 impl Drop for Fixture {
@@ -35,7 +35,7 @@ fn git(real: &Path, root: &Path, args: &[&str]) -> String {
 }
 
 #[test]
-fn failed_verify_is_an_error_not_a_missing_ref() {
+fn git_failures_are_reported_not_read_as_absence() {
     let path = std::env::temp_dir().join(format!(
         "zj-failures-{}-{}",
         std::process::id(),
@@ -58,7 +58,7 @@ fn failed_verify_is_an_error_not_a_missing_ref() {
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\ncase \" $* \" in *\" --verify \"*) echo 'fatal: injected failure' >&2; exit 128;; esac\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\ncase \" $* \" in *\" --verify \"*|*\" --ignored \"*) echo 'fatal: injected failure' >&2; exit 128;; esac\nexec '{}' \"$@\"\n",
             real.display()
         ),
     )
@@ -137,4 +137,14 @@ fn failed_verify_is_an_error_not_a_missing_ref() {
         assert!(error.contains("injected"), "{error}");
     }
     assert_eq!(git(&real, &root, &["tag"]), "v1\n");
+
+    // Discovery still finds the repository, and says its ignore rules could not be read.
+    let (mut found, mut issues) = (0, Vec::new());
+    service.discover(std::slice::from_ref(&root), &cancel, |event| match event {
+        Discovery::Repository(_) => found += 1,
+        Discovery::Issue(_, e) => issues.push(e),
+        _ => {}
+    });
+    assert_eq!(found, 1);
+    assert!(issues.iter().any(|e| e.contains("injected")), "{issues:?}");
 }

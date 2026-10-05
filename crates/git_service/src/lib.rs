@@ -883,12 +883,18 @@ impl GitService {
                         }
                         if repos.insert(repo.id.clone()) {
                             // The repository's own ignore rules decide what is walked below it.
-                            ignored = Arc::new(
-                                self.ignored_dirs(&repo, cancel)
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .collect(),
-                            );
+                            // Without them everything below is walked; say so rather than
+                            // silently ignoring the repository's ignore rules.
+                            ignored = match self.ignored_dirs(&repo, cancel) {
+                                Ok(dirs) => Arc::new(dirs.into_iter().collect()),
+                                Err(e) => {
+                                    event(Discovery::Issue(
+                                        path.clone(),
+                                        format!("无法读取忽略规则，忽略的目录也会被扫描：{e}"),
+                                    ));
+                                    Arc::default()
+                                }
+                            };
                             event(Discovery::Repository(repo));
                         }
                     }
