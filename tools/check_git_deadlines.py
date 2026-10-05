@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Check Git deadlines when descendants keep stdout/stderr open.
 
-Run after a Release build. Compiles the current service in a temporary directory;
+Run after a `--profile dist` or `--release` build (it borrows that build's libc rlib;
+CARGO_TARGET_DIR is honoured). Compiles the current service in a temporary directory;
 uses a fake Git and never accesses a real repository.
 """
 
@@ -9,15 +10,51 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
 project = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(__file__).resolve().parents[1]
-dependencies = project / "target/release/deps"
-libraries = list(dependencies.glob("liblibc-*.rlib"))
-if not libraries:
-    raise SystemExit("Run cargo build --release --locked before this check")
-libc = max(libraries, key=lambda path: path.stat().st_mtime_ns)
+target = Path(os.environ.get("CARGO_TARGET_DIR") or project / "target")
+if not target.is_absolute():
+    target = project / target
+# The newest libc rlib from either optimized profile.
+candidates = [
+    library
+    for profile in ("dist", "release")
+    for library in (target / profile / "deps").glob("liblibc-*.rlib")
+]
+if not candidates:
+    raise SystemExit(
+        f"No libc rlib in {target}/dist/deps or {target}/release/deps; "
+        "run cargo build --profile dist --locked (or --release) before this check"
+    )
+libc = max(candidates, key=lambda path: path.stat().st_mtime_ns)
+dependencies = libc.parent
+
+
+def alive(pid):
+    """Whether `pid` is a running process; a zombie (exited, not yet reaped) counts as dead."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    if Path("/proc/self/stat").exists():  # Linux
+        try:
+            # Field 3 of /proc/<pid>/stat, after the parenthesised command name.
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except FileNotFoundError:
+            return False
+    else:  # macOS
+        result = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+        )
+        state = result.stdout.strip()
+        if result.returncode or not state:
+            return False
+    return not state.startswith("Z")
 
 with tempfile.TemporaryDirectory(prefix="zj-check-deadline-") as temporary:
     root = Path(temporary)
@@ -81,10 +118,11 @@ time.sleep(10)
             print(result.stderr)
             raise SystemExit(result.returncode)
         assert marker.exists(), "fake Git failed to spawn descendant before deadline"
-        try:
-            os.kill(int(marker.read_text()), 0)
-        except ProcessLookupError:
-            pass
-        else:
+        # SIGKILL to the group is delivered asynchronously; give the orphan a moment to die.
+        descendant = int(marker.read_text())
+        deadline = time.monotonic() + 0.5
+        while alive(descendant) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if alive(descendant):
             raise AssertionError("descendant PID still exists after cancellation")
     print("PASS: timeout, exited parent, cancellation; no live descendant remains")
