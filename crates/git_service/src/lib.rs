@@ -125,6 +125,9 @@ impl Drop for RepoGuard<'_> {
     }
 }
 
+/// Status queries that saw the index or HEAD change underneath them are retried this often.
+const STATUS_ATTEMPTS: usize = 3;
+
 /// How often a waiter re-checks its cancellation flag while another operation holds the lock.
 const CANCEL_CHECK: Duration = Duration::from_millis(100);
 
@@ -589,22 +592,30 @@ impl GitService {
         generation: u64,
         cancel: &AtomicBool,
     ) -> io::Result<Status> {
-        let before = write::snapshot_version(repo)?;
-        let reply = self.execute_locked(
-            &Request {
-                repo: repo.clone(),
-                generation,
-                operation: Operation::Status,
-            },
-            cancel,
-        )?;
-        let mut status = parse_status(&reply.output)?;
-        let after = write::snapshot_version(repo)?;
-        if before != after {
-            return Err(error("Git 索引在查询期间发生变化，请刷新"));
+        // Another Git (a terminal, an editor hook) rewriting the index is usually done by the
+        // next attempt; only a repository that keeps changing is reported.
+        for attempt in 1..=STATUS_ATTEMPTS {
+            let before = write::snapshot_version(repo)?;
+            let reply = self.execute_locked(
+                &Request {
+                    repo: repo.clone(),
+                    generation,
+                    operation: Operation::Status,
+                },
+                cancel,
+            )?;
+            let mut status = parse_status(&reply.output)?;
+            let after = write::snapshot_version(repo)?;
+            if before == after {
+                status.version = write::worktree_version(repo, &status, after)?;
+                return Ok(status);
+            }
+            eprintln!("event=status_index_changed attempt={attempt}");
+            if attempt < STATUS_ATTEMPTS {
+                thread::sleep(Duration::from_millis(20));
+            }
         }
-        status.version = write::worktree_version(repo, &status, after)?;
-        Ok(status)
+        Err(error("Git 索引在查询期间发生变化，请刷新"))
     }
 
     /// Local and remote-tracking branches, most recently committed first.

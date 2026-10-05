@@ -1,6 +1,7 @@
 //! Git failures must not read as "absent". Runs alone in its own process: it puts a wrapper
 //! around `git` first on PATH that fails every `rev-parse --verify` and ignored-file listing
-//! the way a broken repository or a timed-out query would.
+//! the way a broken repository or a timed-out query would, and that touches the index during
+//! the first status query the way a concurrent Git would.
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -54,12 +55,20 @@ fn git_failures_are_reported_not_read_as_absence() {
     assert!(real.is_absolute(), "git not found on PATH");
     let bin = fixture.0.join("bin");
     fs::create_dir(&bin).unwrap();
+    let root = fixture.0.join("repo");
+    let touched = fixture.0.join("index-touched");
     let wrapper = bin.join("git");
+    // The first status query sees another process rewrite the index while it runs.
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\ncase \" $* \" in *\" --verify \"*|*\" --ignored \"*) echo 'fatal: injected failure' >&2; exit 128;; esac\nexec '{}' \"$@\"\n",
-            real.display()
+            "#!/bin/sh\n\
+             case \" $* \" in *\" --verify \"*|*\" --ignored \"*) echo 'fatal: injected failure' >&2; exit 128;; esac\n\
+             case \" $* \" in *\" status \"*) [ -e '{touched}' ] || {{ : > '{touched}'; sleep 0.05; touch '{index}'; }};; esac\n\
+             exec '{real}' \"$@\"\n",
+            touched = touched.display(),
+            index = root.join(".git/index").display(),
+            real = real.display(),
         ),
     )
     .unwrap();
@@ -73,7 +82,6 @@ fn git_failures_are_reported_not_read_as_absence() {
         std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
     }
 
-    let root = fixture.0.join("repo");
     fs::create_dir(&root).unwrap();
     git(&real, &root, &["init", "-b", "main"]);
     for (key, value) in [
@@ -93,6 +101,10 @@ fn git_failures_are_reported_not_read_as_absence() {
     let service = GitService::new(1, Duration::from_secs(10)).unwrap();
     let cancel = AtomicBool::new(false);
     let repo = service.identify(&root, &cancel).unwrap();
+    // A concurrent index rewrite is retried, not reported.
+    let status = service.status(&repo, 1, &cancel);
+    assert!(touched.exists());
+    assert!(status.is_ok(), "{:?}", status.err());
     // A detached HEAD is only listed through HEAD itself.
     git(&real, &root, &["switch", "--detach", "HEAD"]);
     let graph = service.graph(&repo, &GraphScope::Local, 0, 10, &cancel);
