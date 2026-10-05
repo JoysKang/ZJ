@@ -77,6 +77,7 @@ impl Workbench {
                 .map(|doc| doc.path.clone()),
             Pane::Diff => self.diff.tab.as_ref().map(|diff| diff.path.clone()),
             Pane::Graph => self.graph.as_ref().map(|graph| graph.repo.worktree.clone()),
+            Pane::Large => self.large.as_ref().map(|large| large.path.clone()),
             Pane::Welcome => None,
         }
     }
@@ -159,6 +160,7 @@ impl Workbench {
             Pane::Document(id) => self.close_document(id, window, cx),
             Pane::Diff => self.close_preview(window, cx),
             Pane::Graph => self.close_graph(window, cx),
+            Pane::Large => self.close_large(window, cx),
             Pane::Welcome => {}
         }
     }
@@ -181,6 +183,9 @@ impl Workbench {
         }
         if keep != Pane::Graph && self.graph.is_some() {
             self.close_graph(window, cx);
+        }
+        if keep != Pane::Large && self.large.is_some() {
+            self.close_large(window, cx);
         }
         let others: Vec<_> = self
             .documents

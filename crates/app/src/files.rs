@@ -498,6 +498,39 @@ fn open_beneath(root: &Path, relative: &Path) -> io::Result<fs::File> {
     Ok(file)
 }
 
+/// Why a text file was not opened for editing; such files can still be viewed read-only
+/// (`crate::large_file`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Restricted {
+    TooLarge,
+    LongLine,
+    NotUtf8,
+}
+
+impl Restricted {
+    /// The `Restricted` behind an error from `text_file`, if that is why it failed.
+    pub fn of(error: &io::Error) -> Option<Self> {
+        error.get_ref()?.downcast_ref::<Self>().copied()
+    }
+
+    /// Why the file is shown read-only, for the viewer's banner.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Restricted::TooLarge => "文件超过 8 MiB",
+            Restricted::LongLine => "有超过 256 KiB 的行",
+            Restricted::NotUtf8 => "不是 UTF-8 文本，按 UTF-8 近似显示",
+        }
+    }
+}
+
+impl std::fmt::Display for Restricted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}，不能编辑", self.reason())
+    }
+}
+
+impl std::error::Error for Restricted {}
+
 // None is reserved for an explicit file-picker selection, including files outside a workspace.
 pub fn text_file(root: Option<&Path>, path: &Path) -> io::Result<TextFile> {
     let path = fs::canonicalize(path)?;
@@ -513,21 +546,34 @@ pub fn text_file(root: Option<&Path>, path: &Path) -> io::Result<TextFile> {
         .map_err(|_| io::Error::other("链接目标位于工作区之外，未读取"))?;
     let file = open_beneath(&root, relative)?;
     let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES as u64 {
-        return Err(io::Error::other("仅支持不超过 8 MiB 的普通 UTF-8 文本文件"));
+    if !metadata.is_file() {
+        return Err(io::Error::other("不是普通文件，未打开"));
     }
+    let binary = || io::Error::other("二进制文件，未打开");
     let mut bytes = Vec::new();
+    if metadata.len() > MAX_FILE_BYTES as u64 {
+        file.take(crate::large_file::BINARY_PROBE as u64)
+            .read_to_end(&mut bytes)?;
+        return Err(if bytes.contains(&0) {
+            binary()
+        } else {
+            io::Error::other(Restricted::TooLarge)
+        });
+    }
     file.take(MAX_FILE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_FILE_BYTES || bytes.contains(&0) {
-        return Err(io::Error::other("文件过大或包含二进制内容，未打开"));
+    if bytes.len() > MAX_FILE_BYTES {
+        // Grew while being read.
+        return Err(io::Error::other(Restricted::TooLarge));
+    }
+    if bytes.contains(&0) {
+        return Err(binary());
     }
     let size = bytes.len();
     let disk = crate::save::DiskState::of(FileStamp::of(&metadata), &bytes);
-    let text =
-        String::from_utf8(bytes).map_err(|_| io::Error::other("文件不是 UTF-8 文本，未打开"))?;
+    let text = String::from_utf8(bytes).map_err(|_| io::Error::other(Restricted::NotUtf8))?;
     if text.split('\n').any(|line| line.len() > 256 * 1024) {
-        return Err(io::Error::other("单行超过 256 KiB，当前原型未打开"));
+        return Err(io::Error::other(Restricted::LongLine));
     }
     Ok(TextFile {
         id: DocumentId {
@@ -618,11 +664,26 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         assert!(text_file(Some(&root), &root.join("pipe")).is_err());
         assert!(text_file(None, &root.join("pipe")).is_err());
-        let large = fs::File::create(root.join("large")).unwrap();
-        large.set_len(MAX_FILE_BYTES as u64 + 1).unwrap();
-        assert!(text_file(Some(&root), &root.join("large")).is_err());
+        // Too large, a long line or not UTF-8: refused, saying why (the viewer takes them);
+        // a large file of zeros is binary.
+        let refused = |name: &str| text_file(Some(&root), &root.join(name)).err().unwrap();
+        let zeros = fs::File::create(root.join("zeros")).unwrap();
+        zeros.set_len(MAX_FILE_BYTES as u64 + 1).unwrap();
+        assert_eq!(Restricted::of(&refused("zeros")), None);
+        fs::write(root.join("large"), "line\n".repeat(MAX_FILE_BYTES / 5 + 1)).unwrap();
+        assert_eq!(
+            Restricted::of(&refused("large")),
+            Some(Restricted::TooLarge)
+        );
         fs::write(root.join("long-line"), "x".repeat(256 * 1024 + 1)).unwrap();
-        assert!(text_file(Some(&root), &root.join("long-line")).is_err());
+        assert_eq!(
+            Restricted::of(&refused("long-line")),
+            Some(Restricted::LongLine)
+        );
+        fs::write(root.join("gbk"), b"\xc4\xe3\xba\xc3\n").unwrap();
+        assert_eq!(Restricted::of(&refused("gbk")), Some(Restricted::NotUtf8));
+        fs::write(root.join("nul"), b"a\0b").unwrap();
+        assert_eq!(Restricted::of(&refused("nul")), None);
         assert_eq!(fs::read_to_string(&path).unwrap(), "\u{feff}hello\r\n");
         assert_eq!(
             fs::read_to_string(&outside).unwrap(),

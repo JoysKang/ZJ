@@ -65,6 +65,7 @@ mod find_widget;
 #[path = "workbench/go_to_line_ui_tests.rs"]
 mod go_to_line_ui_tests;
 mod graph_view;
+mod large_view;
 mod markdown_preview;
 #[cfg(test)]
 #[path = "workbench/markdown_ui_tests.rs"]
@@ -161,6 +162,8 @@ enum Pane {
     Diff,
     /// The Git Graph tab (one at a time, like the diff preview).
     Graph,
+    /// The restricted viewer of a file too large (or not UTF-8) to edit, one at a time.
+    Large,
 }
 
 struct Document {
@@ -416,6 +419,7 @@ pub struct Workbench {
     nav: navigation::NavState,
     /// The Git Graph tab's state (opened from a repository's header).
     graph: Option<graph_view::GitGraph>,
+    large: Option<large_view::LargeView>,
     /// The last tab right-click menu; tab tooltips stay hidden while it has focus.
     tab_menu_focus: Option<FocusHandle>,
     /// ⇧⌘T reopens these, most recent first.
@@ -631,6 +635,7 @@ impl Workbench {
             },
             // Top / bottom by default: the right side of the window is kept for an agent panel.
             graph: None,
+            large: None,
             tab_menu_focus: None,
             closed_tabs: Default::default(),
             pending_tabs: Vec::new(),
@@ -953,7 +958,7 @@ impl Workbench {
                 .find(|doc| doc.id == id)
                 .map(|doc| doc.editor.clone()),
             Pane::Diff => self.diff.fallback.clone(),
-            Pane::Welcome | Pane::Graph => None,
+            Pane::Welcome | Pane::Graph | Pane::Large => None,
         }
     }
 
@@ -1169,6 +1174,7 @@ impl Workbench {
         self.file_generation += 1;
         let generation = self.file_generation;
         self.message = format!("正在打开 {}", path.display());
+        let requested = path.clone();
         let job = cx.background_spawn(async move {
             let loaded = files::text_file(root.as_deref(), &path)?;
             let root = root.and_then(|root| std::fs::canonicalize(root).ok());
@@ -1183,6 +1189,10 @@ impl Workbench {
                 }
                 let (loaded, indent) = match result {
                     Ok(loaded) => loaded,
+                    Err(error) if let Some(reason) = files::Restricted::of(&error) => {
+                        this.open_large(requested, reason, window, cx);
+                        return;
+                    }
                     Err(error) => {
                         this.message = format!("打开失败：{error}");
                         cx.notify();
@@ -1208,6 +1218,7 @@ impl Workbench {
         + 'static,
     ) {
         let workspace = self.root.clone();
+        let requested = path.clone();
         let job = cx.background_spawn(async move {
             // These paths were named explicitly (command line, snapshot, last session): a file
             // outside the folder is read like a file-picker choice, inside it through the
@@ -1228,6 +1239,11 @@ impl Workbench {
                     Ok((loaded, indent)) => this
                         .install_loaded(loaded, indent, window, cx)
                         .ok_or_else(|| "文件已打开，或已达到打开文件的上限".to_string()),
+                    // Not editable: shown in the viewer, and the caller still hears why.
+                    Err(error) if let Some(reason) = files::Restricted::of(&error) => {
+                        this.open_large(requested, reason, window, cx);
+                        Err(format!("{error}，已以只读方式打开"))
+                    }
                     Err(error) => Err(error.to_string()),
                 };
                 then(this, opened, window, cx);

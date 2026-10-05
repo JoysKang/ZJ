@@ -103,6 +103,7 @@ impl Workbench {
                     Pane::Document(id) => this.close_document(id, window, cx),
                     Pane::Diff => this.close_preview(window, cx),
                     Pane::Graph => this.close_graph(window, cx),
+                    Pane::Large => this.close_large(window, cx),
                     Pane::Welcome => {}
                 }
             }));
@@ -266,6 +267,26 @@ impl Workbench {
                 pending: None,
             });
         }
+        if let Some(large) = &self.large {
+            let name = large
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .replace(SINGLE_LINE, "⏎");
+            specs.push(TabSpec {
+                key: usize::MAX - 2,
+                pane: Pane::Large,
+                icon: file_icons::for_file(&name),
+                lucide: None,
+                label: name,
+                tooltip: format!("{}（只读）", large.path.display()),
+                dirty: false,
+                note: Some("只读"),
+                deleted: false,
+                pending: None,
+            });
+        }
         for (index, path) in self.pending_tabs.iter().enumerate() {
             let name = path
                 .file_name()
@@ -325,6 +346,10 @@ impl Workbench {
                 } else {
                     "Diff · 只读"
                 }),
+            ),
+            Pane::Large => (
+                self.large.as_ref().map(|large| large.path.clone()),
+                Some("受限查看 · 只读"),
             ),
             Pane::Welcome | Pane::Graph => (None, None),
         };
@@ -492,6 +517,7 @@ impl Workbench {
             Pane::Welcome => return self.render_welcome(cx),
             Pane::Diff => self.render_diff(cx),
             Pane::Graph => self.render_graph(cx),
+            Pane::Large => self.render_large(cx),
             Pane::Document(id) => match self.documents.iter().find(|doc| doc.id == id) {
                 Some(doc) if doc.markdown.as_ref().is_some_and(|md| !md.source) => {
                     self.render_markdown_preview(id, cx)

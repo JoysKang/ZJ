@@ -332,6 +332,7 @@ impl Workbench {
             Pane::Document(id) => self.close_document(id, window, cx),
             Pane::Diff => self.close_preview(window, cx),
             Pane::Graph => self.close_graph(window, cx),
+            Pane::Large => self.close_large(window, cx),
             Pane::Welcome => self.close_window_after_confirm(window, cx),
         }
     }
@@ -831,6 +832,7 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.large_check_disk(paths, cx);
         let jobs: Vec<(DocumentId, PathBuf, DiskState)> = self
             .documents
             .iter()

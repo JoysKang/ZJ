@@ -9,6 +9,7 @@ mod files;
 mod fuzzy;
 mod indent;
 mod languages;
+mod large_file;
 mod markdown;
 mod markdown_blocks;
 mod partial_patch;

@@ -153,6 +153,7 @@ impl Workbench {
                 .map(|doc| doc.path.clone()),
             Pane::Diff => self.diff.tab.as_ref().map(|diff| diff.path.clone()),
             Pane::Graph => self.graph.as_ref().map(|graph| graph.repo.worktree.clone()),
+            Pane::Large => self.large.as_ref().map(|large| large.path.clone()),
             Pane::Welcome => None,
         }
         .or_else(|| self.root.clone())?;
@@ -368,7 +369,13 @@ impl Workbench {
             })
             .when_some(language, |bar, language| {
                 bar.child(status_item("status-language", colors).child(language))
-            });
+            })
+            .when_some(
+                (self.active == Pane::Large)
+                    .then(|| self.large_status())
+                    .flatten(),
+                |bar, status| bar.child(status_item("status-large", colors).child(status)),
+            );
         h_flex()
             .h(theme::STATUS_HEIGHT)
             .flex_shrink_0()
