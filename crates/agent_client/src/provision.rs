@@ -300,7 +300,10 @@ pub(crate) fn install_node(
         return Ok(bin);
     }
     let (build, expected) = node_build().ok_or_else(|| {
-        "这个平台不能自动下载 Node.js，请自行安装 Node.js 18 或更新版本".to_string()
+        format!(
+            "这个平台不能自动下载 Node.js，请自行安装 Node.js {} 或更新版本",
+            crate::registry::MIN_NODE.0
+        )
     })?;
     let parent = root.join("node");
     fs::create_dir_all(&parent).map_err(|e| format!("无法创建 {}：{e}", parent.display()))?;

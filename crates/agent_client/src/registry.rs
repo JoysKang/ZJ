@@ -391,7 +391,7 @@ fn node_launch(
 }
 
 /// claude-agent-acp needs Node.js 22; an older one on this machine is passed over.
-const MIN_NODE: (u64, u64, u64) = (22, 0, 0);
+pub(crate) const MIN_NODE: (u64, u64, u64) = (22, 0, 0);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LaunchError {

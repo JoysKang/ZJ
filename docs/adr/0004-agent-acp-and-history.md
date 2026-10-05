@@ -89,7 +89,7 @@
 
 **库文件**：1 万条消息 8.26 MB（正文 2.2 MB，trigram 索引占大头）；含 WAL 约 13.8 MB。全部删除后回到 73,728 字节，与只建了表的空库完全相同；两张 FTS 表的行数为 0。
 
-**Agent 进程**（不计入编辑器 footprint，单独列为整应用验收项）：真实的 `claude-agent-acp 0.85.0` 握手成功（`loadSession`、`embeddedContext`、图片均支持），首次 npx 下载约 10 秒。进程组（npx + 适配器 + Claude Code）在开始建会话时约 490 MB RSS。本机以 root 运行，Claude Code 拒绝 `--dangerously-skip-permissions`，会话没建起来；错误详情会原样显示在面板里。用 `npm i -g @agentclientprotocol/claude-agent-acp` 装成本机命令可以省掉 npx 那层 Node 进程，预设会优先用它。
+**Agent 进程**（不计入编辑器 footprint，单独列为整应用验收项）：真实的 `claude-agent-acp 0.85.0` 握手成功（`loadSession`、`embeddedContext`、图片均支持），首次 npx 下载约 10 秒（早期测量，当时还经过 npx；现在由 `provision` 安装，不再经过 npx）。进程组（npx + 适配器 + Claude Code）在开始建会话时约 490 MB RSS。本机以 root 运行，Claude Code 拒绝 `--dangerously-skip-permissions`，会话没建起来；错误详情会原样显示在面板里。用 `npm i -g @agentclientprotocol/claude-agent-acp` 装成本机命令可以省掉 npx 那层 Node 进程，预设会优先用它。
 
 ## 后果
 
