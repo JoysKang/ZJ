@@ -951,3 +951,43 @@ fn dropping_the_client_does_not_wait_out_a_hung_handshake() {
         started.elapsed()
     );
 }
+
+#[test]
+fn a_file_without_a_snapshot_is_reported() {
+    let ws = Workspace::new("nosnap");
+    let file = ws.path("data.bin");
+    std::fs::write(&file, [0xff, 0xfe, 0x00]).unwrap();
+    let client = AgentClient::start(options(&ws, &[])).unwrap();
+    let events = Events::of(&client);
+    client
+        .prompt(text(&format!("write {} text", file.display())))
+        .unwrap();
+    let seen = events.turn();
+    assert!(
+        seen.iter().any(
+            |e| matches!(e, AgentEvent::Error { message } if message.contains("不能对比或还原"))
+        ),
+        "{seen:?}"
+    );
+    assert_eq!(client.snapshot(&file), None);
+}
+
+#[test]
+fn a_cancel_the_agent_ignores_still_ends_the_turn() {
+    let ws = Workspace::new("stuck");
+    let mut opts = options(&ws, &[]);
+    opts.cancel_grace = Duration::from_millis(300);
+    let client = AgentClient::start(opts).unwrap();
+    let events = Events::of(&client);
+    client.prompt(text("stuck")).unwrap();
+    events.until(|e| matches!(e, AgentEvent::SessionStarted { .. }));
+    std::thread::sleep(Duration::from_millis(100));
+    client.cancel();
+    let seen = events.until(|e| matches!(e, AgentEvent::TurnEnded { .. }));
+    assert!(
+        matches!(outcome(&seen), TurnOutcome::Failed(m) if m.contains("没有响应取消")),
+        "{seen:?}"
+    );
+    // The next prompt is not refused as "a turn is running".
+    client.prompt(text("echo again")).unwrap();
+}

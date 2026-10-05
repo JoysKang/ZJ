@@ -39,6 +39,8 @@ pub struct ClientOptions {
     pub workspace_root: PathBuf,
     /// Stop the process after this long without a turn, prompt or permission request.
     pub idle_timeout: Duration,
+    /// How long a cancelled turn may take to end before it is ended without the agent.
+    pub cancel_grace: Duration,
     /// Initialize / session setup.
     pub handshake_timeout: Duration,
     /// Values from the settings file, e.g. `ANTHROPIC_AUTH_TOKEN` for the DeepSeek preset.
@@ -60,6 +62,7 @@ impl ClientOptions {
             preset,
             workspace_root: workspace_root.into(),
             idle_timeout: Duration::from_secs(10 * 60),
+            cancel_grace: Duration::from_secs(10),
             handshake_timeout: Duration::from_secs(180),
             env_overrides: BTreeMap::new(),
             buffers: None,
@@ -132,6 +135,7 @@ struct Shared {
     preset: AgentPreset,
     workspace: Workspace,
     idle_timeout: Duration,
+    cancel_grace: Duration,
     handshake_timeout: Duration,
     resume_session: Option<String>,
     env_overrides: BTreeMap<String, String>,
@@ -160,6 +164,8 @@ struct Shared {
     /// Each file's content before the agent first touched it in this client
     /// (`None` = the file did not exist), for "working tree vs. before the agent" reviews.
     snapshots: Mutex<BTreeMap<PathBuf, Option<String>>>,
+    /// The "too many snapshots" notice was shown.
+    snapshots_full: AtomicBool,
 }
 
 impl Shared {
@@ -194,12 +200,23 @@ impl Shared {
     /// Records `path` as it is now, once: the unsaved buffer when the editor has one (that is
     /// what the agent read and edits), otherwise the disk. Unreadable or oversized files are
     /// skipped.
+    /// A file the agent's change cannot be reviewed for is said so in the thread, not
+    /// silently left out of the changed files.
     async fn snapshot(&self, path: &Path) {
         let known = |s: &Self| {
             let snapshots = s.snapshots.lock().unwrap();
             snapshots.contains_key(path) || snapshots.len() >= MAX_SNAPSHOTS
         };
         if known(self) {
+            let full = !self.snapshots.lock().unwrap().contains_key(path);
+            if full && !self.snapshots_full.swap(true, Ordering::Relaxed) {
+                self.emit(AgentEvent::Error {
+                    message: format!(
+                        "这个会话已记录 {MAX_SNAPSHOTS} 个文件改动前的内容，之后改动的文件不能对比或还原"
+                    ),
+                })
+                .await;
+            }
             return;
         }
         let before = match self.buffer_text(path).await {
@@ -207,7 +224,14 @@ impl Shared {
             Ok(None) | Err(_) => match read_disk(path) {
                 Ok(text) => Some(text),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-                Err(_) => return,
+                Err(e) => {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    self.emit(AgentEvent::Error {
+                        message: format!("没能记录 {name} 改动前的内容（{e}），它不能对比或还原"),
+                    })
+                    .await;
+                    return;
+                }
             },
         };
         if !known(self) {
@@ -281,6 +305,7 @@ impl AgentClient {
             preset: options.preset,
             workspace,
             idle_timeout: options.idle_timeout,
+            cancel_grace: options.cancel_grace,
             handshake_timeout: options.handshake_timeout,
             resume_session: options.resume_session,
             env_overrides: options.env_overrides,
@@ -300,6 +325,7 @@ impl AgentClient {
             embedded_context: AtomicBool::new(false),
             pid: Mutex::new(None),
             snapshots: Mutex::new(BTreeMap::new()),
+            snapshots_full: AtomicBool::new(false),
         });
         let supervisor_shared = shared.clone();
         let supervisor = thread::Builder::new()
@@ -971,6 +997,26 @@ async fn run_session(
                 Ok(Command::Cancel) => {
                     shared.cancel_permissions();
                     cx.send_notification(acp::CancelNotification::new(session.clone()))?;
+                    // An agent that never answers the prompt would keep the turn (and the idle
+                    // timer) stuck; its late answer is ignored once the turn has ended.
+                    let turn = *shared.turn.lock().unwrap();
+                    if let Some(turn) = turn {
+                        let shared = shared.clone();
+                        cx.spawn(async move {
+                            Timer::after(shared.cancel_grace).await;
+                            if *shared.turn.lock().unwrap() == Some(turn) {
+                                eprintln!("event=agent_cancel_unanswered agent={}", shared.preset.id);
+                                shared
+                                    .finish_turn(
+                                        Some(turn),
+                                        TurnOutcome::Failed("Agent 没有响应取消，已结束这一轮".into()),
+                                    )
+                                    .await;
+                                let _ = shared.turn_done.send(()).await;
+                            }
+                            Ok(())
+                        })?;
+                    }
                 }
                 Ok(Command::SetMode(mode)) => {
                     let request = cx.send_request(acp::SetSessionModeRequest::new(session.clone(), mode));

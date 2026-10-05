@@ -243,6 +243,8 @@ async fn run_prompt(
                 async_io::Timer::after(Duration::from_millis(20)).await;
             }
         }
+        // Ignores session/cancel and never answers the prompt.
+        "stuck" => std::future::pending::<()>().await,
         "crash" => {
             eprintln!("fake agent: crashing on purpose");
             std::process::exit(3);
