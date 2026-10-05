@@ -128,6 +128,8 @@ pub(super) struct LiveSession {
     pub branch: Option<String>,
     /// Parsed replies by absolute item index (`thread.dropped + i`).
     pub md: HashMap<usize, Rc<Vec<Block>>>,
+    /// The reply being streamed (absolute index) and its incremental parse.
+    streaming_md: Option<(usize, markdown::Streaming)>,
     /// Oldest stored message loaded (history threads page backwards from it).
     pub oldest_seq: Option<i64>,
     resume: Option<String>,
@@ -155,6 +157,7 @@ impl LiveSession {
             started_at: workspace_editor_agent_history::now_ms(),
             branch: None,
             md: HashMap::new(),
+            streaming_md: None,
             oldest_seq: None,
             resume: None,
             stored_status: None,
@@ -1071,7 +1074,26 @@ impl Prototype {
                 continue;
             }
             if let Item::Agent { text, streaming } = item {
-                let blocks = markdown::parse(text);
+                // A streaming reply only grows: parse just its unfinished tail.
+                let blocks = if *streaming {
+                    let (at, parser) = session
+                        .streaming_md
+                        .get_or_insert_with(|| (index, markdown::Streaming::default()));
+                    if *at != index {
+                        *at = index;
+                        *parser = markdown::Streaming::default();
+                    }
+                    parser.update(text)
+                } else {
+                    if session
+                        .streaming_md
+                        .as_ref()
+                        .is_some_and(|(at, _)| *at == index)
+                    {
+                        session.streaming_md = None;
+                    }
+                    markdown::parse(text)
+                };
                 if !streaming
                     && blocks.iter().any(|b| {
                         matches!(

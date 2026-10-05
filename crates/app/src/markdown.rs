@@ -232,6 +232,58 @@ pub fn parse(source: &str) -> Vec<Block> {
     blocks
 }
 
+/// Parses a reply while it streams without starting over each time: everything before the
+/// last blank line outside a code fence is final (the parser is line based and only a
+/// paragraph or an open fence carries across lines), so only the tail is parsed again.
+#[derive(Default)]
+pub struct Streaming {
+    /// Bytes of the source whose blocks are final.
+    stable_len: usize,
+    stable: Vec<Block>,
+}
+
+impl Streaming {
+    /// The blocks of `source`, which must extend the source of the previous call.
+    pub fn update(&mut self, source: &str) -> Vec<Block> {
+        if source.len() < self.stable_len || !source.is_char_boundary(self.stable_len) {
+            *self = Self::default();
+        }
+        let split = stable_end(source, self.stable_len);
+        if split > self.stable_len {
+            self.stable.extend(parse(&source[self.stable_len..split]));
+            self.stable_len = split;
+        }
+        let mut blocks = self.stable.clone();
+        blocks.extend(parse(&source[self.stable_len..]));
+        blocks
+    }
+}
+
+/// The end of the last blank line after `from` (a line start outside a fence) that is not
+/// inside a code fence: parsing stops and restarts there without changing the result.
+fn stable_end(source: &str, from: usize) -> usize {
+    let mut end = from;
+    let mut in_fence = false;
+    let mut at = from;
+    for line in source[from..].split_inclusive('\n') {
+        at += line.len();
+        if !line.ends_with('\n') {
+            break; // still being written
+        }
+        let text = line.trim_end_matches(['\n', '\r']);
+        if in_fence {
+            if fence(text).is_some_and(|rest| rest.trim().is_empty()) {
+                in_fence = false;
+            }
+        } else if fence(text).is_some() {
+            in_fence = true;
+        } else if text.trim().is_empty() {
+            end = at;
+        }
+    }
+    end
+}
+
 /// Fills in syntax runs for fenced code (off the UI thread).
 pub fn highlight(blocks: &mut [Block], theme: &HighlightTheme) {
     for block in blocks {
@@ -250,6 +302,27 @@ pub fn highlight(blocks: &mut [Block], theme: &HighlightTheme) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_matches_a_full_parse_at_every_step() {
+        let reply = "# 标题\n\n第一段\n续行 **粗体**\n\n- a\n- b\n\n```rust\nfn main() {\n\n}\n```\n\n> 引用\n\n---\n\n最后一段 `code`\n";
+        let mut streaming = Streaming::default();
+        let mut end = 0;
+        while end < reply.len() {
+            end += 1;
+            while !reply.is_char_boundary(end) {
+                end += 1;
+            }
+            assert_eq!(
+                streaming.update(&reply[..end]),
+                parse(&reply[..end]),
+                "{end}"
+            );
+        }
+        assert!(streaming.stable_len > 0);
+        // A source that does not extend the previous one starts over.
+        assert_eq!(streaming.update("新的"), parse("新的"));
+    }
 
     #[test]
     fn blocks_and_inline_markup() {
