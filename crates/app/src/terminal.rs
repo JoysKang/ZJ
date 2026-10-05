@@ -4,7 +4,7 @@
 
 use alacritty_terminal::{
     event::{Event, EventListener, Notify, OnResize, WindowSize},
-    event_loop::{EventLoop, Msg, Notifier},
+    event_loop::{EventLoop, EventLoopSender, Msg, Notifier},
     grid::Dimensions,
     sync::FairMutex,
     term::{Config, Term, TermMode, color::COUNT},
@@ -12,7 +12,16 @@ use alacritty_terminal::{
     vte::ansi::{Color, NamedColor, Rgb},
 };
 use gpui_kit::{Hsla, Keystroke, Rgba};
-use std::{borrow::Cow, collections::HashMap, io, path::PathBuf, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    io,
+    path::PathBuf,
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 pub use alacritty_terminal::{
     grid::Scroll,
@@ -27,23 +36,81 @@ pub use alacritty_terminal::{
 const SCROLLBACK: usize = 1000;
 
 /// In-flight emulator events per terminal. The bound keeps a stalled UI from piling up
-/// events without limit; a full channel applies backpressure to the pty reader instead.
+/// events without limit; a full channel never makes the pty reader wait (see [`Listener`]).
 const EVENTS: usize = 4096;
 
 /// Forwards the emulator's events to the view's task; the channel is the view's only wakeup,
 /// so an idle terminal costs no timer.
+///
+/// The emulator sends events from the pty reader while it holds the terminal lock, and the
+/// view takes that lock to paint and to answer color queries, so sending must never wait for
+/// the view: on a full channel the two would deadlock. So nothing blocks:
+///
+/// - Title changes and the shell's exit are state the view reads after each wakeup
+///   ([`Terminal::take_title`], [`Terminal::exited`]): the latest title wins, and exit is a
+///   flag that cannot be lost.
+/// - Replies for the shell (`PtyWrite`) go through the view, in order with the replies it
+///   computes; when the channel is full they go straight to the pty writer instead.
+/// - Repaint hints are coalescible, and the remaining requests (clipboard, color and size
+///   queries) are dropped on a full channel: a program flooding them loses some answers
+///   rather than hanging the window.
 #[derive(Clone)]
-pub struct Listener(async_channel::Sender<Event>);
+pub struct Listener(Arc<Shared>);
+
+struct Shared {
+    events: async_channel::Sender<Event>,
+    /// The pty writer, set once the event loop exists (before it reads anything).
+    pty: OnceLock<EventLoopSender>,
+    /// A title change the view has not seen yet; `Some(None)` resets the title.
+    title: Mutex<Option<Option<String>>>,
+    exited: AtomicBool,
+}
+
+impl Listener {
+    fn new() -> (Self, async_channel::Receiver<Event>) {
+        let (events, receiver) = async_channel::bounded(EVENTS);
+        let shared = Shared {
+            events,
+            pty: OnceLock::new(),
+            title: Mutex::new(None),
+            exited: AtomicBool::new(false),
+        };
+        (Listener(Arc::new(shared)), receiver)
+    }
+
+    fn wake(&self) {
+        let _ = self.0.events.try_send(Event::Wakeup);
+    }
+
+    fn set_title(&self, title: Option<String>) {
+        *self.0.title.lock().unwrap_or_else(|e| e.into_inner()) = Some(title);
+        self.wake();
+    }
+}
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
-        // Wakeup is a coalescible repaint hint (the view re-reads the grid on any event), so
-        // dropping it on a full channel loses nothing; anything else is a state transition
-        // that must not be lost, so it blocks the reader until the view catches up.
-        if matches!(event, Event::Wakeup) {
-            let _ = self.0.try_send(event);
-        } else {
-            let _ = self.0.send_blocking(event);
+        match event {
+            Event::Title(title) => self.set_title(Some(title)),
+            Event::ResetTitle => self.set_title(None),
+            Event::Exit | Event::ChildExit(_) => {
+                self.0.exited.store(true, Ordering::Release);
+                self.wake();
+            }
+            Event::Wakeup | Event::MouseCursorDirty | Event::CursorBlinkingChange | Event::Bell => {
+                self.wake()
+            }
+            Event::PtyWrite(text) => {
+                if let Err(error) = self.0.events.try_send(Event::PtyWrite(text))
+                    && let Event::PtyWrite(text) = error.into_inner()
+                    && let Some(pty) = self.0.pty.get()
+                {
+                    let _ = pty.send(Msg::Input(text.into_bytes().into()));
+                }
+            }
+            request => {
+                let _ = self.0.events.try_send(request);
+            }
         }
     }
 }
@@ -95,7 +162,10 @@ impl Size {
 
 pub struct Terminal {
     pub term: Arc<FairMutex<Term<Listener>>>,
+    /// Wakeups and requests that need the UI; after each, the view reads
+    /// [`Terminal::take_title`] and [`Terminal::exited`].
     pub events: async_channel::Receiver<Event>,
+    shared: Arc<Shared>,
     notifier: Notifier,
     size: Size,
 }
@@ -105,8 +175,7 @@ impl Terminal {
     /// its own thread until the shell exits or the terminal is dropped.
     pub fn spawn(cwd: Option<PathBuf>, shell: Option<Shell>) -> io::Result<Self> {
         let size = Size::default();
-        let (sender, events) = async_channel::bounded(EVENTS);
-        let listener = Listener(sender);
+        let (listener, events) = Listener::new();
         let config = Config {
             scrolling_history: SCROLLBACK,
             ..Config::default()
@@ -126,15 +195,32 @@ impl Terminal {
             env,
         };
         let pty = tty::new(&options, size.window_size(), 0)?;
+        let shared = listener.0.clone();
         let event_loop = EventLoop::new(term.clone(), listener, pty, false, false)?;
+        let _ = shared.pty.set(event_loop.channel());
         let notifier = Notifier(event_loop.channel());
         event_loop.spawn();
         Ok(Terminal {
             term,
             events,
+            shared,
             notifier,
             size,
         })
+    }
+
+    /// The title the shell set since the last call; `Some(None)` when it reset the title.
+    pub fn take_title(&self) -> Option<Option<String>> {
+        self.shared
+            .title
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
+    /// The shell has exited.
+    pub fn exited(&self) -> bool {
+        self.shared.exited.load(Ordering::Acquire)
     }
 
     pub fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
@@ -367,6 +453,34 @@ mod tests {
 
     fn bytes(key: &str, mode: TermMode) -> Option<String> {
         key_bytes(&Keystroke::parse(key).unwrap(), mode).map(|b| String::from_utf8(b).unwrap())
+    }
+
+    #[test]
+    fn events_never_block_the_reader_and_keep_title_and_exit() {
+        let (listener, events) = Listener::new();
+        let (done, finished) = std::sync::mpsc::channel();
+        let sender = listener.clone();
+        // Nobody reads `events`, as when the UI thread waits for the terminal lock.
+        std::thread::spawn(move || {
+            for i in 0..EVENTS * 2 {
+                sender.send_event(Event::Title(format!("title {i}")));
+                sender.send_event(Event::Wakeup);
+                sender.send_event(Event::PtyWrite("\x1b[0n".into()));
+                sender.send_event(Event::TextAreaSizeRequest(Arc::new(|_| String::new())));
+            }
+            sender.send_event(Event::ChildExit(std::process::ExitStatus::default()));
+            let _ = done.send(());
+        });
+        finished
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("sending an event blocked");
+        assert_eq!(events.len(), EVENTS);
+        let shared = &listener.0;
+        assert!(shared.exited.load(Ordering::Acquire));
+        let title = shared.title.lock().unwrap().take();
+        assert_eq!(title, Some(Some(format!("title {}", EVENTS * 2 - 1))));
+        listener.send_event(Event::ResetTitle);
+        assert_eq!(shared.title.lock().unwrap().take(), Some(None));
     }
 
     #[test]

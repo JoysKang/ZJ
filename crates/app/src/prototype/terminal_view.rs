@@ -128,15 +128,15 @@ impl TerminalView {
     fn handle_events(&mut self, events: Vec<Event>, cx: &mut Context<Self>) {
         for event in events {
             match event {
-                Event::Wakeup | Event::MouseCursorDirty | Event::CursorBlinkingChange => {}
-                Event::Title(title) => {
-                    self.title = title;
-                    cx.emit(TerminalEvent::TitleChanged);
-                }
-                Event::ResetTitle => {
-                    self.title = shell_name();
-                    cx.emit(TerminalEvent::TitleChanged);
-                }
+                // Title and exit arrive as state (read below), the rest as wakeups.
+                Event::Wakeup
+                | Event::MouseCursorDirty
+                | Event::CursorBlinkingChange
+                | Event::Bell
+                | Event::Title(_)
+                | Event::ResetTitle
+                | Event::Exit
+                | Event::ChildExit(_) => {}
                 Event::PtyWrite(text) => self.terminal.write(text.into_bytes()),
                 Event::ClipboardStore(_, text) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(text))
@@ -163,14 +163,15 @@ impl TerminalView {
                     };
                     self.terminal.write(format(window).into_bytes());
                 }
-                Event::Bell => {}
-                Event::Exit | Event::ChildExit(_) => {
-                    if !self.exited {
-                        self.exited = true;
-                        cx.emit(TerminalEvent::Exited);
-                    }
-                }
             }
+        }
+        if let Some(title) = self.terminal.take_title() {
+            self.title = title.unwrap_or_else(shell_name);
+            cx.emit(TerminalEvent::TitleChanged);
+        }
+        if self.terminal.exited() && !self.exited {
+            self.exited = true;
+            cx.emit(TerminalEvent::Exited);
         }
         cx.notify();
     }
