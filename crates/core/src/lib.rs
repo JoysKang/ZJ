@@ -42,9 +42,16 @@ pub enum GitMarker {
 /// Checks `dir/.git` the way Git does before running `git` there, without spawning a process.
 pub fn git_marker(dir: &std::path::Path) -> GitMarker {
     let marker = dir.join(".git");
-    let Ok(metadata) = fs::symlink_metadata(&marker) else {
+    let Ok(mut metadata) = fs::symlink_metadata(&marker) else {
         return GitMarker::Missing;
     };
+    // Git stats `.git` through a symlink: a link to a Git directory (or to a gitfile) counts.
+    if metadata.is_symlink() {
+        match fs::metadata(&marker) {
+            Ok(target) => metadata = target,
+            Err(_) => return GitMarker::Invalid,
+        }
+    }
     if metadata.is_dir() {
         return if marker.join("HEAD").is_file() {
             GitMarker::Valid
@@ -154,6 +161,9 @@ mod tests {
             "linked",
             "dangling",
             "gitdirs/wt",
+            "symlinked",
+            "symlinked-file",
+            "broken-link",
         ] {
             fs::create_dir_all(root.join(dir)).unwrap();
         }
@@ -168,6 +178,14 @@ mod tests {
         assert_eq!(git_marker(&root.join("bad")), GitMarker::Invalid);
         assert_eq!(git_marker(&root.join("linked")), GitMarker::Valid);
         assert_eq!(git_marker(&root.join("dangling")), GitMarker::Invalid);
+        // Git follows a `.git` symlink, to a Git directory or to a gitfile.
+        let link = std::os::unix::fs::symlink;
+        link(root.join("repo/.git"), root.join("symlinked/.git")).unwrap();
+        link(root.join("linked/.git"), root.join("symlinked-file/.git")).unwrap();
+        link(root.join("nonexistent"), root.join("broken-link/.git")).unwrap();
+        assert_eq!(git_marker(&root.join("symlinked")), GitMarker::Valid);
+        assert_eq!(git_marker(&root.join("symlinked-file")), GitMarker::Valid);
+        assert_eq!(git_marker(&root.join("broken-link")), GitMarker::Invalid);
         assert!(is_excluded_dir(std::ffi::OsStr::new(".uv-cache")));
         assert!(!is_excluded_dir(std::ffi::OsStr::new("build")));
         fs::remove_dir_all(root).unwrap();
