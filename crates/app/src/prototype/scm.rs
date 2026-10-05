@@ -909,7 +909,7 @@ impl Prototype {
             .map(|parent| parent.to_string_lossy().replace(SINGLE_LINE, "⏎"))
             .unwrap_or_default();
         // The row whose diff is open is selected, as in VS Code.
-        let selected = self.preview_diff.as_ref().is_some_and(|diff| {
+        let selected = self.diff.tab.as_ref().is_some_and(|diff| {
             diff.path == file_path
                 && match diff.request().map(|request| &request.operation) {
                     Some(workspace_editor_git::Operation::Diff { side: open, .. }) => {

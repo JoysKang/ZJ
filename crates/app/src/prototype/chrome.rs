@@ -151,7 +151,7 @@ impl Prototype {
                 .iter()
                 .find(|doc| doc.id == id)
                 .map(|doc| doc.path.clone()),
-            Pane::Diff => self.preview_diff.as_ref().map(|diff| diff.path.clone()),
+            Pane::Diff => self.diff.tab.as_ref().map(|diff| diff.path.clone()),
             Pane::Graph => self.graph.as_ref().map(|graph| graph.repo.worktree.clone()),
             Pane::Welcome => None,
         }
@@ -188,7 +188,8 @@ impl Prototype {
         };
         let language = match self.active {
             Pane::Diff => self
-                .preview_diff
+                .diff
+                .tab
                 .as_ref()
                 .map(|diff| super::language_for(&diff.path).1),
             _ => document.map(|doc| doc.language),

@@ -43,13 +43,13 @@ struct Paint {
 impl Prototype {
     /// Inline when chosen, and always for added or deleted files (one side is empty).
     pub(super) fn diff_is_inline(&self) -> bool {
-        self.diff_doc.as_ref().is_none_or(|doc| {
-            self.diff_inline || doc.old.lines.is_empty() || doc.new.lines.is_empty()
+        self.diff.doc.as_ref().is_none_or(|doc| {
+            self.diff.inline || doc.old.lines.is_empty() || doc.new.lines.is_empty()
         })
     }
 
     pub(super) fn diff_change_starts(&self) -> &[usize] {
-        match &self.diff_doc {
+        match &self.diff.doc {
             Some(doc) if self.diff_is_inline() => &doc.inline_changes,
             Some(doc) => &doc.changes,
             None => &[],
@@ -58,10 +58,11 @@ impl Prototype {
 
     /// Reveals the first change of a freshly opened diff.
     pub(super) fn reveal_first_change(&mut self) {
-        self.diff_change = None;
+        self.diff.change = None;
         if let Some(&row) = self.diff_change_starts().first() {
-            self.diff_change = Some(0);
-            self.diff_scroll
+            self.diff.change = Some(0);
+            self.diff
+                .scroll
                 .scroll_to_item_strict(row, ScrollStrategy::Center);
         }
     }
@@ -72,29 +73,31 @@ impl Prototype {
         if count == 0 {
             return;
         }
-        let next = match self.diff_change {
+        let next = match self.diff.change {
             None if forward => 0,
             None => count - 1,
             Some(index) if forward => (index + 1) % count,
             Some(index) => (index + count - 1) % count,
         };
         let row = starts[next];
-        self.diff_change = Some(next);
-        self.diff_scroll
+        self.diff.change = Some(next);
+        self.diff
+            .scroll
             .scroll_to_item_strict(row, ScrollStrategy::Center);
         cx.notify();
     }
 
     pub(super) fn toggle_diff_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.diff_inline = !self.diff_inline;
-        let inline = self.diff_inline;
+        self.diff.inline = !self.diff.inline;
+        let inline = self.diff.inline;
         self.change_settings(window, cx, |settings| settings.diff_inline = inline);
         // Row indexes differ between the layouts; keep the current change in view.
-        self.diff_scroll = UniformListScrollHandle::new();
-        if let Some(index) = self.diff_change
+        self.diff.scroll = UniformListScrollHandle::new();
+        if let Some(index) = self.diff.change
             && let Some(&row) = self.diff_change_starts().get(index)
         {
-            self.diff_scroll
+            self.diff
+                .scroll
                 .scroll_to_item_strict(row, ScrollStrategy::Center);
         }
         cx.notify();
@@ -105,7 +108,8 @@ impl Prototype {
         let colors = theme::colors(cx);
         let changes = !self.diff_change_starts().is_empty();
         let one_sided = self
-            .diff_doc
+            .diff
+            .doc
             .as_ref()
             .is_none_or(|doc| doc.old.lines.is_empty() || doc.new.lines.is_empty());
         let inline = self.diff_is_inline();
@@ -123,7 +127,7 @@ impl Prototype {
             .px_2()
             .gap_1()
             .bg(colors.tabs)
-            .when_some(self.diff_doc.as_ref(), |bar, doc| {
+            .when_some(self.diff.doc.as_ref(), |bar, doc| {
                 bar.child(
                     div()
                         .px_1()
@@ -212,7 +216,7 @@ impl Prototype {
             .child(
                 action("diff-open-file", IconName::File, "打开文件").on_click(cx.listener(
                     |this, _, window, cx| {
-                        if let Some(path) = this.preview_diff.as_ref().map(|d| d.path.clone()) {
+                        if let Some(path) = this.diff.tab.as_ref().map(|d| d.path.clone()) {
                             this.scm_open_file(&path, window, cx);
                         }
                     },
@@ -223,9 +227,9 @@ impl Prototype {
 
     pub(super) fn render_diff(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
-        let Some(doc) = &self.diff_doc else {
+        let Some(doc) = &self.diff.doc else {
             // Binary, combined or failed diffs: Git's own text, or the status message.
-            return match &self.preview {
+            return match &self.diff.fallback {
                 Some(editor) => gpui_kit::component::input::Editor::new(editor)
                     .readonly(true)
                     .bordered(false)
@@ -235,7 +239,7 @@ impl Prototype {
                     .p_4()
                     .text_size(theme::TEXT_BODY)
                     .text_color(colors.muted)
-                    .child(self.preview_title.clone())
+                    .child(self.diff.title.clone())
                     .into_any_element(),
             };
         };
@@ -257,7 +261,7 @@ impl Prototype {
             .min_w_0()
             .min_h_0()
             .key_context("DiffEditor")
-            .track_focus(&self.diff_focus)
+            .track_focus(&self.diff.focus)
             .on_action(cx.listener(|this, _: &CopyDiff, _, cx| this.copy_diff_selection(cx)))
             .on_action(cx.listener(|this, _: &SelectAllDiff, _, cx| this.diff_select_all(cx)))
             .on_action(cx.listener(
@@ -272,7 +276,7 @@ impl Prototype {
             ))
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| this.diff_dragging = false),
+                cx.listener(|this, _, _, _| this.diff.dragging = false),
             );
         let columns = if inline {
             columns.child(self.render_diff_list(DiffList::Inline, doc.inline.len(), paint(2.), cx))
@@ -326,8 +330,9 @@ impl Prototype {
                     .bg(color)
                     .cursor_pointer()
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.diff_change = Some(i);
-                        this.diff_scroll
+                        this.diff.change = Some(i);
+                        this.diff
+                            .scroll
                             .scroll_to_item_strict(block.start, ScrollStrategy::Center);
                         cx.notify();
                     }))
@@ -348,7 +353,8 @@ impl Prototype {
             DiffList::Inline => "diff-inline",
         };
         let blocks: Rc<Vec<Block>> = Rc::new(
-            self.diff_doc
+            self.diff
+                .doc
                 .as_ref()
                 .map(|doc| diff_ops::blocks(doc, kind == DiffList::Inline))
                 .unwrap_or_default(),
@@ -362,19 +368,19 @@ impl Prototype {
             id,
             count,
             cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                let Some(doc) = this.diff_doc.clone() else {
+                let Some(doc) = this.diff.doc.clone() else {
                     return Vec::new();
                 };
                 let colors = paint.colors;
                 // Rows are laid out after the list settles its scroll offset and bounds, so
                 // these are this frame's values.
                 let viewport = agent_actions.then(|| {
-                    let handle = &this.diff_scroll.0.borrow().base_handle;
+                    let handle = &this.diff.scroll.0.borrow().base_handle;
                     (handle.offset().x, handle.bounds().size.width)
                 });
                 range
                     .filter_map(|index| {
-                        let selected = this.diff_selection.is_some_and(|s| s.contains(kind, index));
+                        let selected = this.diff.selection.is_some_and(|s| s.contains(kind, index));
                         let row = match kind {
                             DiffList::Original => doc.rows.get(index).map(|row| {
                                 pair_cell(&doc, row.old, row.kind, false, &paint, selected)
@@ -421,7 +427,7 @@ impl Prototype {
                                     .map(|i| (i, blocks[i]))
                             })
                             .flatten();
-                        let current_change = this.diff_change;
+                        let current_change = this.diff.change;
                         Some(
                             row.id((id, index))
                                 .relative()
@@ -447,7 +453,7 @@ impl Prototype {
                                 ))
                                 .on_mouse_up(
                                     MouseButton::Left,
-                                    cx.listener(|this, _, _, _| this.diff_dragging = false),
+                                    cx.listener(|this, _, _, _| this.diff.dragging = false),
                                 )
                                 .when_some(block, |row, (i, block)| {
                                     if agent_actions {
@@ -473,7 +479,7 @@ impl Prototype {
             }),
         )
         .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-        .track_scroll(&self.diff_scroll)
+        .track_scroll(&self.diff.scroll)
         .size_full();
         let colors = theme::colors(cx);
         div()
@@ -489,7 +495,7 @@ impl Prototype {
             .child(list)
             .child(
                 div().absolute().inset_0().child(
-                    Scrollbar::new(&self.diff_scroll)
+                    Scrollbar::new(&self.diff.scroll)
                         .id(match kind {
                             DiffList::Original => "diff-original-scrollbar",
                             DiffList::Modified => "diff-modified-scrollbar",
@@ -635,4 +641,28 @@ fn block_actions(
             }
         })
         .into_any_element()
+}
+
+/// The diff tab: what it shows, the parsed document, selection and scrolling, and its loading task.
+pub(super) struct DiffPane {
+    pub(super) tab: Option<DiffTab>,
+    pub(super) title: String,
+    /// Git's raw text in a read-only editor, shown only when the patch cannot be parsed.
+    pub(super) fallback: Option<Entity<EditorState>>,
+    /// The parsed diff editor document.
+    pub(super) doc: Option<Arc<crate::diff_doc::DiffDoc>>,
+    /// Git's own patch lines, for copying exact text and staging selected lines.
+    pub(super) raw: Option<Arc<crate::partial_patch::RawPatch>>,
+    pub(super) selection: Option<diff_ops::DiffSelection>,
+    pub(super) dragging: bool,
+    pub(super) focus: FocusHandle,
+    /// Patch text and dark mode the document was built from; equal reloads keep the view.
+    pub(super) source: Option<(Arc<str>, bool)>,
+    pub(super) change: Option<usize>,
+    pub(super) inline: bool,
+    pub(super) scroll: UniformListScrollHandle,
+    pub(super) stale: bool,
+    pub(super) task: Option<Task<()>>,
+    pub(super) cancel: Arc<AtomicBool>,
+    pub(super) generation: u64,
 }

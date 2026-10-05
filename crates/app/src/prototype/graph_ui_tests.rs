@@ -172,7 +172,7 @@ async fn the_graph_shows_lanes_refs_details_and_diffs(cx: &mut TestAppContext) {
     this.read_with(cx, |p, _| {
         assert_eq!(p.active, Pane::Diff);
         assert!(p.graph.is_some());
-        let diff = p.preview_diff.as_ref().unwrap();
+        let diff = p.diff.tab.as_ref().unwrap();
         assert!(diff.label.contains("b.txt"), "{}", diff.label);
         let Some(request) = diff.request() else {
             panic!("the tab is not a Git diff");

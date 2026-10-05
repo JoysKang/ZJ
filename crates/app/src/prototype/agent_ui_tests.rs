@@ -340,7 +340,7 @@ async fn rejecting_a_hunk_in_the_review_restores_the_file_and_the_tab(cx: &mut T
         });
     })
     .unwrap();
-    until(cx, &this, "the review loads", |p| p.diff_doc.is_some());
+    until(cx, &this, "the review loads", |p| p.diff.doc.is_some());
     cx.update_window(handle.into(), |_, window, cx| {
         this.update(cx, |p, cx| p.agent_review_hunk(0, false, window, cx));
     })

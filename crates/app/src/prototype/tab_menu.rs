@@ -75,7 +75,7 @@ impl Prototype {
                 .iter()
                 .find(|doc| doc.id == id && !doc.untitled)
                 .map(|doc| doc.path.clone()),
-            Pane::Diff => self.preview_diff.as_ref().map(|diff| diff.path.clone()),
+            Pane::Diff => self.diff.tab.as_ref().map(|diff| diff.path.clone()),
             Pane::Graph => self.graph.as_ref().map(|graph| graph.repo.worktree.clone()),
             Pane::Welcome => None,
         }
@@ -84,7 +84,7 @@ impl Prototype {
     pub(super) fn tab_menu(&self, pane: Pane, menu: PopupMenu, view: Entity<Self>) -> PopupMenu {
         let path = self.pane_path(pane);
         let tabs = self.documents.len()
-            + usize::from(self.preview_diff.is_some())
+            + usize::from(self.diff.tab.is_some())
             + usize::from(self.graph.is_some());
         let in_tree = matches!(pane, Pane::Document(_))
             && path
@@ -176,7 +176,7 @@ impl Prototype {
         if self.active != keep {
             self.select_pane(keep, window, cx);
         }
-        if keep != Pane::Diff && self.preview_diff.is_some() {
+        if keep != Pane::Diff && self.diff.tab.is_some() {
             self.close_preview(window, cx);
         }
         if keep != Pane::Graph && self.graph.is_some() {
@@ -198,7 +198,7 @@ impl Prototype {
     }
 
     pub(super) fn close_all_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.preview_diff.is_some() {
+        if self.diff.tab.is_some() {
             self.close_preview(window, cx);
         }
         if self.graph.is_some() {

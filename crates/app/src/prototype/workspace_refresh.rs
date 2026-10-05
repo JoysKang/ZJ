@@ -248,7 +248,8 @@ impl Prototype {
         }
         if !plan.repos.is_empty() {
             if self
-                .preview_diff
+                .diff
+                .tab
                 .as_ref()
                 .and_then(|diff| diff.request())
                 .is_some_and(|request| plan.repos.contains(&request.repo.id))
@@ -268,12 +269,13 @@ impl Prototype {
     }
 
     pub(super) fn invalidate_preview(&mut self, cx: &mut Context<Self>) {
-        self.preview_cancel
+        self.diff
+            .cancel
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.preview_generation += 1;
-        self.preview_task = None;
-        if self.preview_diff.is_some() {
-            self.preview_stale = true;
+        self.diff.generation += 1;
+        self.diff.task = None;
+        if self.diff.tab.is_some() {
+            self.diff.stale = true;
         }
         cx.notify();
     }

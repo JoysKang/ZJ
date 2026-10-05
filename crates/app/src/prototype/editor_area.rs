@@ -224,7 +224,7 @@ impl Prototype {
                 }
             })
             .collect();
-        if let Some(diff) = &self.preview_diff {
+        if let Some(diff) = &self.diff.tab {
             specs.push(TabSpec {
                 key: usize::MAX,
                 pane: Pane::Diff,
@@ -286,7 +286,7 @@ impl Prototype {
                 None => (None, None),
             },
             Pane::Diff => (
-                self.preview_diff.as_ref().map(|diff| diff.path.clone()),
+                self.diff.tab.as_ref().map(|diff| diff.path.clone()),
                 Some(if self.diff_is_agent_review() {
                     "Agent 修改审阅"
                 } else {

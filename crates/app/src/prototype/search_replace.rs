@@ -607,7 +607,7 @@ impl Prototype {
     ) {
         self.close_preview(window, cx);
         self.message.clear();
-        self.preview_diff = Some(tab);
+        self.diff.tab = Some(tab);
         self.active = Pane::Diff;
         self.update_welcome_blink(window, cx);
         self.find_update(false, cx);

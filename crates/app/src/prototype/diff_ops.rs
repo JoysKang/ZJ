@@ -136,7 +136,8 @@ pub fn changed_lines(
 
 impl Prototype {
     pub(super) fn diff_staged(&self) -> bool {
-        self.preview_diff
+        self.diff
+            .tab
             .as_ref()
             .and_then(|tab| tab.request())
             .is_some_and(|request| {
@@ -152,12 +153,14 @@ impl Prototype {
 
     /// Whether lines of this diff can be staged, unstaged or reverted on their own.
     pub(super) fn diff_partial_ok(&self) -> bool {
-        self.diff_raw
+        self.diff
+            .raw
             .as_ref()
             .is_some_and(|raw| !raw.whole_file_only)
-            && self.diff_doc.is_some()
+            && self.diff.doc.is_some()
             && !self
-                .preview_diff
+                .diff
+                .tab
                 .as_ref()
                 .and_then(|tab| tab.request())
                 .and_then(|request| self.groups.iter().find(|g| g.repo.id == request.repo.id))
@@ -172,25 +175,26 @@ impl Prototype {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.diff_focus.focus(window, cx);
+        self.diff.focus.focus(window, cx);
         let anchor = self
-            .diff_selection
+            .diff
+            .selection
             .filter(|s| extend && s.list == list)
             .map_or(row, |s| s.anchor);
-        self.diff_selection = Some(DiffSelection {
+        self.diff.selection = Some(DiffSelection {
             list,
             anchor,
             head: row,
         });
-        self.diff_dragging = true;
+        self.diff.dragging = true;
         cx.notify();
     }
 
     pub(super) fn diff_drag_to(&mut self, list: DiffList, row: usize, cx: &mut Context<Self>) {
-        if !self.diff_dragging {
+        if !self.diff.dragging {
             return;
         }
-        if let Some(selection) = &mut self.diff_selection
+        if let Some(selection) = &mut self.diff.selection
             && selection.list == list
             && selection.head != row
         {
@@ -200,14 +204,14 @@ impl Prototype {
     }
 
     pub(super) fn diff_select_all(&mut self, cx: &mut Context<Self>) {
-        let Some(doc) = &self.diff_doc else { return };
+        let Some(doc) = &self.diff.doc else { return };
         let (list, count) = if self.diff_is_inline() {
             (DiffList::Inline, doc.inline.len())
         } else {
             (DiffList::Modified, doc.rows.len())
         };
         if count > 0 {
-            self.diff_selection = Some(DiffSelection {
+            self.diff.selection = Some(DiffSelection {
                 list,
                 anchor: 0,
                 head: count - 1,
@@ -218,10 +222,10 @@ impl Prototype {
 
     /// ⌘C: Git's exact text of the selected lines of the list the selection is in.
     pub(super) fn copy_diff_selection(&mut self, cx: &mut Context<Self>) {
-        let (Some(doc), Some(selection)) = (&self.diff_doc, self.diff_selection) else {
+        let (Some(doc), Some(selection)) = (&self.diff.doc, self.diff.selection) else {
             return;
         };
-        let raw = self.diff_raw.clone();
+        let raw = self.diff.raw.clone();
         let line = |old_side: bool, index: u32| -> String {
             let side = if old_side { &doc.old } else { &doc.new };
             let number = side.lines[index as usize].number;
@@ -264,7 +268,7 @@ impl Prototype {
         cx: &mut Context<Self>,
     ) {
         let (Some(doc), Some(raw), Some(tab)) =
-            (&self.diff_doc, self.diff_raw.clone(), &self.preview_diff)
+            (&self.diff.doc, self.diff.raw.clone(), &self.diff.tab)
         else {
             return;
         };
@@ -309,13 +313,13 @@ impl Prototype {
                 cached,
             },
         };
-        self.diff_selection = None;
+        self.diff.selection = None;
         self.request_git_write(request, window, cx);
     }
 
     /// The selection as a row range, for the toolbar actions.
     pub(super) fn diff_selection_rows(&self) -> Option<std::ops::Range<usize>> {
-        let selection = self.diff_selection?;
+        let selection = self.diff.selection?;
         let inline = self.diff_is_inline();
         if inline != (selection.list == DiffList::Inline) {
             return None;

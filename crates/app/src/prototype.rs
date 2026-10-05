@@ -402,23 +402,10 @@ pub struct Prototype {
     /// Cursor (line, column) of the active editor, 0-based, for the status bar.
     cursor: Option<(u32, u32)>,
     _cursor_observer: Option<Subscription>,
-    preview: Option<Entity<EditorState>>,
+    /// The diff tab: what it shows, the parsed document, selection and scrolling, and its loading task.
+    diff: diff_view::DiffPane,
     /// Go to definition, references and back / forward: the symbol index and the navigation history.
     nav: navigation::NavState,
-    /// The parsed diff editor document; `preview` is only Git's raw text when parsing fails.
-    diff_doc: Option<Arc<crate::diff_doc::DiffDoc>>,
-    /// Git's own patch lines, for copying exact text and staging selected lines.
-    diff_raw: Option<Arc<crate::partial_patch::RawPatch>>,
-    diff_selection: Option<diff_ops::DiffSelection>,
-    diff_dragging: bool,
-    diff_focus: FocusHandle,
-    /// Patch text and dark mode the document was built from; equal reloads keep the view.
-    diff_source: Option<(Arc<str>, bool)>,
-    diff_change: Option<usize>,
-    diff_inline: bool,
-    diff_scroll: UniformListScrollHandle,
-    preview_title: String,
-    preview_diff: Option<DiffTab>,
     /// The Git Graph tab's state (opened from a repository's header).
     graph: Option<graph_view::GitGraph>,
     /// The last tab right-click menu; tab tooltips stay hidden while it has focus.
@@ -426,7 +413,6 @@ pub struct Prototype {
     /// ⇧⌘T reopens these, most recent first.
     closed_tabs: tab_menu::ClosedTabs,
     terminals: terminal_panel::Terminals,
-    preview_stale: bool,
     generation: u64,
     cancel: Arc<AtomicBool>,
     loading: bool,
@@ -435,9 +421,6 @@ pub struct Prototype {
     issues: Vec<String>,
     message: String,
     refresh_task: Option<Task<()>>,
-    preview_task: Option<Task<()>>,
-    preview_cancel: Arc<AtomicBool>,
-    preview_generation: u64,
     /// File watching: the shared subscription, the debounce task and refreshes waiting for a quiet moment.
     watch: workspace_refresh::WatchState,
     /// The agent panel: sessions, thread view, history and the ⌘J search.
@@ -448,7 +431,7 @@ pub struct Prototype {
 impl Drop for Prototype {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
-        self.preview_cancel.store(true, Ordering::Relaxed);
+        self.diff.cancel.store(true, Ordering::Relaxed);
         self.index_cancel.store(true, Ordering::Relaxed);
         for document in &self.documents {
             self.owners.borrow_mut().remove(&document.id);
@@ -474,7 +457,7 @@ impl Prototype {
         let appearance = cx.observe_window_appearance(window, |this, window, cx| {
             theme::follow_appearance(Some(window), cx);
             // Diff colors and syntax spans are baked into the document; rebuild them.
-            if this.preview_diff.is_some() {
+            if this.diff.tab.is_some() {
                 this.load_diff(window, cx);
             }
             this.agent_rehighlight(cx);
@@ -605,7 +588,24 @@ impl Prototype {
             window_edited: false,
             cursor: None,
             _cursor_observer: None,
-            preview: None,
+            diff: diff_view::DiffPane {
+                tab: None,
+                title: String::new(),
+                fallback: None,
+                doc: None,
+                raw: None,
+                selection: None,
+                dragging: false,
+                focus: cx.focus_handle(),
+                source: None,
+                change: None,
+                inline: cx.global::<crate::settings::Settings>().diff_inline,
+                scroll: UniformListScrollHandle::new(),
+                stale: false,
+                task: None,
+                cancel: Arc::new(AtomicBool::new(false)),
+                generation: 0,
+            },
             nav: navigation::NavState {
                 symbols: None,
                 symbols_task: None,
@@ -618,23 +618,11 @@ impl Prototype {
                 task: None,
                 pending_place: None,
             },
-            diff_doc: None,
-            diff_raw: None,
-            diff_selection: None,
-            diff_dragging: false,
-            diff_focus: cx.focus_handle(),
-            diff_source: None,
-            diff_change: None,
             // Top / bottom by default: the right side of the window is kept for an agent panel.
-            diff_inline: cx.global::<crate::settings::Settings>().diff_inline,
-            diff_scroll: UniformListScrollHandle::new(),
-            preview_title: String::new(),
-            preview_diff: None,
             graph: None,
             tab_menu_focus: None,
             closed_tabs: Default::default(),
             terminals: Default::default(),
-            preview_stale: false,
             generation: 0,
             cancel: Arc::new(AtomicBool::new(false)),
             loading: false,
@@ -643,9 +631,6 @@ impl Prototype {
             issues: vec![],
             message: String::new(),
             refresh_task: None,
-            preview_task: None,
-            preview_cancel: Arc::new(AtomicBool::new(false)),
-            preview_generation: 0,
             watch: workspace_refresh::WatchState {
                 subscription: None,
                 task: None,
@@ -933,7 +918,7 @@ impl Prototype {
                 .iter()
                 .find(|doc| doc.id == id)
                 .map(|doc| doc.editor.clone()),
-            Pane::Diff => self.preview.clone(),
+            Pane::Diff => self.diff.fallback.clone(),
             Pane::Welcome | Pane::Graph => None,
         }
     }
@@ -965,7 +950,7 @@ impl Prototype {
         if let Some(editor) = self.active_editor() {
             editor.update(cx, |editor, cx| editor.focus(window, cx));
         } else if self.active == Pane::Diff {
-            self.diff_focus.focus(window, cx);
+            self.diff.focus.focus(window, cx);
         } else {
             self.focus_handle.focus(window, cx);
         }
@@ -1299,7 +1284,7 @@ impl Prototype {
         let (sender, receiver) = mpsc::sync_channel(64);
         self.loading = true;
         self.excluded = 0;
-        self.preview_stale = self.preview_diff.as_ref().is_some_and(|diff| {
+        self.diff.stale = self.diff.tab.as_ref().is_some_and(|diff| {
             diff.request().is_some_and(|request| {
                 targets
                     .as_ref()
@@ -1492,7 +1477,7 @@ impl Prototype {
                         this.rebuild_rows();
                         if done {
                             this.flush_workspace_refresh(window, cx);
-                            if this.preview_stale && !this.loading {
+                            if this.diff.stale && !this.loading {
                                 this.load_diff(window, cx);
                             }
                         }
@@ -1635,19 +1620,19 @@ impl Prototype {
     fn close_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.file_generation += 1;
         self.file_task = None;
-        self.preview_cancel.store(true, Ordering::Relaxed);
-        self.preview_generation += 1;
-        self.preview_task = None;
-        self.preview = None;
-        self.diff_doc = None;
-        self.diff_raw = None;
-        self.diff_selection = None;
-        self.diff_source = None;
-        self.diff_change = None;
-        self.diff_scroll = UniformListScrollHandle::new();
-        self.preview_title.clear();
-        self.preview_diff = None;
-        self.preview_stale = false;
+        self.diff.cancel.store(true, Ordering::Relaxed);
+        self.diff.generation += 1;
+        self.diff.task = None;
+        self.diff.fallback = None;
+        self.diff.doc = None;
+        self.diff.raw = None;
+        self.diff.selection = None;
+        self.diff.source = None;
+        self.diff.change = None;
+        self.diff.scroll = UniformListScrollHandle::new();
+        self.diff.title.clear();
+        self.diff.tab = None;
+        self.diff.stale = false;
         if self.active == Pane::Diff {
             self.active = self
                 .documents
@@ -1707,7 +1692,7 @@ impl Prototype {
         };
         self.close_preview(window, cx);
         self.message.clear();
-        self.preview_diff = Some(diff_tab);
+        self.diff.tab = Some(diff_tab);
         self.active = Pane::Diff;
         self.update_welcome_blink(window, cx);
         self.focus_handle.focus(window, cx);
@@ -1716,7 +1701,7 @@ impl Prototype {
 
     /// Requery the selected comparison without discarding its last completed view.
     fn load_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(diff) = &self.preview_diff else {
+        let Some(diff) = &self.diff.tab else {
             return;
         };
         if diff.agent().is_some() {
@@ -1725,17 +1710,17 @@ impl Prototype {
         }
         let mut source = diff.source.clone();
         let title = diff.label.clone();
-        self.preview_cancel.store(true, Ordering::Relaxed);
-        self.preview_generation += 1;
+        self.diff.cancel.store(true, Ordering::Relaxed);
+        self.diff.generation += 1;
         if let DiffSource::Git(request) = &mut source {
-            request.generation = self.preview_generation;
+            request.generation = self.diff.generation;
         }
-        self.preview_stale = false;
-        self.preview_cancel = Arc::new(AtomicBool::new(false));
-        let cancel = self.preview_cancel.clone();
+        self.diff.stale = false;
+        self.diff.cancel = Arc::new(AtomicBool::new(false));
+        let cancel = self.diff.cancel.clone();
         let service = self.service.clone();
-        let version = self.preview_generation;
-        self.preview_title = format!("正在加载 {title}");
+        let version = self.diff.generation;
+        self.diff.title = format!("正在加载 {title}");
         let highlight = gpui_kit::component::Theme::global(cx)
             .highlight_theme
             .clone();
@@ -1769,77 +1754,77 @@ impl Prototype {
             let raw = crate::partial_patch::parse(&text).map(Arc::new);
             Ok::<_, std::io::Error>((text, doc, raw))
         });
-        self.preview_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = job.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                if this.preview_generation != version {
-                    return;
-                }
-                let restore_focus = this.active == Pane::Diff
-                    && (this.focus_handle.is_focused(window)
-                        || this.preview.as_ref().is_some_and(|editor| {
-                            editor
-                                .read(cx)
-                                .focus_handle(cx)
-                                .contains_focused(window, cx)
-                        }));
-                match result {
-                    Ok((text, ..)) if text.is_empty() => {
-                        this.preview = None;
-                        this.diff_doc = None;
-                        this.diff_source = None;
-                        this.preview_title = "当前没有差异".into();
-                    }
-                    Ok((text, doc, raw)) => {
-                        // Equal patches keep the scroll position through a refresh.
-                        if this
-                            .diff_source
-                            .as_ref()
-                            .is_some_and(|(old, was_dark)| *old == text && *was_dark == dark)
-                        {
-                            this.preview_title = title;
-                            cx.notify();
+        self.diff.task =
+            Some(cx.spawn_in(window, async move |this, cx| {
+                let result = job.await;
+                let _ =
+                    this.update_in(cx, |this, window, cx| {
+                        if this.diff.generation != version {
                             return;
                         }
-                        let fresh = this.diff_source.is_none();
-                        this.diff_source = Some((text.clone(), dark));
-                        this.diff_raw = raw;
-                        this.diff_selection = None;
-                        this.preview_title = title;
-                        match doc {
-                            Some(doc) => {
-                                this.preview = None;
-                                this.diff_doc = Some(doc);
-                                if fresh {
-                                    this.reveal_first_change();
+                        let restore_focus = this.active == Pane::Diff
+                            && (this.focus_handle.is_focused(window)
+                                || this.diff.fallback.as_ref().is_some_and(|editor| {
+                                    editor
+                                        .read(cx)
+                                        .focus_handle(cx)
+                                        .contains_focused(window, cx)
+                                }));
+                        match result {
+                            Ok((text, ..)) if text.is_empty() => {
+                                this.diff.fallback = None;
+                                this.diff.doc = None;
+                                this.diff.source = None;
+                                this.diff.title = "当前没有差异".into();
+                            }
+                            Ok((text, doc, raw)) => {
+                                // Equal patches keep the scroll position through a refresh.
+                                if this.diff.source.as_ref().is_some_and(|(old, was_dark)| {
+                                    *old == text && *was_dark == dark
+                                }) {
+                                    this.diff.title = title;
+                                    cx.notify();
+                                    return;
+                                }
+                                let fresh = this.diff.source.is_none();
+                                this.diff.source = Some((text.clone(), dark));
+                                this.diff.raw = raw;
+                                this.diff.selection = None;
+                                this.diff.title = title;
+                                match doc {
+                                    Some(doc) => {
+                                        this.diff.fallback = None;
+                                        this.diff.doc = Some(doc);
+                                        if fresh {
+                                            this.reveal_first_change();
+                                        }
+                                    }
+                                    None => {
+                                        this.diff.doc = None;
+                                        this.diff.fallback = Some(cx.new(|cx| {
+                                            EditorState::new(window, cx)
+                                                .language(crate::diff_syntax::LANGUAGE)
+                                                .default_value(text.to_string())
+                                        }));
+                                    }
                                 }
                             }
-                            None => {
-                                this.diff_doc = None;
-                                this.preview = Some(cx.new(|cx| {
-                                    EditorState::new(window, cx)
-                                        .language(crate::diff_syntax::LANGUAGE)
-                                        .default_value(text.to_string())
-                                }));
+                            Err(e) => {
+                                this.diff.fallback = None;
+                                this.diff.doc = None;
+                                this.diff.source = None;
+                                this.diff.title = format!("Diff 加载失败: {e}");
                             }
                         }
-                    }
-                    Err(e) => {
-                        this.preview = None;
-                        this.diff_doc = None;
-                        this.diff_source = None;
-                        this.preview_title = format!("Diff 加载失败: {e}");
-                    }
-                }
-                if this.active == Pane::Diff {
-                    this.observe_cursor(cx);
-                    if restore_focus {
-                        this.focus_active_editor(window, cx);
-                    }
-                }
-                cx.notify();
-            });
-        }));
+                        if this.active == Pane::Diff {
+                            this.observe_cursor(cx);
+                            if restore_focus {
+                                this.focus_active_editor(window, cx);
+                            }
+                        }
+                        cx.notify();
+                    });
+            }));
         cx.notify();
     }
 }

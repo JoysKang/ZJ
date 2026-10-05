@@ -330,7 +330,8 @@ impl Prototype {
         }
         if self.active == Pane::Graph {
             self.active = self
-                .preview_diff
+                .diff
+                .tab
                 .as_ref()
                 .map(|_| Pane::Diff)
                 .or_else(|| self.documents.last().map(|doc| Pane::Document(doc.id)))
