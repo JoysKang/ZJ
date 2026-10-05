@@ -267,8 +267,9 @@ fn fts_rows(conn: &Connection, table: &str, phrase: &str) -> Result<Vec<RowHit>>
     Ok(rows)
 }
 
-/// One- and two-character fallbacks: titles, file paths and metadata only (message bodies
-/// would turn a single character into noise).
+/// One- and two-character fallbacks: titles, file paths, metadata and message bodies. A
+/// session's first prompt often survives only as a message once the agent names the session,
+/// so bodies count too; they rank below titles, and the newest messages are taken first.
 fn like_rows(conn: &Connection, pattern: &str) -> Result<Vec<RowHit>> {
     let mut rows = Vec::new();
     let mut push = |session: i64, kind: i64| {
@@ -294,6 +295,21 @@ fn like_rows(conn: &Connection, pattern: &str) -> Result<Vec<RowHit>> {
     )?;
     for id in stmt.query_map([pattern], |r| r.get(0))? {
         push(id?, DOC_META);
+    }
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, session_id FROM messages WHERE text LIKE ?1 ESCAPE '\\' \
+         ORDER BY id DESC LIMIT {ROWS_PER_TERM}"
+    ))?;
+    for row in stmt.query_map([pattern], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+    })? {
+        let (id, session) = row?;
+        let doc = Doc::Message(id);
+        rows.push(RowHit {
+            session,
+            doc,
+            weight: kind_weight(doc),
+        });
     }
     Ok(rows)
 }

@@ -869,3 +869,22 @@ fn a_write_failing_halfway_leaves_nothing_behind() {
     assert!(texts.iter().any(|t| t == "fine"), "{texts:?}");
     assert!(search(&h, "kaboom", Scope::All).is_empty());
 }
+
+#[test]
+fn one_character_finds_messages_after_the_title_changed() {
+    let dir = TempDir::new("one-char");
+    let h = History::new(dir.db());
+    let id = session(&h, "/w/a", "claude-code", "今天周几");
+    h.append_message(id, Role::User, "今天周几");
+    h.append_message(id, Role::Agent, "今天是星期一。");
+    // The agent names the session; the first prompt is no longer the title.
+    h.set_auto_title(id, "日期问题");
+    h.flush().unwrap();
+    for text in ["周", "周几", "星期"] {
+        let hits = search(&h, text, Scope::All);
+        assert!(
+            hits.iter().any(|hit| hit.session.id == id),
+            "{text}: {hits:?}"
+        );
+    }
+}
