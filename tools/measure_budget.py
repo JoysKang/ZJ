@@ -7,8 +7,11 @@ temporary directory too) and reports:
   1. cold start to first frame (median of --runs launches);
   2. idle physical footprint and CPU, one window;
   3. physical footprint with 3 windows and 20 open files;
-  4. keystroke-to-frame latency p50 / p99 (needs Accessibility permission for the terminal,
-     because System Events types the keys; skipped with --skip-latency).
+  4. keystroke-to-frame latency p50 / p99 (System Events types the keys: the terminal needs
+     Privacy & Security → Automation (System Events) and → Accessibility; --skip-latency skips).
+
+--breakdown also measures 3 windows without files and 1 window with the 20 files, and prints
+the `footprint` categories of the 3-window, 20-file run, to tell windows from documents.
 
 Footprint counts the whole process tree (git children included), as CLAUDE.md asks.
 
@@ -212,12 +215,40 @@ def measure_idle(binary, folder, env, seconds):
         app.stop()
 
 
-def measure_many(binary, folders, files, env):
+def categories(pid):
+    """The largest `footprint` categories of the app process (dirty bytes)."""
+    out = subprocess.run(["footprint", "-p", str(pid)], capture_output=True, text=True).stdout
+    rows = []
+    for line in out.splitlines():
+        parts = line.split()
+        # "  58 MB   0 B   0 B   3    IOSurface"
+        if len(parts) >= 7 and parts[1] in ("B", "KB", "MB", "GB") and parts[-1] != "Category":
+            scale = {"B": 1e-6, "KB": 1e-3, "MB": 1, "GB": 1e3}[parts[1]]
+            try:
+                dirty = float(parts[0]) * scale
+            except ValueError:
+                continue
+            name = " ".join(parts[7:]) if len(parts) > 7 else parts[-1]
+            if name != "TOTAL":
+                rows.append((dirty, name))
+    return sorted(rows, reverse=True)[:8]
+
+
+def measure_many(binary, folders, files, env, show_categories=False):
     app = App(binary, [*folders, *files], env)
     try:
-        app.wait_for("event=document_opened", count=len(files), timeout=60)
+        if files:
+            app.wait_for("event=document_opened", count=len(files), timeout=60)
+        else:
+            app.wait_for("event=refresh_finished", count=len(folders), timeout=60)
         time.sleep(10)
-        return statistics.median(footprint_mb(app.process.pid) for _ in range(10))
+        value = statistics.median(footprint_mb(app.process.pid) for _ in range(10))
+        if show_categories:
+            for dirty, name in categories(app.process.pid):
+                print(f"    {dirty:8.1f} MB  {name}")
+            children = len(tree(app.process.pid)) - 1
+            print(f"    子进程 {children} 个")
+        return value
     finally:
         app.stop()
 
@@ -240,8 +271,9 @@ tell application "System Events"
 end tell'''
         result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
         if result.returncode != 0:
-            raise RuntimeError("System Events could not type (grant the terminal Accessibility "
-                               f"permission): {result.stderr.strip()}")
+            raise RuntimeError("System Events 没能打字：请在 系统设置 → 隐私与安全性 → 自动化 里允许"
+                               "终端控制 System Events，并在 辅助功能 里勾选终端，然后重开终端再试"
+                               f"（{result.stderr.strip()}）")
         time.sleep(1)
         samples = sorted(value_of(l, "us") / 1000 for l in app.events("event=key_latency"))
         if len(samples) < keys // 2:
@@ -269,6 +301,8 @@ def main():
     parser.add_argument("--idle-seconds", type=float, default=30)
     parser.add_argument("--keys", type=int, default=200)
     parser.add_argument("--skip-latency", action="store_true")
+    parser.add_argument("--breakdown", action="store_true",
+                        help="also 3 windows without files, 1 window with the files, categories")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if not args.binary.is_file():
@@ -288,9 +322,16 @@ def main():
         report["idle_footprint_mb"] = idle
         report["idle_cpu_p95_percent"] = cpu
         print(f"空闲 footprint（1 个窗口）：{idle:.1f} MB；空闲 CPU p95：{cpu:.3f}%")
-        many = measure_many(args.binary, folders, files, env)
+        many = measure_many(args.binary, folders, files, env, show_categories=args.breakdown)
         report["three_windows_20_docs_mb"] = many
         print(f"3 个窗口 + {len(files)} 个文档：{many:.1f} MB")
+        if args.breakdown:
+            windows_only = measure_many(args.binary, folders, [], env)
+            report["three_windows_no_docs_mb"] = windows_only
+            print(f"3 个窗口、不开文件：{windows_only:.1f} MB")
+            docs_only = measure_many(args.binary, [folders[0]], files, env)
+            report["one_window_20_docs_mb"] = docs_only
+            print(f"1 个窗口 + {len(files)} 个文档：{docs_only:.1f} MB")
         if not args.skip_latency:
             try:
                 p50, p99, count = measure_latency(args.binary, folders[0], files[0], env, args.keys)
