@@ -17,6 +17,8 @@ use gpui_kit::{
     prelude::FluentBuilder,
     *,
 };
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 pub(super) fn chevron(expanded: bool, color: Hsla) -> Icon {
     Icon::new(if expanded {
@@ -197,7 +199,7 @@ impl Prototype {
 
     fn render_explorer(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
-        let Some(root) = self.tree.first() else {
+        let Some(root) = self.explorer.rows.first() else {
             return v_flex()
                 .size_full()
                 .px(theme::TREE_BASE)
@@ -225,7 +227,7 @@ impl Prototype {
             .unwrap_or(root.entry.path.as_os_str())
             .to_string_lossy()
             .replace(SINGLE_LINE, "⏎");
-        let expanded = !self.explorer_collapsed;
+        let expanded = !self.explorer.collapsed;
         let header = h_flex()
             .id("explorer-section")
             .group("explorer-section")
@@ -259,7 +261,7 @@ impl Prototype {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 cx.stop_propagation();
                                 window.dispatch_action(Box::new(super::NewFile), cx);
-                                this.explorer_focus.focus(window, cx);
+                                this.explorer.focus.focus(window, cx);
                             })),
                     )
                     .child(
@@ -271,7 +273,7 @@ impl Prototype {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 cx.stop_propagation();
                                 window.dispatch_action(Box::new(super::NewFolder), cx);
-                                this.explorer_focus.focus(window, cx);
+                                this.explorer.focus.focus(window, cx);
                             })),
                     )
                     .child(
@@ -299,14 +301,14 @@ impl Prototype {
                     .child(self.explorer_more()),
             )
             .on_click(cx.listener(|this, _, _, cx| {
-                this.explorer_collapsed = !this.explorer_collapsed;
+                this.explorer.collapsed = !this.explorer.collapsed;
                 cx.notify();
             }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _, window, cx| {
-                    this.tree_selection = this.root.clone();
-                    this.explorer_focus.focus(window, cx);
+                    this.explorer.selection = this.root.clone();
+                    this.explorer.focus.focus(window, cx);
                     cx.notify();
                 }),
             );
@@ -324,30 +326,30 @@ impl Prototype {
         let explorer = v_flex()
             .size_full()
             .min_h_0()
-            .track_focus(&self.explorer_focus);
+            .track_focus(&self.explorer.focus);
         self.explorer_actions(explorer, cx)
             .child(header)
-            .when(!self.tree_message.is_empty(), |list| {
+            .when(!self.explorer.message.is_empty(), |list| {
                 list.child(
                     div()
                         .px(theme::TREE_BASE)
                         .text_size(theme::TEXT_CAPTION)
                         .text_color(colors.muted)
-                        .child(self.tree_message.clone()),
+                        .child(self.explorer.message.clone()),
                 )
             })
             .when(expanded, |list| {
                 list.child(
                     uniform_list(
                         "file-tree",
-                        self.tree.len().saturating_sub(1),
+                        self.explorer.rows.len().saturating_sub(1),
                         cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
                             range
                                 .map(|index| this.tree_row(index + 1, cx))
                                 .collect::<Vec<_>>()
                         }),
                     )
-                    .track_scroll(&self.tree_scroll)
+                    .track_scroll(&self.explorer.scroll)
                     .flex_1()
                     .w_full(),
                 )
@@ -357,7 +359,7 @@ impl Prototype {
 
     /// The Explorer header's "···" menu.
     fn explorer_more(&self) -> AnyElement {
-        let show_hidden = self.show_hidden;
+        let show_hidden = self.explorer.show_hidden;
         let focus = self.focus_handle.clone();
         Button::new("explorer-more")
             .xsmall()
@@ -377,9 +379,9 @@ impl Prototype {
     /// The inline name field for a new file or folder, indented like its future row.
     fn pending_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
-        let row = &self.tree[index];
+        let row = &self.explorer.rows[index];
         let level = row.depth.saturating_sub(1);
-        let Some(edit) = &self.tree_edit else {
+        let Some(edit) = &self.explorer.edit else {
             return div().h(theme::ROW_HEIGHT).into_any_element();
         };
         let folder = matches!(edit.kind, EditKind::NewFolder(_));
@@ -412,7 +414,7 @@ impl Prototype {
     }
 
     fn edit_field(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(edit) = &self.tree_edit else {
+        let Some(edit) = &self.explorer.edit else {
             return div().into_any_element();
         };
         div()
@@ -423,7 +425,7 @@ impl Prototype {
             .on_action(cx.listener(
                 |this, _: &gpui_kit::component::input::Escape, window, cx| {
                     this.cancel_tree_edit(cx);
-                    this.explorer_focus.focus(window, cx);
+                    this.explorer.focus.focus(window, cx);
                 },
             ))
             .child(
@@ -437,7 +439,7 @@ impl Prototype {
 
     fn tree_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
-        let row = &self.tree[index];
+        let row = &self.explorer.rows[index];
         if row.pending {
             return self.pending_row(index, cx);
         }
@@ -449,8 +451,8 @@ impl Prototype {
             .to_string_lossy()
             .replace(SINGLE_LINE, "⏎");
         let directory = entry.directory;
-        let expanded = self.expanded.contains(&path);
-        let selected = match &self.tree_selection {
+        let expanded = self.explorer.expanded.contains(&path);
+        let selected = match &self.explorer.selection {
             Some(selection) => *selection == path,
             None => self
                 .documents
@@ -458,11 +460,12 @@ impl Prototype {
                 .any(|doc| self.active == super::Pane::Document(doc.id) && doc.path == path),
         };
         let editing = self
-            .tree_edit
+            .explorer
+            .edit
             .as_ref()
             .is_some_and(|edit| edit.kind == EditKind::Rename(path.clone()));
         let level = row.depth.saturating_sub(1);
-        let decoration: Option<Decoration> = self.decorations.get(&path).copied();
+        let decoration: Option<Decoration> = self.explorer.decorations.get(&path).copied();
         let name_color = match decoration {
             _ if selected => colors.selected_fg,
             Some(decoration) => colors.decoration(decoration.kind),
@@ -581,7 +584,7 @@ impl Prototype {
             .on_click({
                 let path = path.clone();
                 cx.listener(move |this, event: &ClickEvent, window, cx| {
-                    if this.tree_edit.is_some() {
+                    if this.explorer.edit.is_some() {
                         return;
                     }
                     this.select_tree_path(path.clone(), window, cx);
@@ -590,7 +593,7 @@ impl Prototype {
                     } else {
                         // One click previews and keeps the tree focused (arrow keys, ⌘C, F2);
                         // a double click moves into the editor, as in VS Code.
-                        this.focus_tree_on_open = event.click_count() < 2;
+                        this.explorer.focus_on_open = event.click_count() < 2;
                         this.open_file(path.clone(), this.root.clone(), window, cx);
                     }
                 })
@@ -611,4 +614,26 @@ impl Prototype {
             .child(row)
             .into_any_element()
     }
+}
+
+/// The Explorer: the visible tree, expanded folders, selection and inline rename, and its folder listings.
+pub(super) struct Explorer {
+    pub(super) rows: Vec<super::TreeRow>,
+    pub(super) collapsed: bool,
+    pub(super) decorations: HashMap<PathBuf, Decoration>,
+    pub(super) scroll: UniformListScrollHandle,
+    /// The Explorer and quick open show dot entries hidden by default (settings, ⌘⇧.).
+    pub(super) show_hidden: bool,
+    /// The Explorer row file operations act on (clicked or right-clicked).
+    pub(super) selection: Option<PathBuf>,
+    pub(super) focus: FocusHandle,
+    pub(super) edit: Option<super::explorer_ops::TreeEdit>,
+    /// A single click in the Explorer opens the file but keeps the focus in the tree.
+    pub(super) focus_on_open: bool,
+    pub(super) reveal_pending: bool,
+    pub(super) expanded: HashSet<PathBuf>,
+    pub(super) restore_expanded: HashSet<PathBuf>,
+    pub(super) tasks: HashMap<PathBuf, Task<()>>,
+    pub(super) generation: u64,
+    pub(super) message: String,
 }

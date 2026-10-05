@@ -80,7 +80,7 @@ impl Prototype {
         self.agent.mention_generation += 1;
         let generation = self.agent.mention_generation;
         let index = self.index.clone();
-        let show_hidden = self.show_hidden;
+        let show_hidden = self.explorer.show_hidden;
         let recent: Vec<PathBuf> = self
             .documents
             .iter()

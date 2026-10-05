@@ -102,7 +102,7 @@ async fn the_tab_menu_closes_copies_and_reveals_the_clicked_tab(cx: &mut TestApp
     this.read_with(cx, |p, _| {
         assert!(p.sidebar == Sidebar::Explorer);
         assert_eq!(
-            p.tree_selection.as_deref(),
+            p.explorer.selection.as_deref(),
             Some(root.join("b.txt").as_path())
         );
         assert_eq!(p.active, Pane::Document(p.documents[1].id));

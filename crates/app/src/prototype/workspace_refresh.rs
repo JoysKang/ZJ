@@ -217,7 +217,7 @@ impl Prototype {
         if self.watch.debouncing
             || self.loading
             || self.index_task.is_some()
-            || !self.tree_tasks.is_empty()
+            || !self.explorer.tasks.is_empty()
         {
             return;
         }
@@ -225,9 +225,9 @@ impl Prototype {
             self.watch.refresh_pending = false;
             self.watch.pending_plan = None;
             // Re-enumeration preserves expansion and never forces open a manually collapsed path.
-            let reveal_pending = self.reveal_pending;
+            let reveal_pending = self.explorer.reveal_pending;
             self.refresh_tree(window, cx);
-            self.reveal_pending = reveal_pending;
+            self.explorer.reveal_pending = reveal_pending;
             self.refresh(window, cx);
             self.check_disk(None, window, cx);
             return;
@@ -242,7 +242,7 @@ impl Prototype {
             self.build_index(root, window, cx);
         }
         for dir in &plan.dirs {
-            if self.expanded.contains(dir) {
+            if self.explorer.expanded.contains(dir) {
                 self.reload_directory(dir.clone(), window, cx);
             }
         }

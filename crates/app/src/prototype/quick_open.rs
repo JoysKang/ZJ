@@ -379,7 +379,7 @@ impl Prototype {
             .map(|doc| doc.path.clone())
             .collect();
         let index = self.index.clone();
-        let show_hidden = self.show_hidden;
+        let show_hidden = self.explorer.show_hidden;
         let Some(quick) = self.quick_open.as_mut() else {
             return;
         };

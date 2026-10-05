@@ -170,7 +170,7 @@ impl Prototype {
             include: search.include.read(cx).value().to_string(),
             exclude: search.exclude.read(cx).value().to_string(),
             use_excludes: cx.global::<crate::settings::Settings>().search_use_excludes,
-            show_hidden: self.show_hidden,
+            show_hidden: self.explorer.show_hidden,
         }
     }
 

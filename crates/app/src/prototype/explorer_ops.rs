@@ -63,10 +63,11 @@ impl Prototype {
     /// The folder new entries and pasted files go into: the selected folder, the selected
     /// file's folder, or the workspace root.
     fn target_folder(&self) -> Option<PathBuf> {
-        match &self.tree_selection {
+        match &self.explorer.selection {
             Some(path) => {
                 let directory = self
-                    .tree
+                    .explorer
+                    .rows
                     .iter()
                     .find(|row| row.entry.path == *path)
                     .is_some_and(|row| row.entry.directory);
@@ -86,15 +87,15 @@ impl Prototype {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tree_selection = Some(path);
-        self.explorer_focus.focus(window, cx);
+        self.explorer.selection = Some(path);
+        self.explorer.focus.focus(window, cx);
         cx.notify();
     }
 
     /// The right-click menu for `path` (a row, or the workspace root for the header).
     pub(super) fn explorer_menu(&self, path: &Path, can_paste: bool, menu: PopupMenu) -> PopupMenu {
         let root = self.root.as_deref() == Some(path);
-        menu.action_context(self.explorer_focus.clone())
+        menu.action_context(self.explorer.focus.clone())
             .item(PopupMenuItem::new("新建文件…").action(Box::new(NewFile)))
             .item(PopupMenuItem::new("新建文件夹…").action(Box::new(NewFolder)))
             .item(PopupMenuItem::new(REVEAL_LABEL).action(Box::new(RevealInFinder)))
@@ -131,7 +132,7 @@ impl Prototype {
             .separator()
             .item(
                 PopupMenuItem::new("显示隐藏文件")
-                    .checked(self.show_hidden)
+                    .checked(self.explorer.show_hidden)
                     .action(Box::new(super::ToggleHiddenFiles)),
             )
     }
@@ -158,14 +159,19 @@ impl Prototype {
             EditKind::NewFile(_) | EditKind::NewFolder(_) => (String::new(), 0..0),
         };
         if let EditKind::NewFile(dir) | EditKind::NewFolder(dir) = &kind {
-            let Some(index) = self.tree.iter().position(|row| row.entry.path == *dir) else {
+            let Some(index) = self
+                .explorer
+                .rows
+                .iter()
+                .position(|row| row.entry.path == *dir)
+            else {
                 return;
             };
-            if !self.expanded.contains(dir) {
+            if !self.explorer.expanded.contains(dir) {
                 self.load_directory(dir.clone(), window, cx);
             }
-            let depth = self.tree[index].depth + 1;
-            self.tree.insert(
+            let depth = self.explorer.rows[index].depth + 1;
+            self.explorer.rows.insert(
                 index + 1,
                 TreeRow {
                     entry: Entry {
@@ -201,7 +207,8 @@ impl Prototype {
                     // Leaving the field keeps what was typed, as in VS Code; an empty name cancels.
                     InputEvent::Blur => {
                         if this
-                            .tree_edit
+                            .explorer
+                            .edit
                             .as_ref()
                             .is_some_and(|edit| edit.input.read(cx).value().trim().is_empty())
                         {
@@ -214,7 +221,7 @@ impl Prototype {
                 }
             },
         );
-        self.tree_edit = Some(TreeEdit {
+        self.explorer.edit = Some(TreeEdit {
             kind,
             input,
             _subscription: subscription,
@@ -223,17 +230,17 @@ impl Prototype {
     }
 
     pub(super) fn cancel_tree_edit(&mut self, cx: &mut Context<Self>) {
-        if self.tree_edit.take().is_some() {
-            self.tree.retain(|row| !row.pending);
+        if self.explorer.edit.take().is_some() {
+            self.explorer.rows.retain(|row| !row.pending);
             cx.notify();
         }
     }
 
     fn commit_tree_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(edit) = self.tree_edit.take() else {
+        let Some(edit) = self.explorer.edit.take() else {
             return;
         };
-        self.tree.retain(|row| !row.pending);
+        self.explorer.rows.retain(|row| !row.pending);
         let name = edit.input.read(cx).value().to_string();
         let kind = edit.kind.clone();
         if let EditKind::Rename(path) = &kind
@@ -241,7 +248,7 @@ impl Prototype {
                 .file_name()
                 .is_some_and(|old| old.to_string_lossy() == name.trim())
         {
-            self.explorer_focus.focus(window, cx);
+            self.explorer.focus.focus(window, cx);
             cx.notify();
             return;
         }
@@ -272,11 +279,11 @@ impl Prototype {
                             }
                         }
                         let opens = matches!(kind, EditKind::NewFile(_));
-                        this.tree_selection = Some(path.clone());
+                        this.explorer.selection = Some(path.clone());
                         if opens {
                             this.open_file(path, this.root.clone(), window, cx);
                         } else {
-                            this.explorer_focus.focus(window, cx);
+                            this.explorer.focus.focus(window, cx);
                         }
                     }
                     Err(error) => this.message = format!("操作失败：{error}"),
@@ -290,7 +297,7 @@ impl Prototype {
 
     /// Lists a folder again if it is shown (expanded or the root).
     fn relist(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if self.expanded.contains(&dir) {
+        if self.explorer.expanded.contains(&dir) {
             self.reload_directory(dir, window, cx);
         }
     }
@@ -314,16 +321,21 @@ impl Prototype {
                 document.path = path;
             }
         }
-        if let Some(selection) = self.tree_selection.as_deref().and_then(moved) {
-            self.tree_selection = Some(selection);
+        if let Some(selection) = self.explorer.selection.as_deref().and_then(moved) {
+            self.explorer.selection = Some(selection);
         }
-        let expanded: Vec<_> = self.expanded.iter().filter_map(|p| moved(p)).collect();
-        self.expanded.retain(|p| !p.starts_with(old));
-        self.restore_expanded.extend(expanded);
+        let expanded: Vec<_> = self
+            .explorer
+            .expanded
+            .iter()
+            .filter_map(|p| moved(p))
+            .collect();
+        self.explorer.expanded.retain(|p| !p.starts_with(old));
+        self.explorer.restore_expanded.extend(expanded);
     }
 
     pub(super) fn delete_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.tree_selection.clone() else {
+        let Some(path) = self.explorer.selection.clone() else {
             return;
         };
         if self.root.as_deref() == Some(path.as_path()) {
@@ -357,7 +369,7 @@ impl Prototype {
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(()) => {
-                        this.tree_selection = None;
+                        this.explorer.selection = None;
                         // Unedited tabs of what was deleted close; edited ones stay open.
                         let closing: Vec<_> = this
                             .documents
@@ -388,7 +400,7 @@ impl Prototype {
     }
 
     pub(super) fn copy_selection(&mut self, cut: bool, cx: &mut Context<Self>) {
-        let Some(path) = self.tree_selection.clone() else {
+        let Some(path) = self.explorer.selection.clone() else {
             return;
         };
         if self.root.as_deref() == Some(path.as_path()) {
@@ -449,7 +461,7 @@ impl Prototype {
                 }
                 this.relist(dir, window, cx);
                 if last.is_some() {
-                    this.tree_selection = last;
+                    this.explorer.selection = last;
                 }
                 cx.notify();
             });
@@ -458,7 +470,12 @@ impl Prototype {
     }
 
     pub(super) fn copy_selection_path(&mut self, relative: bool, cx: &mut Context<Self>) {
-        let Some(path) = self.tree_selection.clone().or_else(|| self.root.clone()) else {
+        let Some(path) = self
+            .explorer
+            .selection
+            .clone()
+            .or_else(|| self.root.clone())
+        else {
             return;
         };
         let text = if relative {
@@ -477,7 +494,12 @@ impl Prototype {
     }
 
     pub(super) fn reveal_selection(&mut self, cx: &mut Context<Self>) {
-        if let Some(path) = self.tree_selection.clone().or_else(|| self.root.clone()) {
+        if let Some(path) = self
+            .explorer
+            .selection
+            .clone()
+            .or_else(|| self.root.clone())
+        {
             self.reveal_in_finder(path, cx);
         }
     }
@@ -524,7 +546,7 @@ impl Prototype {
                 }
             }))
             .on_action(cx.listener(|this, _: &Rename, window, cx| {
-                if let Some(path) = this.tree_selection.clone()
+                if let Some(path) = this.explorer.selection.clone()
                     && this.root.as_ref() != Some(&path)
                 {
                     this.start_tree_edit(EditKind::Rename(path), window, cx);
@@ -547,9 +569,9 @@ impl Prototype {
     pub(super) fn clear_tree_selection_for(&mut self, pane: Pane) {
         if let Pane::Document(id) = pane
             && let Some(document) = self.documents.iter().find(|doc| doc.id == id)
-            && self.tree_selection.as_ref() != Some(&document.path)
+            && self.explorer.selection.as_ref() != Some(&document.path)
         {
-            self.tree_selection = None;
+            self.explorer.selection = None;
         }
     }
 }

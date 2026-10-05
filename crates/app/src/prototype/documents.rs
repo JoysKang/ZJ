@@ -1095,7 +1095,7 @@ impl Prototype {
     }
 
     fn relist_folder(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if self.expanded.contains(&dir) || self.root.as_deref() == Some(dir.as_path()) {
+        if self.explorer.expanded.contains(&dir) || self.root.as_deref() == Some(dir.as_path()) {
             self.reload_directory(dir, window, cx);
         }
     }

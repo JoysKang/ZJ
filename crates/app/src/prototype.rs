@@ -358,30 +358,14 @@ pub struct Prototype {
     active: Pane,
     documents: Vec<Document>,
     owners: DocumentOwners,
-    tree: Vec<TreeRow>,
-    explorer_collapsed: bool,
-    decorations: HashMap<PathBuf, Decoration>,
-    tree_scroll: UniformListScrollHandle,
-    /// The Explorer and quick open show dot entries hidden by default (settings, ⌘⇧.).
-    show_hidden: bool,
-    /// The Explorer row file operations act on (clicked or right-clicked).
-    tree_selection: Option<PathBuf>,
-    explorer_focus: FocusHandle,
-    tree_edit: Option<explorer_ops::TreeEdit>,
+    /// The Explorer: the visible tree, expanded folders, selection and inline rename, and its folder listings.
+    explorer: sidebar::Explorer,
     /// Source Control lists only repositories with changes (settings).
     hide_clean_repos: bool,
-    /// A single click in the Explorer opens the file but keeps the focus in the tree.
-    focus_tree_on_open: bool,
     welcome_cursor: Entity<welcome::WelcomeCursor>,
     /// Source Control rows vary in height (repository rows wrap long branch names), so they
     /// use a measured list instead of `uniform_list`.
     scm_list: ListState,
-    reveal_pending: bool,
-    expanded: HashSet<PathBuf>,
-    restore_expanded: HashSet<PathBuf>,
-    tree_tasks: HashMap<PathBuf, Task<()>>,
-    tree_generation: u64,
-    tree_message: String,
     search: search_view::SearchState,
     find: find_widget::FindState,
     /// The selection ⌘D made from the word under the cursor: the next ⌘D matches whole words.
@@ -472,8 +456,8 @@ impl Prototype {
                     cx.notify();
                 }
                 let show_hidden = cx.global::<crate::settings::Settings>().show_hidden;
-                if show_hidden != this.show_hidden {
-                    this.show_hidden = show_hidden;
+                if show_hidden != this.explorer.show_hidden {
+                    this.explorer.show_hidden = show_hidden;
                     this.reload_tree(window, cx);
                     if !this.search.query.read(cx).value().is_empty() {
                         this.schedule_search(Duration::ZERO, window, cx);
@@ -555,24 +539,26 @@ impl Prototype {
             active: Pane::Welcome,
             documents: Vec::new(),
             owners,
-            tree: Vec::new(),
-            explorer_collapsed: false,
-            decorations: HashMap::new(),
-            tree_scroll: UniformListScrollHandle::new(),
-            show_hidden: cx.global::<crate::settings::Settings>().show_hidden,
-            tree_selection: None,
-            explorer_focus: cx.focus_handle(),
-            tree_edit: None,
+            explorer: sidebar::Explorer {
+                rows: Vec::new(),
+                collapsed: false,
+                decorations: HashMap::new(),
+                scroll: UniformListScrollHandle::new(),
+                show_hidden: cx.global::<crate::settings::Settings>().show_hidden,
+                selection: None,
+                focus: cx.focus_handle(),
+                edit: None,
+                focus_on_open: false,
+                reveal_pending: false,
+                expanded: HashSet::new(),
+                restore_expanded: HashSet::new(),
+                tasks: HashMap::new(),
+                generation: 0,
+                message: String::new(),
+            },
             hide_clean_repos: cx.global::<crate::settings::Settings>().hide_clean_repos,
-            focus_tree_on_open: false,
             welcome_cursor: cx.new(|_| welcome::WelcomeCursor::new()),
             scm_list: ListState::new(0, ListAlignment::Top, theme::SCM_LIST_OVERDRAW),
-            reveal_pending: false,
-            expanded: HashSet::new(),
-            restore_expanded: HashSet::new(),
-            tree_tasks: HashMap::new(),
-            tree_generation: 0,
-            tree_message: String::new(),
             search,
             find,
             reloading: Default::default(),
@@ -664,14 +650,14 @@ impl Prototype {
 
     /// Lists the root and every expanded folder again, keeping what is expanded.
     fn reload_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.reveal_pending = matches!(self.active, Pane::Document(_));
-        self.tree_generation += 1;
-        self.tree_tasks.clear();
-        self.restore_expanded = std::mem::take(&mut self.expanded);
-        self.tree.clear();
-        self.tree_edit = None;
+        self.explorer.reveal_pending = matches!(self.active, Pane::Document(_));
+        self.explorer.generation += 1;
+        self.explorer.tasks.clear();
+        self.explorer.restore_expanded = std::mem::take(&mut self.explorer.expanded);
+        self.explorer.rows.clear();
+        self.explorer.edit = None;
         if let Some(root) = self.root.clone() {
-            self.tree.push(TreeRow {
+            self.explorer.rows.push(TreeRow {
                 entry: Entry {
                     path: root.clone(),
                     directory: true,
@@ -682,30 +668,35 @@ impl Prototype {
             });
             self.load_directory(root, window, cx);
         } else {
-            self.tree_message = "点击顶部“打开文件夹”选择工作区；也可单独打开文件".into();
+            self.explorer.message = "点击顶部“打开文件夹”选择工作区；也可单独打开文件".into();
         }
         cx.notify();
     }
 
     fn load_directory(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.expanded.insert(path.clone());
-        self.tree_message = "正在读取目录…".into();
-        let generation = self.tree_generation;
+        self.explorer.expanded.insert(path.clone());
+        self.explorer.message = "正在读取目录…".into();
+        let generation = self.explorer.generation;
         let directory = path.clone();
-        let show_hidden = self.show_hidden;
+        let show_hidden = self.explorer.show_hidden;
         let job = cx.background_spawn(async move { files::directory(&directory, show_hidden) });
         let key = path.clone();
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = job.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if this.tree_generation != generation {
+                if this.explorer.generation != generation {
                     return;
                 }
-                this.tree_tasks.remove(&path);
-                if !this.expanded.contains(&path) {
+                this.explorer.tasks.remove(&path);
+                if !this.explorer.expanded.contains(&path) {
                     return;
                 }
-                let Some(index) = this.tree.iter().position(|row| row.entry.path == path) else {
+                let Some(index) = this
+                    .explorer
+                    .rows
+                    .iter()
+                    .position(|row| row.entry.path == path)
+                else {
                     return;
                 };
                 match result {
@@ -713,16 +704,22 @@ impl Prototype {
                         let restore: Vec<_> = entries
                             .iter()
                             .filter(|entry| {
-                                entry.directory && this.restore_expanded.remove(&entry.path)
+                                entry.directory
+                                    && this.explorer.restore_expanded.remove(&entry.path)
                             })
                             .map(|entry| entry.path.clone())
                             .collect();
-                        let depth = this.tree[index].depth + 1;
+                        let depth = this.explorer.rows[index].depth + 1;
                         // A new-entry field opened before the listing arrived stays on top.
                         let at = index
                             + 1
-                            + usize::from(this.tree.get(index + 1).is_some_and(|row| row.pending));
-                        this.tree.splice(
+                            + usize::from(
+                                this.explorer
+                                    .rows
+                                    .get(index + 1)
+                                    .is_some_and(|row| row.pending),
+                            );
+                        this.explorer.rows.splice(
                             at..at,
                             entries.into_iter().map(|entry| TreeRow {
                                 entry,
@@ -730,21 +727,21 @@ impl Prototype {
                                 pending: false,
                             }),
                         );
-                        this.tree_message.clear();
+                        this.explorer.message.clear();
                         this.reveal_current_file(window, cx);
                         for path in restore {
-                            if !this.expanded.contains(&path) {
+                            if !this.explorer.expanded.contains(&path) {
                                 this.load_directory(path, window, cx);
                             }
                         }
                     }
                     Err(error) => {
-                        this.expanded.remove(&path);
-                        this.tree_message = format!("{}: {error}", path.display());
+                        this.explorer.expanded.remove(&path);
+                        this.explorer.message = format!("{}: {error}", path.display());
                         if this.documents.iter().any(|doc| {
                             this.active == Pane::Document(doc.id) && doc.path.starts_with(&path)
                         }) {
-                            this.reveal_pending = false;
+                            this.explorer.reveal_pending = false;
                         }
                     }
                 }
@@ -752,29 +749,31 @@ impl Prototype {
                 cx.notify();
             });
         });
-        self.tree_tasks.insert(key, task);
+        self.explorer.tasks.insert(key, task);
     }
 
     fn toggle_directory(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.reveal_pending = false;
-        let path = self.tree[index].entry.path.clone();
-        if self.expanded.remove(&path) {
-            self.restore_expanded
+        self.explorer.reveal_pending = false;
+        let path = self.explorer.rows[index].entry.path.clone();
+        if self.explorer.expanded.remove(&path) {
+            self.explorer
+                .restore_expanded
                 .retain(|restore| !restore.starts_with(&path));
-            let depth = self.tree[index].depth;
+            let depth = self.explorer.rows[index].depth;
             let end = self
-                .tree
+                .explorer
+                .rows
                 .iter()
                 .enumerate()
                 .skip(index + 1)
                 .find(|(_, row)| row.depth <= depth)
                 .map(|(index, _)| index)
-                .unwrap_or(self.tree.len());
-            for row in self.tree.drain(index + 1..end) {
-                self.expanded.remove(&row.entry.path);
-                self.tree_tasks.remove(&row.entry.path);
+                .unwrap_or(self.explorer.rows.len());
+            for row in self.explorer.rows.drain(index + 1..end) {
+                self.explorer.expanded.remove(&row.entry.path);
+                self.explorer.tasks.remove(&row.entry.path);
             }
-            self.tree_tasks.remove(&path);
+            self.explorer.tasks.remove(&path);
         } else {
             self.load_directory(path, window, cx);
         }
@@ -784,31 +783,39 @@ impl Prototype {
 
     /// Lists an expanded directory again (file watching), keeping expanded subdirectories.
     fn reload_directory(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(index) = self.tree.iter().position(|row| row.entry.path == path) else {
+        let Some(index) = self
+            .explorer
+            .rows
+            .iter()
+            .position(|row| row.entry.path == path)
+        else {
             return;
         };
-        let depth = self.tree[index].depth;
+        let depth = self.explorer.rows[index].depth;
         let end = self
-            .tree
+            .explorer
+            .rows
             .iter()
             .enumerate()
             .skip(index + 1)
             .find(|(_, row)| row.depth <= depth)
             .map(|(index, _)| index)
-            .unwrap_or(self.tree.len());
+            .unwrap_or(self.explorer.rows.len());
         let mut pending = None;
-        for row in self.tree.drain(index + 1..end) {
+        for row in self.explorer.rows.drain(index + 1..end) {
             if row.pending {
                 pending = Some(row);
                 continue;
             }
-            if self.expanded.remove(&row.entry.path) {
-                self.restore_expanded.insert(row.entry.path.clone());
+            if self.explorer.expanded.remove(&row.entry.path) {
+                self.explorer
+                    .restore_expanded
+                    .insert(row.entry.path.clone());
             }
-            self.tree_tasks.remove(&row.entry.path);
+            self.explorer.tasks.remove(&row.entry.path);
         }
         if let Some(row) = pending {
-            self.tree.insert(index + 1, row);
+            self.explorer.rows.insert(index + 1, row);
         }
         self.load_directory(path, window, cx);
     }
@@ -882,7 +889,7 @@ impl Prototype {
 
     /// Shows or hides dot files in every window's Explorer and quick open (⌘⇧.).
     fn toggle_hidden_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let show = !self.show_hidden;
+        let show = !self.explorer.show_hidden;
         self.change_settings(window, cx, |settings| settings.show_hidden = show);
         self.message = if show {
             "已显示隐藏文件".into()
@@ -965,12 +972,12 @@ impl Prototype {
         self.file_generation += 1;
         self.file_task = None;
         self.active = pane;
-        self.reveal_pending = matches!(pane, Pane::Document(_));
+        self.explorer.reveal_pending = matches!(pane, Pane::Document(_));
         self.clear_tree_selection_for(pane);
         self.update_welcome_blink(window, cx);
         self.find_update(false, cx);
-        if std::mem::take(&mut self.focus_tree_on_open) {
-            self.explorer_focus.focus(window, cx);
+        if std::mem::take(&mut self.explorer.focus_on_open) {
+            self.explorer.focus.focus(window, cx);
         } else {
             self.focus_active_editor(window, cx);
         }
@@ -980,7 +987,7 @@ impl Prototype {
     }
 
     fn reveal_current_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.reveal_pending {
+        if !self.explorer.reveal_pending {
             return;
         }
         let Pane::Document(id) = self.active else {
@@ -1002,19 +1009,30 @@ impl Prototype {
         };
         let mut parent = root;
         for component in relative.components() {
-            if !self.tree.iter().any(|row| row.entry.path == parent) {
+            if !self
+                .explorer
+                .rows
+                .iter()
+                .any(|row| row.entry.path == parent)
+            {
                 return;
             }
-            if !self.expanded.contains(&parent) {
+            if !self.explorer.expanded.contains(&parent) {
                 self.load_directory(parent, window, cx);
                 return;
             }
             parent.push(component.as_os_str());
         }
-        if let Some(index) = self.tree.iter().position(|row| row.entry.path == path) {
-            self.tree_scroll
+        if let Some(index) = self
+            .explorer
+            .rows
+            .iter()
+            .position(|row| row.entry.path == path)
+        {
+            self.explorer
+                .scroll
                 .scroll_to_item(index, ScrollStrategy::Nearest);
-            self.reveal_pending = false;
+            self.explorer.reveal_pending = false;
         }
     }
 
@@ -1573,7 +1591,7 @@ impl Prototype {
     /// Files keep their own decoration; each ancestor folder up to the workspace root takes the
     /// most severe decoration below it, as VS Code does.
     fn rebuild_decorations(&mut self) {
-        self.decorations.clear();
+        self.explorer.decorations.clear();
         let root = self.root.clone();
         for group in &self.groups {
             let Some(Ok(status)) = &group.status else {
@@ -1583,12 +1601,13 @@ impl Prototype {
                 let decoration = decoration(change);
                 let path = group.repo.worktree.join(&change.path);
                 let mut ancestor = path.parent();
-                self.decorations.insert(path.clone(), decoration);
+                self.explorer.decorations.insert(path.clone(), decoration);
                 while let Some(folder) = ancestor {
                     if root.as_ref().is_some_and(|root| !folder.starts_with(root)) {
                         break;
                     }
                     let entry = self
+                        .explorer
                         .decorations
                         .entry(folder.to_path_buf())
                         .or_insert(decoration);
@@ -1605,14 +1624,14 @@ impl Prototype {
     }
 
     fn collapse_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.reveal_pending = false;
-        let Some(root) = self.tree.first().map(|row| row.entry.path.clone()) else {
+        self.explorer.reveal_pending = false;
+        let Some(root) = self.explorer.rows.first().map(|row| row.entry.path.clone()) else {
             return;
         };
-        self.tree.retain(|row| row.depth <= 1);
-        self.expanded.retain(|path| *path == root);
-        self.restore_expanded.clear();
-        self.tree_tasks.clear();
+        self.explorer.rows.retain(|row| row.depth <= 1);
+        self.explorer.expanded.retain(|path| *path == root);
+        self.explorer.restore_expanded.clear();
+        self.explorer.tasks.clear();
         self.flush_workspace_refresh(window, cx);
         cx.notify();
     }
