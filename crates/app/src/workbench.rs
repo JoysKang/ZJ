@@ -110,6 +110,9 @@ pub use tab_menu::{
     RevealActiveInExplorer, RevealActiveInFinder,
 };
 #[cfg(test)]
+#[path = "workbench/idle_ui_tests.rs"]
+mod idle_ui_tests;
+#[cfg(test)]
 #[path = "workbench/indent_ui_tests.rs"]
 mod indent_ui_tests;
 #[cfg(test)]

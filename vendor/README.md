@@ -106,3 +106,11 @@ undoes the lint override above), and compare the warnings with the unpatched com
 2. Re-apply the `ZJ patch` hunks from `git diff`.
 3. Update the version in this file and in the `[patch.crates-io]` comment.
 4. If upstream has fixed the same problem, delete the directory and its `[patch]` entry.
+5. Check that the low-memory behaviour survived, because a lost hunk still builds:
+   - `cargo test -p workspace-editor idle_ui` passes (no timer left in an idle window; it
+     fails with Kit's original blinking caret);
+   - on a Mac, `ZJ_FRAME_LOG=1 target/dist/workspace-editor <folder>` prints
+     `event=display_link state=paused` about 3 s after the last frame, and nothing more until
+     you touch the window;
+   - `python3 tools/measure_budget.py --breakdown` reports 0 frames and 0 wakes while idle,
+     and footprints within the budget in CLAUDE.md.
