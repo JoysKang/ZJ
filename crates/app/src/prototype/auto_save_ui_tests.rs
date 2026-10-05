@@ -107,3 +107,54 @@ async fn saving_an_edited_buffer_writes_it_and_runs_the_saved_hooks(cx: &mut Tes
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[gpui_kit::test]
+async fn a_save_during_another_save_waits_and_writes_the_newer_text(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-save-twice-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("a.rs");
+    std::fs::write(&path, "one\n").unwrap();
+    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    wait(
+        cx,
+        Some(TICK),
+        None,
+        |cx| loaded(cx, &this),
+        |_| "the folder never finished loading".into(),
+    );
+    let folder = Some(root.clone());
+    let open_path = path.clone();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(open_path, folder, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let (id, editor) = this.read_with(cx, |p, _| {
+        (p.documents[0].id, p.documents[0].editor.clone())
+    });
+    // An auto-save is writing "two" when the user types again and quits with 保存.
+    let (first, second) = cx
+        .update_window(window.into(), |_, window, cx| {
+            // Typed edits (they mark the buffer edited), replacing the whole line.
+            editor.update(cx, |state, cx| {
+                state.replace_text_in_range(Some(0..3), "two", window, cx)
+            });
+            let first = this.update(cx, |p, cx| p.save_document(id, false, window, cx));
+            editor.update(cx, |state, cx| {
+                state.replace_text_in_range(Some(0..3), "three", window, cx)
+            });
+            let second = this.update(cx, |p, cx| p.save_document(id, false, window, cx));
+            (first, second)
+        })
+        .unwrap();
+    assert!(first.await);
+    assert!(second.await, "the second save gave up instead of waiting");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "three\n");
+    assert!(!this.read_with(cx, |p, _| p.documents[0].dirty));
+    let _ = std::fs::remove_dir_all(&root);
+}

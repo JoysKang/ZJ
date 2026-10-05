@@ -388,7 +388,29 @@ impl Prototype {
             return self.save_as(id, window, cx);
         }
         if doc.saving {
-            return Task::ready(false);
+            // Another save (often auto-save) is writing: wait for it, then save what is newer.
+            // Quitting with 保存 must not fail just because the two met.
+            return cx.spawn_in(window, async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(20))
+                        .await;
+                    match this.update(cx, |this, _| {
+                        this.document(id).map(|doc| (doc.saving, doc.dirty))
+                    }) {
+                        Ok(Some((true, _))) => {}
+                        Ok(Some((false, false))) => return true,
+                        Ok(Some((false, true))) => break,
+                        _ => return false,
+                    }
+                }
+                match this.update_in(cx, |this, window, cx| {
+                    this.save_document(id, overwrite, window, cx)
+                }) {
+                    Ok(task) => task.await,
+                    Err(_) => false,
+                }
+            });
         }
         let text = doc.editor.read(cx).text().to_string();
         let bytes = save::encode(&text, doc.crlf, doc.bom);
