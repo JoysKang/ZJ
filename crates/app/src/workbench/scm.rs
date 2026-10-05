@@ -402,7 +402,8 @@ impl Workbench {
                     },
                 ),
             );
-        // A status item: icon and caption text that wraps, with its own hover.
+        // A status item: icon and caption text that wraps, with the same hover and pressed
+        // colors as the icon buttons beside it (the list hover would vanish on a hovered row).
         let item = |id: (&'static str, usize), icon: IconName, text: Option<String>| {
             h_flex()
                 .id(id)
@@ -416,7 +417,11 @@ impl Workbench {
                 .text_size(theme::TEXT_CAPTION)
                 .line_height(theme::SCM_DETAIL_LINE)
                 .text_color(colors.muted)
-                .when(!pending, |item| item.hover(|item| item.bg(colors.keycap)))
+                .when(!pending, |item| {
+                    item.cursor_pointer()
+                        .hover(|item| item.bg(colors.control_hover).text_color(colors.foreground))
+                        .active(|item| item.bg(colors.control_active))
+                })
                 .when(pending, |item| item.opacity(0.5).cursor_default())
                 .child(
                     div()
@@ -424,11 +429,7 @@ impl Workbench {
                         .flex()
                         .items_center()
                         .flex_shrink_0()
-                        .child(
-                            Icon::new(icon)
-                                .size(theme::SMALL_ICON_SIZE)
-                                .text_color(colors.muted),
-                        ),
+                        .child(Icon::new(icon).size(theme::SMALL_ICON_SIZE)),
                 )
                 .when_some(text, |item, text| {
                     item.child(div().min_w_0().child(soft_breaks(&text)))
