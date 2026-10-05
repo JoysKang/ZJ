@@ -519,7 +519,12 @@ impl Workbench {
                     PromptLevel::Warning,
                     "文件已在磁盘上更改",
                     Some(&format!("「{name}」已被其他程序修改。")),
-                    &["覆盖", "重新加载（丢弃我的修改）", "比较", "取消"],
+                    &crate::workbench::prompt_buttons(&[
+                        "覆盖",
+                        "重新加载（丢弃我的修改）",
+                        "比较",
+                        "取消",
+                    ]),
                     cx,
                 );
                 cx.spawn_in(window, async move |this, cx| {
@@ -547,7 +552,7 @@ impl Workbench {
                     PromptLevel::Warning,
                     &format!("无法保存「{name}」"),
                     Some(&format!("{why}。可以另存为其他文件。")),
-                    &["另存为…", "取消"],
+                    &crate::workbench::prompt_buttons(&["另存为…", "取消"]),
                     cx,
                 );
                 cx.spawn_in(window, async move |this, cx| {
@@ -716,7 +721,13 @@ impl Workbench {
                 ["全部保存", "全部不保存", "取消"],
             )
         };
-        let answer = window.prompt(PromptLevel::Warning, &title, Some(&detail), &buttons, cx);
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &title,
+            Some(&detail),
+            &crate::workbench::prompt_buttons(&buttons),
+            cx,
+        );
         cx.spawn_in(window, async move |this, cx| {
             let answer = Answer::from_button(answer.await.ok());
             let resolved = match answer {

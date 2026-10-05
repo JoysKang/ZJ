@@ -116,11 +116,11 @@ impl Workbench {
             PromptLevel::Warning,
             &format!("拒绝 Agent 对 {} 个文件的全部修改？", paths.len()),
             Some("已写入磁盘的修改会被还原成 Agent 改动之前的内容；尚未接受的建议会被丢弃。"),
-            &["取消", "全部拒绝"],
+            &crate::workbench::prompt_buttons(&["全部拒绝", "取消"]),
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
-            if answer.await == Ok(1) {
+            if answer.await == Ok(0) {
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.agent_resolve_files(key, paths, false, window, cx)
                 });

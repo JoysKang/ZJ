@@ -230,7 +230,7 @@ impl Workbench {
             PromptLevel::Warning,
             &format!("将在 {files} 个文件中替换 {matches} 处"),
             Some(&detail),
-            &["替换", "取消"],
+            &crate::workbench::prompt_buttons(&["替换", "取消"]),
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {

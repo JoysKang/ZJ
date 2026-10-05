@@ -298,11 +298,11 @@ impl Workbench {
                 PromptLevel::Warning,
                 &format!("永久删除会话「{title}」？"),
                 Some("会话的消息、文件记录和搜索索引都会从本机删除，无法恢复。"),
-                &["取消", "删除"],
+                &crate::workbench::prompt_buttons(&["删除", "取消"]),
                 cx,
             );
             cx.spawn_in(window, async move |this, cx| {
-                if answer.await != Ok(1) {
+                if answer.await != Ok(0) {
                     return;
                 }
                 let job = cx.background_spawn(async move { store.delete_session(id) });
@@ -407,11 +407,11 @@ impl Workbench {
             PromptLevel::Warning,
             &format!("永久删除 {count} 个已归档会话？"),
             Some("删除后释放磁盘空间，无法恢复。"),
-            &["取消", "删除"],
+            &crate::workbench::prompt_buttons(&["删除", "取消"]),
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
-            if answer.await == Ok(1) {
+            if answer.await == Ok(0) {
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.agent_history_op(HistoryOp::DeleteArchived(scope), window, cx)
                 });

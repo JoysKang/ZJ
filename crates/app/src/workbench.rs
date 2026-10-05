@@ -294,6 +294,18 @@ const OUTGOING_LIMIT: usize = 100;
 const SINGLE_LINE: [char; 2] = ['\n', '\r'];
 
 /// Highlighter language (only grammars compiled into Kit) and status bar display name.
+/// Prompt buttons, the action first (macOS puts it on the right, on Return) and 取消 marked
+/// as the cancel button so Escape answers it; a plain "取消" label is not recognized as one.
+pub(crate) fn prompt_buttons(labels: &[&str]) -> Vec<PromptButton> {
+    labels
+        .iter()
+        .map(|&label| match label {
+            "取消" => PromptButton::cancel(label),
+            _ => PromptButton::new(label),
+        })
+        .collect()
+}
+
 fn language_for(path: &std::path::Path) -> (&'static str, &'static str) {
     crate::languages::for_path(path)
 }

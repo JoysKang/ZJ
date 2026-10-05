@@ -355,7 +355,7 @@ impl Workbench {
             PromptLevel::Warning,
             &format!("删除“{name}”？"),
             Some(detail),
-            &[trash, "取消"],
+            &crate::workbench::prompt_buttons(&[trash, "取消"]),
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {

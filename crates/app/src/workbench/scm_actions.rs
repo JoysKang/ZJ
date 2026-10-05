@@ -246,11 +246,11 @@ impl Workbench {
                 PromptLevel::Warning,
                 &title,
                 Some(&detail),
-                &["取消", action],
+                &crate::workbench::prompt_buttons(&[action, "取消"]),
                 cx,
             );
             cx.spawn_in(window, async move |this, cx| {
-                if answer.await == Ok(1) {
+                if answer.await == Ok(0) {
                     let _ = this.update_in(cx, |this, window, cx| {
                         this.start_git_write(request, window, cx)
                     });
@@ -358,7 +358,7 @@ impl Workbench {
                             PromptLevel::Critical,
                             failed,
                             Some(&detail),
-                            &["确定"],
+                            &crate::workbench::prompt_buttons(&["确定"]),
                             cx,
                         );
                     }
@@ -543,14 +543,14 @@ impl Workbench {
                 "仓库：{}\n同时删除远程标签时，先删远程的，成功后再删本地的。",
                 worktree.display()
             )),
-            &["取消", "删除本地标签", "同时删除远程标签"],
+            &crate::workbench::prompt_buttons(&["删除本地标签", "同时删除远程标签", "取消"]),
             cx,
         );
         let repo = repo.clone();
         cx.spawn_in(window, async move |this, cx| {
             let remote = match answer.await {
-                Ok(1) => false,
-                Ok(2) => true,
+                Ok(0) => false,
+                Ok(1) => true,
                 _ => return,
             };
             let _ = this.update_in(cx, |this, window, cx| {
