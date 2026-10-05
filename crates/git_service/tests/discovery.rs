@@ -1,4 +1,6 @@
 //! Repository discovery skips ignored and cache directories and invalid `.git` markers.
+mod common;
+
 use std::{fs, path::Path, process::Command, sync::atomic::AtomicBool, time::Duration};
 use workspace_editor_git::{Discovery, GitService};
 
@@ -21,6 +23,7 @@ fn repo(path: &Path) {
 
 #[test]
 fn discovery_respects_ignores_caches_depth_and_git_markers() {
+    common::hermetic();
     let root = std::env::temp_dir().join(format!("zj-discovery-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();

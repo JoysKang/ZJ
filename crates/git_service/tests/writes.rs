@@ -1,3 +1,5 @@
+mod common;
+
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -82,6 +84,7 @@ fn paths() -> Vec<PathBuf> {
 
 #[test]
 fn disk_stage_unborn_unstage_commit_hook_discard_and_local_push() {
+    common::hermetic();
     let fixture = fixture();
     let root = fixture.0.join("a");
     let service = GitService::new(2, Duration::from_secs(10)).unwrap();
@@ -210,6 +213,7 @@ fn disk_stage_unborn_unstage_commit_hook_discard_and_local_push() {
 
 #[test]
 fn stale_snapshot_identity_paths_and_rename() {
+    common::hermetic();
     let fixture = fixture();
     let root = fixture.0.join("a");
     let service = GitService::new(2, Duration::from_secs(10)).unwrap();
@@ -303,6 +307,7 @@ fn stale_snapshot_identity_paths_and_rename() {
 
 #[test]
 fn check_ignore_batches_directories_and_files() {
+    common::hermetic();
     let fixture = fixture();
     let root = fixture.0.join("a");
     fs::write(root.join(".gitignore"), "target/\n*.log\n").unwrap();
@@ -337,6 +342,7 @@ fn check_ignore_batches_directories_and_files() {
 
 #[test]
 fn apply_patch_stages_and_rejects_stale_patches() {
+    common::hermetic();
     let fixture = fixture();
     let root = fixture.0.join("a");
     git(&root, &["add", "."]);
@@ -365,6 +371,7 @@ fn apply_patch_stages_and_rejects_stale_patches() {
 
 #[test]
 fn amend_keeps_or_replaces_the_message_and_commit_push_publishes() {
+    common::hermetic();
     let fixture = fixture();
     let root = fixture.0.join("a");
     let service = GitService::new(2, Duration::from_secs(10)).unwrap();
@@ -432,6 +439,7 @@ fn amend_keeps_or_replaces_the_message_and_commit_push_publishes() {
 
 #[test]
 fn outgoing_lists_the_commits_the_upstream_lacks() {
+    common::hermetic();
     let fixture = fixture();
     let root = fixture.0.join("a");
     let service = GitService::new(1, Duration::from_secs(10)).unwrap();
@@ -477,6 +485,7 @@ fn configure(repo: &Path) {
 
 #[test]
 fn fetch_pull_sync_checkout_and_create_branch() {
+    common::hermetic();
     let fixture = fixture();
     let root = fixture.0.join("a");
     let service = GitService::new(2, Duration::from_secs(20)).unwrap();
@@ -571,6 +580,7 @@ fn fetch_pull_sync_checkout_and_create_branch() {
 
 #[test]
 fn branches_graph_details_and_commit_diff() {
+    common::hermetic();
     use workspace_editor_git::{GraphScope, Operation, RefKind, Request};
     let fixture = fixture();
     let root = fixture.0.join("a");
@@ -707,6 +717,7 @@ fn branches_graph_details_and_commit_diff() {
 
 #[test]
 fn tags_are_created_pushed_and_deleted() {
+    common::hermetic();
     let fixture = fixture();
     let root = fixture.0.join("a");
     let service = GitService::new(2, Duration::from_secs(20)).unwrap();
@@ -803,6 +814,7 @@ fn tags_are_created_pushed_and_deleted() {
 
 #[test]
 fn patches_keep_a_b_prefixes_whatever_the_user_config_says() {
+    common::hermetic();
     let fixture = fixture();
     let root = fixture.0.join("a");
     git(&root, &["add", "."]);
@@ -843,6 +855,7 @@ fn patches_keep_a_b_prefixes_whatever_the_user_config_says() {
 
 #[test]
 fn a_cancelled_write_asks_git_to_stop_before_killing_it() {
+    common::hermetic();
     let fixture = fixture();
     let root = fixture.0.join("a");
     let service = GitService::new(2, Duration::from_secs(10)).unwrap();
@@ -892,6 +905,7 @@ fn a_cancelled_write_asks_git_to_stop_before_killing_it() {
 
 #[test]
 fn discard_explains_staged_only_and_conflicted_files() {
+    common::hermetic();
     let fixture = fixture();
     let root = fixture.0.join("a");
     let service = GitService::new(2, Duration::from_secs(10)).unwrap();
@@ -926,4 +940,19 @@ fn discard_explains_staged_only_and_conflicted_files() {
             .unwrap()
             .starts_with("<<<<<<<")
     );
+}
+
+#[test]
+fn git_in_tests_sees_no_user_or_system_config() {
+    common::hermetic();
+    let fixture = fixture();
+    // The service passes GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM through, like this does.
+    let listed = Command::new("git")
+        .arg("-C")
+        .arg(&fixture.0)
+        .args(["config", "--list", "--show-origin"])
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    assert!(listed.trim().is_empty(), "{listed}");
 }

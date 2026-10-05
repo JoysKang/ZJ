@@ -1,3 +1,5 @@
+mod common;
+
 use std::{
     ffi::OsString,
     fs,
@@ -17,6 +19,7 @@ impl Drop for Fixture {
 
 #[test]
 fn real_git_identities_states_diffs_and_cancellation() {
+    common::hermetic();
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()

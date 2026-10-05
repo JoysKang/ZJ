@@ -2,6 +2,8 @@
 //! around `git` first on PATH that fails every `rev-parse --verify` and ignored-file listing
 //! the way a broken repository or a timed-out query would, and that touches the index during
 //! the first status query the way a concurrent Git would.
+mod common;
+
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -37,6 +39,7 @@ fn git(real: &Path, root: &Path, args: &[&str]) -> String {
 
 #[test]
 fn git_failures_are_reported_not_read_as_absence() {
+    common::hermetic();
     let path = std::env::temp_dir().join(format!(
         "zj-failures-{}-{}",
         std::process::id(),
@@ -79,7 +82,6 @@ fn git_failures_are_reported_not_read_as_absence() {
     // SAFETY: the only test in this binary; no other thread reads the environment yet.
     unsafe {
         std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
-        std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
     }
 
     fs::create_dir(&root).unwrap();
