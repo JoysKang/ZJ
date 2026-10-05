@@ -18,6 +18,8 @@ use serde_json::{Value, json};
 // Heights: every list row shares one height; every bar shares another. The owner asked for
 // text one step larger than VS Code's 13 px, so rows grow from 22 to 24 on the same grid.
 pub const ROW_HEIGHT: Pixels = px(24.);
+/// How far beyond the viewport the Source Control list lays out rows (smooth scrolling).
+pub const SCM_LIST_OVERDRAW: Pixels = px(200.);
 pub const TAB_HEIGHT: Pixels = px(36.);
 pub const BREADCRUMB_HEIGHT: Pixels = px(24.);
 pub const TAB_CLOSE: Pixels = px(20.);
@@ -263,8 +265,6 @@ pub struct Palette {
     pub commit_hover: u32,
     /// Keyboard shortcut key caps.
     pub keycap: u32,
-    /// The faint welcome wordmark.
-    pub logo: u32,
     /// The welcome logo's cursor (Nord aurora red in both themes, as in the app icon).
     pub logo_cursor: u32,
     /// The current find match (VS Code `editor.findMatchBackground`), drawn at
@@ -336,7 +336,6 @@ pub const DARK: Palette = Palette {
     commit_fg: 0xffffff,
     commit_hover: 0x47731b,
     keycap: 0x103a44,
-    logo: 0x00222b,
     logo_cursor: 0xbf616a,
     // Solarized yellow.
     find_current: 0xb58900,
@@ -399,7 +398,6 @@ pub const LIGHT: Palette = Palette {
     commit_fg: 0x2e3440,
     commit_hover: 0x97b47e,
     keycap: 0xd8dee9,
-    logo: 0xdfe4ec,
     logo_cursor: 0xbf616a,
     // Nord aurora yellow.
     find_current: 0xebcb8b,
@@ -546,7 +544,6 @@ fn syntax_json(entries: &[(&str, u32, Option<&str>)]) -> Value {
 
 /// The palette converted for drawing.
 #[derive(Clone, Copy)]
-#[allow(dead_code)] // Badge, key cap, logo and guide colors are used by the upcoming workbench.
 pub struct Colors {
     pub editor: Hsla,
     pub panel: Hsla,
@@ -565,7 +562,6 @@ pub struct Colors {
     pub commit_fg: Hsla,
     pub commit_hover: Hsla,
     pub keycap: Hsla,
-    pub logo: Hsla,
     pub logo_cursor: Hsla,
     pub indent_guide: Hsla,
     pub added: Hsla,
@@ -639,7 +635,6 @@ impl Palette {
             commit_fg: hsla(self.commit_fg),
             commit_hover: hsla(self.commit_hover),
             keycap: hsla(self.keycap),
-            logo: hsla(self.logo),
             logo_cursor: hsla(self.logo_cursor),
             indent_guide: hsla(self.indent_guide),
             added: hsla(self.added),

@@ -679,7 +679,7 @@ impl Placement {
                 {
                     let top = height * line as f32 - (bounds.size.height - height) / 2.;
                     let x = state.scroll_offset().x;
-                    state.set_scroll_offset(point(x, -top.max(px(0.))), cx);
+                    state.set_scroll_offset(point(x, -top.max(Pixels::ZERO)), cx);
                 }
                 return;
             }

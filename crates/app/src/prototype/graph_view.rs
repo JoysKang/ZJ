@@ -924,8 +924,20 @@ impl Prototype {
                     let mut circle = PathBuilder::stroke(theme::GRAPH_STROKE);
                     circle.move_to(point(node_x - ring, middle));
                     let radii = point(ring, ring);
-                    circle.arc_to(radii, px(0.), false, true, point(node_x + ring, middle));
-                    circle.arc_to(radii, px(0.), false, true, point(node_x - ring, middle));
+                    circle.arc_to(
+                        radii,
+                        Pixels::ZERO,
+                        false,
+                        true,
+                        point(node_x + ring, middle),
+                    );
+                    circle.arc_to(
+                        radii,
+                        Pixels::ZERO,
+                        false,
+                        true,
+                        point(node_x - ring, middle),
+                    );
                     if let Ok(path) = circle.build() {
                         window.paint_path(path, lane_color);
                     }

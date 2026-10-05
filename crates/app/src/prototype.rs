@@ -599,7 +599,7 @@ impl Prototype {
             hide_clean_repos: cx.global::<crate::settings::Settings>().hide_clean_repos,
             focus_tree_on_open: false,
             welcome_cursor: cx.new(|_| welcome::WelcomeCursor::new()),
-            scm_list: ListState::new(0, ListAlignment::Top, px(200.)),
+            scm_list: ListState::new(0, ListAlignment::Top, theme::SCM_LIST_OVERDRAW),
             reveal_pending: false,
             expanded: HashSet::new(),
             restore_expanded: HashSet::new(),

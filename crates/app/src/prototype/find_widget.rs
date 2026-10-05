@@ -648,9 +648,9 @@ impl Prototype {
                 .rounded_b(theme::RADIUS)
                 .shadow(vec![BoxShadow {
                     color: colors.shadow,
-                    offset: point(px(0.), theme::FIND_SHADOW_Y),
+                    offset: point(Pixels::ZERO, theme::FIND_SHADOW_Y),
                     blur_radius: theme::FIND_SHADOW_BLUR,
-                    spread_radius: px(0.),
+                    spread_radius: Pixels::ZERO,
                     inset: false,
                 }])
                 .text_color(colors.foreground)
