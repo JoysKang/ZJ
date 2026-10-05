@@ -341,7 +341,7 @@ def main():
                                           show_categories=args.breakdown)
         report["idle_welcome_footprint_mb"] = welcome
         report["idle_welcome_cpu_p95_percent"] = blink_cpu
-        print(f"空闲（1 个窗口，欢迎页，光标可能在闪）：{welcome:.1f} MB；CPU p95：{blink_cpu:.3f}%")
+        print(f"空闲（1 个窗口，欢迎页）：{welcome:.1f} MB；CPU p95：{blink_cpu:.3f}%")
         many = measure_many(args.binary, folders, files, env, show_categories=args.breakdown)
         report["three_windows_20_docs_mb"] = many
         print(f"3 个窗口 + {len(files)} 个文档：{many:.1f} MB")
