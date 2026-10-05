@@ -119,14 +119,26 @@ pub fn resolve_file(client: &AgentClient, path: &Path, accept: bool) -> Result<(
     Ok(())
 }
 
-/// Accepts or rejects one hunk (block `index` of the review diff).
+/// Returned when the file changed after the review was shown: block `index` may now be a
+/// different change, so nothing is applied and the caller reloads the review.
+pub const STALE_REVIEW: &str = "这个文件在审阅期间又有修改，已重新载入，请再选一次";
+
+/// Accepts or rejects one hunk (block `index` of the review diff). `shown` is the
+/// [`full_context_patch`] the user was looking at; if the file has moved on since, block
+/// `index` could be another change, so the call fails with [`STALE_REVIEW`].
 pub fn resolve_hunk(
     client: &AgentClient,
     path: &Path,
     index: usize,
     accept: bool,
+    shown: &str,
 ) -> Result<(), String> {
     let name = file_name(path);
+    let current = review_texts(client, path)
+        .map(|(before, after, _)| full_context_patch(before.as_deref().unwrap_or(""), &after).0);
+    if current.as_deref() != Some(shown) {
+        return Err(STALE_REVIEW.into());
+    }
     if client.shadow().get(path).is_some() {
         return client
             .shadow()

@@ -949,6 +949,7 @@ impl Prototype {
         let mut written = Vec::new();
         let mut recount = false;
         let mut turn_ended = false;
+        let mut review_changed = false;
         let Some(session) = self.agent.session_mut(key) else {
             return;
         };
@@ -982,10 +983,12 @@ impl Prototype {
                     written.push(path.clone());
                     touched.push(path.display().to_string());
                     recount = true;
+                    review_changed = true;
                 }
                 AgentEvent::EditProposed { path } => {
                     touched.push(path.display().to_string());
                     recount = true;
+                    review_changed = true;
                 }
                 AgentEvent::ToolCall(call) => {
                     touched.extend(call.locations.iter().map(|l| l.path.display().to_string()));
@@ -1050,11 +1053,12 @@ impl Prototype {
         for path in written {
             self.reload_document_from_disk(&path, window, cx);
         }
-        if turn_ended {
+        // An open review follows the agent's writes as they happen, not only at turn end.
+        if turn_ended || review_changed {
             self.agent_reload_review(key, window, cx);
-            if self.agent.view == AgentView::History {
-                self.agent_reload_history(window, cx);
-            }
+        }
+        if turn_ended && self.agent.view == AgentView::History {
+            self.agent_reload_history(window, cx);
         }
         self.agent_sync_list(false);
         self.agent_update_spin(window, cx);

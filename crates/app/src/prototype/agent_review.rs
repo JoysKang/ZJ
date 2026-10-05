@@ -221,9 +221,13 @@ impl Prototype {
             cx.notify();
             return;
         };
+        // The patch on screen: block `index` is only meaningful against it.
+        let Some(shown) = self.diff_source.as_ref().map(|(text, _)| text.clone()) else {
+            return;
+        };
         let path = diff.path.clone();
         let job = cx.background_spawn(async move {
-            workspace_editor_agent::review::resolve_hunk(&client, &path, index, accept)
+            workspace_editor_agent::review::resolve_hunk(&client, &path, index, accept, &shown)
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = job.await;

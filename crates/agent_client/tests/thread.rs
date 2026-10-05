@@ -154,7 +154,7 @@ fn a_crash_shows_a_notice_and_an_error_status() {
 #[test]
 fn a_full_turn_reviews_hunk_by_hunk() {
     use workspace_editor_agent::{
-        review::{resolve_file, resolve_hunk, review_texts},
+        review::{STALE_REVIEW, full_context_patch, resolve_file, resolve_hunk, review_texts},
         thread::{command_prefix, permission_command, rule_matches},
     };
     let root = std::env::temp_dir().join(format!("zj-thread-demo-{}", std::process::id()));
@@ -256,14 +256,30 @@ fn a_full_turn_reviews_hunk_by_hunk() {
     assert_eq!(origin, ChangeOrigin::Written);
     assert_eq!(base.as_deref(), Some(before));
     assert_eq!(after, "a\nB\nc\nd\ne\nF\n");
-    resolve_hunk(&client, &file, 0, true).unwrap();
+    let shown = |client: &AgentClient| {
+        let (base, after, _) = review_texts(client, &file).unwrap();
+        full_context_patch(base.as_deref().unwrap_or(""), &after).0
+    };
+    // A review shown before the file changed again refuses to apply block 0 blindly.
+    let old = shown(&client);
+    std::fs::write(&file, "A\nB\nc\nd\ne\nF\n").unwrap();
+    assert_eq!(
+        resolve_hunk(&client, &file, 0, false, &old).unwrap_err(),
+        STALE_REVIEW
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "A\nB\nc\nd\ne\nF\n"
+    );
+    std::fs::write(&file, "a\nB\nc\nd\ne\nF\n").unwrap();
+    resolve_hunk(&client, &file, 0, true, &shown(&client)).unwrap();
     let (base, _, _) = review_texts(&client, &file).unwrap();
     assert_eq!(
         base.as_deref(),
         Some("a\nB\nc\nd\ne\nf\n"),
         "accepted into the snapshot"
     );
-    resolve_hunk(&client, &file, 0, false).unwrap();
+    resolve_hunk(&client, &file, 0, false, &shown(&client)).unwrap();
     assert_eq!(
         std::fs::read_to_string(&file).unwrap(),
         "a\nB\nc\nd\ne\nf\n"
