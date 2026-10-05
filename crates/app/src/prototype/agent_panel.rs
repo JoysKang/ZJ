@@ -22,9 +22,7 @@ use gpui_kit::{
 };
 use workspace_editor_agent::{
     Glyph, PermissionKind, PlanStatus, ToolKind, ToolStatus,
-    thread::{
-        ChangeOrigin, Item, LoginCard, LoginState, PermissionCard, PermissionState, ToolCard,
-    },
+    thread::{Item, LoginCard, LoginState, PermissionCard, PermissionState, ToolCard},
 };
 
 /// The agent's monochrome Lucide glyph on its tinted tile.
@@ -1694,7 +1692,6 @@ impl Prototype {
         let (added, removed) = files
             .values()
             .fold((0, 0), |(a, r), c| (a + c.added, r + c.removed));
-        let proposed = files.values().any(|c| c.origin == ChangeOrigin::Proposed);
         let collapsed = compact || self.agent.changes_collapsed;
         let key = session.key;
         let head =
@@ -1752,11 +1749,7 @@ impl Prototype {
                         .selected(true)
                         .xsmall()
                         .label(if compact { "接受" } else { "全部接受" })
-                        .tooltip(if proposed {
-                            "把建议写入磁盘"
-                        } else {
-                            "保留已写入的修改（不再列在这里）"
-                        })
+                        .tooltip("保留已写入的修改（不再列在这里）")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.agent_resolve_all(true, window, cx)
                         })),
@@ -2223,29 +2216,6 @@ impl Prototype {
                 .text_color(colors.muted)
                 .child(title)
         };
-        let accept_first = settings.accept_first;
-        let write_mode = h_flex()
-            .gap_1()
-            .child(
-                Button::new("agent-write-direct")
-                    .xsmall()
-                    .outline()
-                    .selected(!accept_first)
-                    .label("直接写入")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.agent_set_write_mode(false, window, cx)
-                    })),
-            )
-            .child(
-                Button::new("agent-write-accept")
-                    .xsmall()
-                    .outline()
-                    .selected(accept_first)
-                    .label("先审阅再写入")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.agent_set_write_mode(true, window, cx)
-                    })),
-            );
         let idle = {
             let weak = cx.weak_entity();
             let current = settings.idle_minutes;
@@ -2385,18 +2355,6 @@ impl Prototype {
             .overflow_y_scroll()
             .px_3()
             .pb_3()
-            .child(section("写入方式"))
-            .child(line("Agent 修改文件时", write_mode.into_any_element()))
-            .child(
-                div()
-                    .text_size(theme::TEXT_SECTION)
-                    .text_color(colors.muted)
-                    .child(if accept_first {
-                        "修改先留在 ZJ 里，在 Diff 中逐处接受后才写入磁盘。Agent 自己运行的命令（如 cargo fmt）仍会直接改动文件。"
-                    } else {
-                        "修改直接写入磁盘；面板列出改动过的文件，可与 Agent 改动前的内容对比、逐处还原。"
-                    }),
-            )
             .child(section("会话"))
             .child(line("新会话默认使用", default_agent.into_any_element()))
             .child(line("空闲多久后停止 Agent 进程", idle.into_any_element()))

@@ -32,8 +32,6 @@ pub struct AgentSettings {
     pub panel_width: f32,
     /// Preset id for new sessions.
     pub default_agent: String,
-    /// `false`: write directly (default); `true`: accept before writing.
-    pub accept_first: bool,
     pub idle_minutes: u32,
     /// agent id → variable → `$NAME` | `keychain:ACCOUNT`.
     pub env: BTreeMap<String, BTreeMap<String, String>>,
@@ -48,7 +46,6 @@ impl Default for AgentSettings {
             panel_visible: false,
             panel_width: AGENT_PANEL_WIDTH_DEFAULT,
             default_agent: "codex".into(),
-            accept_first: false,
             idle_minutes: AGENT_IDLE_DEFAULT,
             env: BTreeMap::new(),
             custom: Vec::new(),
@@ -100,11 +97,6 @@ impl AgentSettings {
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .unwrap_or(defaults.default_agent),
-            accept_first: value
-                .get("write_mode")
-                .and_then(Value::as_str)
-                .map(|m| m == "accept_first")
-                .unwrap_or(defaults.accept_first),
             idle_minutes: value
                 .get("idle_minutes")
                 .and_then(Value::as_u64)
@@ -157,7 +149,6 @@ impl AgentSettings {
             "panel_visible": self.panel_visible,
             "panel_width": self.panel_width,
             "default_agent": self.default_agent,
-            "write_mode": if self.accept_first { "accept_first" } else { "direct" },
             "idle_minutes": self.idle_minutes,
             "env": self.env,
             "custom": self.custom.iter().map(|agent| json!({
@@ -386,7 +377,6 @@ mod tests {
                 panel_visible: true,
                 panel_width: 380.,
                 default_agent: "claude-code".into(),
-                accept_first: true,
                 idle_minutes: 30,
                 env: BTreeMap::from([(
                     "claude-code-deepseek".into(),

@@ -235,10 +235,7 @@ impl Prototype {
                 label: diff.label.clone(),
                 tooltip: diff.tooltip.clone(),
                 dirty: false,
-                note: diff.agent().map(|agent| match agent.origin {
-                    workspace_editor_agent::thread::ChangeOrigin::Proposed => "Agent 建议",
-                    workspace_editor_agent::thread::ChangeOrigin::Written => "Agent 修改",
-                }),
+                note: diff.agent().map(|_| "Agent 修改"),
                 deleted: false,
             });
         }

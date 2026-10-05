@@ -8,8 +8,8 @@
 //!   [`AgentEvent`]s, stops after an idle timeout and restarts on the next prompt (restoring
 //!   the session with `session/load` when the agent supports it).
 //! - Client capabilities: `fs/read_text_file` (open buffers first, then disk) and
-//!   `fs/write_text_file` ([`WriteMode::Direct`] or [`WriteMode::AcceptFirst`] through the
-//!   [`ShadowStore`]). `terminal/*` is not advertised in v1. When a session needs a login,
+//!   `fs/write_text_file` (written to disk after a snapshot of the file as it was before the
+//!   agent, for review; see [`review`]). `terminal/*` is not advertised in v1. When a session needs a login,
 //!   [`AgentEvent::AuthRequired`] lists the agent's methods; `terminal` ones run in
 //!   Terminal.app.
 //!
@@ -17,6 +17,7 @@
 //! content, environment values or the agent's stderr.
 
 mod client;
+pub mod diff;
 mod events;
 pub mod fs;
 mod login;
@@ -24,11 +25,10 @@ mod process;
 pub mod provision;
 pub mod registry;
 pub mod review;
-pub mod shadow;
 pub mod thread;
 
-pub use client::{AgentClient, ClientError, ClientOptions, PromptPart, WriteMode};
+pub use client::{AgentClient, ClientError, ClientOptions, PromptPart};
+pub use diff::Hunk;
 pub use events::*;
 pub use fs::BufferProvider;
 pub use registry::{AgentPreset, Glyph, LaunchError, SearchPath, builtin_presets};
-pub use shadow::{Hunk, PendingEdit, ShadowStore};

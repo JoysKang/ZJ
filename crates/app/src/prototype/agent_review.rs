@@ -15,7 +15,7 @@ use gpui_kit::{
     },
     prelude::FluentBuilder,
 };
-use workspace_editor_agent::{Glyph, review::full_context_patch, thread::ChangeOrigin};
+use workspace_editor_agent::{Glyph, review::full_context_patch};
 
 gpui_kit::actions!(agent_review, [AcceptAgentChange, RejectAgentChange]);
 
@@ -24,7 +24,6 @@ pub(super) struct AgentDiff {
     /// The live session whose client holds the snapshot or proposal.
     pub key: u64,
     pub path: PathBuf,
-    pub origin: ChangeOrigin,
     pub agent: String,
     pub glyph: Glyph,
     pub title: String,
@@ -42,15 +41,9 @@ impl Prototype {
         let Some(session) = self.agent.session(key) else {
             return;
         };
-        let origin = session
-            .thread
-            .changed_files
-            .get(&path)
-            .map_or(ChangeOrigin::Written, |c| c.origin);
         let diff = AgentDiff {
             key,
             path: path.clone(),
-            origin,
             agent: session.preset.display_name.clone(),
             glyph: session.preset.glyph,
             title: session.title(),
@@ -132,8 +125,7 @@ impl Prototype {
         let path = diff.path.clone();
         let job = cx.background_spawn(async move {
             let client = client?;
-            let (before, after, origin) =
-                workspace_editor_agent::review::review_texts(&client, &path)?;
+            let (before, after) = workspace_editor_agent::review::review_texts(&client, &path)?;
             let (patch, hunks) = full_context_patch(before.as_deref().unwrap_or(""), &after);
             if hunks.is_empty() {
                 return None;
@@ -141,7 +133,7 @@ impl Prototype {
             let text: Arc<str> = patch.into();
             let doc = crate::diff_doc::DiffDoc::parse(&text, language, &highlight, change_colors)
                 .map(Arc::new);
-            Some((text, doc, origin))
+            Some((text, doc))
         });
         self.preview_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = job.await;
@@ -153,16 +145,11 @@ impl Prototype {
                 this.diff_selection = None;
                 this.preview = None;
                 match result {
-                    Some((text, Some(doc), origin)) => {
+                    Some((text, Some(doc))) => {
                         let same = this
                             .diff_source
                             .as_ref()
                             .is_some_and(|(old, was_dark)| *old == text && *was_dark == dark);
-                        if let Some(DiffSource::Agent(diff)) =
-                            this.preview_diff.as_mut().map(|tab| &mut tab.source)
-                        {
-                            diff.origin = origin;
-                        }
                         if !same {
                             let fresh = this.diff_source.is_none();
                             this.diff_source = Some((text, dark));
@@ -182,7 +169,7 @@ impl Prototype {
                             .map(|tab| tab.label.clone())
                             .unwrap_or_default();
                     }
-                    Some((_, None, _)) => {
+                    Some((_, None)) => {
                         this.diff_doc = None;
                         this.diff_source = None;
                         this.preview_title = "这个文件太大或不是文本，无法逐处审阅".into();
@@ -235,13 +222,7 @@ impl Prototype {
                 if let Err(error) = result {
                     this.message = error;
                 }
-                eprintln!(
-                    "event=agent_review_hunk accept={accept} origin={}",
-                    match diff.origin {
-                        ChangeOrigin::Written => "written",
-                        ChangeOrigin::Proposed => "proposed",
-                    }
-                );
+                eprintln!("event=agent_review_hunk accept={accept}");
                 this.reload_document_from_disk(&diff.path, window, cx);
                 this.agent_resolved(diff.key, window, cx);
             });
@@ -305,10 +286,7 @@ impl Prototype {
             .diff_doc
             .as_ref()
             .is_none_or(|doc| doc.old.lines.is_empty() || doc.new.lines.is_empty());
-        let heading = match diff.origin {
-            ChangeOrigin::Proposed => format!("{} 建议的修改", diff.agent),
-            ChangeOrigin::Written => format!("{} 已写入的修改", diff.agent),
-        };
+        let heading = format!("{} 已写入的修改", diff.agent);
         let layout = |id: &'static str, icon: IconName, on: bool, label: &'static str| {
             Button::new(id)
                 .ghost()

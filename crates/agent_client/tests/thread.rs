@@ -3,12 +3,12 @@
 use std::{path::PathBuf, time::Duration};
 use workspace_editor_agent::{
     AgentClient, AgentEvent, AgentPreset, ClientOptions, Glyph, PermissionKind, PromptPart,
-    SearchPath, WriteMode,
+    SearchPath,
     registry::Launch,
-    thread::{ChangeOrigin, Item, PermissionState, Record, Status, Thread},
+    thread::{Item, PermissionState, Record, Status, Thread},
 };
 
-fn client(tag: &str, mode: WriteMode) -> (AgentClient, PathBuf) {
+fn client(tag: &str) -> (AgentClient, PathBuf) {
     let root = std::env::temp_dir().join(format!("zj-thread-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
@@ -30,7 +30,6 @@ fn client(tag: &str, mode: WriteMode) -> (AgentClient, PathBuf) {
     };
     let mut options = ClientOptions::new(preset, &root);
     options.search_path = Some(SearchPath::new(vec![]));
-    options.write_mode = mode;
     (AgentClient::start(options).unwrap(), root)
 }
 
@@ -70,7 +69,7 @@ fn run(client: &AgentClient, thread: &mut Thread, prompt: &str, answer: Option<&
 
 #[test]
 fn a_conversation_builds_the_panel_model() {
-    let (client, root) = client("conv", WriteMode::Direct);
+    let (client, root) = client("conv");
     let mut thread = Thread::new();
     run(&client, &mut thread, "echo 你好 world", None);
     assert_eq!(thread.status, Status::Idle);
@@ -111,31 +110,14 @@ fn a_conversation_builds_the_panel_model() {
         &format!("write {} two", file.display()),
         None,
     );
-    assert_eq!(thread.changed_files[&file].origin, ChangeOrigin::Written);
+    assert!(thread.changed_files.contains_key(&file));
     assert_eq!(client.snapshot(&file), Some(Some("one\n".into())));
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
-fn accept_first_proposals_show_as_pending_files() {
-    let (client, root) = client("shadow", WriteMode::AcceptFirst);
-    let mut thread = Thread::new();
-    let file = root.join("a.rs");
-    run(
-        &client,
-        &mut thread,
-        &format!("write {} two", file.display()),
-        None,
-    );
-    assert_eq!(thread.changed_files[&file].origin, ChangeOrigin::Proposed);
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\n");
-    assert_eq!(client.shadow().hunks(&file).len(), 1);
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
 fn a_crash_shows_a_notice_and_an_error_status() {
-    let (client, root) = client("crash", WriteMode::Direct);
+    let (client, root) = client("crash");
     let mut thread = Thread::new();
     run(&client, &mut thread, "crash", None);
     assert_eq!(thread.status, Status::Error);
@@ -252,12 +234,11 @@ fn a_full_turn_reviews_hunk_by_hunk() {
     assert_eq!(thread.title.as_deref(), Some("修复重连后序列号缺口"));
 
     // Review: two hunks against the snapshot taken before the agent wrote.
-    let (base, after, origin) = review_texts(&client, &file).unwrap();
-    assert_eq!(origin, ChangeOrigin::Written);
+    let (base, after) = review_texts(&client, &file).unwrap();
     assert_eq!(base.as_deref(), Some(before));
     assert_eq!(after, "a\nB\nc\nd\ne\nF\n");
     let shown = |client: &AgentClient| {
-        let (base, after, _) = review_texts(client, &file).unwrap();
+        let (base, after) = review_texts(client, &file).unwrap();
         full_context_patch(base.as_deref().unwrap_or(""), &after).0
     };
     // A review shown before the file changed again refuses to apply block 0 blindly.
@@ -273,7 +254,7 @@ fn a_full_turn_reviews_hunk_by_hunk() {
     );
     std::fs::write(&file, "a\nB\nc\nd\ne\nF\n").unwrap();
     resolve_hunk(&client, &file, 0, true, &shown(&client)).unwrap();
-    let (base, _, _) = review_texts(&client, &file).unwrap();
+    let (base, _) = review_texts(&client, &file).unwrap();
     assert_eq!(
         base.as_deref(),
         Some("a\nB\nc\nd\ne\nf\n"),

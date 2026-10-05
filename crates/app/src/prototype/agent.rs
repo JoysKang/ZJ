@@ -13,8 +13,7 @@ use crate::agent_model::{self, Attachment};
 use crate::markdown::{self, Block};
 use gpui_kit::component::input::InputState;
 use workspace_editor_agent::{
-    AgentClient, AgentEvent, AgentPreset, ClientOptions, PermissionKind, WriteMode,
-    builtin_presets,
+    AgentClient, AgentEvent, AgentPreset, ClientOptions, PermissionKind, builtin_presets,
     review::{line_counts, resolve_file, review_texts},
     thread::{self as agent_thread, FileChange, Item, PermissionState, Record, Thread},
 };
@@ -678,11 +677,6 @@ impl Prototype {
         let preset = session.preset.clone();
         let resume = session.resume.clone();
         let overrides = settings.env_for(&preset.id);
-        let write_mode = if settings.accept_first {
-            WriteMode::AcceptFirst
-        } else {
-            WriteMode::Direct
-        };
         let idle = Duration::from_secs(u64::from(settings.idle_minutes) * 60);
         let buffers = buffer_provider(cx);
         let create = default_workspace(cx).as_ref() == Some(&root);
@@ -693,7 +687,6 @@ impl Prototype {
             }
             let env = crate::secrets::resolve(&overrides, |name| std::env::var(name).ok())?;
             let mut options = ClientOptions::new(preset, root);
-            options.write_mode = write_mode;
             options.idle_timeout = idle;
             options.env_overrides = env;
             options.resume_session = resume;
@@ -981,11 +974,6 @@ impl Prototype {
                 }
                 AgentEvent::FileWritten { path } => {
                     written.push(path.clone());
-                    touched.push(path.display().to_string());
-                    recount = true;
-                    review_changed = true;
-                }
-                AgentEvent::EditProposed { path } => {
                     touched.push(path.display().to_string());
                     recount = true;
                     review_changed = true;
@@ -1362,41 +1350,9 @@ impl Prototype {
         cx.notify();
     }
 
-    pub(super) fn agent_set_write_mode(
-        &mut self,
-        accept_first: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.change_settings(window, cx, move |s| s.agent.accept_first = accept_first);
-        let mode = if accept_first {
-            WriteMode::AcceptFirst
-        } else {
-            WriteMode::Direct
-        };
-        for session in &self.agent.sessions {
-            if let Some(client) = &session.client {
-                client.set_write_mode(mode);
-            }
-        }
-        cx.notify();
-    }
-
     /// Another window (or the settings file) changed agent settings.
     pub(super) fn agent_follow_settings(&mut self, cx: &mut Context<Self>) {
         let settings = cx.global::<crate::settings::Settings>().agent.clone();
-        let mode = if settings.accept_first {
-            WriteMode::AcceptFirst
-        } else {
-            WriteMode::Direct
-        };
-        for session in &self.agent.sessions {
-            if let Some(client) = &session.client
-                && client.write_mode() != mode
-            {
-                client.set_write_mode(mode);
-            }
-        }
         let mut presets = builtin_presets();
         presets.extend(settings.custom.iter().cloned().map(|a| a.into_preset()));
         if presets != self.agent.presets {
@@ -1585,7 +1541,6 @@ impl Prototype {
         };
         let mut paths: Vec<PathBuf> = session.thread.changed_files.keys().cloned().collect();
         paths.extend(client.snapshot_paths());
-        paths.extend(client.shadow().pending_paths());
         paths.sort();
         paths.dedup();
         let db = session.db;
@@ -1593,10 +1548,9 @@ impl Prototype {
             paths
                 .into_iter()
                 .map(|path| {
-                    let change = review_texts(&client, &path).map(|(before, after, origin)| {
+                    let change = review_texts(&client, &path).map(|(before, after)| {
                         let (added, removed) = line_counts(before.as_deref().unwrap_or(""), &after);
                         FileChange {
-                            origin,
                             added,
                             removed,
                             new_file: before.is_none(),

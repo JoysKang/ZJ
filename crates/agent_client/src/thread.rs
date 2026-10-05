@@ -4,12 +4,12 @@
 //! Bounded: at most [`MAX_ITEMS`] items stay in memory; older ones are dropped from the front
 //! (`dropped` counts them) and come back from the history database on demand.
 
+use crate::diff::diff_hunks;
 use crate::events::{
     AgentCommand, AgentEvent, AuthChoice, ExitReason, Modes, PermissionId, PermissionKind,
     PermissionRequest, PlanEntry, ToolCall, ToolCallPatch, ToolContent, ToolKind, ToolStatus,
     TurnId, TurnOutcome,
 };
-use crate::shadow::diff_hunks;
 use std::{
     collections::{BTreeMap, VecDeque},
     path::PathBuf,
@@ -94,18 +94,9 @@ pub enum Item {
     },
 }
 
-/// Where a changed file's pending state lives.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChangeOrigin {
-    /// Written to disk (Direct); reviewed against the snapshot from before the agent.
-    Written,
-    /// Waiting in the shadow store (AcceptFirst).
-    Proposed,
-}
-
+/// A file the agent changed, reviewed against the snapshot from before the agent.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileChange {
-    pub origin: ChangeOrigin,
     pub added: usize,
     pub removed: usize,
     pub new_file: bool,
@@ -147,7 +138,7 @@ fn diff_stats(old: Option<&str>, new: &str) -> (usize, usize) {
     let old = old.unwrap_or("");
     diff_hunks(old, new)
         .iter()
-        .fold((0, 0), |(a, r), h| (a + h.proposed.len(), r + h.base.len()))
+        .fold((0, 0), |(a, r), h| (a + h.after.len(), r + h.base.len()))
 }
 
 fn clip(mut text: String) -> String {
@@ -407,7 +398,6 @@ impl Thread {
                     .changed_files
                     .entry(path.clone())
                     .or_insert(FileChange {
-                        origin: ChangeOrigin::Written,
                         added: 0,
                         removed: 0,
                         new_file: old_text.is_none(),
@@ -421,8 +411,7 @@ impl Thread {
         }
     }
 
-    /// Replaces a changed file's counts (computed by the app against the snapshot or shadow
-    /// base); `None` removes the file from the summary (accepted, rejected or reverted).
+    /// Replaces a changed file's counts (computed by the app against the snapshot); `None` removes the file from the summary (accepted, rejected or reverted).
     pub fn set_file_change(&mut self, path: PathBuf, change: Option<FileChange>) {
         match change {
             Some(change) => {
@@ -560,28 +549,13 @@ impl Thread {
                 self.status = Status::Awaiting;
             }
             AgentEvent::FileWritten { path } => {
-                let entry = self
-                    .changed_files
+                self.changed_files
                     .entry(path.clone())
                     .or_insert(FileChange {
-                        origin: ChangeOrigin::Written,
                         added: 0,
                         removed: 0,
                         new_file: false,
                     });
-                entry.origin = ChangeOrigin::Written;
-            }
-            AgentEvent::EditProposed { path } => {
-                let entry = self
-                    .changed_files
-                    .entry(path.clone())
-                    .or_insert(FileChange {
-                        origin: ChangeOrigin::Proposed,
-                        added: 0,
-                        removed: 0,
-                        new_file: false,
-                    });
-                entry.origin = ChangeOrigin::Proposed;
             }
             AgentEvent::TurnEnded { turn, outcome } => {
                 if self.turn != Some(*turn) {

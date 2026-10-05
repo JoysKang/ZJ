@@ -11,7 +11,6 @@ use crate::{
     process::{AgentProcess, describe},
     provision::{self, InstallError},
     registry::{AgentPreset, LaunchPlan, ResolvedLaunch, SearchPath},
-    shadow::ShadowStore,
 };
 use agent_client_protocol::{
     self as sdk, Agent, ByteStreams, Client, ConnectionTo, Responder,
@@ -34,22 +33,10 @@ use std::{
     time::Duration,
 };
 
-/// How `fs/write_text_file` reaches the disk.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum WriteMode {
-    /// Write immediately (default); the editor reloads the file.
-    #[default]
-    Direct,
-    /// Keep the agent's version in the [`ShadowStore`] until the user accepts it.
-    /// Shell commands the agent runs itself still see and write the real disk.
-    AcceptFirst,
-}
-
 pub struct ClientOptions {
     pub preset: AgentPreset,
     /// The agent's `cwd`; every `fs/*` path must stay inside it.
     pub workspace_root: PathBuf,
-    pub write_mode: WriteMode,
     /// Stop the process after this long without a turn, prompt or permission request.
     pub idle_timeout: Duration,
     /// Initialize / session setup.
@@ -72,7 +59,6 @@ impl ClientOptions {
         Self {
             preset,
             workspace_root: workspace_root.into(),
-            write_mode: WriteMode::Direct,
             idle_timeout: Duration::from_secs(10 * 60),
             handshake_timeout: Duration::from_secs(180),
             env_overrides: BTreeMap::new(),
@@ -122,7 +108,7 @@ const EVENT_CAPACITY: usize = 512;
 const COMMAND_CAPACITY: usize = 64;
 /// One JSON-RPC line from the agent (a tool call can carry two copies of a large file).
 const MAX_LINE: usize = 32 * 1024 * 1024;
-/// Files remembered for Direct-mode reviews per client.
+/// Files remembered for reviews per client.
 const MAX_SNAPSHOTS: usize = 256;
 /// How long a read waits for the editor's unsaved buffer.
 const BUFFER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -157,14 +143,12 @@ struct Shared {
     install_root: Option<PathBuf>,
     /// Set by [`AgentClient::cancel`]: a running first-use install stops.
     install_cancel: AtomicBool,
-    write_mode: Mutex<WriteMode>,
     events: async_channel::Sender<AgentEvent>,
     /// Wakes the session loop when a turn finishes (re-arms the idle timer).
     turn_done: async_channel::Sender<()>,
     /// A prompt the agent refused with "auth required" (sent before `turn_done`): the turn
     /// stays open, the session loop asks for a login and sends it again.
     parked: Mutex<Option<(TurnId, Vec<PromptPart>)>>,
-    shadow: ShadowStore,
     permissions: Mutex<HashMap<PermissionId, oneshot::Sender<Option<String>>>>,
     next_permission: AtomicU64,
     turn: Mutex<Option<TurnId>>,
@@ -173,7 +157,7 @@ struct Shared {
     replaying: AtomicBool,
     embedded_context: AtomicBool,
     pid: Mutex<Option<u32>>,
-    /// Direct mode: each file's content before the agent first touched it in this client
+    /// Each file's content before the agent first touched it in this client
     /// (`None` = the file did not exist), for "working tree vs. before the agent" reviews.
     snapshots: Mutex<BTreeMap<PathBuf, Option<String>>>,
 }
@@ -305,11 +289,9 @@ impl AgentClient {
             search: options.search_path.unwrap_or_else(SearchPath::from_env),
             install_root: options.install_root,
             install_cancel: AtomicBool::new(false),
-            write_mode: Mutex::new(options.write_mode),
             events: events_tx,
             turn_done: done_tx,
             parked: Mutex::new(None),
-            shadow: ShadowStore::default(),
             permissions: Mutex::new(HashMap::new()),
             next_permission: AtomicU64::new(1),
             turn: Mutex::new(None),
@@ -405,7 +387,7 @@ impl AgentClient {
         self.commands.try_send(Command::SetMode(mode_id)).is_ok()
     }
 
-    /// Paths the agent changed (or announced an edit for) in Direct mode, with their content
+    /// Paths the agent changed (or announced an edit for), with their content
     /// before that first change.
     pub fn snapshot_paths(&self) -> Vec<PathBuf> {
         self.shared
@@ -439,19 +421,6 @@ impl AgentClient {
     /// Forgets the "before" versions (after the user reviewed them, or for a new session).
     pub fn clear_snapshots(&self) {
         self.shared.snapshots.lock().unwrap().clear();
-    }
-
-    pub fn write_mode(&self) -> WriteMode {
-        *self.shared.write_mode.lock().unwrap()
-    }
-
-    /// Takes effect for the next write; proposals already pending stay in the shadow store.
-    pub fn set_write_mode(&self, mode: WriteMode) {
-        *self.shared.write_mode.lock().unwrap() = mode;
-    }
-
-    pub fn shadow(&self) -> &ShadowStore {
-        &self.shared.shadow
     }
 
     /// Process id while the agent runs (for the status bar's RSS sample).
@@ -1283,7 +1252,7 @@ async fn handle_update(
     let Some(mut event) = events::from_update(&notification.update) else {
         return;
     };
-    // Direct mode reviews diff against the file as it was before the first edit; an edit tool
+    // Reviews diff against the file as it was before the first edit; an edit tool
     // call announces its paths before it runs. Replayed history (`session/load`) is not about
     // to edit anything.
     if let AgentEvent::ToolCall(call) = &event
@@ -1292,7 +1261,6 @@ async fn handle_update(
             call.kind,
             events::ToolKind::Edit | events::ToolKind::Delete | events::ToolKind::Move
         )
-        && *shared.write_mode.lock().unwrap() == WriteMode::Direct
     {
         for location in &call.locations {
             if let Ok(path) = shared.workspace.resolve(&location.path) {
@@ -1399,12 +1367,9 @@ async fn handle_read(
     request: &acp::ReadTextFileRequest,
 ) -> Result<acp::ReadTextFileResponse, sdk::Error> {
     let path = shared.workspace.resolve(&request.path).map_err(fs_error)?;
-    let text = match shared.shadow.proposed_text(&path) {
+    let text = match shared.buffer_text(&path).await.map_err(fs_error)? {
         Some(text) => text,
-        None => match shared.buffer_text(&path).await.map_err(fs_error)? {
-            Some(text) => text,
-            None => read_disk(&path).map_err(fs_error)?,
-        },
+        None => read_disk(&path).map_err(fs_error)?,
     };
     Ok(acp::ReadTextFileResponse::new(window(
         text,
@@ -1418,26 +1383,9 @@ async fn handle_write(
     request: acp::WriteTextFileRequest,
 ) -> Result<acp::WriteTextFileResponse, sdk::Error> {
     let path = shared.workspace.resolve(&request.path).map_err(fs_error)?;
-    let mode = *shared.write_mode.lock().unwrap();
-    match mode {
-        WriteMode::Direct => {
-            shared.snapshot(&path).await;
-            write_atomic(&path, &request.content).map_err(fs_error)?;
-            // A proposal left from accept-first mode is older than this write; keeping it
-            // would make reads and the review show the stale text.
-            if shared.shadow.reject_file(&path) {
-                eprintln!("event=agent_proposal_superseded");
-            }
-            shared.emit(AgentEvent::FileWritten { path }).await;
-        }
-        WriteMode::AcceptFirst => {
-            shared
-                .shadow
-                .propose(&path, request.content)
-                .map_err(fs_error)?;
-            shared.emit(AgentEvent::EditProposed { path }).await;
-        }
-    }
+    shared.snapshot(&path).await;
+    write_atomic(&path, &request.content).map_err(fs_error)?;
+    shared.emit(AgentEvent::FileWritten { path }).await;
     Ok(acp::WriteTextFileResponse::new())
 }
 

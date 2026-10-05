@@ -1,11 +1,10 @@
 //! Reviewing an agent's changes hunk by hunk: a full-context patch for the diff editor (one
-//! change block per [`Hunk`], in the same order) and the Direct-mode decisions, which move
-//! the "before" snapshot (accept) or the file on disk (reject).
+//! change block per [`Hunk`], in the same order) and the decisions, which move the "before"
+//! snapshot (accept) or the file on disk (reject).
 
 use crate::{
     AgentClient,
-    shadow::{Hunk, apply_hunks, diff_hunks},
-    thread::ChangeOrigin,
+    diff::{Hunk, apply_hunks, diff_hunks},
 };
 use std::path::Path;
 
@@ -36,7 +35,7 @@ pub fn full_context_patch(before: &str, after: &str) -> (String, Vec<Hunk>) {
         for line in &old[hunk.base.clone()] {
             push('-', line);
         }
-        for line in &new[hunk.proposed.clone()] {
+        for line in &new[hunk.after.clone()] {
             push('+', line);
         }
         at = hunk.base.end;
@@ -51,56 +50,38 @@ pub fn full_context_patch(before: &str, after: &str) -> (String, Vec<Hunk>) {
 pub fn line_counts(before: &str, after: &str) -> (usize, usize) {
     diff_hunks(before, after)
         .iter()
-        .fold((0, 0), |(a, r), h| (a + h.proposed.len(), r + h.base.len()))
+        .fold((0, 0), |(a, r), h| (a + h.after.len(), r + h.base.len()))
 }
 
-/// Direct mode, accepting hunk `index` of `before → current`: the new "before" text, which
+/// Accepting hunk `index` of `before → current`: the new "before" text, which
 /// already contains that hunk (so it drops out of the review).
 pub fn accept_written_hunk(before: &str, current: &str, index: usize) -> String {
     apply_hunks(before, current, &[index])
 }
 
-/// Direct mode, rejecting hunk `index`: the file text with just that hunk reverted.
+/// Rejecting hunk `index`: the file text with just that hunk reverted.
 pub fn reject_written_hunk(before: &str, current: &str, index: usize) -> String {
     let count = diff_hunks(before, current).len();
     let keep: Vec<usize> = (0..count).filter(|i| *i != index).collect();
     apply_hunks(before, current, &keep)
 }
 
-/// The review base and current text of a changed file: (before, after, origin). `None` when
-/// nothing is pending for it.
-pub fn review_texts(
-    client: &AgentClient,
-    path: &Path,
-) -> Option<(Option<String>, String, ChangeOrigin)> {
-    if let Some(edit) = client.shadow().get(path) {
-        return Some((edit.base, edit.proposed, ChangeOrigin::Proposed));
-    }
+/// The review base and current text of a changed file: (before, after). `None` when nothing
+/// is pending for it.
+pub fn review_texts(client: &AgentClient, path: &Path) -> Option<(Option<String>, String)> {
     let before = client.snapshot(path)?;
     let after = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(_) => return None,
     };
-    Some((before, after, ChangeOrigin::Written))
+    Some((before, after))
 }
 
-/// Accepts or rejects a whole file. Direct mode: accepting forgets the snapshot, rejecting
-/// restores it on disk (or removes a file the agent created).
+/// Accepts or rejects a whole file: accepting forgets the snapshot, rejecting restores it on
+/// disk (or removes a file the agent created).
 pub fn resolve_file(client: &AgentClient, path: &Path, accept: bool) -> Result<(), String> {
     let name = file_name(path);
-    if client.shadow().get(path).is_some() {
-        if accept {
-            client
-                .shadow()
-                .accept_file(path)
-                .map(|_| ())
-                .map_err(|e| format!("{name}：{e}"))?;
-        } else {
-            client.shadow().reject_file(path);
-        }
-        return Ok(());
-    }
     let Some(before) = client.snapshot(path) else {
         return Ok(());
     };
@@ -135,18 +116,11 @@ pub fn resolve_hunk(
 ) -> Result<(), String> {
     let name = file_name(path);
     let current = review_texts(client, path)
-        .map(|(before, after, _)| full_context_patch(before.as_deref().unwrap_or(""), &after).0);
+        .map(|(before, after)| full_context_patch(before.as_deref().unwrap_or(""), &after).0);
     if current.as_deref() != Some(shown) {
         return Err(STALE_REVIEW.into());
     }
-    if client.shadow().get(path).is_some() {
-        return client
-            .shadow()
-            .resolve_hunk(path, index, accept)
-            .map(|_| ())
-            .map_err(|e| format!("{name}：{e}"));
-    }
-    let Some((before, current, _)) = review_texts(client, path) else {
+    let Some((before, current)) = review_texts(client, path) else {
         return Ok(());
     };
     let base = before.clone().unwrap_or_default();

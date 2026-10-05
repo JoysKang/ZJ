@@ -12,7 +12,6 @@ use std::{
 use workspace_editor_agent::{
     AgentClient, AgentEvent, AgentPreset, BufferProvider, ClientError, ClientOptions, ExitReason,
     Glyph, PermissionKind, PromptPart, SearchPath, ToolContent, ToolKind, ToolStatus, TurnOutcome,
-    WriteMode,
     registry::{EnvValue, Launch},
 };
 
@@ -409,83 +408,6 @@ fn direct_writes_hit_the_disk() {
     );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "你好 disk");
     assert_eq!(message(&seen), "readback:你好 disk");
-}
-
-#[test]
-fn accept_first_keeps_disk_until_accepted() {
-    let ws = Workspace::new("shadow");
-    let file = ws.path("src/lib.rs");
-    std::fs::write(&file, "one\ntwo\nthree\n").unwrap();
-    let mut opts = options(&ws, &[]);
-    opts.write_mode = WriteMode::AcceptFirst;
-    let client = AgentClient::start(opts).unwrap();
-    let events = Events::of(&client);
-    // "ONE" replaces line 1, line 3 changes, a line is appended: two hunks.
-    client
-        .prompt(text(&format!(
-            "write {} ONE\ntwo\nTHREE\nfour\n",
-            file.display()
-        )))
-        .unwrap();
-    let seen = events.turn();
-    assert!(
-        seen.iter()
-            .any(|e| matches!(e, AgentEvent::EditProposed { path } if *path == file))
-    );
-    // The agent reads its own proposal; the disk is untouched.
-    assert_eq!(message(&seen), "readback:ONE\ntwo\nTHREE\nfour\n");
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\ntwo\nthree\n");
-    let shadow = client.shadow();
-    assert_eq!(shadow.pending_paths(), vec![file.clone()]);
-    let hunks = shadow.hunks(&file);
-    assert_eq!(hunks.len(), 2, "{hunks:?}");
-    // Accept only the first hunk.
-    let text_now = shadow.accept_hunks(&file, &[0]).unwrap();
-    assert_eq!(text_now, "ONE\ntwo\nthree\n");
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), text_now);
-    assert!(shadow.pending_paths().is_empty());
-
-    // New file, rejected: never created.
-    let new_file = ws.path("src/new.rs");
-    client
-        .prompt(text(&format!("write {} fn new() {{}}", new_file.display())))
-        .unwrap();
-    events.turn();
-    assert!(shadow.reject_file(&new_file));
-    assert!(!new_file.exists());
-
-    // Conflict: the user edited the file after the proposal.
-    client
-        .prompt(text(&format!("write {} agent version", file.display())))
-        .unwrap();
-    events.turn();
-    std::fs::write(&file, "user edit\n").unwrap();
-    let err = shadow.accept_file(&file).unwrap_err();
-    assert!(err.to_string().contains("又被改动"), "{err}");
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), "user edit\n");
-
-    // Switching back to direct writes.
-    shadow.reject_file(&file);
-    client.set_write_mode(WriteMode::Direct);
-    client
-        .prompt(text(&format!("write {} direct again", file.display())))
-        .unwrap();
-    events.turn();
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), "direct again");
-
-    // A proposal still pending when the mode changes is replaced by the direct write.
-    client.set_write_mode(WriteMode::AcceptFirst);
-    client
-        .prompt(text(&format!("write {} stale proposal", file.display())))
-        .unwrap();
-    events.turn();
-    assert_eq!(shadow.pending_paths(), vec![file.clone()]);
-    client.set_write_mode(WriteMode::Direct);
-    client
-        .prompt(text(&format!("write {} direct wins", file.display())))
-        .unwrap();
-    assert_eq!(message(&events.turn()), "readback:direct wins");
-    assert!(shadow.pending_paths().is_empty());
 }
 
 #[test]

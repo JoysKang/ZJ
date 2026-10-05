@@ -50,12 +50,8 @@ pub enum AgentEvent {
         title: Option<String>,
     },
     PermissionRequested(PermissionRequest),
-    /// `WriteMode::Direct`: the file on disk changed (the editor should reload it).
+    /// The agent wrote a file on disk (the editor should reload it).
     FileWritten {
-        path: PathBuf,
-    },
-    /// `WriteMode::AcceptFirst`: a proposal is waiting in the shadow store.
-    EditProposed {
         path: PathBuf,
     },
     TurnEnded {
