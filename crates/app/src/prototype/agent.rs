@@ -309,14 +309,7 @@ impl AgentPanel {
                 _ => {}
             },
         );
-        let mut presets = builtin_presets();
-        presets.extend(
-            settings
-                .custom
-                .iter()
-                .cloned()
-                .map(|agent| agent.into_preset()),
-        );
+        let presets = presets_from(&settings);
         let thread_list = ListState::new(0, ListAlignment::Top, theme::AGENT_THREAD_MAX);
         thread_list.set_follow_mode(FollowMode::Tail);
         Self {
@@ -377,6 +370,11 @@ impl AgentPanel {
         self.presets.iter().find(|p| p.id == id)
     }
 
+    /// The preset `id`, or the first one when it is gone (removed from the settings).
+    pub fn preset_or_first(&self, id: &str) -> Option<&AgentPreset> {
+        self.preset(id).or_else(|| self.presets.first())
+    }
+
     /// Sessions running, waiting for approval or finished unread (direction B's strip).
     pub fn active_sessions(&self) -> impl Iterator<Item = &LiveSession> {
         self.sessions.iter().filter(|s| s.busy() || s.thread.unread)
@@ -402,15 +400,19 @@ pub(super) fn agent_name(presets: &[AgentPreset], id: &str) -> String {
         .unwrap_or_else(|| id.to_string())
 }
 
-fn glyph_of(presets: &[AgentPreset], id: &str) -> workspace_editor_agent::Glyph {
+/// The agent's glyph; unknown agents get the generic one.
+pub(super) fn glyph_for(presets: &[AgentPreset], id: &str) -> workspace_editor_agent::Glyph {
     presets
         .iter()
         .find(|p| p.id == id)
         .map_or(workspace_editor_agent::Glyph::Generic, |p| p.glyph)
 }
 
-pub(super) fn glyph_for(presets: &[AgentPreset], id: &str) -> workspace_editor_agent::Glyph {
-    glyph_of(presets, id)
+/// The built-in presets followed by the user's own agents from the settings.
+fn presets_from(settings: &crate::settings::AgentSettings) -> Vec<AgentPreset> {
+    let mut presets = builtin_presets();
+    presets.extend(settings.custom.iter().cloned().map(|a| a.into_preset()));
+    presets
 }
 
 fn record_role(record: &Record) -> (HistoryRole, String) {
@@ -547,12 +549,7 @@ impl Prototype {
             return;
         }
         let id = self.agent.agent_id.clone();
-        let Some(preset) = self
-            .agent
-            .preset(&id)
-            .or_else(|| self.agent.presets.first())
-            .cloned()
-        else {
+        let Some(preset) = self.agent.preset_or_first(&id).cloned() else {
             return;
         };
         let key = self.agent.next_key;
@@ -573,12 +570,7 @@ impl Prototype {
         cx: &mut Context<Self>,
     ) {
         let id = agent.unwrap_or_else(|| self.agent.agent_id.clone());
-        let Some(preset) = self
-            .agent
-            .preset(&id)
-            .or_else(|| self.agent.presets.first())
-            .cloned()
-        else {
+        let Some(preset) = self.agent.preset_or_first(&id).cloned() else {
             return;
         };
         self.agent.agent_id = preset.id.clone();

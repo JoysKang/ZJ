@@ -151,8 +151,7 @@ impl Prototype {
     /// Another window (or the settings file) changed agent settings.
     pub(in crate::prototype) fn agent_follow_settings(&mut self, cx: &mut Context<Self>) {
         let settings = cx.global::<crate::settings::Settings>().agent.clone();
-        let mut presets = builtin_presets();
-        presets.extend(settings.custom.iter().cloned().map(|a| a.into_preset()));
+        let presets = presets_from(&settings);
         if presets != self.agent.presets {
             self.agent.presets = presets;
             cx.notify();
