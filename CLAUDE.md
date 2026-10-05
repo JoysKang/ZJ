@@ -61,7 +61,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `replace.rs`：查找替换的共同规则（Aa / ab / .*、`$1` 与大小写转义、保留大小写、CRLF、不跨行）；`prototype/find_widget.rs`：编辑器右上角的查找替换浮层（⌘F / ⌥⌘F）。
   - `watch.rs`：共用原生文件监听、路径引用回收和有界事件信号（带变更路径，超出上限退化为全量刷新）；不持有界面实体。
   - `refresh_plan.rs`：把一批变更路径算成最小刷新（只刷受影响仓库的状态、只重列变化的目录、增量更新索引）；被 Git 忽略的路径（target/、node_modules）按目录缓存判定后丢弃，构建期间不刷新。
-  - `prototype.rs`：工作台的状态和逻辑；`prototype/` 下是各区域的渲染（`chrome` 标题栏与状态栏、`sidebar` 侧栏与资源管理器、`scm`、`editor_area`、`quick_open`、`commands` 命令面板的命令表），以及 `workspace_refresh` 的事件刷新编排。
+  - `prototype.rs`：工作台的状态和逻辑（成组的状态放在各自模块的子结构体里：`sidebar::Explorer`、`diff_view::DiffPane`、`navigation::NavState`、`workspace_refresh::WatchState`）；`prototype/` 下是各区域的渲染（`chrome` 标题栏与状态栏、`sidebar` 侧栏与资源管理器、`scm`、`editor_area`、`quick_open`、`commands` 命令面板的命令表），以及 `workspace_refresh` 的事件刷新编排。
   - `diff_syntax.rs`：重新注册 diff 语法，让新增 / 删除有独立的颜色。
   - `languages.rs`：文件名 / 扩展名到语法的映射；新增语法要同时打开 Kit 的 feature 并在 `SAMPLES` 里加样例。
   - `editing.rs`：行编辑命令的纯逻辑（⌘/ 行注释、⌥↑↓ 移动行、⇧⌥↑↓ 复制行、⌘D 选词和下一个匹配，按 VS Code 规则），不依赖 GPUI；`prototype/edit_commands.rs` 接到文档编辑器上（`DocumentEditor > Input` 键上下文，只用 Kit 公开的主选区）。
