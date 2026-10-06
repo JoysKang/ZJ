@@ -21,7 +21,6 @@ pub const ROW_HEIGHT: Pixels = px(24.);
 /// How far beyond the viewport the Source Control list lays out rows (smooth scrolling).
 pub const SCM_LIST_OVERDRAW: Pixels = px(200.);
 pub const TAB_HEIGHT: Pixels = px(36.);
-pub const BREADCRUMB_HEIGHT: Pixels = px(24.);
 pub const TAB_CLOSE: Pixels = px(20.);
 pub const DIRTY_DOT: Pixels = px(8.);
 pub const KEYCAP: Pixels = px(20.);

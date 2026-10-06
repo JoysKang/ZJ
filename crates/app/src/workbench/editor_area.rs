@@ -231,7 +231,7 @@ impl Workbench {
                     label: name,
                     tooltip: doc.path.to_string_lossy().into_owned(),
                     dirty: doc.dirty,
-                    note: None,
+                    note: doc.readonly.then_some("只读"),
                     deleted: doc.deleted,
                     pending: None,
                 }
@@ -331,77 +331,6 @@ impl Workbench {
                 self.active == Pane::Diff && !self.diff_is_agent_review(),
                 |bar| bar.child(self.render_diff_actions(cx)),
             )
-            .into_any_element()
-    }
-
-    fn render_breadcrumbs(&self, cx: &mut Context<Self>) -> AnyElement {
-        let colors = theme::colors(cx);
-        let (path, suffix) = match self.active {
-            Pane::Document(id) => match self.documents.iter().find(|doc| doc.id == id) {
-                Some(doc) => (
-                    Some(doc.path.clone()),
-                    doc.readonly.then_some("只读文件（保存时需另存为）"),
-                ),
-                None => (None, None),
-            },
-            Pane::Diff => (
-                self.diff.tab.as_ref().map(|diff| diff.path.clone()),
-                Some(if self.diff_is_agent_review() {
-                    "Agent 修改审阅"
-                } else {
-                    "Diff · 只读"
-                }),
-            ),
-            Pane::Large => (
-                self.large.as_ref().map(|large| large.path.clone()),
-                Some("受限查看 · 只读"),
-            ),
-            Pane::Welcome | Pane::Graph => (None, None),
-        };
-        let Some(path) = path else {
-            return div().into_any_element();
-        };
-        let relative = self.relative(&path).to_path_buf();
-        let segments: Vec<String> = relative
-            .components()
-            .map(|component| {
-                component
-                    .as_os_str()
-                    .to_string_lossy()
-                    .replace(SINGLE_LINE, "⏎")
-            })
-            .collect();
-        let last = segments.len().saturating_sub(1);
-        let mut crumbs = h_flex()
-            .h(theme::BREADCRUMB_HEIGHT)
-            .w_full()
-            .flex_shrink_0()
-            .px_3()
-            .gap_1()
-            .overflow_hidden()
-            .bg(colors.editor)
-            .text_size(theme::TEXT_CAPTION)
-            .text_color(colors.muted);
-        for (index, segment) in segments.into_iter().enumerate() {
-            if index > 0 {
-                crumbs = crumbs.child(
-                    Icon::new(IconName::ChevronRight)
-                        .size(theme::SMALL_ICON_SIZE)
-                        .text_color(colors.muted),
-                );
-            }
-            if index == last {
-                crumbs = crumbs
-                    .child(file_icons::icon(file_icons::for_file(&segment)))
-                    .child(div().text_color(colors.foreground).child(segment));
-            } else {
-                crumbs = crumbs.child(div().flex_shrink_0().child(segment));
-            }
-        }
-        crumbs
-            .when_some(suffix, |crumbs, suffix| {
-                crumbs.child(div().pl_2().child(suffix))
-            })
             .into_any_element()
     }
 
@@ -558,7 +487,6 @@ impl Workbench {
             .min_h_0()
             .bg(colors.editor)
             .child(self.render_tabs(cx))
-            .child(self.render_breadcrumbs(cx))
             .when(self.active == Pane::Diff, |area| {
                 area.children(self.render_agent_review_bar(cx))
             })
