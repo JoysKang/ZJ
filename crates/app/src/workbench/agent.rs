@@ -153,6 +153,8 @@ pub(super) struct LiveSession {
     highlight_task: Option<Task<()>>,
     /// The prompt typed while the agent was starting.
     queued: Option<(String, Vec<Attachment>)>,
+    /// The last event, prompt or look at it: idle sessions are put away after a while.
+    last_active: std::time::Instant,
 }
 
 impl LiveSession {
@@ -179,6 +181,7 @@ impl LiveSession {
             stats_task: None,
             highlight_task: None,
             queued: None,
+            last_active: std::time::Instant::now(),
         }
     }
 
@@ -522,7 +525,12 @@ impl Workbench {
         if self.agent.session(key).is_none() {
             return;
         }
+        // The session being left was looked at until now.
+        if let Some(left) = self.agent.current.and_then(|k| self.agent.session_mut(k)) {
+            left.last_active = std::time::Instant::now();
+        }
         self.agent.current = Some(key);
+        self.agent_reclaim_idle(cx);
         self.agent.attachments.clear();
         self.agent.mention = None;
         self.agent_sync_list(true);
@@ -594,7 +602,46 @@ impl Workbench {
             self.agent.current = Some(key);
         }
         self.agent.attachments.clear();
+        self.agent_reclaim_idle(cx);
         self.agent_sync_list(true);
         self.agent_show(AgentView::Thread, window, cx);
+    }
+
+    /// Puts away sessions left idle longer than the agent idle setting (their process has
+    /// stopped by then too): not the one shown, nothing running, waiting, unread, queued or
+    /// unsaved, and no changes waiting for review. They stay in the history and reopen from
+    /// there. Runs on events (switching, a new session, a turn ending, the window coming
+    /// back), never on a timer.
+    pub(super) fn agent_reclaim_idle(&mut self, cx: &mut Context<Self>) {
+        let minutes = cx.global::<crate::settings::Settings>().agent.idle_minutes;
+        let idle = Duration::from_secs(u64::from(minutes) * 60);
+        let current = self.agent.current;
+        let idle_enough = |s: &LiveSession| {
+            Some(s.key) != current
+                && !s.busy()
+                && !s.thread.unread
+                && s.queued.is_none()
+                && s.db.is_some()
+                && !s.db_creating
+                && s.pending.is_empty()
+                && s.thread.changed_files.is_empty()
+                && s.last_active.elapsed() >= idle
+        };
+        if !self.agent.sessions.iter().any(idle_enough) {
+            return;
+        }
+        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.agent.sessions)
+            .into_iter()
+            .partition(|s| idle_enough(s));
+        self.agent.sessions = kept;
+        for mut session in gone {
+            eprintln!("event=agent_session_reclaimed agent={}", session.preset.id);
+            // Stopping a client may wait for its process: not on the UI thread.
+            if let Some(client) = session.client.take() {
+                cx.background_spawn(async move { drop(client) }).detach();
+            }
+        }
+        self.agent_sync_list(false);
+        cx.notify();
     }
 }

@@ -523,6 +523,7 @@ impl Workbench {
         });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.agent_update_spin(window, cx);
+            this.agent_reclaim_idle(cx);
             if window.is_window_active() {
                 // Files opened from outside the workspace are not watched: look on activation.
                 this.check_disk(None, window, cx);

@@ -152,7 +152,7 @@ impl Workbench {
             .pb_3()
             .child(section("会话"))
             .child(line("新会话默认使用", default_agent.into_any_element()))
-            .child(line("空闲多久后停止 Agent 进程", idle.into_any_element()))
+            .child(line("空闲多久后停止 Agent 进程、收起会话", idle.into_any_element()))
             .child(section("Agent 与环境变量"))
             .children(agents)
             .child(

@@ -542,3 +542,53 @@ async fn answering_a_request_the_agent_no_longer_waits_for_changes_nothing(
     assert!(!replies(cx, &this).contains("selected:allow"));
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[gpui_kit::test]
+async fn sessions_left_idle_are_put_away_unless_something_still_needs_them(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let data = temp_root("reclaim");
+    let (handle, this) = open_with(
+        cx,
+        Some(data.clone()),
+        AgentStore {
+            history: Some(Arc::new(History::new(data.join("history.sqlite")))),
+            default_workspace: None,
+        },
+    );
+    send(cx, handle, &this, "echo hi");
+    settle(cx, &this);
+    until(cx, &this, "the session is in the history", |p| {
+        p.agent.current().is_some_and(|s| s.db.is_some())
+    });
+    let first = this.read_with(cx, |p, _| p.agent.current.unwrap());
+    // Another session is shown; the first one has been left alone for an hour.
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_new_session(None, window, cx);
+            let session = p.agent.session_mut(first).unwrap();
+            session.last_active = std::time::Instant::now() - Duration::from_secs(3600);
+            // An unread reply keeps it.
+            session.thread.unread = true;
+            p.agent_reclaim_idle(cx);
+        });
+    })
+    .unwrap();
+    this.read_with(cx, |p, _| assert!(p.agent.session(first).is_some()));
+    cx.update_window(handle.into(), |_, _, cx| {
+        this.update(cx, |p, cx| {
+            p.agent.session_mut(first).unwrap().thread.unread = false;
+            p.agent_reclaim_idle(cx);
+        });
+    })
+    .unwrap();
+    this.read_with(cx, |p, _| {
+        assert!(
+            p.agent.session(first).is_none(),
+            "an idle, saved session is put away"
+        );
+        assert!(p.agent.current.is_some_and(|k| k != first));
+    });
+    let _ = std::fs::remove_dir_all(data);
+}

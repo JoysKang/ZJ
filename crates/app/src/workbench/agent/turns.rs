@@ -188,6 +188,7 @@ impl Workbench {
         let Some(session) = self.agent.session_mut(key) else {
             return;
         };
+        session.last_active = std::time::Instant::now();
         let Some(client) = session.client.clone() else {
             return;
         };
@@ -351,6 +352,7 @@ impl Workbench {
         let Some(session) = self.agent.session_mut(key) else {
             return;
         };
+        session.last_active = std::time::Instant::now();
         let before = session.thread.items.len() + session.thread.dropped;
         let mut touched: Vec<String> = Vec::new();
         let mut title = None;
@@ -440,6 +442,9 @@ impl Workbench {
         }
         if turn_ended && self.agent.view == AgentView::History {
             self.agent_reload_history(window, cx);
+        }
+        if turn_ended {
+            self.agent_reclaim_idle(cx);
         }
         self.agent_sync_list(false);
         self.agent_update_spin(window, cx);
