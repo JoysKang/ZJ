@@ -6,7 +6,7 @@ use crate::recovery::{self, Op, Record};
 use crate::settings::Settings;
 #[allow(unused_imports)]
 use core::prelude::v1::test;
-use gpui_kit::TestAppContext;
+use gpui_kit::{TestAppContext, WindowBounds, WindowOptions};
 
 fn temp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("zj-recovery-ui-{name}-{}", std::process::id()));
@@ -241,4 +241,70 @@ async fn restored_tabs_open_the_active_one_and_read_the_rest_when_chosen(cx: &mu
     .unwrap();
     assert_eq!(names(cx).1, Vec::<String>::new());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The usual crash: the file being edited is also the last session's active tab. Both open it
+/// at launch; whichever comes second must still end with the snapshot in the tab.
+#[gpui_kit::test]
+async fn a_snapshot_of_the_restored_active_tab_comes_back(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let base = temp("active-tab");
+    let (root, store) = (base.join("work"), base.join("recovery"));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("a.txt");
+    std::fs::write(&path, "on disk").unwrap();
+    let record = Record {
+        key: recovery::file_key(&path),
+        path: path.clone(),
+        untitled: false,
+        root: Some(root.clone()),
+        text: "unsaved before the crash".into(),
+        written_at: 1,
+    };
+    recovery::apply(&store, &Op::Write(record)).unwrap();
+    cx.update(|cx| super::install(store.clone(), cx));
+    // As main.rs does: the window restores its tabs right as it is built.
+    let this = cx.update(|cx| {
+        let documents =
+            super::super::test_support::install_globals(cx, Settings::default(), empty_store());
+        let service = GitService::new(1, Duration::from_secs(5)).unwrap();
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1400.), px(900.)));
+        let active = path.clone();
+        let root = root.clone();
+        let mut view = None;
+        gpui_kit::open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            },
+            cx,
+            |window, cx| {
+                let this = cx.new(|cx| {
+                    let mut workbench =
+                        Workbench::new(Some(root), service, documents, 1, window, cx);
+                    workbench.restore_tabs(Vec::new(), Some(active), window, cx);
+                    workbench
+                });
+                view = Some(this.clone());
+                this
+            },
+        )
+        .unwrap();
+        view.unwrap()
+    });
+    let text = |cx: &mut TestAppContext| {
+        this.read_with(cx, |p, cx| {
+            p.documents
+                .first()
+                .map(|doc| (doc.editor.read(cx).text().to_string(), doc.dirty))
+        })
+    };
+    settle(cx, None, |cx| {
+        text(cx) == Some(("unsaved before the crash".to_string(), true))
+    });
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.documents.len(), 1);
+        assert!(!p.message.contains("没能"), "{}", p.message);
+    });
+    let _ = std::fs::remove_dir_all(&base);
 }

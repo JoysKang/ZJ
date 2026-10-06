@@ -1307,9 +1307,19 @@ impl Workbench {
             let result = job.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 let opened = match result {
-                    Ok((loaded, indent)) => this
-                        .install_loaded(loaded, indent, window, cx)
-                        .ok_or_else(|| "文件已打开，或已达到打开文件的上限".to_string()),
+                    Ok((loaded, indent)) => {
+                        let (id, path) = (loaded.id, loaded.path.clone());
+                        // Opened meanwhile (a restored tab and a crash snapshot of the same
+                        // file at launch): the callers want that tab.
+                        this.install_loaded(loaded, indent, window, cx)
+                            .or_else(|| {
+                                this.documents
+                                    .iter()
+                                    .find(|doc| doc.id == id || doc.path == path)
+                                    .map(|doc| doc.id)
+                            })
+                            .ok_or_else(|| "已达到打开文件的上限".to_string())
+                    }
                     // Not editable: shown in the viewer, and the caller still hears why.
                     Err(error) if let Some(reason) = files::Restricted::of(&error) => {
                         this.open_large(requested, reason, window, cx);
