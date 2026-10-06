@@ -141,7 +141,14 @@ impl Workbench {
         large._read_task = None;
         let (generation, cancel, path) =
             (large.generation, large.cancel.clone(), large.path.clone());
-        let job = cx.background_spawn(async move { large_file::index(&path, &cancel) });
+        // A growing log is indexed on from where the last index ended.
+        let old = large.index.clone();
+        let job = cx.background_spawn(async move {
+            match old {
+                Some(old) => large_file::reindex(&path, &old, &cancel),
+                None => large_file::index(&path, &cancel),
+            }
+        });
         large._index_task = Some(cx.spawn(async move |this, cx| {
             let result = job.await;
             let _ = this.update(cx, |this, cx| {
