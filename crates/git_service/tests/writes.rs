@@ -956,3 +956,97 @@ fn git_in_tests_sees_no_user_or_system_config() {
     let listed = String::from_utf8_lossy(&listed.stdout);
     assert!(listed.trim().is_empty(), "{listed}");
 }
+
+#[test]
+fn stash_push_list_apply_pop_drop_and_blame() {
+    common::hermetic();
+    let fixture = fixture();
+    let root = fixture.0.join("a");
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "initial"]);
+    let service = GitService::new(2, Duration::from_secs(5)).unwrap();
+    let cancel = AtomicBool::new(false);
+    let repo = service.identify(&root, &cancel).unwrap();
+
+    // Nothing to stash: refused. An untracked file alone needs `untracked`.
+    let push = |message: &str, untracked| WriteOperation::StashPush {
+        message: message.into(),
+        untracked,
+    };
+    assert!(write(&service, &root, push("", false)).is_err());
+    fs::write(root.join("new.txt"), "new\n").unwrap();
+    assert!(write(&service, &root, push("", false)).is_err());
+    write(&service, &root, push("带上新文件", true)).unwrap();
+    assert!(!root.join("new.txt").exists());
+    fs::write(root.join("src/main.rs"), "changed\n").unwrap();
+    write(&service, &root, push("", false)).unwrap();
+    assert_eq!(
+        fs::read_to_string(root.join("src/main.rs")).unwrap(),
+        "original\n"
+    );
+
+    let stashes = service.stashes(&repo, &cancel).unwrap();
+    assert_eq!(stashes.len(), 2);
+    assert!(
+        stashes[1].message.ends_with("带上新文件"),
+        "{:?}",
+        stashes[1]
+    );
+    assert!(
+        stashes[0].message.starts_with("WIP on main"),
+        "{:?}",
+        stashes[0]
+    );
+
+    // A stale choice (the list moved) is refused; the right one applies and pops.
+    let stale = WriteOperation::StashApply {
+        index: 0,
+        oid: stashes[1].oid.clone(),
+        pop: true,
+    };
+    assert!(write(&service, &root, stale).is_err());
+    let pop = WriteOperation::StashApply {
+        index: 0,
+        oid: stashes[0].oid.clone(),
+        pop: true,
+    };
+    write(&service, &root, pop).unwrap();
+    assert_eq!(
+        fs::read_to_string(root.join("src/main.rs")).unwrap(),
+        "changed\n"
+    );
+    let left = service.stashes(&repo, &cancel).unwrap();
+    assert_eq!(left.len(), 1);
+    let apply = WriteOperation::StashApply {
+        index: 0,
+        oid: left[0].oid.clone(),
+        pop: false,
+    };
+    write(&service, &root, apply).unwrap();
+    assert!(root.join("new.txt").exists());
+    assert_eq!(service.stashes(&repo, &cancel).unwrap().len(), 1);
+    let drop = WriteOperation::StashDrop {
+        index: 0,
+        oid: left[0].oid.clone(),
+    };
+    write(&service, &root, drop).unwrap();
+    assert!(service.stashes(&repo, &cancel).unwrap().is_empty());
+
+    // Blame: the committed line, then an edited buffer's line (not committed yet).
+    let path = Path::new("src/main.rs");
+    git(&root, &["checkout", "--", "src/main.rs"]);
+    let blame = service.blame_line(&repo, path, 1, None, &cancel).unwrap();
+    assert_eq!(
+        (
+            blame.author.as_str(),
+            blame.summary.as_str(),
+            blame.uncommitted
+        ),
+        ("Fixture", "initial", false)
+    );
+    let edited = service
+        .blame_line(&repo, path, 1, Some(b"edited\n"), &cancel)
+        .unwrap();
+    assert!(edited.uncommitted);
+    assert!(service.blame_line(&repo, path, 9, None, &cancel).is_err());
+}

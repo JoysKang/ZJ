@@ -68,6 +68,24 @@ pub enum WriteOperation {
         patch: String,
         cached: bool,
     },
+    /// `git stash push`; `untracked` also stashes untracked files. An empty message lets Git
+    /// name the stash after the branch and commit.
+    StashPush {
+        message: String,
+        untracked: bool,
+    },
+    /// Applies `stash@{index}`, checked to still be `oid`; `pop` also drops it once applied
+    /// cleanly (Git keeps it when the apply conflicts).
+    StashApply {
+        index: usize,
+        oid: String,
+        pop: bool,
+    },
+    /// Deletes `stash@{index}`, checked to still be `oid`.
+    StashDrop {
+        index: usize,
+        oid: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -133,6 +151,7 @@ impl GitService {
                     | WriteOperation::CreateTag { .. }
                     | WriteOperation::PushTag { .. }
                     | WriteOperation::DeleteTag { .. }
+                    | WriteOperation::StashDrop { .. }
             )
         {
             return Err(error("文件、暂存区或分支已变化，请刷新后重试"));
@@ -414,6 +433,57 @@ impl GitService {
                 }
                 let remote = self.tag_remote(&request.repo, &current, cancel)?;
                 args = tag_push_args(&remote, format!("refs/tags/{name}"));
+            }
+            WriteOperation::StashPush { message, untracked } => {
+                if conflicted {
+                    return Err(error("请先解决冲突"));
+                }
+                let stashable = current
+                    .changes
+                    .iter()
+                    .any(|c| *untracked || c.kind != ChangeKind::Untracked);
+                if !stashable {
+                    return Err(error("没有可以 stash 的更改"));
+                }
+                if message.len() > 65_536 || message.contains('\0') || message.contains('\n') {
+                    return Err(error("stash 说明须为一行，且不能超过 64 KiB"));
+                }
+                // No paths here, and with --literal-pathspecs `stash push -u` saves untracked
+                // files but leaves them in the worktree (its clean step uses a magic pathspec).
+                args = vec!["stash".into(), "push".into()];
+                if *untracked {
+                    args.push("--include-untracked".into());
+                }
+                if !message.trim().is_empty() {
+                    args.extend(["-m".into(), message.trim().into()]);
+                }
+            }
+            WriteOperation::StashApply { index, oid, .. }
+            | WriteOperation::StashDrop { index, oid } => {
+                let name = format!("stash@{{{index}}}");
+                let found = self
+                    .run_command(
+                        &request.repo.worktree,
+                        &[
+                            "rev-parse".into(),
+                            "--verify".into(),
+                            "--quiet".into(),
+                            name.clone().into(),
+                        ],
+                        cancel,
+                        true,
+                    )
+                    .map(|out| String::from_utf8_lossy(&out).trim().to_owned())?;
+                if found != *oid {
+                    return Err(error("stash 列表已变化，请重新选择"));
+                }
+                args = vec!["stash".into()];
+                args.push(match &request.operation {
+                    WriteOperation::StashApply { pop: true, .. } => "pop".into(),
+                    WriteOperation::StashApply { .. } => "apply".into(),
+                    _ => "drop".into(),
+                });
+                args.push(name.into());
             }
             WriteOperation::DeleteTag { name, remote } => {
                 self.check_tag_name(&request.repo, name, cancel)?;

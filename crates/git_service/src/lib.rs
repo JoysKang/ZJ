@@ -4,6 +4,7 @@ mod graph;
 mod log;
 mod ls_files;
 mod refs;
+mod stash;
 mod status;
 mod write;
 pub use graph::{
@@ -12,6 +13,7 @@ pub use graph::{
 pub use log::{Commit, parse_log};
 pub use ls_files::{ListedKind, parse_ls_files};
 pub use refs::{Branch, parse_branches};
+pub use stash::{Blame, Stash, parse_blame, parse_stashes};
 pub use status::{Change, ChangeKind, Status, parse_status};
 pub use write::{WriteOperation, WriteRequest};
 
@@ -632,6 +634,40 @@ impl GitService {
             cancel,
         )?;
         parse_branches(&output)
+    }
+
+    /// The stashes, newest (`stash@{0}`) first.
+    pub fn stashes(&self, repo: &Repository, cancel: &AtomicBool) -> io::Result<Vec<Stash>> {
+        let output = self.run(
+            &repo.worktree,
+            &["stash".into(), "list".into(), stash::STASH_FORMAT.into()],
+            cancel,
+        )?;
+        parse_stashes(&output)
+    }
+
+    /// Who last changed line `line` (1-based) of `path` (relative to the worktree). With
+    /// `contents` (an edited buffer) lines are counted in that text, edits blamed on nobody.
+    pub fn blame_line(
+        &self,
+        repo: &Repository,
+        path: &Path,
+        line: usize,
+        contents: Option<&[u8]>,
+        cancel: &AtomicBool,
+    ) -> io::Result<Blame> {
+        validate_relative_path(path)?;
+        let mut args: Vec<OsString> = vec![
+            "blame".into(),
+            "--porcelain".into(),
+            format!("-L{line},{line}").into(),
+        ];
+        if contents.is_some() {
+            args.extend(["--contents".into(), "-".into()]);
+        }
+        args.extend(["--".into(), path.as_os_str().to_owned()]);
+        let output = self.run_with_input(&repo.worktree, &args, cancel, false, contents)?;
+        parse_blame(&output)
     }
 
     /// A page of the commit graph, children before parents, newest first.
