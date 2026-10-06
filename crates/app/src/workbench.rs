@@ -1377,8 +1377,14 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let root = self.root.clone();
+        let root = self.root_for(&path);
         self.open_file(path, root, window, cx);
+    }
+
+    /// The folder to read `path` through: the workspace when the file is in it; none for a
+    /// file opened from elsewhere (⌘O, the command line), which is read like a picked file.
+    pub(super) fn root_for(&self, path: &std::path::Path) -> Option<PathBuf> {
+        self.root.clone().filter(|root| path.starts_with(root))
     }
 
     /// × on a restored tab that was never opened.

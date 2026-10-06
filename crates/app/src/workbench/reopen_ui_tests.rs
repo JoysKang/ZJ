@@ -100,3 +100,42 @@ async fn shift_cmd_t_reopens_the_last_closed_tab_with_its_cursor(cx: &mut TestAp
     assert_eq!(names(cx, &this), ["a.txt", "b.txt"]);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[gpui_kit::test]
+async fn a_closed_file_from_outside_the_folder_reopens(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let base = std::env::temp_dir().join(format!("zj-reopen-outside-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("work")).unwrap();
+    let base = std::fs::canonicalize(base).unwrap();
+    let outside = base.join("notes.md");
+    std::fs::write(&outside, "# notes\n").unwrap();
+    let (window, this) = open(cx, base.join("work"));
+    // Opened from elsewhere (⌘O): read without the workspace folder.
+    let path = outside.clone();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(path, None, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let id = this.read_with(cx, |p, _| p.documents[0].id);
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.close_document(id, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.is_empty())
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.reopen_closed_tab(window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| {
+            p.documents.first().is_some_and(|d| d.path == outside)
+        })
+    });
+    let _ = std::fs::remove_dir_all(&base);
+}

@@ -275,7 +275,8 @@ impl Workbench {
             tab.path.clone(),
             super::navigation::Placement::Offset(tab.offset),
         ));
-        self.open_file(tab.path, self.root.clone(), window, cx);
+        let root = self.root_for(&tab.path);
+        self.open_file(tab.path, root, window, cx);
     }
 }
 
