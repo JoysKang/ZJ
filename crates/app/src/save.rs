@@ -183,17 +183,27 @@ pub fn write(
         // A file deleted together with its folder is recreated with it (as VS Code does).
         fs::create_dir_all(parent)?;
     }
+    let in_place = |target: &Path| -> io::Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(target)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    };
     match &metadata {
         // Several names for one file: rewrite it in place so they all stay the same file.
-        Some(metadata) if metadata.nlink() > 1 => {
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(&target)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
+        // Another user's file (group-writable, say): replacing it would make it ours.
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        Some(metadata) if metadata.nlink() > 1 || metadata.uid() != unsafe { libc::geteuid() } => {
+            in_place(&target)?
         }
-        _ => write_atomically(&target, bytes, metadata.as_ref())?,
+        Some(_) => match write_atomically(&target, bytes, metadata.as_ref()) {
+            // The folder takes no new files but the file is writable: write it in place.
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => in_place(&target)?,
+            result => result?,
+        },
+        None => write_atomically(&target, bytes, None)?,
     }
     let stamp = FileStamp::read(&target)?;
     Ok(DiskState::of(stamp, bytes))
@@ -456,6 +466,28 @@ mod tests {
             write(&path, b"mine\n", Some(&known)),
             Err(SaveError::Conflict)
         ));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_writable_file_in_a_folder_that_takes_no_new_files_is_written_in_place() {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root ignores the folder's permissions
+        }
+        let root = temp("locked-dir");
+        let dir = root.join("shared");
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("a.txt");
+        fs::write(&path, "old\n").unwrap();
+        let known = state(&path);
+        let inode = fs::metadata(&path).unwrap().ino();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let saved = write(&path, b"new\n", Some(&known));
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        saved.unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new\n");
+        assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
         fs::remove_dir_all(&root).unwrap();
     }
 
