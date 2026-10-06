@@ -563,6 +563,7 @@ impl Workbench {
                 area.children(self.render_agent_review_bar(cx))
             })
             .children(self.render_disk_banner(cx))
+            .children(self.render_conflict_bar(cx))
             .child(
                 div()
                     .relative()

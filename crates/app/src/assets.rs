@@ -36,6 +36,7 @@ pub const EXTRA: &[(&str, &[u8])] = &[
     embed!("icons/book-marked.svg"),
     embed!("icons/git-commit-horizontal.svg"),
     embed!("icons/git-graph.svg"),
+    embed!("icons/git-merge.svg"),
     embed!("icons/tag.svg"),
     embed!("icons/cloud.svg"),
     embed!("icons/replace-all.svg"),

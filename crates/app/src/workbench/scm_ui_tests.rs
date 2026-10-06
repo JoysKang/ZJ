@@ -345,3 +345,76 @@ async fn the_status_bar_blames_the_cursor_line(cx: &mut TestAppContext) {
     });
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }
+
+#[gpui_kit::test]
+async fn merge_conflicts_are_resolved_from_the_bar_and_marked_resolved(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("conflict", 0);
+    std::fs::write(repo.join("a.txt"), "top\nbase 1\nm1\nm2\nm3\nm4\nbase 2\n").unwrap();
+    git(&repo, &["commit", "-q", "-am", "base"]);
+    git(&repo, &["switch", "-q", "-c", "feature"]);
+    std::fs::write(
+        repo.join("a.txt"),
+        "top\nfeature 1\nm1\nm2\nm3\nm4\nfeature 2\n",
+    )
+    .unwrap();
+    git(&repo, &["commit", "-q", "-am", "feature"]);
+    git(&repo, &["switch", "-q", "main"]);
+    std::fs::write(repo.join("a.txt"), "top\nmain 1\nm1\nm2\nm3\nm4\nmain 2\n").unwrap();
+    git(&repo, &["commit", "-q", "-am", "main"]);
+    let merge = std::process::Command::new("git")
+        .args(["-C", repo.to_str().unwrap(), "merge", "-q", "feature"])
+        .output()
+        .unwrap();
+    assert!(!merge.status.success(), "the merge must conflict");
+
+    let (window, this) = open(cx, repo.clone());
+    let folder = Some(repo.clone());
+    let path = repo.join("a.txt");
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(path, folder, window, cx));
+    })
+    .unwrap();
+    let count = |cx: &mut TestAppContext| {
+        this.read_with(cx, |p, _| p.documents.first().map(|d| d.conflicts_found()))
+    };
+    settle(cx, Some(window), |cx| count(cx) == Some(Some(2)));
+
+    // The first conflict (the cursor is at the top): keep both; the rest: take theirs.
+    let resolve = |cx: &mut TestAppContext, choice, all| {
+        cx.update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| p.resolve_conflict(choice, all, window, cx));
+        })
+        .unwrap();
+    };
+    resolve(cx, crate::conflicts::Choice::Both, false);
+    settle(cx, Some(window), |cx| count(cx) == Some(Some(1)));
+    resolve(cx, crate::conflicts::Choice::Theirs, true);
+    settle(cx, Some(window), |cx| count(cx) == Some(Some(0)));
+    let text = this.read_with(cx, |p, cx| {
+        p.documents[0].editor.read(cx).text().to_string()
+    });
+    assert_eq!(text, "top\nmain 1\nfeature 1\nm1\nm2\nm3\nm4\nfeature 2\n");
+
+    // 标记为已解决: saved and staged, so Git no longer lists a conflict.
+    let id = this.read_with(cx, |p, _| p.documents[0].id);
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.mark_resolved(id, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| {
+            p.groups[0]
+                .status
+                .as_ref()
+                .and_then(|s| s.as_ref().ok())
+                .is_some_and(|s| {
+                    s.changes
+                        .iter()
+                        .all(|c| c.kind != workspace_editor_git::ChangeKind::Conflict)
+                })
+        })
+    });
+    assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), text);
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}

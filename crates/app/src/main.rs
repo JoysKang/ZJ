@@ -1,5 +1,6 @@
 mod agent_model;
 mod assets;
+mod conflicts;
 mod diff_doc;
 mod diff_syntax;
 mod editing;

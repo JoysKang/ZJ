@@ -39,6 +39,7 @@ mod agent_search;
 mod blame;
 mod chrome;
 mod commands;
+mod conflict_bar;
 pub use commands::ShowAllCommands;
 #[cfg(test)]
 #[path = "workbench/commands_ui_tests.rs"]
@@ -220,6 +221,7 @@ struct Document {
     recovered: bool,
     /// Markdown files: the live preview (`None` for other languages).
     markdown: Option<markdown_preview::MarkdownPreview>,
+    conflicts: conflict_bar::ConflictDoc,
     _subscription: Subscription,
 }
 
@@ -1478,6 +1480,7 @@ impl Workbench {
         );
         this.message.clear();
         this.markdown_refresh(id, cx);
+        this.scan_conflicts(cx);
         this.pending_tabs.retain(|tab| *tab != path_for_pending);
         eprintln!("event=document_opened");
         this.select_pane(Pane::Document(id), window, cx);
@@ -1716,6 +1719,7 @@ impl Workbench {
                                         group.status = Some(status.map(Arc::new));
                                         group.outgoing = outgoing;
                                         this.refresh_blame(cx);
+                                        this.scan_conflicts(cx);
                                     }
                                 }
                                 Event::Issue(issue) => {

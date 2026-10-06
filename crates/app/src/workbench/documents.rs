@@ -168,7 +168,7 @@ impl Workbench {
         self.documents.iter_mut().find(|doc| doc.id == id)
     }
 
-    fn active_document_id(&self) -> Option<DocumentId> {
+    pub(super) fn active_document_id(&self) -> Option<DocumentId> {
         match self.active {
             Pane::Document(id) => Some(id),
             _ => None,
@@ -190,6 +190,7 @@ impl Workbench {
         doc.version += 1;
         // The cursor observer may have run before this edit was counted.
         self.schedule_blame(cx);
+        self.scan_conflicts(cx);
         let Some(doc) = self.document_mut(id) else {
             return;
         };
@@ -1256,6 +1257,7 @@ impl Document {
             snapshot_on_disk: None,
             recovered: false,
             markdown: None,
+            conflicts: Default::default(),
             _subscription: subscription,
         }
     }

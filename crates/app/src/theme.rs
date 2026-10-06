@@ -609,6 +609,11 @@ pub struct Colors {
     pub glyphs: [(Hsla, Hsla); 5],
     /// The editor's "file changed on disk" banner: the git-modified hue, faint.
     pub banner: Hsla,
+    /// Merge conflicts in the editor, as VS Code's merge.current / incoming backgrounds: the
+    /// current side green, the incoming side blue, marker lines a faint gray on top.
+    pub conflict_ours: Hsla,
+    pub conflict_theirs: Hsla,
+    pub conflict_marker: Hsla,
     /// Git Graph lane colors, cycled as lanes are created (lines and nodes, never text).
     pub graph_lanes: [Hsla; 8],
     /// The terminal draws on the editor background in the code color, as VS Code's does.
@@ -681,6 +686,9 @@ impl Palette {
             ]
             .map(|c| (hsla(c), hsla(c).opacity(0.18))),
             banner: hsla(self.modified).opacity(0.16),
+            conflict_ours: hsla(self.diff_green).opacity(self.diff_line_alpha),
+            conflict_theirs: hsla(self.unread).opacity(self.diff_line_alpha),
+            conflict_marker: hsla(self.foreground).opacity(0.12),
             // Git Graph's palette works on both dark and light backgrounds.
             graph_lanes: [
                 0x0085d9, 0xd9008f, 0x00d0a0, 0xd98500, 0xa000d9, 0x00b8d9, 0xd0a000, 0xd94545,
