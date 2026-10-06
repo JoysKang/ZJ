@@ -270,12 +270,80 @@ pub const TASK_DONE: &str = "[x]";
 /// Parses a reply while it streams without starting over each time: everything before the
 /// last blank line outside a code fence is final (the parser is line based and only a
 /// paragraph or an open fence carries across lines), so only the tail is parsed again, and
-/// the final blocks are kept in shared chunks rather than copied.
+/// the final blocks are kept in shared chunks rather than copied. A code block still being
+/// written keeps its finished lines, so a long one is not parsed again on every batch.
 #[derive(Default)]
 pub struct Streaming {
     /// Bytes of the source whose blocks are final.
     stable_len: usize,
     stable: Vec<std::rc::Rc<Vec<Block>>>,
+    /// The code fence open at the end of the source, once its opening line is complete.
+    fence: Option<OpenFence>,
+}
+
+struct OpenFence {
+    /// Where its opening line starts.
+    start: usize,
+    tag: String,
+    /// Its finished lines, each with its `\n`.
+    code: String,
+    /// The source read into `code`.
+    scanned: usize,
+}
+
+impl OpenFence {
+    /// The fence left open by the complete lines of `source` after `from`, if any.
+    fn find(source: &str, from: usize) -> Option<Self> {
+        let mut open = None;
+        let mut at = from;
+        for line in source[from..].split_inclusive('\n') {
+            if !line.ends_with('\n') {
+                break; // an opening line still being written may change its tag
+            }
+            let text = line.trim_end_matches('\n').trim_end_matches('\r');
+            open = match open {
+                None => fence(text).map(|tag| Self {
+                    start: at,
+                    tag: tag.to_string(),
+                    code: String::new(),
+                    scanned: at + line.len(),
+                }),
+                Some(_) if fence(text).is_some_and(|rest| rest.trim().is_empty()) => None,
+                open => open,
+            };
+            at += line.len();
+        }
+        open
+    }
+
+    /// Takes in the finished lines added since the last call; the block's text so far, or
+    /// `None` once the fence closed.
+    fn extend(&mut self, source: &str) -> Option<String> {
+        let closes = |text: &str| fence(text).is_some_and(|rest| rest.trim().is_empty());
+        for line in source[self.scanned..].split_inclusive('\n') {
+            if !line.ends_with('\n') {
+                break;
+            }
+            let text = line.trim_end_matches('\n').trim_end_matches('\r');
+            if closes(text) {
+                return None;
+            }
+            self.code.push_str(text);
+            self.code.push('\n');
+            self.scanned += line.len();
+        }
+        let partial = &source[self.scanned..];
+        if closes(partial) {
+            return None;
+        }
+        let mut text = String::with_capacity(self.code.len() + partial.len());
+        text.push_str(&self.code);
+        text.push_str(partial);
+        if text.ends_with('\n') {
+            text.pop();
+        }
+        Some(text)
+    }
 }
 
 impl Streaming {
@@ -283,6 +351,17 @@ impl Streaming {
     pub fn update(&mut self, source: &str) -> Blocks {
         if source.len() < self.stable_len || !source.is_char_boundary(self.stable_len) {
             *self = Self::default();
+        }
+        if self
+            .fence
+            .as_ref()
+            .is_some_and(|f| source.len() < f.scanned || !source.is_char_boundary(f.scanned))
+        {
+            self.fence = None;
+        }
+        // While a fence stays open nothing before it changes: only its new lines are read.
+        if let Some(blocks) = self.open_fence_blocks(source) {
+            return blocks;
         }
         let split = stable_end(source, self.stable_len);
         if split > self.stable_len {
@@ -292,10 +371,34 @@ impl Streaming {
             }
             self.stable_len = split;
         }
+        self.fence = OpenFence::find(source, self.stable_len);
+        if let Some(blocks) = self.open_fence_blocks(source) {
+            return blocks;
+        }
         Blocks {
             chunks: self.stable.clone(),
             tail: parse(&source[self.stable_len..]),
         }
+    }
+
+    /// With a fence open at the end: the final chunks, what comes before the fence, then the
+    /// code block so far. `None` (and the fence dropped) once it closed.
+    fn open_fence_blocks(&mut self, source: &str) -> Option<Blocks> {
+        let open = self.fence.as_mut()?;
+        let Some(text) = open.extend(source) else {
+            self.fence = None;
+            return None;
+        };
+        let mut tail = parse(&source[self.stable_len..open.start]);
+        tail.push(Block::Code {
+            language: fence_language(&open.tag),
+            text,
+            runs: Vec::new(),
+        });
+        Some(Blocks {
+            chunks: self.stable.clone(),
+            tail,
+        })
     }
 }
 
@@ -362,6 +465,31 @@ mod tests {
         assert!(streaming.stable_len > 0);
         // A source that does not extend the previous one starts over.
         assert_eq!(streaming.update("新的").to_vec(), parse("新的"));
+    }
+
+    #[test]
+    fn a_long_code_block_streams_line_by_line_and_still_matches_a_full_parse() {
+        let mut reply = String::from("看代码：\r\n~~~py\r\n");
+        for n in 0..200 {
+            reply.push_str(&format!("x{n} = {n}  # ``\r\n\r\n"));
+        }
+        reply.push_str("``\n~~~\n\n后记\n```\n未闭合");
+        let mut streaming = Streaming::default();
+        let mut end = 0;
+        let mut cached = false;
+        while end < reply.len() {
+            end += 1;
+            while !reply.is_char_boundary(end) {
+                end += 1;
+            }
+            assert_eq!(
+                streaming.update(&reply[..end]).to_vec(),
+                parse(&reply[..end]),
+                "{end}"
+            );
+            cached |= streaming.fence.is_some();
+        }
+        assert!(cached, "the open fence was cached");
     }
 
     #[test]
