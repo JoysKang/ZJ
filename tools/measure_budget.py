@@ -217,10 +217,11 @@ def measure_idle(binary, folder, env, seconds, file=None, show_categories=False)
             footprints.append(footprint_mb(app.process.pid))
         cpu.sort()
         p95 = cpu[int(len(cpu) * 0.95) - 1] if cpu else 0.0
+        frames = len(app.events("event=frame")) - frames_before
+        wakes = len(app.events("event=display_link state=woken")) - wakes_before
+        print(f"    测量期间出帧 {frames} 次，display link 被唤醒 {wakes} 次"
+              + ("" if frames or wakes else "（CPU 不是画帧花的）"))
         if show_categories:
-            frames = len(app.events("event=frame")) - frames_before
-            wakes = len(app.events("event=display_link state=woken")) - wakes_before
-            print(f"    测量期间出帧 {frames} 次，display link 被唤醒 {wakes} 次")
             for dirty, name in categories(app.process.pid):
                 print(f"    {dirty:8.1f} MB  {name}")
         return statistics.median(footprints), p95
