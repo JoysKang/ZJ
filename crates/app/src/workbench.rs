@@ -120,6 +120,9 @@ mod idle_ui_tests;
 #[path = "workbench/indent_ui_tests.rs"]
 mod indent_ui_tests;
 #[cfg(test)]
+#[path = "workbench/search_ui_tests.rs"]
+mod search_ui_tests;
+#[cfg(test)]
 #[path = "workbench/settings_ui_tests.rs"]
 mod settings_ui_tests;
 #[cfg(test)]

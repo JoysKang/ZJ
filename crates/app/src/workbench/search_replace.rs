@@ -41,13 +41,12 @@ struct Undo {
     written: FileStamp,
 }
 
-/// One file to rewrite: the spans the search found there (and their lines, for a buffer
-/// with unsaved edits, whose offsets differ from the file's).
+/// One file to rewrite: the spans the search found there (also applied to a buffer with
+/// unsaved edits, as long as its text still has those matches).
 struct Job {
     path: PathBuf,
     stamp: Option<FileStamp>,
     spans: Vec<Range<usize>>,
-    lines: Option<Vec<u32>>,
 }
 
 impl ReplaceState {
@@ -180,9 +179,6 @@ impl Workbench {
             path: found.path.clone(),
             stamp: found.stamp,
             spans,
-            lines: only
-                .and_then(|line| found.lines.get(line))
-                .map(|l| vec![l.line]),
         }
     }
 
@@ -293,14 +289,14 @@ impl Workbench {
             .partition(|job| self.unsaved_elsewhere(&job.path, me, cx));
         let mut buffer_count = 0;
         for job in &in_buffers {
-            buffer_count += self.replace_in_buffers(
-                &job.path,
-                &finder,
-                &replacement,
-                job.lines.as_deref(),
-                window,
-                cx,
-            );
+            match self.replace_in_buffers(&job.path, &finder, &replacement, &job.spans, window, cx)
+            {
+                Some(count) => buffer_count += count,
+                None => skipped.push((
+                    job.path.clone(),
+                    "编辑器里的内容和搜索结果对不上（搜索后又改过），请重新搜索".into(),
+                )),
+            }
             self.search.results.retain(|found| found.path != job.path);
         }
         self.search.replace.running = true;
@@ -376,18 +372,19 @@ impl Workbench {
         self.reload_everywhere(&done.path, &done.text, state, window, cx);
     }
 
-    /// Replaces in the buffers of `path` that have unsaved edits, in all windows: the matches
-    /// of the buffer's own text (on `lines` only, for a single result line). Returns how many.
+    /// Replaces in the buffers of `path` that have unsaved edits, in all windows: exactly the
+    /// matches the search found at `spans` (ignored lines are not among them). Returns how
+    /// many, or `None` when a buffer no longer has a match at every span.
     fn replace_in_buffers(
         &mut self,
         path: &std::path::Path,
         finder: &crate::replace::Finder,
         replacement: &Replacement,
-        lines: Option<&[u32]>,
+        spans: &[Range<usize>],
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> usize {
-        let mut count = self.replace_in_own_buffer(path, finder, replacement, lines, window, cx);
+    ) -> Option<usize> {
+        let mut count = self.replace_in_own_buffer(path, finder, replacement, spans, window, cx)?;
         let others: Vec<_> = self
             .owners
             .borrow()
@@ -399,12 +396,13 @@ impl Workbench {
         for (handle, view) in others {
             let _ = handle.update(cx, |_, window, cx| {
                 view.update(cx, |this, cx| {
-                    count +=
-                        this.replace_in_own_buffer(path, finder, replacement, lines, window, cx);
+                    count += this
+                        .replace_in_own_buffer(path, finder, replacement, spans, window, cx)
+                        .unwrap_or(0);
                 });
             });
         }
-        count
+        Some(count)
     }
 
     fn replace_in_own_buffer(
@@ -412,36 +410,32 @@ impl Workbench {
         path: &std::path::Path,
         finder: &crate::replace::Finder,
         replacement: &Replacement,
-        lines: Option<&[u32]>,
+        spans: &[Range<usize>],
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> usize {
+    ) -> Option<usize> {
         let Some(editor) = self
             .documents
             .iter()
             .find(|doc| doc.path == path && doc.dirty)
             .map(|doc| doc.editor.clone())
         else {
-            return 0;
+            return Some(0);
         };
         editor.update(cx, |state, cx| {
             let text = state.text().to_string();
             let replacement = replacement.clone().with_eol(replace::eol_of(&text));
-            let line_of = |offset: usize| text[..offset].matches('\n').count() as u32;
-            let only: Vec<Range<usize>> = finder
-                .find_all(&text, MAX_MATCHES)
-                .into_iter()
-                .filter(|range| lines.is_none_or(|lines| lines.contains(&line_of(range.start))))
-                .collect();
-            if only.is_empty() {
-                return 0;
-            }
-            let (start, end) = (only[0].start, only[only.len() - 1].end);
-            let (new, count) = finder.replace(&text, Some(&only), &replacement);
+            // The spans were found in this file; a buffer edited since then may have moved.
+            let edits = finder.edits_at(&text, spans, &replacement)?;
+            let (Some(first), Some(last)) = (edits.first(), edits.last()) else {
+                return Some(0);
+            };
+            let (start, end) = (first.0.start, last.0.end);
+            let new = replace::apply(&text, &edits);
             let middle = &new[start..new.len() - (text.len() - end)];
             let utf16 = replace::utf16_offset(&text, start)..replace::utf16_offset(&text, end);
             state.replace_text_in_range(Some(utf16), middle, window, cx);
-            count
+            Some(edits.len())
         })
     }
 
