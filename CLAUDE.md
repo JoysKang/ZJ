@@ -44,7 +44,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 ## 模块边界
 
 - `crates/core`：身份模型与共享常量（`RepoId`、`DocumentId`、`EXCLUDED_DIRS`、按 Git 规则校验 `.git` 的 `git_marker`），**不依赖 GPUI**。
-- `crates/git_service`：调用系统 git，负责有界输出、超时、取消、全局限流，**不依赖 GPUI**。仓库发现最多向下 4 层，跳过 `EXCLUDED_DIRS` 和上层仓库忽略的目录，无效的 `.git` 静默跳过。
+- `crates/git_service`：调用系统 git，负责有界输出、超时、取消、全局限流，**不依赖 GPUI**。仓库发现最多向下 4 层，跳过 `EXCLUDED_DIRS` 和上层仓库忽略的目录，无效的 `.git` 静默跳过（自动发现找不到的仓库可以手动添加，见 `settings.rs` 的 `extra_repos`）。`lib.rs` 是服务本体（进程、限流、发现、查询），解析放在各自的文件里：`status.rs`（porcelain v2）、`refs.rs`（分支）、`log.rs`（未推送的提交）、`graph.rs`（Git 图的分页和提交详情）、`ls_files.rs`（快速打开的路径）、`stash.rs`（stash 和 blame），写操作在 `write.rs`。
 - `crates/agent_client`：ACP 客户端（Agent 预设、子进程、会话、权限、`fs/*`、改动前快照与审阅、空闲退出），**不依赖 GPUI**，见 docs/adr/0004。
 - `crates/agent_history`：Agent 会话历史（SQLite + FTS5，后台写线程、搜索、钉住、硬删除），**不依赖 GPUI**。
 - `crates/app`：GPUI 界面。
@@ -85,7 +85,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 - 尺寸、间距、行高、颜色都从 `crates/app/src/theme.rs` 的 token 取，不要在 UI 代码里新写 `px(数字)` 或色值。
 - 布局参照 VS Code 工作台的尺寸，按用户要求字号大一号：正文 `TEXT_BODY` 14、标题栏 `TITLE_HEIGHT` 38、标签栏 `TAB_HEIGHT` 36、列表行 `ROW_HEIGHT` 24、状态栏 `STATUS_HEIGHT` 24；间距用 4 px 网格。编辑器字号默认 14，可缩放，Diff 行高随之计算（`theme::diff_metrics`）。
 - 配色：暗色是 Solarized Dark（按 VS Code 内置主题的映射），亮色是 Nord Light。只改 `theme.rs` 的 `DARK` / `LIGHT` / 语法表，不要在界面代码里写颜色。
-- 界面图标只用 Lucide（`IconName`），不要用文本符号充当图标。Kit 默认只内嵌 101 个图标；需要额外的图标时，把 SVG 放进 `crates/app/assets/icons/`，并登记到 `assets.rs` 的 `EXTRA`。
+- 界面图标只用 Lucide（`IconName`），不要用文本符号充当图标。Kit 默认只内嵌 104 个图标（`gpui-kit-assets` 的 `default-icons.txt`），没内嵌的 `IconName` 会画成空白；需要额外的图标时，把 SVG 放进 `crates/app/assets/icons/`，并登记到 `assets.rs` 的 `EXTRA`。
 - 文件类型图标用 vscode-icons 的一个子集（`crates/app/assets/file-icons/`，MIT 许可），映射写在 `file_icons.rs`。这些是彩色 SVG，用 `img()` 绘制：第一次画彩色图片时，GPUI 会分配一张 polychrome 图集（所有窗口共用，vendor 补丁把初始尺寸从 1024² 降到 512²，约 1 MiB）。新增图标前先看体积（当前合计约 58 KB）。
 - 文字对比度：正文 ≥ 7:1，次要文字 ≥ 4.5:1（`theme.rs` 里有测试检查）。
 - 外观跟随系统亮暗；可以用环境变量 `ZJ_APPEARANCE=light|dark` 强制指定，方便截图和调试。
