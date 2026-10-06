@@ -379,6 +379,14 @@ impl Workbench {
         )
     }
 
+    /// Matches from an edit still waiting for its debounced search would cut the wrong bytes
+    /// (or past the end): search the current text now.
+    fn find_catch_up(&mut self, cx: &mut Context<Self>) {
+        if self.find.refresh.take().is_some() {
+            self.find_update(false, cx);
+        }
+    }
+
     /// 替换 (⌘⇧1, or Enter in the replace input): replaces the current match and moves on.
     pub(super) fn find_replace_one(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((_, editor, readonly)) = self.find_document() else {
@@ -387,6 +395,7 @@ impl Workbench {
         if readonly {
             return;
         }
+        self.find_catch_up(cx);
         let Some(range) = self
             .find
             .current
@@ -422,17 +431,29 @@ impl Workbench {
         let Some((_, editor, readonly)) = self.find_document() else {
             return;
         };
-        if readonly || self.find.matches.is_empty() {
+        if readonly {
+            return;
+        }
+        self.find_catch_up(cx);
+        if self.find.matches.is_empty() {
             return;
         }
         let Ok(finder) = Finder::new(&self.find.query(cx)) else {
             return;
         };
         let replacement = self.find_replacement(cx);
-        let only = self.find.matches.clone();
+        let scope = self.find.scope.clone();
         let mut replaced = 0;
         editor.update(cx, |state, cx| {
             let text = state.text().to_string();
+            // Every match, not only the ones highlighted (capped at MAX_MATCHES).
+            let only = match &scope {
+                Some(scope) => finder.find_in(&text, scope, usize::MAX),
+                None => finder.find_all(&text, usize::MAX),
+            };
+            if only.is_empty() {
+                return;
+            }
             let replacement = replacement.with_eol(replace::eol_of(&text));
             let (start, end) = (only[0].start, only[only.len() - 1].end);
             let (new, count) = finder.replace(&text, Some(&only), &replacement);
