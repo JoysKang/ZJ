@@ -154,8 +154,11 @@ pub struct Settings {
     pub diff_inline: bool,
     /// Source Control lists only repositories with changes.
     pub hide_clean_repos: bool,
-    /// Full-text search applies `.gitignore` and the default excludes.
+    /// Full-text search skips what `.gitignore` ignores (and dot files hidden by default).
     pub search_use_excludes: bool,
+    /// The Search view's 排除的文件: prefilled with the usual build and dependency folders,
+    /// edited there (an emptied list stays empty).
+    pub search_exclude: String,
     /// macOS: the Dock icon's cursor blinks while the app runs (off by default; never with
     /// 减少动态效果).
     pub dock_icon_blink: bool,
@@ -168,6 +171,11 @@ pub struct Settings {
     pub extra_repos: BTreeMap<String, Vec<String>>,
 }
 
+/// What 排除的文件 starts with: folders of builds, dependencies and caches, and generated
+/// bundles; the user deletes what they do want searched.
+pub const SEARCH_EXCLUDE_DEFAULT: &str = "node_modules, target, dist, build, .venv, venv, \
+     __pycache__, .next, .nuxt, coverage, *.min.js, *.map";
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -176,6 +184,7 @@ impl Default for Settings {
             diff_inline: true,
             hide_clean_repos: false,
             search_use_excludes: true,
+            search_exclude: SEARCH_EXCLUDE_DEFAULT.into(),
             dock_icon_blink: false,
             agent: AgentSettings::default(),
             auto_save: crate::save::AutoSave::Off,
@@ -248,6 +257,11 @@ impl Settings {
             diff_inline: flag("diff_inline", defaults.diff_inline),
             hide_clean_repos: flag("hide_clean_repos", defaults.hide_clean_repos),
             search_use_excludes: flag("search_use_excludes", defaults.search_use_excludes),
+            search_exclude: value
+                .get("search_exclude")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or(defaults.search_exclude),
             dock_icon_blink: flag("dock_icon_blink", defaults.dock_icon_blink),
             agent: AgentSettings::from_json(value.get("agent")),
             auto_save: value
@@ -283,6 +297,7 @@ impl Settings {
             "diff_inline": self.diff_inline,
             "hide_clean_repos": self.hide_clean_repos,
             "search_use_excludes": self.search_use_excludes,
+            "search_exclude": self.search_exclude,
             "dock_icon_blink": self.dock_icon_blink,
             "agent": self.agent.to_json(),
             "auto_save": self.auto_save.as_str(),
@@ -410,6 +425,7 @@ mod tests {
             diff_inline: false,
             hide_clean_repos: true,
             search_use_excludes: false,
+            search_exclude: "*.log".into(),
             dock_icon_blink: true,
             agent: AgentSettings {
                 panel_visible: true,

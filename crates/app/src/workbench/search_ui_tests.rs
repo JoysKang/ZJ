@@ -113,7 +113,6 @@ async fn find_in_folder_searches_only_that_folder(cx: &mut TestAppContext) {
     this.read_with(cx, |p, cx| {
         assert!(matches!(p.sidebar, Sidebar::Search));
         assert_eq!(p.search.include.read(cx).value().as_ref(), "./sub");
-        assert!(p.search.details);
     });
     cx.update_window(window.into(), |_, window, cx| {
         this.update(cx, |p, cx| {
@@ -131,5 +130,121 @@ async fn find_in_folder_searches_only_that_folder(cx: &mut TestAppContext) {
         let found: Vec<_> = p.search.results.iter().map(|f| f.path.clone()).collect();
         assert_eq!(found, [sub.join("a.txt")]);
     });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn the_replacement_takes_effect_only_once_it_has_text(cx: &mut TestAppContext) {
+    let root = std::env::temp_dir().join(format!("zj-replace-active-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let (window, this) = open(cx, root.clone());
+    let typed = |cx: &mut TestAppContext, text: &str| {
+        cx.update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.search.replace.input.update(cx, |input, cx| {
+                    input.set_value(text.to_string(), window, cx)
+                });
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        this.read_with(cx, |p, cx| p.search.replace.active(cx))
+    };
+    // Always on screen; an empty replacement leaves results opening their files.
+    assert!(!this.read_with(cx, |p, cx| p.search.replace.active(cx)));
+    assert!(typed(cx, "y"));
+    assert!(!typed(cx, ""));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn the_ignored_files_switch_stays_in_the_column_and_toggles(cx: &mut TestAppContext) {
+    let root = std::env::temp_dir().join(format!("zj-excludes-switch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    // The window where the old in-input button was pushed out of the sidebar.
+    let mut settings = crate::settings::Settings::default();
+    settings.agent.panel_visible = true;
+    settings.agent.panel_width = 539.5;
+    let (window, this) = cx.update(|cx| {
+        let documents =
+            super::test_support::install_globals(cx, settings, super::test_support::empty_store());
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1728.), px(1084.)));
+        let (window, this) =
+            super::test_support::new_window(cx, Some(root.clone()), documents, bounds);
+        (window.downcast::<gpui_kit::base::Root>().unwrap(), this)
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.find_in_files(window, cx));
+        window.render_frame(cx);
+    })
+    .unwrap();
+    let cx = &mut gpui_kit::VisualTestContext::from_window(window.into(), cx);
+    let exclude = cx.debug_bounds("search-exclude").unwrap();
+    let query = cx.debug_bounds("search-query").unwrap();
+    eprintln!("bounds: query={query:?} exclude={exclude:?}");
+    assert!(
+        exclude.right() <= query.right(),
+        "{exclude:?} past {query:?}"
+    );
+    let on = |cx: &mut gpui_kit::VisualTestContext| {
+        cx.update(|_, cx| cx.global::<crate::settings::Settings>().search_use_excludes)
+    };
+    assert!(on(cx));
+    // One line high while it fits (like the query), taller once the list wraps.
+    let include = cx.debug_bounds("search-include").unwrap();
+    assert_eq!(include.size.height, query.size.height);
+    assert!(exclude.size.height > query.size.height);
+    // The switch sits in the top right corner of the list, inside it.
+    let switch = cx.debug_bounds("search-use-excludes").unwrap();
+    eprintln!("bounds: switch={switch:?}");
+    assert!(exclude.contains(&switch.origin) && switch.right() <= exclude.right());
+    let knob = switch.center();
+    cx.simulate_click(knob, Modifiers::default());
+    assert!(!on(cx));
+    cx.simulate_click(knob, Modifiers::default());
+    assert!(on(cx));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn the_exclude_list_starts_with_the_usual_folders_and_keeps_edits(cx: &mut TestAppContext) {
+    let root = std::env::temp_dir().join(format!("zj-exclude-list-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let (window, this) = open(cx, root.clone());
+    let shown = |cx: &mut TestAppContext| {
+        this.read_with(cx, |p, cx| p.search.exclude.read(cx).value().to_string())
+    };
+    assert_eq!(shown(cx), crate::settings::SEARCH_EXCLUDE_DEFAULT);
+    // Typed over by hand: kept for later once typing pauses.
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.find_in_files(window, cx);
+            p.search.exclude.update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        });
+        window.render_frame(cx);
+        window.input("*.log", cx);
+    })
+    .unwrap();
+    assert_eq!(shown(cx), "*.log");
+    let saved = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            cx.global::<crate::settings::Settings>()
+                .search_exclude
+                .clone()
+        })
+    };
+    assert_eq!(saved(cx), crate::settings::SEARCH_EXCLUDE_DEFAULT);
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    assert_eq!(saved(cx), "*.log");
     let _ = std::fs::remove_dir_all(root);
 }

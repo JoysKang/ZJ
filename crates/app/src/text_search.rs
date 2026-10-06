@@ -19,17 +19,15 @@ use workspace_editor_core::is_excluded_dir;
 
 pub const MAX_MATCHES: usize = 10_000;
 pub const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
-/// Files walked when excludes are off (ignored folders included).
-const MAX_WALK_FILES: usize = 200_000;
+/// Files beyond the index walked when excludes are off (ignored folders: `target/` alone can
+/// hold hundreds of thousands).
+pub const MAX_WALK_FILES: usize = 200_000;
 /// Bytes checked for NUL before a file counts as binary.
 const BINARY_PROBE: usize = 8 * 1024;
 /// A preview keeps this many characters before the first match on its line (VS Code keeps
 /// a few words; more pushes the match out of a narrow sidebar, especially in CJK text).
 const PREVIEW_LEAD: usize = 12;
 const PREVIEW_MAX: usize = 240;
-/// Folders that are never worth searching, also excluded by default (like VS Code's
-/// `search.exclude`), on top of `.gitignore` and [`EXCLUDED_DIRS`](workspace_editor_core::EXCLUDED_DIRS).
-const DEFAULT_EXCLUDES: &[&str] = &["dist", "build", ".next", ".nuxt", "coverage"];
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Options {
@@ -40,7 +38,8 @@ pub struct Options {
     /// Comma-separated globs (`*.py`, `src/**`, `./api`); empty means everything.
     pub include: String,
     pub exclude: String,
-    /// `.gitignore` and the default excludes apply (VS Code's "使用排除设置和忽略文件").
+    /// `.gitignore` applies (and dot files hidden by default stay out); the usual folders to
+    /// skip are in `exclude`, where the user sees and edits them.
     pub use_excludes: bool,
     pub show_hidden: bool,
 }
@@ -75,10 +74,12 @@ pub struct Progress {
     pub matches: AtomicUsize,
     pub files_searched: AtomicUsize,
     pub truncated: AtomicBool,
+    /// Excludes off: there were more ignored files than `MAX_WALK_FILES`, some went unsearched.
+    pub files_capped: AtomicBool,
     pub done: AtomicBool,
 }
 
-/// A comma-separated glob list. `./x` and patterns with `/` are anchored at the root; a bare
+/// A comma- (or line-) separated glob list. `./x` and patterns with `/` are anchored at the root; a bare
 /// pattern (`*.py`, `node_modules`) matches at any depth. A match on a folder covers what is
 /// inside it.
 pub struct Globs(Option<regex::Regex>);
@@ -92,7 +93,8 @@ impl Globs {
             match c {
                 '{' => depth += 1,
                 '}' => depth -= 1,
-                ',' if depth <= 0 => {
+                // A line break (⇧⏎ in the list) separates like a comma.
+                ',' | '\n' if depth <= 0 => {
                     patterns.push(&list[start..i]);
                     start = i + 1;
                 }
@@ -216,7 +218,6 @@ pub struct Matcher {
     multiline: bool,
     include: Globs,
     exclude: Globs,
-    defaults: Globs,
     use_excludes: bool,
     show_hidden: bool,
 }
@@ -237,7 +238,6 @@ impl Matcher {
             multiline: options.regex && options.pattern.contains("\\n"),
             include: Globs::parse(&options.include)?,
             exclude: Globs::parse(&options.exclude)?,
-            defaults: Globs::parse(&DEFAULT_EXCLUDES.join(","))?,
             use_excludes: options.use_excludes,
             show_hidden: options.show_hidden,
         })
@@ -252,9 +252,7 @@ impl Matcher {
         if self.exclude.matches(&text) {
             return false;
         }
-        if self.use_excludes
-            && (self.defaults.matches(&text)
-                || (!self.show_hidden && crate::files::path_hidden_by_default(relative)))
+        if self.use_excludes && !self.show_hidden && crate::files::path_hidden_by_default(relative)
         {
             return false;
         }
@@ -533,12 +531,23 @@ pub fn run(
     });
 }
 
-/// Every file below `root` except `.git` and symlinks, for searching with excludes off.
-pub fn walk_all(root: &Path, cancel: &AtomicBool) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let mut pending = vec![PathBuf::new()];
-    while let Some(dir) = pending.pop() {
-        if cancel.load(Ordering::Relaxed) || files.len() >= MAX_WALK_FILES {
+/// Every file below `root` except `.git` and symlinks, for searching with excludes off: all
+/// of `known` (the index, i.e. the files that are not ignored), then what the index leaves out,
+/// walked breadth first, at most `limit` of those. `false` when the limit cut that short; the
+/// known files are never dropped (a deep `target/` once crowded out every source file).
+pub fn walk_all(
+    root: &Path,
+    known: Vec<PathBuf>,
+    limit: usize,
+    cancel: &AtomicBool,
+) -> (Vec<PathBuf>, bool) {
+    let seen: std::collections::HashSet<PathBuf> = known.iter().cloned().collect();
+    let mut files = known;
+    let mut extra = 0;
+    let mut complete = true;
+    let mut pending = std::collections::VecDeque::from([PathBuf::new()]);
+    'walk: while let Some(dir) = pending.pop_front() {
+        if cancel.load(Ordering::Relaxed) {
             break;
         }
         let Ok(entries) = fs::read_dir(root.join(&dir)) else {
@@ -550,14 +559,23 @@ pub fn walk_all(root: &Path, cancel: &AtomicBool) -> Vec<PathBuf> {
             };
             let name = entry.file_name();
             if kind.is_dir() && name.as_bytes() != b".git" {
-                pending.push(dir.join(name));
+                pending.push_back(dir.join(name));
             } else if kind.is_file() {
-                files.push(dir.join(name));
+                let path = dir.join(name);
+                if seen.contains(&path) {
+                    continue;
+                }
+                if extra >= limit {
+                    complete = false;
+                    break 'walk;
+                }
+                extra += 1;
+                files.push(path);
             }
         }
     }
     files.sort();
-    files
+    (files, complete)
 }
 
 /// Files from the quick-open index (already following `.gitignore` and the excluded
@@ -584,6 +602,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_crowd_of_ignored_files_never_hides_the_indexed_ones() {
+        let root = std::env::temp_dir().join(format!("zj-walk-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("crates/app/src")).unwrap();
+        fs::write(root.join("crates/app/src/main.rs"), "").unwrap();
+        fs::write(root.join("README.md"), "").unwrap();
+        fs::create_dir_all(root.join("target/debug/deps")).unwrap();
+        for i in 0..5 {
+            fs::write(root.join(format!("target/debug/deps/lib-{i}.d")), "").unwrap();
+        }
+        fs::write(root.join("target/.rustc_info.json"), "").unwrap();
+        let known: Vec<PathBuf> = ["crates/app/src/main.rs", "README.md"]
+            .map(PathBuf::from)
+            .to_vec();
+        let stop = AtomicBool::new(false);
+        // Room for two ignored files: the shallowest one comes first, the index stays whole.
+        let (files, complete) = walk_all(&root, known.clone(), 2, &stop);
+        assert!(!complete);
+        assert_eq!(files.len(), 4);
+        assert!(known.iter().all(|k| files.contains(k)));
+        assert!(files.contains(&PathBuf::from("target/.rustc_info.json")));
+        let (files, complete) = walk_all(&root, known, 100, &stop);
+        assert!(complete);
+        assert_eq!(files.len(), 8);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn a_folder_pattern_matches_only_that_folder() {
         let pattern = folder_pattern("src/a,b/c*{x}[y]");
         assert_eq!(pattern, "./src/a?b/c[*][{]x[}][[]y]");
@@ -599,6 +645,11 @@ mod tests {
         );
         // Typed by hand: `&&` in a class is literal, not Rust regex's intersection.
         assert!(Globs::parse("[&&~]x.rs").unwrap().matches("&x.rs"));
+        let lines = Globs::parse("*.md\n target ,\n*.log").unwrap();
+        assert!(
+            lines.matches("a/README.md") && lines.matches("target/x") && lines.matches("x.log")
+        );
+        assert!(!lines.matches("src/main.rs"));
     }
 
     fn options(pattern: &str) -> Options {
@@ -733,7 +784,23 @@ mod tests {
         assert!(!m.wants(Path::new("app/main.rs")));
         assert!(!m.wants(Path::new("app/tests/t.py")));
         assert!(!m.wants(Path::new(".venv/lib/x.py")));
-        assert!(!m.wants(Path::new("dist/x.py")));
+        // Only what 排除的文件 lists is skipped: the usual folders are in its default text.
+        assert!(m.wants(Path::new("dist/x.py")));
+        let defaults = Matcher::new(&Options {
+            exclude: crate::settings::SEARCH_EXCLUDE_DEFAULT.into(),
+            ..options("x")
+        })
+        .unwrap();
+        for skipped in [
+            "dist/x.py",
+            "web/node_modules/a/x.js",
+            "target/debug/deps/x.d",
+            "web/app.min.js",
+            "web/app.js.map",
+        ] {
+            assert!(!defaults.wants(Path::new(skipped)), "{skipped}");
+        }
+        assert!(defaults.wants(Path::new("crates/app/src/main.rs")));
         let all = Matcher::new(&Options {
             use_excludes: false,
             ..options("x")
@@ -758,7 +825,7 @@ mod tests {
             return;
         };
         let started = std::time::Instant::now();
-        let files = walk_all(&root, &AtomicBool::new(false));
+        let (files, _) = walk_all(&root, Vec::new(), MAX_WALK_FILES, &AtomicBool::new(false));
         let matcher = Matcher::new(&options("return x")).unwrap();
         let files = filter(files, &matcher, true);
         let listed = started.elapsed();
@@ -818,8 +885,10 @@ mod tests {
         fs::write(root.join("src/c.bin"), b"needle\0").unwrap();
         fs::create_dir_all(root.join(".git")).unwrap();
         fs::write(root.join(".git/needle"), "needle").unwrap();
-        let files = walk_all(&root, &AtomicBool::new(false));
+        let (files, complete) =
+            walk_all(&root, Vec::new(), MAX_WALK_FILES, &AtomicBool::new(false));
         assert_eq!(files.len(), 3);
+        assert!(complete);
         let matcher = Matcher::new(&options("needle")).unwrap();
         let progress = Progress::default();
         run(&root, files, &matcher, &progress, &AtomicBool::new(false));

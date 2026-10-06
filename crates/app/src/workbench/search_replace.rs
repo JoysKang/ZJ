@@ -23,7 +23,6 @@ use gpui_kit::{
 use std::{ops::Range, path::PathBuf};
 
 pub(super) struct ReplaceState {
-    pub open: bool,
     pub input: Entity<InputState>,
     pub preserve_case: bool,
     pub running: bool,
@@ -59,7 +58,6 @@ impl ReplaceState {
             }
         });
         Self {
-            open: false,
             input,
             preserve_case: false,
             running: false,
@@ -68,6 +66,11 @@ impl ReplaceState {
             summary: None,
             _subscription: subscription,
         }
+    }
+
+    /// The replacement has text: results show what replacing would do instead of opening.
+    pub fn active(&self, cx: &App) -> bool {
+        !self.input.read(cx).value().is_empty()
     }
 
     pub fn has_undo(&self) -> bool {
@@ -116,18 +119,6 @@ impl Workbench {
         }
         text.push_str(&preview[last..]);
         (text, removed, added)
-    }
-
-    pub(super) fn toggle_search_replace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let replace = &mut self.search.replace;
-        replace.open = !replace.open;
-        let input = if replace.open {
-            replace.input.clone()
-        } else {
-            self.search.query.clone()
-        };
-        input.update(cx, |input, cx| input.focus(window, cx));
-        cx.notify();
     }
 
     fn rebuild_after_edit(&mut self) {

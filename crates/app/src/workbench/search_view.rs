@@ -14,7 +14,8 @@ use gpui_kit::{
         Disableable, Selectable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
-        input::{Input, InputEvent, InputState},
+        input::{Input, InputEvent, InputState, Textarea, TextareaState},
+        switch::Switch,
         v_flex,
     },
     prelude::FluentBuilder,
@@ -32,6 +33,10 @@ use std::{
 
 /// Typing settles for this long before a search starts.
 const DEBOUNCE: Duration = Duration::from_millis(250);
+/// The glob lists grow up to this many lines, then scroll.
+const GLOB_ROWS: usize = 4;
+/// Typing in 排除的文件 settles for this long before it is saved.
+const EXCLUDE_SAVE_DELAY: Duration = Duration::from_secs(1);
 /// How often a running search hands its results to the view.
 const POLL: Duration = Duration::from_millis(100);
 
@@ -43,17 +48,22 @@ enum SearchRow {
 
 pub(super) struct SearchState {
     pub query: Entity<InputState>,
-    pub include: Entity<InputState>,
-    exclude: Entity<InputState>,
+    /// Glob lists: they wrap and grow to a few lines, ⏎ searches (⇧⏎ breaks the line, which
+    /// separates like a comma).
+    pub include: Entity<TextareaState>,
+    pub exclude: Entity<TextareaState>,
     pub case_sensitive: bool,
     pub whole_word: bool,
     pub regex: bool,
-    pub details: bool,
     pub results: Vec<FileMatches>,
     pub collapsed: HashSet<PathBuf>,
     rows: Vec<SearchRow>,
     pub matches: usize,
     truncated: bool,
+    /// Excludes off and too many ignored files: some were not searched.
+    files_capped: bool,
+    /// Saves 排除的文件 to the settings a moment after typing stops.
+    exclude_save: Option<Task<()>>,
     error: Option<String>,
     running: bool,
     /// A search was asked for before the file index existed.
@@ -73,14 +83,30 @@ pub(super) struct SearchState {
 impl SearchState {
     pub fn new(window: &mut Window, cx: &mut Context<Workbench>) -> Self {
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("搜索"));
-        let include =
-            cx.new(|cx| InputState::new(window, cx).placeholder("例如 *.py, ./src, **/tests"));
-        let exclude = cx.new(|cx| InputState::new(window, cx).placeholder("例如 .venv, *.min.js"));
-        let rerun = |this: &mut Workbench,
-                     _: &Entity<InputState>,
-                     event: &InputEvent,
-                     window: &mut Window,
-                     cx: &mut Context<Workbench>| {
+        let globs =
+            |placeholder: &'static str, value: String, window: &mut Window, cx: &mut App| {
+                cx.new(|cx| {
+                    TextareaState::new(window, cx)
+                        .auto_grow(1, GLOB_ROWS)
+                        .submit_on_enter(true)
+                        .placeholder(placeholder)
+                        .default_value(value)
+                })
+            };
+        let include = globs("例如 *.py, ./src, **/tests", String::new(), window, cx);
+        // Starts with the usual folders to skip (kept in the settings); the user edits it.
+        let saved = cx
+            .global::<crate::settings::Settings>()
+            .search_exclude
+            .clone();
+        let exclude = globs("例如 .venv, *.min.js", saved, window, cx);
+        fn rerun<T>(
+            this: &mut Workbench,
+            _: &Entity<T>,
+            event: &InputEvent,
+            window: &mut Window,
+            cx: &mut Context<Workbench>,
+        ) {
             match event {
                 InputEvent::Change => {
                     this.search.replace.summary = None;
@@ -89,11 +115,16 @@ impl SearchState {
                 InputEvent::PressEnter { .. } => this.schedule_search(Duration::ZERO, window, cx),
                 _ => {}
             }
-        };
+        }
         let subscriptions = vec![
             cx.subscribe_in(&query, window, rerun),
             cx.subscribe_in(&include, window, rerun),
             cx.subscribe_in(&exclude, window, rerun),
+            cx.subscribe_in(&exclude, window, |this, input, event, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.save_exclude_later(input.read(cx).value().to_string(), window, cx);
+                }
+            }),
         ];
         Self {
             query,
@@ -102,12 +133,13 @@ impl SearchState {
             case_sensitive: false,
             whole_word: false,
             regex: false,
-            details: false,
             results: Vec::new(),
             collapsed: HashSet::new(),
             rows: Vec::new(),
             matches: 0,
             truncated: false,
+            files_capped: false,
+            exclude_save: None,
             error: None,
             running: false,
             waiting_for_index: false,
@@ -161,7 +193,7 @@ impl Workbench {
     }
 
     /// The Explorer's 「在文件夹中查找」: the Search view limited to `folder` (all files for
-    /// the root), its details open, the query focused.
+    /// the root), the query focused.
     pub(super) fn find_in_folder(
         &mut self,
         folder: &std::path::Path,
@@ -178,8 +210,19 @@ impl Workbench {
         self.search
             .include
             .update(cx, |input, cx| input.set_value(include, window, cx));
-        self.search.details = true;
         self.find_in_files(window, cx);
+    }
+
+    /// Keeps 排除的文件 for the next session and new windows, once typing has paused.
+    fn save_exclude_later(&mut self, value: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.exclude_save = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(EXCLUDE_SAVE_DELAY).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if cx.global::<crate::settings::Settings>().search_exclude != value {
+                    this.change_settings(window, cx, |s| s.search_exclude = value);
+                }
+            });
+        }));
     }
 
     fn search_options(&self, cx: &App) -> Options {
@@ -220,6 +263,7 @@ impl Workbench {
             search.rows.clear();
             search.matches = 0;
             search.truncated = false;
+            search.files_capped = false;
             search.running = false;
             cx.notify();
             return;
@@ -243,7 +287,8 @@ impl Workbench {
         .ok()
         .map(Arc::new);
         let index = self.index.clone();
-        if options.use_excludes && index.is_none() {
+        // The index lists the files to search (with excludes off, before the ignored ones).
+        if index.is_none() {
             // build_index starts the search once the file list exists.
             self.search.waiting_for_index = true;
             self.search.running = true;
@@ -262,16 +307,18 @@ impl Workbench {
             let worker = progress.clone();
             let stop = cancel.clone();
             std::thread::spawn(move || {
-                let files = match &index {
-                    Some(index) if options.use_excludes => {
-                        let relative: Vec<PathBuf> = index
-                            .paths()
-                            .into_iter()
-                            .filter_map(|p| p.strip_prefix(&root).ok().map(PathBuf::from))
-                            .collect();
-                        text_search::filter(relative, &matcher, true)
-                    }
-                    _ => text_search::filter(text_search::walk_all(&root, &stop), &matcher, false),
+                let indexed: Vec<PathBuf> = index
+                    .iter()
+                    .flat_map(|index| index.paths())
+                    .filter_map(|p| p.strip_prefix(&root).ok().map(PathBuf::from))
+                    .collect();
+                let files = if options.use_excludes {
+                    text_search::filter(indexed, &matcher, true)
+                } else {
+                    let (all, complete) =
+                        text_search::walk_all(&root, indexed, text_search::MAX_WALK_FILES, &stop);
+                    worker.files_capped.store(!complete, Ordering::Relaxed);
+                    text_search::filter(all, &matcher, false)
                 };
                 text_search::run(&root, files, &matcher, &worker, &stop);
             });
@@ -297,6 +344,7 @@ impl Workbench {
                         search.results.sort_by(|a, b| a.relative.cmp(&b.relative));
                         search.matches = progress.matches.load(Ordering::Relaxed);
                         search.truncated = progress.truncated.load(Ordering::Relaxed);
+                        search.files_capped = progress.files_capped.load(Ordering::Relaxed);
                         search.running = !done;
                         search.rebuild_rows();
                         cx.notify();
@@ -417,12 +465,17 @@ impl Workbench {
         } else if search.results.is_empty() && search.replace.summary.is_some() {
             // Everything was replaced; the replace summary says so.
             None
+        } else if search.results.is_empty() && search.files_capped {
+            Some((
+                "未找到结果。被忽略的文件太多，只搜索了其中一部分".into(),
+                colors.muted,
+            ))
         } else if search.results.is_empty() {
             Some(("未找到结果。请检查排除设置和忽略文件".into(), colors.muted))
         } else {
             Some((
                 format!(
-                    "{} 个文件中有 {} 个结果{}",
+                    "{} 个文件中有 {} 个结果{}{}",
                     search.results.len(),
                     search.matches,
                     if search.truncated {
@@ -431,22 +484,17 @@ impl Workbench {
                         "，仍在搜索…"
                     } else {
                         ""
+                    },
+                    if search.files_capped {
+                        "。被忽略的文件太多，只搜索了其中一部分"
+                    } else {
+                        ""
                     }
                 ),
                 colors.muted,
             ))
         };
         let replace = &search.replace;
-        let replace_toggle = Button::new("search-toggle-replace")
-            .xsmall()
-            .ghost()
-            .icon(if replace.open {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronRight
-            })
-            .tooltip("切换替换")
-            .on_click(cx.listener(|this, _, window, cx| this.toggle_search_replace(window, cx)));
         let preserve_case = Button::new("search-preserve-case")
             .small()
             .ghost()
@@ -464,27 +512,24 @@ impl Workbench {
             .tooltip("全部替换")
             .disabled(search.results.is_empty() || replace.running)
             .on_click(cx.listener(|this, _, window, cx| this.confirm_replace_all(window, cx)));
-        let inputs = h_flex()
-            .ml(theme::SEARCH_CHEVRON_OUTDENT)
+        // Everything stays open: the query, the replacement, the files to include and exclude.
+        let inputs = v_flex()
             .gap_1()
-            .items_start()
-            .child(div().pt_1().child(replace_toggle))
             .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
+                div()
+                    .debug_selector(|| "search-query".into())
+                    .child(Input::new(&search.query).small().suffix(query_options)),
+            )
+            .child(
+                h_flex()
                     .gap_1()
-                    .child(Input::new(&search.query).small().suffix(query_options))
-                    .when(replace.open, |inputs| {
-                        inputs.child(
-                            h_flex()
-                                .gap_1()
-                                .child(div().flex_1().min_w_0().child(
-                                    Input::new(&replace.input).small().suffix(preserve_case),
-                                ))
-                                .child(replace_all),
-                        )
-                    }),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&replace.input).small().suffix(preserve_case)),
+                    )
+                    .child(replace_all),
             );
         let replace_summary = replace.summary.clone().map(|(text, warn)| {
             h_flex()
@@ -521,45 +566,54 @@ impl Workbench {
                     .gap_1()
                     .flex_shrink_0()
                     .child(inputs)
-                    .child(
-                        h_flex().justify_end().child(
-                            Button::new("search-details")
-                                .xsmall()
-                                .ghost()
-                                .icon(IconName::Ellipsis)
-                                .selected(search.details)
-                                .tooltip("切换搜索详细信息")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.search.details = !this.search.details;
-                                    cx.notify();
-                                })),
-                        ),
-                    )
-                    .when(search.details, |panel| {
-                        panel
-                            .child(label("包含的文件"))
-                            .child(Input::new(&search.include).small())
+                    .child(label("包含的文件"))
+                            .child(
+                                div()
+                                    .debug_selector(|| "search-include".into())
+                                    .child(
+                                        Textarea::new(&search.include)
+                                            .small()
+                                            .line_height(theme::SEARCH_GLOB_LINE),
+                                    ),
+                            )
                             .child(label("排除的文件"))
                             .child(
-                                Input::new(&search.exclude).small().suffix(
-                                    Button::new("search-use-excludes")
-                                        .xsmall()
-                                        .ghost()
-                                        .icon(IconName::Settings)
-                                        .selected(use_excludes)
-                                        .tooltip(if use_excludes {
-                                            "使用排除设置和忽略文件（已开启：跳过 .gitignore、.venv、node_modules 等）"
-                                        } else {
-                                            "使用排除设置和忽略文件（已关闭：搜索所有文件）"
-                                        })
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            let on = !cx.global::<crate::settings::Settings>().search_use_excludes;
-                                            this.change_settings(window, cx, |s| s.search_use_excludes = on);
-                                            this.schedule_search(Duration::ZERO, window, cx);
-                                        })),
-                                ),
+                                // Kit's textarea takes no suffix: the switch sits over its top
+                                // right corner, the text keeps clear of it.
+                                div()
+                                    .debug_selector(|| "search-exclude".into())
+                                    .relative()
+                                    .child(
+                                        Textarea::new(&search.exclude)
+                                            .small()
+                                            .line_height(theme::SEARCH_GLOB_LINE)
+                                            .pr(theme::SEARCH_SWITCH_GUTTER),
+                                    )
+                                    .child(
+                                        div()
+                                            .debug_selector(|| "search-use-excludes".into())
+                                            .absolute()
+                                            .top(theme::SEARCH_SWITCH_INSET_Y)
+                                            .right(theme::SEARCH_SWITCH_INSET_X)
+                                            .child(
+                                        Switch::new("search-use-excludes")
+                                            .xsmall()
+                                            .checked(use_excludes)
+                                            .tooltip(if use_excludes {
+                                                "跳过忽略的文件（已开启）：不搜 .gitignore 忽略的文件和 .venv、node_modules 等目录"
+                                            } else {
+                                                "跳过忽略的文件（已关闭）：搜索所有文件"
+                                            })
+                                            .on_click(cx.listener(|this, on: &bool, window, cx| {
+                                                let on = *on;
+                                                this.change_settings(window, cx, |s| {
+                                                    s.search_use_excludes = on
+                                                });
+                                                this.schedule_search(Duration::ZERO, window, cx);
+                                            })),
+                                            ),
+                                    ),
                             )
-                    })
                     .when_some(summary, |panel, (text, color)| {
                         panel.child(
                             div()
@@ -576,7 +630,9 @@ impl Workbench {
                     "search-results",
                     search.rows.len(),
                     cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                        range.map(|index| this.search_row(index, cx)).collect::<Vec<_>>()
+                        range
+                            .map(|index| this.search_row(index, cx))
+                            .collect::<Vec<_>>()
                     }),
                 )
                 .track_scroll(&search.scroll)
@@ -611,7 +667,7 @@ impl Workbench {
     fn search_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
         let group: SharedString = format!("search-row-{index}").into();
-        let replacing = self.search.replace.open;
+        let replacing = self.search.replace.active(cx);
         let busy = self.search.replace.running;
         let base = h_flex()
             .id(("search-row", index))
@@ -757,7 +813,7 @@ impl Workbench {
                     )
                     .child(self.row_actions(group, buttons))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        if this.search.replace.open {
+                        if this.search.replace.active(cx) {
                             this.preview_replace(f, window, cx)
                         } else {
                             this.open_match(f, l, window, cx)

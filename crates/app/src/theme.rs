@@ -42,10 +42,16 @@ pub const SIDEBAR_TITLE_HEIGHT: Pixels = px(36.);
 pub const SECTION_HEIGHT: Pixels = px(24.);
 /// Explorer tree geometry, measured from the owner's VS Code screenshot.
 pub const TREE_BASE: Pixels = px(12.);
+/// The Search view's ignore switch over the top right of 排除的文件, and the room the text
+/// leaves for it.
+pub const SEARCH_SWITCH_INSET_X: Pixels = px(8.);
+pub const SEARCH_SWITCH_INSET_Y: Pixels = px(4.);
+pub const SEARCH_SWITCH_GUTTER: Pixels = px(44.);
+/// The Search view's glob lists are textareas: this line height makes one line as high as
+/// the single-line query above them (24 px), whose text gets the same 18 px.
+pub const SEARCH_GLOB_LINE: Pixels = px(18.);
 pub const TREE_STEP: Pixels = px(8.);
 pub const ROW_INSET: Pixels = px(4.);
-/// The Search view's replace chevron sits in the left margin, outside the inputs' edge.
-pub const SEARCH_CHEVRON_OUTDENT: Pixels = px(-10.);
 pub const GUIDE_WIDTH: Pixels = px(1.);
 pub const DECORATION_DOT: Pixels = px(6.);
 /// A folder's decoration dot is the file color, lighter.
