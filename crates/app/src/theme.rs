@@ -43,7 +43,7 @@ pub const SECTION_HEIGHT: Pixels = px(24.);
 /// Explorer tree geometry, measured from the owner's VS Code screenshot.
 pub const TREE_BASE: Pixels = px(12.);
 pub const TREE_STEP: Pixels = px(8.);
-pub const ROW_INSET: Pixels = px(2.);
+pub const ROW_INSET: Pixels = px(4.);
 /// The Search view's replace chevron sits in the left margin, outside the inputs' edge.
 pub const SEARCH_CHEVRON_OUTDENT: Pixels = px(-10.);
 pub const GUIDE_WIDTH: Pixels = px(1.);
@@ -60,7 +60,7 @@ pub const BADGE_OFFSET: Pixels = px(-3.);
 pub const COMMAND_CENTER_HEIGHT: Pixels = px(24.);
 pub const COMMAND_CENTER_WIDTH: Pixels = px(600.);
 pub const QUICK_OPEN_WIDTH: Pixels = px(600.);
-pub const QUICK_OPEN_TOP: Pixels = px(6.);
+pub const QUICK_OPEN_TOP: Pixels = px(8.);
 pub const QUICK_OPEN_ROWS: usize = 12;
 pub const RADIUS: Pixels = px(4.);
 pub const RADIUS_LARGE: Pixels = px(6.);
@@ -139,12 +139,13 @@ pub const TERMINAL_PAD_Y: Pixels = px(4.);
 /// The cursor's width as a bar and its height as an underline.
 pub const TERMINAL_CURSOR_BAR: Pixels = px(2.);
 
-/// The Markdown preview: VS Code's preview column (`max-width: 882px`, 26 px side padding),
+/// The Markdown preview: VS Code's preview column (`max-width: 882px`; its 26 px side padding
+/// is 24 here, on the 4 px grid),
 /// the space around each block, the clickable room after the last block, and how far the
 /// list lays out beyond the viewport.
 pub const MD_MAX_WIDTH: Pixels = px(882.);
-pub const MD_PAD_X: Pixels = px(26.);
-pub const MD_BLOCK_GAP: Pixels = px(6.);
+pub const MD_PAD_X: Pixels = px(24.);
+pub const MD_BLOCK_GAP: Pixels = px(8.);
 pub const MD_EDIT_PAD: Pixels = px(4.);
 pub const MD_TAIL: Pixels = px(160.);
 pub const MD_OVERDRAW: Pixels = px(800.);
@@ -163,8 +164,9 @@ pub const DIFF_RULER_MIN: Pixels = px(3.);
 pub const SCM_NOTICE_MAX: Pixels = px(100.);
 /// Source Control repository rows: the branch line under the name, and wrapped lines.
 pub const SCM_DETAIL_LINE: Pixels = px(20.);
-/// Centers a `SCM_DETAIL_LINE` line inside a `ROW_HEIGHT` row.
-pub const SCM_LINE_PAD: Pixels = px(2.);
+/// Centers a `SCM_DETAIL_LINE` line inside a `ROW_HEIGHT` row: derived from the two, not a
+/// spacing choice (the one value off the 4 px grid).
+pub const SCM_LINE_PAD: Pixels = px((24. - 20.) / 2.);
 
 // Git Graph (editor-area commit graph).
 /// Horizontal space per branch lane.
@@ -194,7 +196,7 @@ pub const STATUS_HALO: Pixels = px(14.);
 pub const AGENT_TOOL_ROW: Pixels = px(30.);
 pub const AGENT_CARD_HEAD: Pixels = px(32.);
 pub const AGENT_FILE_ROW: Pixels = px(26.);
-pub const AGENT_FILE_INDENT: Pixels = px(26.);
+pub const AGENT_FILE_INDENT: Pixels = px(24.);
 pub const AGENT_CHIP: Pixels = px(20.);
 pub const AGENT_COMPOSER_BAR: Pixels = px(34.);
 pub const AGENT_COMPOSER_MIN: Pixels = px(44.);
@@ -217,7 +219,9 @@ pub const AGENT_MENTION_ROWS: usize = 8;
 pub const AGENT_THREAD_MAX: Pixels = px(760.);
 /// ⌘J search overlay.
 pub const AGENT_OVERLAY_WIDTH: Pixels = px(680.);
-pub const AGENT_OVERLAY_TOP: Pixels = px(6.);
+pub const AGENT_OVERLAY_TOP: Pixels = px(8.);
+/// The ⌘J overlay's footer.
+pub const AGENT_OVERLAY_FOOTER: Pixels = px(32.);
 pub const AGENT_OVERLAY_INPUT: Pixels = px(44.);
 pub const AGENT_OVERLAY_ROW: Pixels = px(80.);
 pub const AGENT_OVERLAY_ROWS: usize = 7;
@@ -847,6 +851,39 @@ pub fn highlight_theme_for_tests(dark: bool) -> gpui_kit::component::highlighter
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 间距用 4 px 网格 (CLAUDE.md): no half-step spacing utilities (gap_0p5 is 2 px, gap_1p5
+    /// 6 px …) in the UI code.
+    #[test]
+    fn spacing_utilities_stay_on_the_4px_grid() {
+        fn visit(dir: &std::path::Path, found: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(&path, found);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    for (n, line) in text.lines().enumerate() {
+                        let off_grid = line.match_indices("p5()").any(|(at, _)| {
+                            line[..at].ends_with(|c: char| c.is_ascii_digit())
+                                && line[..at]
+                                    .trim_end_matches(|c: char| c.is_ascii_digit())
+                                    .ends_with('_')
+                        });
+                        if off_grid {
+                            found.push(format!("{}:{}", path.display(), n + 1));
+                        }
+                    }
+                }
+            }
+        }
+        let mut found = Vec::new();
+        visit(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut found,
+        );
+        assert!(found.is_empty(), "off the 4 px grid: {found:?}");
+    }
 
     fn luminance(hex: u32) -> f64 {
         let channel = |shift: u32| {

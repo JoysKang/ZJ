@@ -560,7 +560,7 @@ impl Workbench {
             .child(div().py_1().child(body))
             .child(
                 h_flex()
-                    .h(theme::STATUS_HEIGHT + theme::ROW_INSET * 4.)
+                    .h(theme::AGENT_OVERLAY_FOOTER)
                     .px_3()
                     .gap_2()
                     .border_t_1()

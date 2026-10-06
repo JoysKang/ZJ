@@ -83,7 +83,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 ## 视觉规则
 
 - 尺寸、间距、行高、颜色都从 `crates/app/src/theme.rs` 的 token 取，不要在 UI 代码里新写 `px(数字)` 或色值。
-- 布局参照 VS Code 工作台的尺寸，按用户要求字号大一号：正文 `TEXT_BODY` 14、标题栏 `TITLE_HEIGHT` 38、标签栏 `TAB_HEIGHT` 36、列表行 `ROW_HEIGHT` 24、状态栏 `STATUS_HEIGHT` 24；间距用 4 px 网格。编辑器字号默认 14，可缩放，Diff 行高随之计算（`theme::diff_metrics`）。
+- 布局参照 VS Code 工作台的尺寸，按用户要求字号大一号：正文 `TEXT_BODY` 14、标题栏 `TITLE_HEIGHT` 38、标签栏 `TAB_HEIGHT` 36、列表行 `ROW_HEIGHT` 24、状态栏 `STATUS_HEIGHT` 24；间距用 4 px 网格（不用 `gap_0p5` 这类半格工具类，`theme.rs` 的测试会检查；唯一例外是由行高推出的居中偏移 `SCM_LINE_PAD`）。编辑器字号默认 14，可缩放，Diff 行高随之计算（`theme::diff_metrics`）。
 - 配色：暗色是 Solarized Dark（按 VS Code 内置主题的映射），亮色是 Nord Light。只改 `theme.rs` 的 `DARK` / `LIGHT` / 语法表，不要在界面代码里写颜色。
 - 界面图标只用 Lucide（`IconName`），不要用文本符号充当图标。Kit 默认只内嵌 104 个图标（`gpui-kit-assets` 的 `default-icons.txt`），没内嵌的 `IconName` 会画成空白；需要额外的图标时，把 SVG 放进 `crates/app/assets/icons/`，并登记到 `assets.rs` 的 `EXTRA`。
 - 文件类型图标用 vscode-icons 的一个子集（`crates/app/assets/file-icons/`，MIT 许可），映射写在 `file_icons.rs`。这些是彩色 SVG，用 `img()` 绘制：第一次画彩色图片时，GPUI 会分配一张 polychrome 图集（所有窗口共用，vendor 补丁把初始尺寸从 1024² 降到 512²，约 1 MiB）。新增图标前先看体积（当前合计约 58 KB）。

@@ -546,7 +546,7 @@ impl Workbench {
         let has_matches = !find.matches.is_empty();
         let replace_open = find.replace_open && !readonly;
         let toggles = h_flex()
-            .gap_0p5()
+            .gap_1()
             .child(self.find_toggle(
                 "find-case",
                 IconName::CaseSensitive,
@@ -740,7 +740,7 @@ impl Workbench {
                 .on_action(cx.listener(|this, _: &ToggleFindInSelection, _, cx| {
                     this.toggle_find_in_selection(cx)
                 }))
-                .child(div().pt_0p5().child(chevron))
+                .child(div().pt_1().child(chevron))
                 .child(
                     v_flex()
                         .flex_1()

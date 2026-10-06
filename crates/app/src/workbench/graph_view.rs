@@ -1454,7 +1454,7 @@ fn ref_chip(reference: &GraphRef, lane: Hsla, colors: theme::Colors) -> AnyEleme
         .h(theme::BADGE_SIZE)
         .px_1()
         .mr_1()
-        .gap_0p5()
+        .gap_1()
         .items_center()
         .rounded(theme::RADIUS)
         .border_1()

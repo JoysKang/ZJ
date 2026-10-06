@@ -79,7 +79,7 @@ fn action(id: impl Into<ElementId>, icon: IconName, label: &'static str, cx: &Ap
 fn hover_actions(group: SharedString) -> Div {
     h_flex()
         .flex_shrink_0()
-        .gap_0p5()
+        .gap_1()
         .opacity(0.)
         .group_hover(group, |actions| actions.opacity(1.))
 }
@@ -443,7 +443,7 @@ impl Workbench {
         let actions = h_flex()
             .flex_shrink_0()
             .h(theme::ROW_HEIGHT)
-            .gap_0p5()
+            .gap_1()
             .child(
                 action(("scm-repo-commit", g), IconName::Check, "提交", cx)
                     .disabled(pending || !can_commit)
@@ -646,9 +646,9 @@ impl Workbench {
             .w_full()
             .pl(theme::ROW_INSET + theme::ICON_SIZE * 2. + theme::SCM_LINE_PAD * 2.)
             .pr_1()
-            .pt_0p5()
+            .pt_1()
             .pb_2()
-            .gap_1p5()
+            .gap_2()
             .child(
                 // ⌘Enter commits; capture it before the textarea inserts a line break.
                 div()

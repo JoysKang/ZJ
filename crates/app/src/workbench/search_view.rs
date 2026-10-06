@@ -354,7 +354,7 @@ impl Workbench {
         let search = &self.search;
         let use_excludes = cx.global::<crate::settings::Settings>().search_use_excludes;
         let query_options = h_flex()
-            .gap_0p5()
+            .gap_1()
             .child(self.option_button(
                 "search-case",
                 IconName::CaseSensitive,
@@ -444,7 +444,7 @@ impl Workbench {
             .on_click(cx.listener(|this, _, window, cx| this.confirm_replace_all(window, cx)));
         let inputs = h_flex()
             .ml(theme::SEARCH_CHEVRON_OUTDENT)
-            .gap_0p5()
+            .gap_1()
             .items_start()
             .child(div().pt_1().child(replace_toggle))
             .child(
@@ -456,7 +456,7 @@ impl Workbench {
                     .when(replace.open, |inputs| {
                         inputs.child(
                             h_flex()
-                                .gap_0p5()
+                                .gap_1()
                                 .child(div().flex_1().min_w_0().child(
                                     Input::new(&replace.input).small().suffix(preserve_case),
                                 ))
@@ -568,7 +568,7 @@ impl Workbench {
     fn row_actions(&self, group: SharedString, buttons: Vec<Button>) -> AnyElement {
         h_flex()
             .flex_shrink_0()
-            .gap_0p5()
+            .gap_1()
             .invisible()
             .group_hover(group, |actions| actions.visible())
             // The row's own click must not fire under the buttons.
