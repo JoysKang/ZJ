@@ -36,6 +36,7 @@ mod agent_panel;
 mod agent_review;
 pub use agent_review::{AcceptAgentChange, RejectAgentChange};
 mod agent_search;
+mod blame;
 mod chrome;
 mod commands;
 pub use commands::ShowAllCommands;
@@ -420,6 +421,7 @@ pub struct Workbench {
     /// Cursor (line, column) of the active editor, 0-based, for the status bar.
     cursor: Option<(u32, u32)>,
     _cursor_observer: Option<Subscription>,
+    blame: blame::BlameState,
     /// The diff tab: what it shows, the parsed document, selection and scrolling, and its loading task.
     diff: diff_view::DiffPane,
     /// Go to definition, references and back / forward: the symbol index and the navigation history.
@@ -610,6 +612,7 @@ impl Workbench {
             window_edited: false,
             cursor: None,
             _cursor_observer: None,
+            blame: Default::default(),
             diff: diff_view::DiffPane {
                 tab: None,
                 title: String::new(),
@@ -1038,8 +1041,10 @@ impl Workbench {
                     this.cursor = cursor;
                     cx.notify();
                 }
+                this.schedule_blame(cx);
             })
         });
+        self.schedule_blame(cx);
     }
 
     fn focus_active_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1710,6 +1715,7 @@ impl Workbench {
                                         }
                                         group.status = Some(status.map(Arc::new));
                                         group.outgoing = outgoing;
+                                        this.refresh_blame(cx);
                                     }
                                 }
                                 Event::Issue(issue) => {

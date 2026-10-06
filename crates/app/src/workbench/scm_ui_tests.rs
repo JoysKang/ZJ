@@ -307,3 +307,41 @@ async fn stash_with_a_message_then_pop_it(cx: &mut TestAppContext) {
     );
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }
+
+#[gpui_kit::test]
+async fn the_status_bar_blames_the_cursor_line(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("blame", 0);
+    let (window, this) = open(cx, repo.clone());
+    let folder = Some(repo.clone());
+    let path = repo.join("a.txt");
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(path, folder, window, cx));
+    })
+    .unwrap();
+    let shown = |cx: &mut TestAppContext| {
+        this.read_with(cx, |p, _| {
+            p.blame.shown.as_ref().map(|b| {
+                b.as_ref()
+                    .map(|b| (b.author.clone(), b.uncommitted))
+                    .map_err(|e| e.clone())
+            })
+        })
+    };
+    settle(cx, Some(window), |cx| shown(cx).is_some());
+    assert_eq!(shown(cx), Some(Ok(("Fixture".to_string(), false))));
+
+    // Typing on the line: blamed as typed, so not committed yet.
+    let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        editor.update(cx, |state, cx| {
+            state.replace_text_in_range(Some(0..0), "x", window, cx)
+        });
+    })
+    .unwrap();
+    // (Git names the author of such lines differently across versions.)
+    settle(cx, Some(window), |cx| {
+        matches!(shown(cx), Some(Ok((_, true))))
+    });
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}

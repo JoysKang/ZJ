@@ -188,6 +188,11 @@ impl Workbench {
             return;
         };
         doc.version += 1;
+        // The cursor observer may have run before this edit was counted.
+        self.schedule_blame(cx);
+        let Some(doc) = self.document_mut(id) else {
+            return;
+        };
         if reloaded {
             return;
         }

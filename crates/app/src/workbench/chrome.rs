@@ -290,6 +290,7 @@ impl Workbench {
         let right = h_flex()
             .h_full()
             .flex_shrink_0()
+            .children(self.render_blame(cx))
             .when(awaiting.0 > 0, |bar| {
                 let label = match (&awaiting.1, awaiting.0) {
                     (Some(agent), 1) => format!("{agent} · 待批准"),
