@@ -561,6 +561,10 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.active == Pane::Large {
+            self.large_go_to(line as usize, cx);
+            return;
+        }
         let Pane::Document(id) = self.active else {
             return;
         };

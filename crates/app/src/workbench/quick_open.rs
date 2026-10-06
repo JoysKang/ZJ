@@ -233,6 +233,20 @@ impl Workbench {
             keys: Vec::new(),
             pick: Pick::Line(line),
         };
+        if self.active == super::Pane::Large
+            && let Some((lines, here)) = self.large_line_count()
+        {
+            let lines = lines as u32;
+            return match super::navigation::parse_line_query(query) {
+                Some((line, _)) if line <= lines => {
+                    row(format!("转到第 {line} 行"), Some((line - 1, 0)))
+                }
+                _ => row(
+                    format!("当前行: {}。请输入 1 到 {lines} 之间的行号。", here + 1),
+                    None,
+                ),
+            };
+        }
         let Some((_, editor)) = self.active_document() else {
             return row("请先打开一个文件".into(), None);
         };

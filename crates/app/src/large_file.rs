@@ -104,25 +104,119 @@ pub fn read_lines(
     index: &LineIndex,
     range: Range<usize>,
 ) -> Result<Vec<Line>, ReadError> {
-    let mut file = fs::File::open(path)?;
-    if FileStamp::of(&file.metadata()?) != index.stamp {
-        return Err(ReadError::Changed);
-    }
     let end = range.end.min(index.lines).min(range.start + MAX_READ_LINES);
     if range.start >= end {
+        // Still a read: a changed file is noticed here too.
+        reader_at(path, index, 0)?;
         return Ok(Vec::new());
     }
-    let checkpoint = range.start / STRIDE;
-    file.seek(SeekFrom::Start(index.checkpoints[checkpoint]))?;
-    let mut reader = BufReader::with_capacity(64 * 1024, file);
-    for _ in checkpoint * STRIDE..range.start {
-        skip_line(&mut reader)?;
-    }
+    let mut reader = reader_at(path, index, range.start)?;
     let mut lines = Vec::with_capacity(end - range.start);
     for _ in range.start..end {
         lines.push(read_line(&mut reader)?);
     }
     Ok(lines)
+}
+
+/// Most text copied out of a large file at once.
+pub const MAX_COPY_BYTES: usize = 16 * 1024 * 1024;
+
+/// A reader at the start of line `line`, after checking the file is the one indexed.
+fn reader_at(
+    path: &Path,
+    index: &LineIndex,
+    line: usize,
+) -> Result<BufReader<fs::File>, ReadError> {
+    let mut file = fs::File::open(path)?;
+    if FileStamp::of(&file.metadata()?) != index.stamp {
+        return Err(ReadError::Changed);
+    }
+    let checkpoint = (line / STRIDE).min(index.checkpoints.len() - 1);
+    file.seek(SeekFrom::Start(index.checkpoints[checkpoint]))?;
+    let mut reader = BufReader::with_capacity(64 * 1024, file);
+    for _ in checkpoint * STRIDE..line {
+        skip_line(&mut reader)?;
+    }
+    Ok(reader)
+}
+
+/// The full text of the lines in `range` (lossily decoded), for copying; refused over
+/// `MAX_COPY_BYTES`.
+pub fn read_text(path: &Path, index: &LineIndex, range: Range<usize>) -> Result<String, ReadError> {
+    let end = range.end.min(index.lines);
+    let mut reader = reader_at(path, index, range.start)?;
+    let mut bytes = Vec::new();
+    for _ in range.start..end {
+        reader.read_until(b'\n', &mut bytes)?;
+        if bytes.len() > MAX_COPY_BYTES {
+            return Err(ReadError::Io(io::Error::other(format!(
+                "选中的行超过 {} MB，没有复制",
+                MAX_COPY_BYTES / 1024 / 1024
+            ))));
+        }
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Whether `line` contains `query`: case-sensitive when the query has an uppercase letter,
+/// otherwise ASCII case-insensitive (VS Code's smart case).
+fn contains(line: &[u8], query: &[u8], sensitive: bool) -> bool {
+    !query.is_empty()
+        && line.windows(query.len()).any(|window| {
+            if sensitive {
+                window == query
+            } else {
+                window.eq_ignore_ascii_case(query)
+            }
+        })
+}
+
+/// The next (`forward`) or previous line after / before `from` that contains `query`,
+/// wrapping around the file; `from` itself is checked last. `cancel` stops the scan.
+pub fn find(
+    path: &Path,
+    index: &LineIndex,
+    query: &str,
+    from: usize,
+    forward: bool,
+    cancel: &AtomicBool,
+) -> Result<Option<usize>, ReadError> {
+    let sensitive = query.chars().any(char::is_uppercase);
+    let query = query.as_bytes();
+    let lines = index.lines;
+    let from = from.min(lines.saturating_sub(1));
+    // One pass from the top keeps the scan sequential; it remembers the matches it needs.
+    let mut reader = reader_at(path, index, 0)?;
+    let mut line = Vec::new();
+    let (mut first, mut last_before, mut first_after, mut last) = (None, None, None, None);
+    for number in 0..lines {
+        if number % STRIDE == 0 && cancel.load(Ordering::Relaxed) {
+            return Err(ReadError::Io(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "已取消",
+            )));
+        }
+        line.clear();
+        reader.read_until(b'\n', &mut line)?;
+        if !contains(&line, query, sensitive) {
+            continue;
+        }
+        first.get_or_insert(number);
+        last = Some(number);
+        if number < from {
+            last_before = Some(number);
+        } else if number > from && first_after.is_none() {
+            first_after = Some(number);
+            if forward {
+                break;
+            }
+        }
+    }
+    Ok(if forward {
+        first_after.or(first)
+    } else {
+        last_before.or(last)
+    })
 }
 
 /// Consumes up to and including the next newline; returns the bytes consumed.
@@ -230,6 +324,36 @@ mod tests {
         );
         assert!(read(index.lines..index.lines + 5).is_empty());
         assert_eq!(read(0..usize::MAX).len(), MAX_READ_LINES);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn copies_whole_lines_and_finds_with_smart_case_wrapping_around() {
+        let mut contents = String::new();
+        for n in 0..(STRIDE * 2) {
+            contents.push_str(&format!(
+                "{}\n",
+                if n % 700 == 5 { "Error here" } else { "fine" }
+            ));
+        }
+        let path = temp("find", contents.as_bytes());
+        let index = index(&path, &AtomicBool::new(false)).unwrap();
+        assert_eq!(
+            read_text(&path, &index, 4..7).unwrap(),
+            "fine\nError here\nfine\n"
+        );
+        let find = |query, from, forward| {
+            find(&path, &index, query, from, forward, &AtomicBool::new(false)).unwrap()
+        };
+        // Matches at 5, 705, 1405.
+        assert_eq!(find("error", 0, true), Some(5));
+        assert_eq!(find("error", 5, true), Some(705));
+        assert_eq!(find("error", 1405, true), Some(5));
+        assert_eq!(find("error", 705, false), Some(5));
+        assert_eq!(find("error", 5, false), Some(1405));
+        assert_eq!(find("ERROR", 0, true), None);
+        assert_eq!(find("Error", 0, true), Some(5));
+        assert_eq!(find("missing", 0, true), None);
         fs::remove_file(path).unwrap();
     }
 

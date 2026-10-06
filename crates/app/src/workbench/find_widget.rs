@@ -155,6 +155,10 @@ impl Workbench {
     /// ⌘F (`replace` false) / ⌥⌘F: open the widget, seeded with the selection if it is one
     /// line, and focus the find input.
     pub(super) fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active == Pane::Large {
+            self.large_open_find(window, cx);
+            return;
+        }
         if let Pane::Document(id) = self.active {
             let _ = self.markdown_show_source(id, window, cx);
         }
@@ -332,6 +336,10 @@ impl Workbench {
 
     /// Enter / ⇧Enter, ↑ ↓, ⌘G / ⌘⇧G.
     pub(super) fn find_step(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.active == Pane::Large {
+            self.large_find_step(forward, cx);
+            return;
+        }
         let Some((id, editor, _)) = self.find_document() else {
             return;
         };

@@ -68,6 +68,7 @@ mod find_widget;
 mod go_to_line_ui_tests;
 mod graph_view;
 mod large_view;
+pub use large_view::CopyLargeLines;
 mod markdown_preview;
 #[cfg(test)]
 #[path = "workbench/markdown_ui_tests.rs"]

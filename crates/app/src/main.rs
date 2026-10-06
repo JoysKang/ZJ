@@ -206,6 +206,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         theme::follow_appearance(None, cx);
         cx.bind_keys([
             KeyBinding::new("cmd-shift-n", workbench::NewWindow, Some("WorkspaceEditor")),
+            KeyBinding::new("secondary-c", workbench::CopyLargeLines, Some("LargeView")),
             KeyBinding::new(
                 "cmd-,",
                 workbench::OpenSettingsFile,
