@@ -504,11 +504,14 @@ impl MetalRenderer {
                 width: 1.,
                 height: 1.,
             };
+            // SAFETY: `layer` is the renderer's live CAMetalLayer, messaged on the main
+            // thread like the rest of the renderer; `setDrawableSize:` takes a CGSize.
             unsafe {
                 let _: () = msg_send![layer.as_ref(), setDrawableSize: tiny];
             }
         }
         if hidden.clears_contents() {
+            // SAFETY: as above; `setContents:` accepts nil to drop the layer's contents.
             unsafe {
                 let _: () = msg_send![layer.as_ref(), setContents: ptr::null_mut::<AnyObject>()];
             }
@@ -545,6 +548,8 @@ impl MetalRenderer {
             width: size.width.0 as f64,
             height: size.height.0 as f64,
         };
+        // SAFETY: `layer` is the renderer's live CAMetalLayer, messaged on the main thread
+        // like the rest of the renderer; `setDrawableSize:` takes a CGSize.
         unsafe {
             let _: () = msg_send![layer.as_ref(), setDrawableSize: tiny];
             let _: () = msg_send![layer.as_ref(), setDrawableSize: real];

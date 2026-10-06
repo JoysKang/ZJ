@@ -459,7 +459,7 @@ fn prepaint(
             std::mem::swap(&mut fg, &mut bg);
         }
         if flags.intersects(Flags::DIM) {
-            fg = fg.opacity(0.66);
+            fg = fg.opacity(theme::TERMINAL_DIM_ALPHA);
         }
         if selection.is_some_and(|s| s.contains_cell(&indexed, cursor.point, cursor.shape)) {
             bg = colors.selection;

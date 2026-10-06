@@ -360,7 +360,7 @@ impl Workbench {
                                 !inline,
                                 "左右显示",
                             )
-                            .when(one_sided, |b| b.opacity(0.5))
+                            .when(one_sided, |b| b.opacity(theme::DIMMED_OPACITY))
                             .on_click(cx.listener(
                                 move |this, _, window, cx| {
                                     if this.diff.inline && !one_sided {

@@ -125,7 +125,7 @@ impl Workbench {
             .relative()
             .border_1()
             .border_color(if self.agent.composer_focused {
-                colors.accent.opacity(0.7)
+                colors.focus_border
             } else {
                 colors.strong_border
             })

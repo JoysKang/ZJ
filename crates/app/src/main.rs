@@ -112,7 +112,7 @@ fn open_empty_window(service: GitService, cx: &mut App) {
         Default::default(),
         cx,
     ) {
-        eprintln!("无法创建窗口: {e}");
+        eprintln!("event=window_open_failed error={e}");
     }
 }
 
@@ -134,7 +134,7 @@ fn window_closed(id: WindowId, service: GitService, cx: &mut App) {
     cx.defer(move |cx| {
         if let Err(e) = open_workspace(None, service, documents, 0, bounds, Default::default(), cx)
         {
-            eprintln!("无法创建窗口: {e}");
+            eprintln!("event=window_open_failed error={e}");
         }
     });
 }
@@ -547,7 +547,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_default();
             let startup = Startup { tabs, active, open };
             if let Err(e) = open_workspace(root, service, documents, index, bounds, startup, cx) {
-                eprintln!("无法创建窗口: {e}");
+                eprintln!("event=window_open_failed error={e}");
             }
         }
         let closing = service.clone();

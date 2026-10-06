@@ -638,7 +638,7 @@ impl Workbench {
         let live = self.agent.sessions.iter().find(|l| l.db == Some(s.id));
         let status = live.map_or(RowStatus::of_stored(s.status), |l| l.row_status());
         let muted = if selected {
-            colors.selected_fg.opacity(0.82)
+            colors.selected_muted
         } else {
             colors.muted
         };
@@ -652,7 +652,7 @@ impl Workbench {
                 .px_1()
                 .rounded(theme::RADIUS)
                 .bg(if selected {
-                    colors.selected_fg.opacity(0.14)
+                    colors.selected_chip
                 } else {
                     colors.keycap
                 })

@@ -506,7 +506,9 @@ impl Workbench {
                         .hover(|item| item.bg(colors.control_hover).text_color(colors.foreground))
                         .active(|item| item.bg(colors.control_active))
                 })
-                .when(pending, |item| item.opacity(0.5).cursor_default())
+                .when(pending, |item| {
+                    item.opacity(theme::DIMMED_OPACITY).cursor_default()
+                })
                 .child(
                     div()
                         .h(theme::SCM_DETAIL_LINE)

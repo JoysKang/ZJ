@@ -541,14 +541,26 @@ impl Workbench {
                     .child(self.edit_field(cx))
                     .into_any_element()
             } else {
-                div()
+                h_flex()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_color(name_color)
-                    .child(format!("{name}{}", if entry.symlink { " ↗" } else { "" }))
+                    .gap_1()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_color(name_color)
+                            .child(name),
+                    )
+                    .when(entry.symlink, |row| {
+                        row.child(
+                            Icon::new(IconName::ExternalLink)
+                                .size(theme::SMALL_ICON_SIZE)
+                                .text_color(colors.muted),
+                        )
+                    })
                     .into_any_element()
             })
             .when_some(decoration, |row, decoration| {
@@ -567,7 +579,7 @@ impl Workbench {
                                     div()
                                         .size(theme::DECORATION_DOT)
                                         .rounded_full()
-                                        .bg(color.opacity(0.7)),
+                                        .bg(color.opacity(theme::DECORATION_DOT_ALPHA)),
                                 )
                             } else {
                                 slot.child(decoration.letter.to_string())

@@ -179,7 +179,18 @@ impl Workbench {
                                 .w(theme::ICON_SIZE + theme::TREE_STEP)
                                 .flex_shrink_0()
                                 .text_color(colors.muted)
-                                .child(marker.clone()),
+                                .child(match marker.as_str() {
+                                    crate::markdown::TASK_OPEN | crate::markdown::TASK_DONE => {
+                                        Icon::new(if marker == crate::markdown::TASK_DONE {
+                                            IconName::SquareCheck
+                                        } else {
+                                            IconName::Square
+                                        })
+                                        .size(theme::SMALL_ICON_SIZE)
+                                        .into_any_element()
+                                    }
+                                    _ => marker.clone().into_any_element(),
+                                }),
                         )
                         .child(div().flex_1().min_w_0().child(styled(
                             text,

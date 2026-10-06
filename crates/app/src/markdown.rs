@@ -143,8 +143,8 @@ fn list_item(line: &str) -> Option<(usize, String, &str)> {
         if let Some(rest) = trimmed.strip_prefix(bullet) {
             let rest = rest
                 .strip_prefix("[ ] ")
-                .map(|r| ("☐", r))
-                .or_else(|| rest.strip_prefix("[x] ").map(|r| ("☑", r)));
+                .map(|r| (TASK_OPEN, r))
+                .or_else(|| rest.strip_prefix("[x] ").map(|r| (TASK_DONE, r)));
             return Some(match rest {
                 Some((mark, r)) => (depth, mark.to_string(), r),
                 None => (depth, "•".to_string(), &trimmed[2..]),
@@ -262,6 +262,10 @@ impl From<Vec<Block>> for Blocks {
         }
     }
 }
+
+/// List markers of task items; the panel draws them as check boxes.
+pub const TASK_OPEN: &str = "[ ]";
+pub const TASK_DONE: &str = "[x]";
 
 /// Parses a reply while it streams without starting over each time: everything before the
 /// last blank line outside a code fence is final (the parser is line based and only a
@@ -391,7 +395,7 @@ mod tests {
         assert!(matches!(&blocks[2], Block::Item { depth: 0, marker, .. } if marker == "•"));
         assert!(matches!(&blocks[3], Block::Item { depth: 1, .. }));
         assert!(matches!(&blocks[4], Block::Item { marker, .. } if marker == "3."));
-        assert!(matches!(&blocks[5], Block::Item { marker, .. } if marker == "☑"));
+        assert!(matches!(&blocks[5], Block::Item { marker, .. } if marker == TASK_DONE));
         assert!(matches!(
             &blocks[6],
             Block::Code { language: Some("rust"), text, .. } if text == "fn main() {}"

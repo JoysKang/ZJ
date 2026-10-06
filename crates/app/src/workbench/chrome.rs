@@ -239,7 +239,7 @@ impl Workbench {
                     status_item("status-sync", colors)
                         .child(icon(IconName::RefreshCw))
                         .when_some(counts, |item, counts| item.child(counts))
-                        .when(pending, |item| item.opacity(0.5))
+                        .when(pending, |item| item.opacity(theme::DIMMED_OPACITY))
                         .tooltip(move |window, cx| {
                             gpui_kit::component::tooltip::Tooltip::new(tooltip.clone())
                                 .build(window, cx)

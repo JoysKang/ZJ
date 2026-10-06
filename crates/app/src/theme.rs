@@ -48,6 +48,12 @@ pub const ROW_INSET: Pixels = px(2.);
 pub const SEARCH_CHEVRON_OUTDENT: Pixels = px(-10.);
 pub const GUIDE_WIDTH: Pixels = px(1.);
 pub const DECORATION_DOT: Pixels = px(6.);
+/// A folder's decoration dot is the file color, lighter.
+pub const DECORATION_DOT_ALPHA: f32 = 0.7;
+/// Items that cannot be used right now (waiting for a Git write, a one-sided review action).
+pub const DIMMED_OPACITY: f32 = 0.5;
+/// SGR 2 (faint) terminal text.
+pub const TERMINAL_DIM_ALPHA: f32 = 0.66;
 pub const DECORATION_WIDTH: Pixels = px(16.);
 pub const BADGE_SIZE: Pixels = px(16.);
 pub const BADGE_OFFSET: Pixels = px(-3.);
@@ -601,6 +607,11 @@ pub struct Colors {
     /// `toolbar.activeBackground`): the text color, faint, so they show on a hovered row too.
     pub control_hover: Hsla,
     pub control_active: Hsla,
+    /// Secondary text and tag chips on a selected (accent) row, and the focused composer's
+    /// border.
+    pub selected_muted: Hsla,
+    pub selected_chip: Hsla,
+    pub focus_border: Hsla,
     /// Selected filter chips: accent tint and border.
     pub chip_on: Hsla,
     pub chip_on_border: Hsla,
@@ -673,6 +684,9 @@ impl Palette {
             mark_bg: hsla(self.mark).opacity(self.mark_alpha),
             mark_fg: hsla(self.mark_fg),
             chip_on: hsla(self.accent).opacity(0.16),
+            selected_muted: hsla(self.selected_fg).opacity(0.82),
+            selected_chip: hsla(self.selected_fg).opacity(0.14),
+            focus_border: hsla(self.accent).opacity(0.7),
             control_hover: hsla(self.foreground).opacity(0.12),
             control_active: hsla(self.foreground).opacity(0.2),
             chip_on_border: hsla(self.accent).opacity(0.45),
