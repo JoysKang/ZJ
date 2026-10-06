@@ -300,3 +300,49 @@ async fn after_save_as_the_original_file_opens_in_its_own_tab(cx: &mut TestAppCo
     this.read_with(cx, |p, _| assert!(p.documents.iter().any(|d| d.path == a)));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[gpui_kit::test]
+async fn a_file_deleted_and_restored_unchanged_leaves_its_tab_clean(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-deleted-back-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("x.rs");
+    std::fs::write(&path, "fn x() {}\n").unwrap();
+    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    wait(
+        cx,
+        Some(TICK),
+        None,
+        |cx| loaded(cx, &this),
+        |_| "never loaded".into(),
+    );
+    let folder = Some(root.clone());
+    let open_path = path.clone();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(open_path, folder, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let check = |cx: &mut TestAppContext| {
+        cx.update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| p.check_disk(None, window, cx));
+        })
+        .unwrap();
+    };
+    let state = |cx: &mut TestAppContext| {
+        this.read_with(cx, |p, _| (p.documents[0].deleted, p.documents[0].dirty))
+    };
+    // Switching to a branch without the file...
+    std::fs::remove_file(&path).unwrap();
+    check(cx);
+    settle(cx, Some(window), |cx| state(cx) == (true, true));
+    // ...and back: the same bytes in a new file.
+    std::fs::write(&path, "fn x() {}\n").unwrap();
+    check(cx);
+    settle(cx, Some(window), |cx| state(cx) == (false, false));
+    let _ = std::fs::remove_dir_all(&root);
+}

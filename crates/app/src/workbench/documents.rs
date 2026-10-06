@@ -902,6 +902,16 @@ impl Workbench {
             return;
         }
         let mut snapshot = false;
+        let mut forget = false;
+        // Back with the very bytes it had (a branch switched away and back): a tab that was
+        // not edited meanwhile is clean again.
+        if matches!(on_disk, OnDisk::Same | OnDisk::Touched(_)) && doc.deleted {
+            doc.deleted = false;
+            if doc.unedited_when_deleted == Some(doc.version) {
+                doc.dirty = false;
+                forget = true;
+            }
+        }
         match on_disk {
             OnDisk::Same => {}
             OnDisk::Touched(state) => doc.disk = Some(state),
@@ -932,6 +942,7 @@ impl Workbench {
                     doc.dirty = false;
                     doc.disk = Some(state);
                     doc.banner = None;
+                    self.forget_snapshot(id, cx);
                     return;
                 }
                 if doc.dirty {
@@ -950,6 +961,10 @@ impl Workbench {
         }
         if snapshot {
             self.schedule_snapshot(id, window, cx);
+        }
+        if forget {
+            self.forget_snapshot(id, cx);
+            cx.notify();
         }
     }
 
