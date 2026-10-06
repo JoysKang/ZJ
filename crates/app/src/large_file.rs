@@ -146,13 +146,27 @@ pub fn read_text(path: &Path, index: &LineIndex, range: Range<usize>) -> Result<
     let end = range.end.min(index.lines);
     let mut reader = reader_at(path, index, range.start)?;
     let mut bytes = Vec::new();
-    for _ in range.start..end {
-        reader.read_until(b'\n', &mut bytes)?;
-        if bytes.len() > MAX_COPY_BYTES {
+    let mut left = end.saturating_sub(range.start);
+    // Chunk by chunk, so one huge line stops at the limit instead of being read whole.
+    while left > 0 {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            break;
+        }
+        let (take, line_ends) = match buffer.iter().position(|b| *b == b'\n') {
+            Some(at) => (at + 1, true),
+            None => (buffer.len(), false),
+        };
+        if bytes.len() + take > MAX_COPY_BYTES {
             return Err(ReadError::Io(io::Error::other(format!(
                 "选中的行超过 {} MB，没有复制",
                 MAX_COPY_BYTES / 1024 / 1024
             ))));
+        }
+        bytes.extend_from_slice(&buffer[..take]);
+        reader.consume(take);
+        if line_ends {
+            left -= 1;
         }
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
@@ -187,7 +201,6 @@ pub fn find(
     let from = from.min(lines.saturating_sub(1));
     // One pass from the top keeps the scan sequential; it remembers the matches it needs.
     let mut reader = reader_at(path, index, 0)?;
-    let mut line = Vec::new();
     let (mut first, mut last_before, mut first_after, mut last) = (None, None, None, None);
     for number in 0..lines {
         if number % STRIDE == 0 && cancel.load(Ordering::Relaxed) {
@@ -196,9 +209,7 @@ pub fn find(
                 "已取消",
             )));
         }
-        line.clear();
-        reader.read_until(b'\n', &mut line)?;
-        if !contains(&line, query, sensitive) {
+        if !line_contains(&mut reader, query, sensitive, cancel)? {
             continue;
         }
         first.get_or_insert(number);
@@ -217,6 +228,42 @@ pub fn find(
     } else {
         last_before.or(last)
     })
+}
+
+/// Consumes the next line and says whether it contains `query`, holding at most a buffer
+/// and `query.len() - 1` carried bytes however long the line is.
+fn line_contains(
+    reader: &mut impl BufRead,
+    query: &[u8],
+    sensitive: bool,
+    cancel: &AtomicBool,
+) -> io::Result<bool> {
+    let keep = query.len().saturating_sub(1);
+    let mut window: Vec<u8> = Vec::new();
+    let mut found = false;
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            return Ok(found);
+        }
+        let (take, line_ends) = match buffer.iter().position(|b| *b == b'\n') {
+            Some(at) => (at, true),
+            None => (buffer.len(), false),
+        };
+        if !found {
+            window.extend_from_slice(&buffer[..take]);
+            found = contains(&window, query, sensitive);
+            let drop = window.len().saturating_sub(keep);
+            window.drain(..drop);
+        }
+        reader.consume(if line_ends { take + 1 } else { take });
+        if line_ends {
+            return Ok(found);
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "已取消"));
+        }
+    }
 }
 
 /// Consumes up to and including the next newline; returns the bytes consumed.
@@ -355,6 +402,33 @@ mod tests {
         assert_eq!(find("Error", 0, true), Some(5));
         assert_eq!(find("missing", 0, true), None);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn long_lines_are_searched_and_copied_without_holding_them_whole() {
+        // The match straddles the 64 KiB buffer boundary of a long line.
+        let mut contents = "a".repeat(64 * 1024 - 3);
+        contents.push_str("needle");
+        contents.push_str(&"a".repeat(100_000));
+        contents.push_str("\nshort\n");
+        let path = temp("long-find", contents.as_bytes());
+        let index = index(&path, &AtomicBool::new(false)).unwrap();
+        let cancel = AtomicBool::new(false);
+        assert_eq!(
+            find(&path, &index, "needle", 1, true, &cancel).unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            find(&path, &index, "short", 0, true, &cancel).unwrap(),
+            Some(1)
+        );
+        assert_eq!(read_text(&path, &index, 1..2).unwrap(), "short\n");
+        // A line over the copy limit is refused, not read whole.
+        let huge = temp("long-copy", &vec![b'x'; MAX_COPY_BYTES + 1]);
+        let huge_index = super::index(&huge, &AtomicBool::new(false)).unwrap();
+        assert!(read_text(&huge, &huge_index, 0..1).is_err());
+        fs::remove_file(path).unwrap();
+        fs::remove_file(huge).unwrap();
     }
 
     #[test]
