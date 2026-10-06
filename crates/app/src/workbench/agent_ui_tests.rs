@@ -617,3 +617,38 @@ async fn files_written_one_after_another_all_get_their_line_counts(cx: &mut Test
     });
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[gpui_kit::test]
+async fn enter_in_the_file_picker_attaches_without_sending(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("mention-enter");
+    std::fs::write(root.join("alpha.rs"), "").unwrap();
+    let (handle, this) = open(cx, Some(root.clone()));
+    until(cx, &this, "index", |p| p.index.is_some());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |this, cx| this.agent_focus_composer(window, cx));
+        window.input("look @alp", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    until(cx, &this, "the picker lists the file", |p| {
+        p.agent
+            .mention
+            .as_ref()
+            .is_some_and(|m| !m.results.is_empty())
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press("enter", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(sent(cx, &this), (vec![], "look ".to_string()));
+    this.read_with(cx, |p, _| {
+        assert_eq!(
+            p.agent.attachments,
+            [Attachment::File(root.join("alpha.rs"))]
+        );
+    });
+    let _ = std::fs::remove_dir_all(root);
+}

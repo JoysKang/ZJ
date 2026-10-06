@@ -140,11 +140,13 @@ impl Workbench {
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
                 let plain = !event.keystroke.modifiers.modified();
+                // ⏎ reaches `agent_submit` even when stopped here, so the pickers take it there
+                // (picking here as well sent the message right after).
                 if this.agent.mention.is_some() {
                     match key {
                         "up" => this.agent_move_mention(-1, cx),
                         "down" => this.agent_move_mention(1, cx),
-                        "enter" | "tab" if plain => this.agent_pick_mention(None, window, cx),
+                        "tab" if plain => this.agent_pick_mention(None, window, cx),
                         "escape" => this.agent_close_mention(cx),
                         _ => return,
                     }
