@@ -13,6 +13,7 @@ mod languages;
 mod large_file;
 mod markdown;
 mod markdown_blocks;
+mod md_images;
 mod partial_patch;
 mod perf;
 mod platform;

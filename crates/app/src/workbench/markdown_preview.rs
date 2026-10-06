@@ -4,6 +4,10 @@
 //! dirty state, saving and undo in the source view work as for any edit. Esc or clicking
 //! elsewhere renders it again. Clicking below the last block starts a new one. The tab bar's
 //! button (⇧⌘V, as in VS Code) switches between the preview and the source editor.
+//!
+//! Images are resolved with the split, in the background (`crate::md_images`): local ones
+//! within budget are shown, others (remote, too large, missing) as a placeholder; nothing is
+//! downloaded. Links with a scheme open in the system browser, relative ones in ZJ.
 
 use super::{Pane, Workbench};
 use crate::{
@@ -19,14 +23,29 @@ use gpui_kit::{
         h_flex,
         input::{Escape, InputEvent, RopeExt, Textarea, TextareaState},
         scroll::Scrollbar,
-        text::TextView,
         v_flex,
     },
     prelude::FluentBuilder,
     *,
 };
-use std::ops::Range;
+use std::{collections::HashMap, ops::Range, sync::Arc};
 use workspace_editor_core::DocumentId;
+
+/// What each image URL of the document resolved to.
+type Images = Arc<HashMap<String, crate::md_images::Resolved>>;
+
+/// The placeholder for an image that is not shown (Lucide `image-off`, a gray that reads on
+/// both themes).
+const IMAGE_OFF: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#8a8a8a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" x2="22" y1="2" y2="22"/><path d="M10.41 10.41a2 2 0 1 1-2.83-2.83"/><line x1="13.5" x2="6" y1="13.5" y2="21"/><line x1="18" x2="21" y1="12" y2="15"/><path d="M3.59 3.59A1.99 1.99 0 0 0 3 5v14a2 2 0 0 0 2 2h14c.55 0 1.052-.22 1.41-.59"/><path d="M21 15V5a2 2 0 0 0-2-2H9"/></svg>"##;
+
+fn placeholder() -> ImageSource {
+    static IMAGE: std::sync::OnceLock<Arc<Image>> = std::sync::OnceLock::new();
+    ImageSource::Image(
+        IMAGE
+            .get_or_init(|| Arc::new(Image::from_bytes(ImageFormat::Svg, IMAGE_OFF.to_vec())))
+            .clone(),
+    )
+}
 
 gpui_kit::actions!(markdown, [ToggleMarkdownPreview]);
 
@@ -60,6 +79,7 @@ pub(super) struct MarkdownPreview {
     focus: FocusHandle,
     editing: Option<Editing>,
     task: Option<Task<()>>,
+    pub(super) images: Images,
 }
 
 impl MarkdownPreview {
@@ -73,6 +93,7 @@ impl MarkdownPreview {
             focus: cx.focus_handle(),
             editing: None,
             task: None,
+            images: Arc::default(),
         })
     }
 
@@ -179,9 +200,14 @@ impl Workbench {
         }
         let text = doc.editor.read(cx).text().to_string();
         let version = doc.version;
+        let base = doc
+            .path
+            .parent()
+            .map(|dir| dir.to_path_buf())
+            .unwrap_or_default();
         let work = cx.background_spawn(async move {
             let split = markdown_blocks::split(&text);
-            split
+            let blocks = split
                 .blocks
                 .iter()
                 .map(|block| Shown {
@@ -189,10 +215,18 @@ impl Workbench {
                     kind: block.kind,
                     text: markdown_blocks::rendered(&text, block, &split.definitions).into(),
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            let images: HashMap<_, _> = crate::md_images::image_urls(&text)
+                .into_iter()
+                .map(|url| {
+                    let resolved = crate::md_images::resolve(&base, &url);
+                    (url, resolved)
+                })
+                .collect();
+            (blocks, images)
         });
         let task = cx.spawn(async move |this, cx| {
-            let blocks = work.await;
+            let (blocks, images) = work.await;
             let _ = this.update(cx, |this, cx| {
                 let Some(doc) = this.document_mut(id) else {
                     return;
@@ -208,6 +242,7 @@ impl Workbench {
                     return;
                 }
                 md.replace_blocks(blocks);
+                md.images = Arc::new(images);
                 md.parsed = Some(version);
                 md.task = None;
                 cx.notify();
@@ -474,6 +509,38 @@ impl Workbench {
         )
     }
 
+    /// A link in the preview: with a scheme (https:, mailto:) to the system; a relative path
+    /// to a file in ZJ, resolved against the document's folder.
+    pub(super) fn markdown_link(
+        &mut self,
+        id: DocumentId,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if url.contains(':') || url.starts_with("//") {
+            cx.open_url(url);
+            return;
+        }
+        let Some(base) = self
+            .document(id)
+            .and_then(|doc| doc.path.parent().map(|dir| dir.to_path_buf()))
+        else {
+            return;
+        };
+        let target = url.split('#').next().unwrap_or_default();
+        if target.is_empty() {
+            return;
+        }
+        let path = base.join(target);
+        if path.is_file() {
+            self.open_file(path, self.root.clone(), window, cx);
+        } else {
+            self.message = format!("找不到链接的文件：{}", path.display());
+            cx.notify();
+        }
+    }
+
     pub(super) fn render_markdown_preview(
         &self,
         id: DocumentId,
@@ -572,11 +639,21 @@ impl Workbench {
                     .child(block.text.clone())
                     .into_any_element(),
                 Kind::Markdown | Kind::Frontmatter(_) => {
-                    TextView::markdown(("md-text", index), block.text.clone())
+                    let images = md.images.clone();
+                    let link_view = view.clone();
+                    // Kit's base view: the component wrapper does not pass image resolvers on.
+                    gpui_kit::base::TextView::markdown(("md-text", index), block.text.clone())
                         .selectable(false)
-                        .on_link_click(|url, _, _, cx| {
-                            cx.open_url(url);
+                        // Only what the background resolved; anything else is not loaded.
+                        .image_source(move |url| match images.get(url.as_ref()) {
+                            Some(crate::md_images::Resolved::Local(path)) => {
+                                ImageSource::from(path.clone())
+                            }
+                            _ => placeholder(),
+                        })
+                        .on_link_click(move |url, _, window, cx| {
                             cx.stop_propagation();
+                            link_view.update(cx, |this, cx| this.markdown_link(id, url, window, cx));
                         })
                         .into_any_element()
                 }
