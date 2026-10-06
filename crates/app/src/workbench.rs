@@ -1779,6 +1779,7 @@ impl Workbench {
                                         group.status = Some(status.map(Arc::new));
                                         group.outgoing = outgoing;
                                         this.refresh_blame(&id, cx);
+                                        this.graph_follow_head(&id, window, cx);
                                         this.scan_conflicts(cx);
                                     }
                                 }

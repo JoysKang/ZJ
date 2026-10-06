@@ -259,6 +259,9 @@ pub(super) struct GitGraph {
     lanes: usize,
     has_more: bool,
     loading: bool,
+    /// The repository's HEAD when the graph was loaded: when it moves (a commit or checkout
+    /// made elsewhere), the graph reloads rather than paging on a shifted history.
+    head: Option<String>,
     error: Option<String>,
     /// The row whose details show; clicking it again closes the view.
     selected: Option<usize>,
@@ -281,6 +284,7 @@ impl GitGraph {
             lanes: 1,
             has_more: false,
             loading: false,
+            head: None,
             error: None,
             selected: None,
             details: None,
@@ -370,18 +374,21 @@ impl Workbench {
         }
         cx.notify();
         let service = self.service.clone();
+        if reset {
+            graph.head = self
+                .groups
+                .iter()
+                .find(|g| g.repo.id == repo.id)
+                .and_then(|g| g.status.as_ref()?.as_ref().ok()?.oid.clone());
+        }
         let job = cx.background_spawn(async move {
-            let branches = if reset {
-                service.branches(&repo, &cancel).ok()
-            } else {
-                None
-            };
+            let branches = reset.then(|| service.branches(&repo, &cancel));
             let page = service.graph(&repo, &scope, skip, PAGE, &cancel);
             (branches, page)
         });
         cx.spawn_in(window, async move |this, cx| {
             let (branches, page) = job.await;
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 let Some(graph) = &mut this.graph else {
                     return;
                 };
@@ -389,11 +396,26 @@ impl Workbench {
                     return;
                 }
                 graph.loading = false;
+                match branches {
+                    Some(Ok(branches)) => graph.branches = branches,
+                    Some(Err(error)) => this.message = format!("无法列出分支：{error}"),
+                    None => {}
+                }
+                let Some(graph) = &mut this.graph else {
+                    return;
+                };
                 match page {
+                    // A page that repeats loaded commits: the history moved under the paging.
+                    Ok(page)
+                        if !reset
+                            && page
+                                .iter()
+                                .any(|c| graph.commits.iter().any(|old| old.hash == c.hash)) =>
+                    {
+                        this.graph_load(true, window, cx);
+                        return;
+                    }
                     Ok(page) => {
-                        if let Some(branches) = branches {
-                            graph.branches = branches;
-                        }
                         graph.has_more = page.len() == PAGE;
                         graph.commits.extend(page);
                         let (rows, lanes) = layout(&graph.commits);
@@ -423,6 +445,30 @@ impl Workbench {
             .as_ref()
             .is_some_and(|graph| graph.repo.id == *id)
         {
+            self.graph_load(true, window, cx);
+        }
+    }
+
+    /// The status of `id` came in: a HEAD that moved outside ZJ (a commit in a terminal, a
+    /// pull) reloads the graph.
+    pub(super) fn graph_follow_head(
+        &mut self,
+        id: &RepoId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(graph) = &self.graph else {
+            return;
+        };
+        if graph.repo.id != *id || graph.loading {
+            return;
+        }
+        let head = self
+            .groups
+            .iter()
+            .find(|g| g.repo.id == *id)
+            .and_then(|g| g.status.as_ref()?.as_ref().ok()?.oid.clone());
+        if head.is_some() && head != graph.head {
             self.graph_load(true, window, cx);
         }
     }

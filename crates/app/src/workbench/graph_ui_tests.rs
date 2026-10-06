@@ -371,3 +371,36 @@ async fn a_new_scope_replaces_a_page_still_loading(cx: &mut TestAppContext) {
     assert_eq!(subjects, ["feat", "one"]);
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }
+
+#[gpui_kit::test]
+async fn a_commit_made_elsewhere_reloads_the_open_graph(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("follow-head");
+    let (window, this) = open(cx, repo.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_git_graph(0, window, cx));
+    })
+    .unwrap();
+    let top = |cx: &mut TestAppContext| {
+        this.read_with(cx, |p, _| {
+            p.graph
+                .as_ref()
+                .filter(|g| !g.loading)
+                .and_then(|g| g.commits.first().map(|c| c.subject.clone()))
+        })
+    };
+    settle(cx, None, |cx| top(cx).as_deref() == Some("merge"));
+    // A commit in a terminal; the next status refresh sees HEAD move.
+    git(
+        &repo,
+        &["commit", "-q", "--allow-empty", "-m", "from the terminal"],
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.refresh(window, cx));
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        top(cx).as_deref() == Some("from the terminal")
+    });
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
