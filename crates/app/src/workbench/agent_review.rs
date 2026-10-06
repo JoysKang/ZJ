@@ -251,7 +251,7 @@ impl Workbench {
 
     fn agent_resolved(&mut self, key: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.agent_reload_review(key, window, cx);
-        self.agent_recount(key, window, cx);
+        self.agent_recount(key, None, window, cx);
         cx.notify();
     }
 

@@ -150,6 +150,8 @@ pub(super) struct LiveSession {
     pub turns: usize,
     pump: Option<Task<()>>,
     stats_task: Option<Task<()>>,
+    /// Files to recount once the recount in flight is done (`None`: all of them).
+    recount_pending: Option<std::collections::BTreeSet<PathBuf>>,
     highlight_task: Option<Task<()>>,
     /// The prompt typed while the agent was starting.
     queued: Option<(String, Vec<Attachment>)>,
@@ -179,6 +181,7 @@ impl LiveSession {
             turns: 0,
             pump: None,
             stats_task: None,
+            recount_pending: Some(Default::default()),
             highlight_task: None,
             queued: None,
             last_active: std::time::Instant::now(),

@@ -26,15 +26,18 @@ impl Workbench {
             .map(|s| s.key)
             .collect();
         for key in keys {
-            self.agent_recount(key, window, cx);
+            self.agent_recount(key, Some(vec![path.to_path_buf()]), window, cx);
             self.agent_reload_review(key, window, cx);
         }
     }
 
-    /// Recomputes each changed file's line counts against its review base, in the background.
+    /// Recomputes line counts against the review base, in the background: of `only` (the
+    /// files just written or saved), or of every changed file. Requests made while a recount
+    /// runs wait for it and go together.
     pub(in crate::workbench) fn agent_recount(
         &mut self,
         key: u64,
+        only: Option<Vec<PathBuf>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -42,13 +45,28 @@ impl Workbench {
         let Some(session) = self.agent.session_mut(key) else {
             return;
         };
+        match (&mut session.recount_pending, only) {
+            (Some(pending), Some(only)) => pending.extend(only),
+            (pending, _) => *pending = None,
+        }
+        if session.stats_task.is_some() {
+            return;
+        }
         let Some(client) = session.client.clone() else {
             return;
         };
-        let mut paths: Vec<PathBuf> = session.thread.changed_files.keys().cloned().collect();
-        paths.extend(client.snapshot_paths());
-        paths.sort();
-        paths.dedup();
+        let paths: Vec<PathBuf> = match session.recount_pending.replace(Default::default()) {
+            Some(pending) if pending.is_empty() => return,
+            Some(pending) => pending.into_iter().collect(),
+            None => {
+                let mut paths: Vec<PathBuf> =
+                    session.thread.changed_files.keys().cloned().collect();
+                paths.extend(client.snapshot_paths());
+                paths.sort();
+                paths.dedup();
+                paths
+            }
+        };
         let db = session.db;
         let job = cx.background_spawn(async move {
             paths
@@ -68,10 +86,11 @@ impl Workbench {
         });
         session.stats_task = Some(cx.spawn_in(window, async move |this, cx| {
             let changes = job.await;
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 let Some(session) = this.agent.session_mut(key) else {
                     return;
                 };
+                session.stats_task = None;
                 for (path, change) in changes {
                     session.thread.set_file_change(path, change);
                 }
@@ -85,6 +104,8 @@ impl Workbench {
                         h.set_line_counts(id, added as i64, removed as i64)
                     });
                 }
+                // What came in meanwhile.
+                this.agent_recount(key, Some(Vec::new()), window, cx);
                 cx.notify();
             });
         }));
@@ -161,7 +182,7 @@ impl Workbench {
                 for path in &paths {
                     this.reload_document_from_disk(path, window, cx);
                 }
-                this.agent_recount(key, window, cx);
+                this.agent_recount(key, Some(paths.clone()), window, cx);
                 this.agent_reload_review(key, window, cx);
                 cx.notify();
             });

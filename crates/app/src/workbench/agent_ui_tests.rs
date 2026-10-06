@@ -592,3 +592,28 @@ async fn sessions_left_idle_are_put_away_unless_something_still_needs_them(
     });
     let _ = std::fs::remove_dir_all(data);
 }
+
+#[gpui_kit::test]
+async fn files_written_one_after_another_all_get_their_line_counts(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("recount");
+    let (a, b) = (root.join("a.txt"), root.join("b.txt"));
+    std::fs::write(&a, "one\n").unwrap();
+    std::fs::write(&b, "two\n").unwrap();
+    let (handle, this) = open(cx, Some(root.clone()));
+    send(cx, handle, &this, &format!("write {} ONE", a.display()));
+    settle(cx, &this);
+    send(cx, handle, &this, &format!("write {} TWO", b.display()));
+    settle(cx, &this);
+    until(cx, &this, "both files are counted", |p| {
+        p.agent.current().is_some_and(|s| {
+            [&a, &b].iter().all(|path| {
+                s.thread
+                    .changed_files
+                    .get(*path)
+                    .is_some_and(|c| c.added + c.removed > 0)
+            })
+        })
+    });
+    let _ = std::fs::remove_dir_all(root);
+}

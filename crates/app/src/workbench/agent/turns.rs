@@ -431,7 +431,7 @@ impl Workbench {
         }
         self.agent_parse_from(key, before.saturating_sub(1), cx);
         if recount {
-            self.agent_recount(key, window, cx);
+            self.agent_recount(key, Some(written.clone()), window, cx);
         }
         for path in written {
             self.reload_document_from_disk(&path, window, cx);
