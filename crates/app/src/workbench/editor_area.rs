@@ -462,10 +462,19 @@ impl Workbench {
             .into_any_element()
     }
 
+    /// The welcome page has no tab bar, unless restored tabs not read yet are waiting there:
+    /// hiding them made them look closed, and a new file brought them back.
+    pub(super) fn shows_tab_bar(&self) -> bool {
+        self.active != Pane::Welcome || !self.pending_tabs.is_empty()
+    }
+
     pub(super) fn render_editor_area(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
+        if !self.shows_tab_bar() {
+            return self.render_welcome(cx);
+        }
         let content = match self.active {
-            Pane::Welcome => return self.render_welcome(cx),
+            Pane::Welcome => self.render_welcome(cx),
             Pane::Diff => self.render_diff(cx),
             Pane::Graph => self.render_graph(cx),
             Pane::Large => self.render_large(cx),

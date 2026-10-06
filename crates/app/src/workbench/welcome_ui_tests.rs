@@ -45,3 +45,38 @@ async fn a_double_click_on_the_welcome_page_opens_an_untitled_file(cx: &mut Test
         assert_eq!(p.active, Pane::Document(p.documents[0].id));
     });
 }
+
+#[gpui_kit::test]
+async fn restored_tabs_stay_in_sight_on_the_welcome_page(cx: &mut TestAppContext) {
+    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    // Never read: the paths only have to name files.
+    let tabs = vec![
+        PathBuf::from("/zj-test/a.txt"),
+        PathBuf::from("/zj-test/b.txt"),
+    ];
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.restore_tabs(tabs, None, window, cx));
+        window.render_frame(cx);
+    })
+    .unwrap();
+    let state = |cx: &mut VisualTestContext| {
+        this.read_with(cx, |p, _| {
+            (
+                p.active == Pane::Welcome,
+                p.pending_tabs.len(),
+                p.shows_tab_bar(),
+            )
+        })
+    };
+    let cx = &mut VisualTestContext::from_window(window.into(), cx);
+    assert_eq!(state(cx), (true, 2, true));
+    // A new file joins them; closing it leaves them where they were.
+    click(cx, point(px(1000.), px(820.)), 2);
+    cx.run_until_parked();
+    this.read_with(cx, |p, _| assert!(p.documents.iter().all(|d| d.untitled)));
+    assert_eq!(state(cx), (false, 2, true));
+    cx.update(|window, cx| this.update(cx, |p, cx| p.close_editor(window, cx)));
+    cx.run_until_parked();
+    this.read_with(cx, |p, _| assert!(p.documents.is_empty()));
+    assert_eq!(state(cx), (true, 2, true));
+}
