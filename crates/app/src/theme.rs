@@ -6,9 +6,9 @@
 //! such as the Editor match.
 
 use gpui_kit::{
-    App, Hsla, Pixels, Window, WindowAppearance,
+    App, Hsla, Pixels, Rems, Window, WindowAppearance,
     component::{Theme, ThemeColor, ThemeMode},
-    px, rgb,
+    px, rems, rgb,
 };
 use serde_json::{Value, json};
 
@@ -205,6 +205,8 @@ pub const AGENT_RING_STROKE: Pixels = px(2.5);
 pub const AGENT_PLAN_BAR: Pixels = px(3.);
 pub const AGENT_PLAN_BAR_WIDTH: Pixels = px(160.);
 pub const AGENT_LINE: Pixels = px(22.);
+/// Between the paragraphs, lists and code blocks of a reply (8 px at the default rem).
+pub const AGENT_PARAGRAPH_GAP: Rems = rems(0.5);
 pub const AGENT_FILTER_CHIP: Pixels = px(22.);
 pub const AGENT_SEARCH_INPUT: Pixels = px(28.);
 /// 接受 / 拒绝 at the top right of a change block: kept clear of the overlay scrollbar.

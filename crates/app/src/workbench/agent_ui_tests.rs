@@ -190,6 +190,24 @@ async fn slash_commands_complete_and_model_settings_switch(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
+async fn finished_replies_get_their_code_highlighted(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("highlight");
+    let (handle, this) = open(cx, Some(root.clone()));
+    send(cx, handle, &this, "markdown");
+    settle(cx, &this);
+    // Kit asks while painting; the answer arrives from the background and is kept.
+    wait(
+        cx,
+        None,
+        Some(handle),
+        |cx| this.read_with(cx, |p, _| p.agent.code.highlighted() == 1),
+        |_| "the rust block was never highlighted".into(),
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
 async fn enter_sends_every_turn(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = temp_root("send");

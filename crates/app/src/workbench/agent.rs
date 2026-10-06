@@ -12,7 +12,7 @@
 
 use super::*;
 use crate::agent_model::{self, Attachment};
-use crate::markdown::{self, Block};
+use crate::markdown;
 use gpui_kit::component::input::InputState;
 use workspace_editor_agent::{
     AgentClient, AgentCommand, AgentEvent, AgentPreset, ClientOptions, PermissionKind,
@@ -27,6 +27,7 @@ use workspace_editor_agent_history::{
 mod buffers;
 mod changes;
 mod composer;
+mod highlights;
 pub(super) mod history;
 mod permissions;
 mod turns;
@@ -140,10 +141,9 @@ pub(super) struct LiveSession {
     pending: Vec<(HistoryRole, String)>,
     pub started_at: i64,
     pub branch: Option<String>,
-    /// Parsed replies by absolute item index (`thread.dropped + i`).
-    pub md: HashMap<usize, Rc<markdown::Blocks>>,
-    /// The reply being streamed (absolute index) and its incremental parse.
-    streaming_md: Option<(usize, markdown::Streaming)>,
+    /// Reply texts by absolute item index (`thread.dropped + i`) for Kit's `TextView`: the
+    /// same allocation every frame, so an unchanged reply is not compared again.
+    pub md: HashMap<usize, SharedString>,
     /// Oldest stored message loaded (history threads page backwards from it).
     pub oldest_seq: Option<i64>,
     resume: Option<String>,
@@ -153,7 +153,6 @@ pub(super) struct LiveSession {
     stats_task: Option<Task<()>>,
     /// Files to recount once the recount in flight is done (`None`: all of them).
     recount_pending: Option<std::collections::BTreeSet<PathBuf>>,
-    highlight_task: Option<Task<()>>,
     /// The prompt typed while the agent was starting.
     queued: Option<(String, Vec<Attachment>)>,
     /// The last event, prompt or look at it: idle sessions are put away after a while.
@@ -177,7 +176,6 @@ impl LiveSession {
             started_at: workspace_editor_agent_history::now_ms(),
             branch: None,
             md: HashMap::new(),
-            streaming_md: None,
             oldest_seq: None,
             resume: None,
             stored_status: None,
@@ -185,7 +183,6 @@ impl LiveSession {
             pump: None,
             stats_task: None,
             recount_pending: Some(Default::default()),
-            highlight_task: None,
             queued: None,
             last_active: std::time::Instant::now(),
             last_output: std::time::Instant::now(),
@@ -289,6 +286,8 @@ pub(super) struct AgentPanel {
     /// The agent picked for the next new session.
     pub agent_id: String,
     pub composer_focused: bool,
+    /// Syntax colors for code blocks in replies.
+    pub code: highlights::CodeHighlights,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -363,6 +362,7 @@ impl AgentPanel {
             agent_id: settings.default_agent.clone(),
             presets,
             composer_focused: false,
+            code: highlights::CodeHighlights::new(cx),
             _subscriptions: vec![events],
         }
     }

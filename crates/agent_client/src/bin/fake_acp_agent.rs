@@ -3,7 +3,7 @@
 //!
 //! The first word of the prompt text selects a script:
 //! `echo <text>` · `links` · `tool <path>` · `permission` · `read <path>` ·
-//! `write <path> <text>` · `slow` · `crash` · `pid` · `env <NAME>` · `demo` (a scripted
+//! `write <path> <text>` · `slow` · `crash` · `pid` · `env <NAME>` · `markdown` · `demo` (a scripted
 //! turn for the panel's screenshots and e2e test: reads, a plan, edits from
 //! `$FAKE_DEMO/edits/<path with / as __>`, then a command that needs approval).
 //! `FAKE_LOAD_SESSION=1` advertises `loadSession` (history is replayed on load).
@@ -291,6 +291,24 @@ async fn run_prompt(
                 )),
             ))?;
             say(&cx, &session, "bypassed")?;
+        }
+        // A multi-line command, then a reply with the Markdown the panel renders.
+        "markdown" => {
+            notify(
+                &cx,
+                &session,
+                acp::SessionUpdate::ToolCall(
+                    acp::ToolCall::new("md-run", "zsh -ic 'f() (\n    unset HTTP_PROXY\n)'")
+                        .kind(acp::ToolKind::Execute)
+                        .status(acp::ToolCallStatus::Completed)
+                        .content(vec![acp::ToolCallContent::from("line 1\nline 2")]),
+                ),
+            )?;
+            say(
+                &cx,
+                &session,
+                "## 结论\n\n改动在 `crates/app`，要点：\n\n- 第一项 **重要**\n- 第二项\n\n```rust\nfn main() {\n    let x = 1;\n}\n```\n\n完。",
+            )?;
         }
         "demo" => {
             let cwd = state.cwd.lock().unwrap().clone();

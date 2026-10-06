@@ -436,7 +436,7 @@ impl Workbench {
             (None, Some(_)) => session.pending.extend(records),
             (_, None) => {}
         }
-        self.agent_parse_from(key, before.saturating_sub(1), cx);
+        self.agent_sync_replies(key, before.saturating_sub(1));
         if recount {
             self.agent_recount(key, Some(written.clone()), window, cx);
         }
@@ -458,101 +458,28 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Parses agent replies from absolute item index `from` on; finished replies are then
-    /// highlighted in the background.
-    pub(super) fn agent_parse_from(&mut self, key: u64, from: usize, cx: &mut Context<Self>) {
-        let theme = gpui_kit::component::Theme::global(cx)
-            .highlight_theme
-            .clone();
+    /// Keeps the reply texts Kit's `TextView` renders, from absolute item index `from` on.
+    pub(super) fn agent_sync_replies(&mut self, key: u64, from: usize) {
         let Some(session) = self.agent.session_mut(key) else {
             return;
         };
         let dropped = session.thread.dropped;
         session.md.retain(|&index, _| index >= dropped);
-        let mut finished: Vec<(usize, Vec<Block>)> = Vec::new();
         for (i, item) in session.thread.items.iter().enumerate() {
             let index = dropped + i;
-            if index < from {
-                continue;
-            }
-            if let Item::Agent { text, streaming } = item {
-                // A streaming reply only grows: parse just its unfinished tail.
-                let blocks = if *streaming {
-                    let (at, parser) = session
-                        .streaming_md
-                        .get_or_insert_with(|| (index, markdown::Streaming::default()));
-                    if *at != index {
-                        *at = index;
-                        *parser = markdown::Streaming::default();
-                    }
-                    parser.update(text)
-                } else {
-                    if session
-                        .streaming_md
-                        .as_ref()
-                        .is_some_and(|(at, _)| *at == index)
-                    {
-                        session.streaming_md = None;
-                    }
-                    let parsed = markdown::parse(text);
-                    if parsed.iter().any(|b| {
-                        matches!(
-                            b,
-                            Block::Code {
-                                language: Some(_),
-                                ..
-                            }
-                        )
-                    }) {
-                        finished.push((index, parsed.clone()));
-                    }
-                    markdown::Blocks::from(parsed)
-                };
-                session.md.insert(index, Rc::new(blocks));
-            }
-        }
-        if finished.is_empty() {
-            return;
-        }
-        let job = cx.background_spawn(async move {
-            for (_, blocks) in &mut finished {
-                markdown::highlight(blocks, &theme);
-            }
-            finished
-        });
-        // Several batches may finish replies; each task only fills in its own indexes.
-        let task = cx.spawn(async move |this, cx| {
-            let highlighted = job.await;
-            let _ = this.update(cx, |this, cx| {
-                if let Some(session) = this.agent.session_mut(key) {
-                    for (index, blocks) in highlighted {
-                        if session.md.contains_key(&index) {
-                            session
-                                .md
-                                .insert(index, Rc::new(markdown::Blocks::from(blocks)));
-                        }
-                    }
-                    cx.notify();
-                }
-            });
-        });
-        if let Some(session) = self.agent.session_mut(key) {
-            match session.highlight_task.take() {
-                Some(previous) => {
-                    previous.detach();
-                    session.highlight_task = Some(task);
-                }
-                None => session.highlight_task = Some(task),
+            if let Item::Agent { text, .. } = item
+                && index >= from
+                && session.md.get(&index).is_none_or(|old| old != text)
+            {
+                session.md.insert(index, SharedString::from(text.clone()));
             }
         }
     }
 
-    /// Re-highlights every reply (the appearance changed).
+    /// The appearance changed: code blocks are highlighted again in the new colors.
     pub(in crate::workbench) fn agent_rehighlight(&mut self, cx: &mut Context<Self>) {
-        let keys: Vec<u64> = self.agent.sessions.iter().map(|s| s.key).collect();
-        for key in keys {
-            self.agent_parse_from(key, 0, cx);
-        }
+        self.agent.code.clear();
+        cx.notify();
     }
 
     /// Keeps the thread list's item count in step with the current thread.

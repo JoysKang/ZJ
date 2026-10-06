@@ -490,9 +490,51 @@ pub fn tool_summary(call: &ToolCall) -> (&'static str, String) {
                 files.join(", ")
             }
         }
-        _ => call.title.trim_matches('`').to_string(),
+        // One line: a multi-line command reads as its words (the card shows it whole).
+        _ => call
+            .title
+            .trim_matches('`')
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
     };
     (verb, detail)
+}
+
+/// The user's message as Markdown that shows exactly what was typed: punctuation escaped,
+/// line breaks kept, leading spaces kept (as no-break spaces, which Markdown does not read as
+/// indentation).
+pub fn literal_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 4);
+    let lines: Vec<&str> = text.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        let body = line.trim_start_matches([' ', '\t']);
+        for c in line[..line.len() - body.len()].chars() {
+            out.extend(std::iter::repeat_n('\u{a0}', if c == '\t' { 4 } else { 1 }));
+        }
+        for c in body.chars() {
+            if c.is_ascii_punctuation() {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        if let Some(next) = lines.get(i + 1) {
+            // A backslash at the end of a line is a hard break; a blank line stays a paragraph
+            // break.
+            if !line.trim().is_empty() && !next.trim().is_empty() {
+                out.push('\\');
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Plain text as a fenced code block (the fence longer than any run of backticks inside).
+pub fn fenced(text: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2) + 1);
+    format!("{fence}\n{}\n{fence}", text.trim_end_matches('\n'))
 }
 
 /// Text output of a tool call (for the expanded card).
@@ -653,6 +695,30 @@ mod tests {
             },
         ];
         assert_eq!(config_label(&configs), "Opus · max");
+    }
+
+    #[test]
+    fn plain_text_survives_markdown() {
+        assert_eq!(literal_markdown("a*b* `c`"), "a\\*b\\* \\`c\\`");
+        assert_eq!(
+            literal_markdown("1. x\n  - y"),
+            "1\\. x\\\n\u{a0}\u{a0}\\- y"
+        );
+        assert_eq!(literal_markdown("one\n\ntwo"), "one\n\ntwo");
+        assert_eq!(fenced("ls\n"), "```\nls\n```");
+        assert_eq!(fenced("a ```` b"), "`````\na ```` b\n`````");
+        let call = ToolCall {
+            id: "1".into(),
+            title: "zsh -ic 'f() (\n    unset A\n)'".into(),
+            kind: ToolKind::Execute,
+            status: ToolStatus::Completed,
+            locations: vec![],
+            content: vec![],
+        };
+        assert_eq!(
+            tool_summary(&call),
+            ("运行", "zsh -ic 'f() ( unset A )'".to_string())
+        );
     }
 
     #[test]

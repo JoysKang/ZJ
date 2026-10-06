@@ -135,20 +135,29 @@ impl Workbench {
             .w_full()
             .child(row)
             .when(expanded && has_output, |body| {
-                let text: String = output.lines().take(40).collect::<Vec<_>>().join("\n");
+                // The first lines are shown; the copy button takes the whole output.
+                let shown: String = output.lines().take(40).collect::<Vec<_>>().join("\n");
+                let whole = SharedString::from(output.clone());
+                let weak = cx.weak_entity();
                 body.child(
                     div()
                         .w_full()
-                        .pl(theme::AGENT_FILE_INDENT + theme::TREE_STEP)
-                        .pr_3()
+                        .px_3()
                         .py_2()
                         .border_t_1()
                         .border_color(colors.card_border)
                         .bg(colors.panel)
-                        .font_family(fonts.mono.family.clone())
-                        .text_size(theme::TEXT_SECTION)
-                        .text_color(colors.muted)
-                        .child(text),
+                        .child(
+                            self.agent_text(
+                                SharedString::from(format!("agent-tool-out-{key}-{}", call.id)),
+                                agent_model::fenced(&shown).into(),
+                                true,
+                                cx,
+                            )
+                            .code_block_actions(move |_, _, _| {
+                                copy_button(weak.clone(), whole.clone())
+                            }),
+                        ),
                 )
             });
         if compact {

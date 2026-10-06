@@ -225,7 +225,7 @@ impl Workbench {
         session.thread.dropped = 0;
         self.agent.sessions.push(session);
         self.agent.current = Some(key);
-        self.agent_parse_from(key, 0, cx);
+        self.agent_sync_replies(key, 0);
         self.agent_sync_list(true);
         self.agent_show(AgentView::Thread, window, cx);
     }
@@ -291,7 +291,7 @@ impl Workbench {
                     session.thread.dropped = 0;
                     session.md.clear();
                 }
-                this.agent_parse_from(key, 0, cx);
+                this.agent_sync_replies(key, 0);
                 this.agent_sync_list(true);
                 this.agent.thread_list.set_follow_mode(FollowMode::Normal);
                 this.agent.thread_list.scroll_to(ListOffset {

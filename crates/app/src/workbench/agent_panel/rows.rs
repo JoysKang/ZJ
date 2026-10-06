@@ -1,4 +1,4 @@
-//! Thread rows: the row dispatcher, user messages, replies (Markdown) and thoughts.
+//! Thread rows: the row dispatcher, user messages, replies (Kit's `TextView`) and thoughts.
 
 use super::*;
 
@@ -53,12 +53,25 @@ impl Workbench {
         let next_tool = is_tool(Some(i + 1));
         let content = match item {
             Item::User { text, attachments } => {
-                self.render_user_message(text, attachments, compact, cx)
+                self.render_user_message(session.key, i, text, attachments, compact, cx)
             }
-            Item::Agent { .. } => match session.md.get(&(session.thread.dropped + i)).cloned() {
-                Some(blocks) => self.render_markdown(blocks.iter(), &fonts, cx),
-                None => self.render_markdown(std::iter::empty(), &fonts, cx),
-            },
+            Item::Agent { streaming, .. } => {
+                let index = session.thread.dropped + i;
+                let text = session.md.get(&index).cloned().unwrap_or_default();
+                let id = SharedString::from(format!("agent-md-{}-{index}", session.key));
+                let view = self.agent_text(id, text, false, cx);
+                // Highlighted once complete: a growing block would be highlighted every batch.
+                let view = if *streaming {
+                    view
+                } else {
+                    view.shared_code_block_highlighter(self.agent.code.highlighter.clone())
+                };
+                div()
+                    .w_full()
+                    .line_height(theme::AGENT_LINE)
+                    .child(view)
+                    .into_any_element()
+            }
             Item::Thought { text, streaming } => {
                 self.render_thought(session.key, i, text, *streaming, cx)
             }
@@ -97,6 +110,8 @@ impl Workbench {
 
     pub(super) fn render_user_message(
         &self,
+        key: u64,
+        index: usize,
         text: &str,
         attachments: &[String],
         compact: bool,
@@ -125,120 +140,12 @@ impl Workbench {
                         .children(attachments.iter().map(|label| chip(label, None, colors))),
                 )
             })
-            .child(div().line_height(theme::AGENT_LINE).child(text.to_string()))
-            .into_any_element()
-    }
-
-    pub(super) fn render_markdown<'a>(
-        &self,
-        blocks: impl Iterator<Item = &'a Block>,
-        fonts: &Fonts,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let colors = theme::colors(cx);
-        let mono_family = gpui_kit::component::Theme::global(cx)
-            .mono_font_family
-            .clone();
-        v_flex()
-            .w_full()
-            .gap_2()
-            .line_height(theme::AGENT_LINE)
-            .children(blocks.enumerate().map(|(i, block)| {
-                match block {
-                    Block::Paragraph(inline) => div()
-                        .child(styled(
-                            inline,
-                            &fonts.base,
-                            &fonts.mono,
-                            colors.foreground,
-                            colors,
-                        ))
-                        .into_any_element(),
-                    Block::Heading(inline) => div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(styled(
-                            inline,
-                            &Font {
-                                weight: FontWeight::SEMIBOLD,
-                                ..fonts.base.clone()
-                            },
-                            &fonts.mono,
-                            colors.foreground,
-                            colors,
-                        ))
-                        .into_any_element(),
-                    Block::Item {
-                        depth,
-                        marker,
-                        text,
-                    } => h_flex()
-                        .items_start()
-                        .pl(theme::TREE_STEP * 2. * *depth as f32)
-                        .child(
-                            div()
-                                .w(theme::ICON_SIZE + theme::TREE_STEP)
-                                .flex_shrink_0()
-                                .text_color(colors.muted)
-                                .child(match marker.as_str() {
-                                    crate::markdown::TASK_OPEN | crate::markdown::TASK_DONE => {
-                                        Icon::new(if marker == crate::markdown::TASK_DONE {
-                                            IconName::SquareCheck
-                                        } else {
-                                            IconName::Square
-                                        })
-                                        .size(theme::SMALL_ICON_SIZE)
-                                        .into_any_element()
-                                    }
-                                    _ => marker.clone().into_any_element(),
-                                }),
-                        )
-                        .child(div().flex_1().min_w_0().child(styled(
-                            text,
-                            &fonts.base,
-                            &fonts.mono,
-                            colors.foreground,
-                            colors,
-                        )))
-                        .into_any_element(),
-                    Block::Quote(inline) => div()
-                        .pl_3()
-                        .border_l_2()
-                        .border_color(colors.strong_border)
-                        .child(styled(
-                            inline,
-                            &fonts.base,
-                            &fonts.mono,
-                            colors.muted,
-                            colors,
-                        ))
-                        .into_any_element(),
-                    Block::Rule => div()
-                        .h(theme::INDICATOR)
-                        .w_full()
-                        .bg(colors.border)
-                        .into_any_element(),
-                    Block::Code { text, runs, .. } => div()
-                        .id(("agent-code", i))
-                        .w_full()
-                        .px_3()
-                        .py_2()
-                        .rounded(theme::RADIUS)
-                        .bg(colors.editor)
-                        .border_1()
-                        .border_color(colors.card_border)
-                        .overflow_x_scroll()
-                        .font_family(mono_family.clone())
-                        .text_size(theme::TEXT_SECTION)
-                        .line_height(theme::SCM_DETAIL_LINE)
-                        .text_color(colors.code)
-                        .whitespace_nowrap()
-                        .child(
-                            StyledText::new(SharedString::from(text.clone()))
-                                .with_highlights(runs.iter().cloned()),
-                        )
-                        .into_any_element(),
-                }
-            }))
+            .child(div().line_height(theme::AGENT_LINE).child(self.agent_text(
+                SharedString::from(format!("agent-user-{key}-{index}")),
+                agent_model::literal_markdown(text).into(),
+                false,
+                cx,
+            )))
             .into_any_element()
     }
 
@@ -291,8 +198,12 @@ impl Workbench {
                         .border_l_2()
                         .border_color(colors.border)
                         .text_size(theme::TEXT_CAPTION)
-                        .text_color(colors.muted)
-                        .child(text.to_string()),
+                        .child(self.agent_text(
+                            SharedString::from(format!("agent-thought-{key}-{index}")),
+                            text.to_string().into(),
+                            true,
+                            cx,
+                        )),
                 )
             })
             .into_any_element()

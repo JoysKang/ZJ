@@ -9,10 +9,10 @@
 use super::agent::{self, AgentView, LiveSession, PermissionChoice, SPIN_FRAMES, agent_name};
 use super::*;
 use crate::agent_model::{self, Attachment, RowStatus};
-use crate::markdown::{Block, Inline, Span};
 use crate::{file_icons, theme};
 use gpui_kit::{
     assets::IconName,
+    base::{TextView, TextViewStyle},
     component::{
         Disableable, Icon, Selectable, Sizable,
         button::{Button, ButtonVariants},
@@ -93,79 +93,23 @@ pub(super) fn status_mark(status: RowStatus, frame: usize, colors: theme::Colors
     }
 }
 
-/// Text runs for inline markup: code in the mono font on a key-cap tint, bold, italic, links.
-fn inline_runs(
-    inline: &Inline,
-    base: &Font,
-    mono: &Font,
-    color: Hsla,
-    colors: theme::Colors,
-) -> Vec<TextRun> {
-    let run = |len: usize, font: Font, color: Hsla, background: Option<Hsla>| TextRun {
-        len,
-        font,
-        color,
-        background_color: background,
-        underline: None,
-        strikethrough: None,
-    };
-    let mut runs = Vec::new();
-    let mut at = 0;
-    for (range, span) in &inline.spans {
-        if range.start > at {
-            runs.push(run(range.start - at, base.clone(), color, None));
-        }
-        let len = range.end - range.start;
-        runs.push(match span {
-            Span::Code => run(len, mono.clone(), colors.foreground, Some(colors.keycap)),
-            Span::Bold => run(
-                len,
-                Font {
-                    weight: FontWeight::SEMIBOLD,
-                    ..base.clone()
-                },
-                color,
-                None,
-            ),
-            Span::Italic => run(
-                len,
-                Font {
-                    style: FontStyle::Italic,
-                    ..base.clone()
-                },
-                color,
-                None,
-            ),
-            Span::Link => TextRun {
-                underline: Some(UnderlineStyle {
-                    thickness: theme::INDICATOR,
-                    color: Some(colors.accent),
-                    wavy: false,
-                }),
-                ..run(len, base.clone(), colors.accent, None)
-            },
-        });
-        at = range.end;
-    }
-    if inline.text.len() > at {
-        runs.push(run(inline.text.len() - at, base.clone(), color, None));
-    }
-    runs
-}
-
-fn styled(
-    inline: &Inline,
-    base: &Font,
-    mono: &Font,
-    color: Hsla,
-    colors: theme::Colors,
-) -> StyledText {
-    StyledText::new(SharedString::from(inline.text.clone()))
-        .with_runs(inline_runs(inline, base, mono, color, colors))
+/// A copy button for a code block or a tool's output; the status bar says it worked.
+fn copy_button(weak: WeakEntity<Workbench>, text: SharedString) -> Button {
+    Button::new("agent-copy")
+        .ghost()
+        .xsmall()
+        .icon(IconName::Copy)
+        .tooltip("复制")
+        .on_click(move |_, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+            let _ = weak.update(cx, |this, cx| {
+                this.message = "已复制".into();
+                cx.notify();
+            });
+        })
 }
 
 struct Fonts {
-    base: Font,
     mono: Font,
 }
 
@@ -173,9 +117,58 @@ impl Workbench {
     fn agent_fonts(&self, cx: &App) -> Fonts {
         let theme = gpui_kit::component::Theme::global(cx);
         Fonts {
-            base: font(theme.font_family.clone()),
             mono: font(theme.mono_font_family.clone()),
         }
+    }
+
+    /// Selectable Markdown in the panel's colors (replies, thoughts, tool output, the user's
+    /// messages); each code block gets a copy button.
+    pub(super) fn agent_text(
+        &self,
+        id: impl Into<ElementId>,
+        text: SharedString,
+        muted: bool,
+        cx: &mut Context<Self>,
+    ) -> TextView {
+        let colors = theme::colors(cx);
+        let dark = gpui_kit::component::Theme::global(cx).is_dark();
+        let style = TextViewStyle::default()
+            .with_dark(dark)
+            .with_foreground(if muted {
+                colors.muted
+            } else {
+                colors.foreground
+            })
+            .with_muted_foreground(colors.muted)
+            .with_link(colors.accent)
+            .with_selection(colors.selection)
+            .with_code_background(colors.editor)
+            .with_border(colors.card_border)
+            .with_paragraph_gap(theme::AGENT_PARAGRAPH_GAP)
+            .with_heading(|_| {
+                StyleRefinement::default()
+                    .text_size(theme::TEXT_BODY)
+                    .font_weight(FontWeight::SEMIBOLD)
+            })
+            .with_inline_code(HighlightStyle {
+                background_color: Some(colors.keycap),
+                ..Default::default()
+            })
+            .with_code_block(
+                StyleRefinement::default()
+                    .px_3()
+                    .py_2()
+                    .rounded(theme::RADIUS)
+                    .border_1()
+                    .border_color(colors.card_border)
+                    .text_size(theme::TEXT_SECTION)
+                    .line_height(theme::SCM_DETAIL_LINE)
+                    .text_color(colors.code),
+            );
+        let weak = cx.weak_entity();
+        TextView::markdown(id, text)
+            .style(style)
+            .code_block_actions(move |block, _, _| copy_button(weak.clone(), block.code()))
     }
 
     // ----- the panel ----------------------------------------------------------------------
