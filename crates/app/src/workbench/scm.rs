@@ -84,7 +84,13 @@ impl Workbench {
 
     /// The "···" menu of a repository: VS Code's 拉取 / 推送 / 签出到… / 抓取, then
     /// whole-repository operations.
-    fn scm_menu(&self, g: usize, menu: PopupMenu, view: WeakEntity<Self>) -> PopupMenu {
+    fn scm_menu(
+        &self,
+        g: usize,
+        menu: PopupMenu,
+        view: WeakEntity<Self>,
+        extra: bool,
+    ) -> PopupMenu {
         let stage = self.scm_paths(g, None, DiffSide::Worktree);
         let unstage = self.scm_paths(g, None, DiffSide::Staged);
         let discard = self.scm_discard(g, None);
@@ -168,15 +174,26 @@ impl Workbench {
             .item(PopupMenuItem::new("刷新").on_click(move |_, window, cx| {
                 let _ = refresh.update(cx, |this, cx| this.refresh(window, cx));
             }))
+            .when(extra, |menu| {
+                let remove = view.clone();
+                menu.item(PopupMenuItem::new("从列表移除（手动添加的仓库）").on_click(
+                    move |_, window, cx| {
+                        let _ = remove
+                            .update(cx, |this, cx| this.remove_extra_repository(g, window, cx));
+                    },
+                ))
+            })
     }
 
     /// The Source Control title bar's "···": options for the whole list.
     pub(super) fn scm_more(&self, cx: &mut Context<Self>) -> AnyElement {
         let weak = cx.weak_entity();
         let hide = self.hide_clean_repos;
+        let has_root = self.root.is_some();
         action("scm-more-button", IconName::Ellipsis, "更多操作", cx)
             .dropdown_menu(move |menu, _, _| {
                 let (toggle, collapse, refresh) = (weak.clone(), weak.clone(), weak.clone());
+                let add = weak.clone();
                 menu.item(
                     PopupMenuItem::new("隐藏无变更的仓库")
                         .checked(hide)
@@ -199,6 +216,13 @@ impl Workbench {
                 .item(PopupMenuItem::new("刷新").on_click(move |_, window, cx| {
                     let _ = refresh.update(cx, |this, cx| this.refresh(window, cx));
                 }))
+                .item(
+                    PopupMenuItem::new("添加仓库…")
+                        .disabled(!has_root)
+                        .on_click(move |_, window, cx| {
+                            let _ = add.update(cx, |this, cx| this.add_repository(window, cx));
+                        }),
+                )
             })
             .into_any_element()
     }
@@ -424,7 +448,11 @@ impl Workbench {
                     move |menu, _, cx| {
                         let view = weak.clone();
                         match weak.upgrade() {
-                            Some(this) => this.read(cx).scm_menu(g, menu, view),
+                            Some(this) => {
+                                let this = this.read(cx);
+                                let extra = this.is_extra_repo(g, cx);
+                                this.scm_menu(g, menu, view, extra)
+                            }
                             None => menu,
                         }
                     },

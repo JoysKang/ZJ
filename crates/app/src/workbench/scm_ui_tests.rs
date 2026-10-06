@@ -418,3 +418,55 @@ async fn merge_conflicts_are_resolved_from_the_bar_and_marked_resolved(cx: &mut 
     assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), text);
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }
+
+#[gpui_kit::test]
+async fn repositories_added_by_hand_are_listed_and_can_be_removed(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let base = std::env::temp_dir().join(format!("zj-scm-extra-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    // Deeper than discovery's 4 levels.
+    let deep = base.join("a/b/c/d/e/repo");
+    std::fs::create_dir_all(&deep).unwrap();
+    git(&deep, &["init", "-q", "-b", "main"]);
+    let base = std::fs::canonicalize(base).unwrap();
+    let deep = std::fs::canonicalize(deep).unwrap();
+    let settings = crate::settings::Settings {
+        extra_repos: [(
+            base.to_string_lossy().into_owned(),
+            vec![
+                deep.to_string_lossy().into_owned(),
+                base.join("gone").to_string_lossy().into_owned(),
+            ],
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let (window, this) = super::super::test_support::open_window(
+        cx,
+        Some(base.clone()),
+        settings,
+        super::super::test_support::empty_store(),
+    );
+    settle(cx, None, |cx| super::super::test_support::loaded(cx, &this));
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.groups.len(), 1);
+        assert_eq!(p.groups[0].repo.worktree, deep);
+        // The one that is gone is reported, not silently dropped.
+        assert!(
+            p.issues.iter().any(|i| i.contains("gone")),
+            "{:?}",
+            p.issues
+        );
+    });
+    this.read_with(cx, |p, cx| assert!(p.is_extra_repo(0, cx)));
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.remove_extra_repository(0, window, cx));
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| {
+            p.refresh_completed && !p.loading && p.groups.is_empty()
+        })
+    });
+    let _ = std::fs::remove_dir_all(&base);
+}

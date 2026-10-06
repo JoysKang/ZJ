@@ -377,6 +377,9 @@ enum Event {
     Repo(Repository),
     Status(RepoId, Result<Status, String>, Result<Vec<Commit>, String>),
     Issue(String),
+    /// A repository added by hand that cannot be opened: shown like an issue, but it says
+    /// nothing about discovery, so it does not keep vanished repositories listed.
+    ExtraIssue(String),
     Excluded,
     Done,
 }
@@ -1537,6 +1540,7 @@ impl Workbench {
             return;
         };
         let full = targets.is_none();
+        let extras = self.extra_repos(cx);
         let known: Option<Vec<Repository>> = targets.as_ref().map(|ids| {
             self.groups
                 .iter()
@@ -1591,6 +1595,28 @@ impl Workbench {
                     }
                     Discovery::Cancelled => {}
                 });
+                // Repositories added by hand (R03): a broken one is reported, not dropped.
+                for extra in extras {
+                    match service.identify(&extra, &cancel) {
+                        Ok(repo) if repos.iter().any(|r: &Repository| r.id == repo.id) => {}
+                        Ok(repo) => {
+                            if let Some(watch) = &watch
+                                && let Err(error) = watch.add_repository(&repo)
+                            {
+                                let _ =
+                                    sender.send(Event::Issue(format!("Git 目录监听失败：{error}")));
+                            }
+                            let _ = sender.send(Event::Repo(repo.clone()));
+                            repos.push(repo);
+                        }
+                        Err(error) => {
+                            let _ = sender.send(Event::ExtraIssue(format!(
+                                "手动添加的仓库 {}：{error}",
+                                extra.display()
+                            )));
+                        }
+                    }
+                }
                 if !discovery_failed
                     && !cancel.load(Ordering::Relaxed)
                     && let Some(watch) = &watch
@@ -1645,6 +1671,7 @@ impl Workbench {
         self.refresh_task = Some(cx.spawn_in(window, async move |this, cx| {
             let mut seen = std::collections::HashSet::new();
             let mut issues = Vec::new();
+            let mut discovery_issues = false;
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(50))
@@ -1724,6 +1751,12 @@ impl Workbench {
                                     }
                                 }
                                 Event::Issue(issue) => {
+                                    discovery_issues = true;
+                                    if issues.len() < 100 {
+                                        issues.push(issue);
+                                    }
+                                }
+                                Event::ExtraIssue(issue) => {
                                     if issues.len() < 100 {
                                         issues.push(issue);
                                     }
@@ -1731,7 +1764,7 @@ impl Workbench {
                                 Event::Excluded => this.excluded += 1,
                                 Event::Done => {
                                     if full
-                                        && issues.is_empty()
+                                        && !discovery_issues
                                         && !this.cancel.load(Ordering::Relaxed)
                                     {
                                         this.groups.retain(|g| {

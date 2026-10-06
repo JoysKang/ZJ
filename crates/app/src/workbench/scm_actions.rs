@@ -842,3 +842,98 @@ fn branch_items(repo: &RepoId, branches: Vec<Branch>) -> Vec<PickItem> {
     }
     items
 }
+
+impl Workbench {
+    /// The repositories added by hand to this window's folder.
+    pub(super) fn extra_repos(&self, cx: &App) -> Vec<PathBuf> {
+        let Some(root) = &self.root else {
+            return Vec::new();
+        };
+        cx.global::<crate::settings::Settings>()
+            .extra_repos
+            .get(root.to_string_lossy().as_ref())
+            .map(|repos| repos.iter().map(PathBuf::from).collect())
+            .unwrap_or_default()
+    }
+
+    /// 添加仓库…: a folder holding a repository that discovery did not find; it is kept for
+    /// this workspace folder in the settings.
+    pub(super) fn add_repository(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        let answer = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("添加仓库".into()),
+        });
+        let service = self.service.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = answer.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let identified = cx
+                .background_spawn(async move { service.identify(&path, &AtomicBool::new(false)) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let repo = match identified {
+                    Ok(repo) => repo,
+                    Err(error) => {
+                        this.message = format!("不是 Git 仓库：{error}");
+                        cx.notify();
+                        return;
+                    }
+                };
+                if this.groups.iter().any(|g| g.repo.id == repo.id) {
+                    this.message = format!("{} 已在列表中", repo.worktree.display());
+                    cx.notify();
+                    return;
+                }
+                let key = root.to_string_lossy().into_owned();
+                let worktree = repo.worktree.to_string_lossy().into_owned();
+                this.change_settings(window, cx, move |settings| {
+                    let repos = settings.extra_repos.entry(key).or_default();
+                    if !repos.contains(&worktree) {
+                        repos.push(worktree);
+                    }
+                });
+                this.message = format!("已添加仓库 {}", repo.worktree.display());
+                this.refresh(window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Whether group `g` was added by hand (and so can be removed from the list).
+    pub(super) fn is_extra_repo(&self, g: usize, cx: &App) -> bool {
+        self.groups
+            .get(g)
+            .is_some_and(|group| self.extra_repos(cx).contains(&group.repo.worktree))
+    }
+
+    pub(super) fn remove_extra_repository(
+        &mut self,
+        g: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(root), Some(group)) = (self.root.clone(), self.groups.get(g)) else {
+            return;
+        };
+        let key = root.to_string_lossy().into_owned();
+        let worktree = group.repo.worktree.to_string_lossy().into_owned();
+        self.change_settings(window, cx, move |settings| {
+            if let Some(repos) = settings.extra_repos.get_mut(&key) {
+                repos.retain(|repo| *repo != worktree);
+                if repos.is_empty() {
+                    settings.extra_repos.remove(&key);
+                }
+            }
+        });
+        self.refresh(window, cx);
+    }
+}

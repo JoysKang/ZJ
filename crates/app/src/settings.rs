@@ -186,6 +186,9 @@ pub struct Settings {
     /// files.autoSave: "off" (default), "afterDelay" (1 s after the last edit) or
     /// "onFocusChange" (when the window loses focus or another tab is chosen).
     pub auto_save: crate::save::AutoSave,
+    /// Repositories added by hand to a workspace (开发说明 R03): the workspace folder to the
+    /// repositories discovery did not find (deeper than 4 levels, in an ignored folder).
+    pub extra_repos: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for Settings {
@@ -199,6 +202,7 @@ impl Default for Settings {
             dock_icon_blink: false,
             agent: AgentSettings::default(),
             auto_save: crate::save::AutoSave::Off,
+            extra_repos: BTreeMap::new(),
         }
     }
 }
@@ -274,6 +278,24 @@ impl Settings {
                 .and_then(Value::as_str)
                 .map(crate::save::AutoSave::parse)
                 .unwrap_or(defaults.auto_save),
+            extra_repos: value
+                .get("extra_repos")
+                .and_then(Value::as_object)
+                .map(|roots| {
+                    roots
+                        .iter()
+                        .map(|(root, repos)| {
+                            let repos = repos
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|repo| repo.as_str().map(str::to_string))
+                                .collect();
+                            (root.clone(), repos)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -287,6 +309,7 @@ impl Settings {
             "dock_icon_blink": self.dock_icon_blink,
             "agent": self.agent.to_json(),
             "auto_save": self.auto_save.as_str(),
+            "extra_repos": self.extra_repos,
         })
     }
 
@@ -430,6 +453,7 @@ mod tests {
                 allow: BTreeMap::from([("/w".into(), vec!["cargo test".into()])]),
             },
             auto_save: crate::save::AutoSave::AfterDelay,
+            extra_repos: BTreeMap::from([("/w".into(), vec!["/w/deep/repo".into()])]),
         };
         changed.save_to(&path).unwrap();
         assert_eq!(Settings::load_from(&path), changed);
