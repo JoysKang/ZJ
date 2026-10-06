@@ -62,6 +62,12 @@ measure it are in [docs/adr/0005-gpu-memory.md](../docs/adr/0005-gpu-memory.md).
   file's own tests now describe the steady cursor; vendor crates are not workspace members,
   so they do not run in CI). `crates/app`'s `idle_ui_tests` checks that an idle focused
   editor leaves no timer.
+- `src/input/editor/lsp/definitions.rs`: a ⌘-click with no definition found for that spot
+  yet asks the definition provider right away and follows the answer (as F12 does), instead of
+  being ignored. Upstream only follows a definition a ⌘-hover has already fetched, so a click
+  without moving the pointer under ⌘, or before a slow answer (ZJ's symbol index still being
+  built), did nothing. The click still places the cursor; the jump is dropped if the text
+  changed or the editor lost the focus meanwhile.
 - `Cargo.toml`: the same lint override.
 
 `gpui-pre-macos`:

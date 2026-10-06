@@ -154,3 +154,106 @@ async fn ctrl_g_goes_to_a_line_of_the_active_file(cx: &mut TestAppContext) {
     });
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[gpui_kit::test]
+async fn go_to_definition_waits_for_the_workspace_index(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-go-to-def-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("pkg")).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::write(root.join("pkg/a.py"), "def helper(x):\n    return x\n").unwrap();
+    let b = "from pkg.a import helper\n\n\ndef main():\n    return helper(1)\n";
+    std::fs::write(root.join("pkg/b.py"), b).unwrap();
+    let (window, this) = open(cx, root.clone());
+    let path = root.join("pkg/b.py");
+    let folder = Some(root.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(path.clone(), folder, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    // F12 on the call before anything built the symbol index.
+    this.read_with(cx, |p, _| assert!(p.nav.symbols.is_none()));
+    let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.focus(window, cx);
+            editor.set_cursor_position(
+                gpui_kit::component::input::Position::new(4, 12),
+                window,
+                cx,
+            );
+        });
+        window.render_frame(cx);
+        window.dispatch_action(Box::new(gpui_kit::component::input::GoToDefinition), cx);
+    })
+    .unwrap();
+    let target = root.join("pkg/a.py");
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| match p.active {
+            Pane::Document(id) => p.document(id).is_some_and(|doc| doc.path == target),
+            _ => false,
+        })
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A file opened in a window whose folder does not hold it looks its definitions up in the
+/// window whose folder does.
+#[gpui_kit::test]
+async fn go_to_definition_uses_the_window_that_holds_the_file(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let base = std::env::temp_dir().join(format!("zj-go-to-def-other-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("here")).unwrap();
+    std::fs::create_dir_all(base.join("there/pkg")).unwrap();
+    let base = std::fs::canonicalize(base).unwrap();
+    let (here, there) = (base.join("here"), base.join("there"));
+    std::fs::write(here.join("notes.py"), "x = 1\n").unwrap();
+    std::fs::write(there.join("pkg/a.py"), "def helper(x):\n    return x\n").unwrap();
+    let b = "from pkg.a import helper\n\n\ndef main():\n    return helper(1)\n";
+    std::fs::write(there.join("pkg/b.py"), b).unwrap();
+    let (window, this) = open(cx, here.clone());
+    let other = cx.update(|cx| {
+        let documents = cx.global::<OpenDocuments>().0.clone();
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1400.), px(900.)));
+        super::test_support::new_window(cx, Some(there.clone()), documents, bounds).1
+    });
+    settle(cx, None, |cx| super::test_support::loaded(cx, &other));
+    let path = there.join("pkg/b.py");
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(path.clone(), None, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.focus(window, cx);
+            editor.set_cursor_position(
+                gpui_kit::component::input::Position::new(4, 12),
+                window,
+                cx,
+            );
+        });
+        window.render_frame(cx);
+        window.dispatch_action(Box::new(gpui_kit::component::input::GoToDefinition), cx);
+    })
+    .unwrap();
+    let target = there.join("pkg/a.py");
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| match p.active {
+            Pane::Document(id) => p.document(id).is_some_and(|doc| doc.path == target),
+            _ => false,
+        })
+    });
+    // The other window's index answered; this window built none.
+    this.read_with(cx, |p, _| assert!(p.nav.symbols.is_none()));
+    other.read_with(cx, |p, _| assert!(p.nav.symbols.is_some()));
+    let _ = std::fs::remove_dir_all(base);
+}

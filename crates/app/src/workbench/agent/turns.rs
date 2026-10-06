@@ -201,7 +201,7 @@ impl Workbench {
             return;
         };
         session.last_active = std::time::Instant::now();
-        session.last_output = session.last_active;
+        session.turn_started = session.last_active;
         let Some(client) = session.client.clone() else {
             return;
         };
@@ -366,7 +366,6 @@ impl Workbench {
             return;
         };
         session.last_active = std::time::Instant::now();
-        session.last_output = session.last_active;
         let before = session.thread.items.len() + session.thread.dropped;
         let mut touched: Vec<String> = Vec::new();
         let mut title = None;
@@ -397,6 +396,15 @@ impl Workbench {
                 AgentEvent::TurnEnded { .. } => {
                     turn_ended = true;
                     recount = true;
+                    // Shown under the turn's last row (the reply, or the notice it ended with).
+                    if session.thread.status != agent_thread::Status::Running
+                        && let Some(last) = session.thread.items.len().checked_sub(1)
+                    {
+                        let took = session.turn_started.elapsed();
+                        session
+                            .turn_times
+                            .insert(session.thread.dropped + last, took);
+                    }
                 }
                 AgentEvent::AvailableCommands(_) => learned = true,
                 _ => {}
@@ -491,6 +499,7 @@ impl Workbench {
         };
         let dropped = session.thread.dropped;
         session.md.retain(|&index, _| index >= dropped);
+        session.turn_times.retain(|&index, _| index >= dropped);
         for (i, item) in session.thread.items.iter().enumerate() {
             let index = dropped + i;
             if let Item::Agent { text, .. } = item

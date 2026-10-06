@@ -969,6 +969,27 @@ fn direct_writes_remember_the_file_before_the_agent() {
 }
 
 #[test]
+fn an_edit_the_agent_wrote_itself_keeps_the_file_before_it() {
+    let ws = Workspace::new("self-edit");
+    let client = AgentClient::start(options(&ws, &[])).unwrap();
+    let events = Events::of(&client);
+    let file = ws.path("src/a.rs");
+    client
+        .prompt(text(&format!("selfedit {}", file.display())))
+        .unwrap();
+    let turn = events.turn();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "fn b() {}\n");
+    // Read after the agent had written it, yet the snapshot is the text before.
+    assert_eq!(client.snapshot(&file), Some(Some("fn a() {}\n".into())));
+    // The completed edit counts as written: the app recounts and reviews it.
+    assert!(
+        turn.iter()
+            .any(|e| matches!(e, AgentEvent::FileWritten { path } if *path == file))
+    );
+    client.shutdown();
+}
+
+#[test]
 fn a_session_from_history_is_resumed_with_load() {
     let ws = Workspace::new("resume");
     let mut opts = options(&ws, &[("FAKE_LOAD_SESSION", "1")]);
@@ -1283,4 +1304,33 @@ fn other_variables_move_only_that_session_to_another_process() {
     assert_ne!(a.pid(), Some(pid));
     b.prompt(text("pid")).unwrap();
     assert_eq!(pid_of(&eb.turn()), pid);
+}
+
+#[test]
+fn a_mode_switch_counts_once_the_agent_answers() {
+    let ws = Workspace::new("quiet-modes");
+    let client = AgentClient::start(options(&ws, &[("FAKE_QUIET_MODES", "1")])).unwrap();
+    let events = Events::of(&client);
+    client.prompt(text("echo hi")).unwrap();
+    events.turn();
+    assert!(client.set_mode("plan"));
+    events.until(|e| matches!(e, AgentEvent::ModeChanged { mode_id } if mode_id == "plan"));
+}
+
+#[test]
+fn a_session_comes_back_in_the_mode_it_was_left_in() {
+    let ws = Workspace::new("mode-kept");
+    let mut opts = options(&ws, &[("FAKE_QUIET_MODES", "1")]);
+    opts.idle_timeout = Duration::from_millis(300);
+    let client = AgentClient::start(opts).unwrap();
+    let events = Events::of(&client);
+    client.prompt(text("echo hi")).unwrap();
+    events.turn();
+    assert!(client.set_mode("plan"));
+    events.until(|e| matches!(e, AgentEvent::ModeChanged { mode_id } if mode_id == "plan"));
+    // Closed when idle; the next prompt starts it again and switches it back to `plan`.
+    events.until(|e| matches!(e, AgentEvent::Exited { .. }));
+    client.prompt(text("modes")).unwrap();
+    let reply = message(&events.turn());
+    assert!(reply.ends_with("modes:plan"), "{reply}");
 }

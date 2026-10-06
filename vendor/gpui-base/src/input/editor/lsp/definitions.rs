@@ -101,6 +101,28 @@ impl InputBaseState<EditorMode> {
         });
     }
 
+    /// ZJ patch: the definition at `offset`, followed once the provider answers if the text
+    /// has not changed and the editor still has the focus.
+    fn zj_go_to_definition_at(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(provider) = self.extras.lsp.definition_provider.clone() else {
+            return;
+        };
+        let text = self.text.clone();
+        let response = provider.definitions(&text, offset, window, cx);
+        self.extras.lsp._definition_task = cx.spawn_in(window, async move |editor, cx| {
+            let locations = response.await?;
+            editor.update_in(cx, |editor, window, cx| {
+                if editor.text != text || !editor.focus_handle.is_focused(window) {
+                    return;
+                }
+                if let Some(location) = locations.first() {
+                    editor.go_to_definition(location, window, cx);
+                }
+            })?;
+            Ok(())
+        });
+    }
+
     pub(crate) fn on_action_go_to_definition(
         &mut self,
         _: &GoToDefinition,
@@ -147,10 +169,13 @@ impl InputBaseState<EditorMode> {
             return false;
         }
 
-        if self.extras.hover_definition.is_empty() {
-            return false;
-        };
-        if !self.extras.hover_definition.is_same(offset) {
+        // ZJ patch: a ⌘-click with no definition found for this spot yet (the pointer did not
+        // move while ⌘ was held, or the answer is still on its way) asks now and jumps when the
+        // answer comes, like F12. The click itself still places the cursor. Upstream ignored
+        // such a click, so a definition only opened after a ⌘-hover had finished.
+        if self.extras.hover_definition.is_empty() || !self.extras.hover_definition.is_same(offset)
+        {
+            self.zj_go_to_definition_at(offset, window, cx);
             return false;
         }
 

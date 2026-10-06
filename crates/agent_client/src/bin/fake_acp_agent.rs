@@ -252,6 +252,32 @@ async fn run_prompt(
                 Err(e) => say(&cx, &session, format!("error:{}", e.message))?,
             }
         }
+        // Like Codex: writes the file itself, then announces the edit with a hunk, then ends it.
+        "selfedit" => {
+            let path = std::path::PathBuf::from(&arg);
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            std::fs::write(&path, text.replace("fn a() {}", "fn b() {}")).ok();
+            notify(
+                &cx,
+                &session,
+                acp::SessionUpdate::ToolCall(
+                    acp::ToolCall::new("p1", "Editing files")
+                        .kind(acp::ToolKind::Edit)
+                        .status(acp::ToolCallStatus::InProgress)
+                        .content(vec![acp::ToolCallContent::Diff(
+                            acp::Diff::new(path, "fn b() {}\n").old_text("fn a() {}\n"),
+                        )]),
+                ),
+            )?;
+            notify(
+                &cx,
+                &session,
+                acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                    "p1",
+                    acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Completed),
+                )),
+            )?;
+        }
         "write" => {
             let result = cx
                 .send_request(acp::WriteTextFileRequest::new(
@@ -568,6 +594,8 @@ fn main() -> sdk::Result<()> {
     let on_mode = state.clone();
     let on_config = state.clone();
     let on_close = state.clone();
+    // FAKE_QUIET_MODES=1: `session/set_mode` sends no `current_mode_update`.
+    let quiet_modes = std::env::var_os("FAKE_QUIET_MODES").is_some();
     // FAKE_NO_CLOSE=1: an agent without `session/close`.
     let can_close = std::env::var_os("FAKE_NO_CLOSE").is_none();
     // FAKE_BYPASS_DEFAULT=1: like a user whose Claude settings default to bypassPermissions.
@@ -715,6 +743,10 @@ fn main() -> sdk::Result<()> {
                         .lock()
                         .unwrap()
                         .push(request.mode_id.to_string());
+                    // Like Codex: the answer alone says the mode changed.
+                    if quiet_modes {
+                        return responder.respond(acp::SetSessionModeResponse::new());
+                    }
                     notify(
                         &cx,
                         &request.session_id,

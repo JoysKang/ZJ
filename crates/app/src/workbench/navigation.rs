@@ -26,6 +26,10 @@ use std::{
 const MAX_TARGETS: usize = 50;
 const MAX_REFERENCES: usize = 500;
 const MAX_HISTORY: usize = 50;
+/// A definition asked for while the workspace index is being built waits this long for it,
+/// checking this often, rather than answering "nothing".
+const INDEX_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+const INDEX_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 const URI_PREFIX: &str = "zj-nav:";
 
 gpui_kit::actions!(
@@ -256,16 +260,33 @@ impl DefinitionProvider for Definitions {
         let Some(view) = self.view.upgrade() else {
             return Task::ready(Ok(Vec::new()));
         };
-        let index = view.update(cx, |this, cx| this.symbol_index(cx));
+        let indexer = indexing_view(view, &self.path, cx);
+        let index = indexer.update(cx, |this, cx| this.symbol_index(cx));
+        let indexer = indexer.downgrade();
         let rope = text.clone();
         let source = text.to_string();
         let (path, language) = (self.path.clone(), self.language);
-        let job = cx.background_spawn(async move {
-            resolve(&path, language, &source, offset, index.as_deref())
-        });
         let weak = self.view.clone();
         cx.spawn(async move |cx| {
-            let targets = job.await;
+            // First use (or a rebuild) of the workspace index: a definition in another file is
+            // only found once it is there.
+            let mut index = index;
+            let deadline = std::time::Instant::now() + INDEX_WAIT;
+            while index.is_none() && std::time::Instant::now() < deadline {
+                let (now, building) = indexer.update(cx, |this, _| {
+                    (this.nav.symbols.clone(), this.symbol_index_building())
+                })?;
+                index = now;
+                if index.is_some() || !building {
+                    break;
+                }
+                cx.background_executor().timer(INDEX_POLL).await;
+            }
+            let targets = cx
+                .background_spawn(async move {
+                    resolve(&path, language, &source, offset, index.as_deref())
+                })
+                .await;
             if targets.is_empty() {
                 return Ok(Vec::new());
             }
@@ -290,6 +311,34 @@ impl DefinitionProvider for Definitions {
             }])
         })
     }
+}
+
+/// The workbench whose index holds `path`: the editor's own, unless the file lies outside its
+/// folder and another window's folder holds it (the deepest such folder).
+fn indexing_view(view: Entity<Workbench>, path: &Path, cx: &App) -> Entity<Workbench> {
+    // How deep the folder that holds `path` is.
+    let holds = |this: &Workbench| {
+        let root = this.root.as_ref().filter(|root| path.starts_with(root))?;
+        Some(root.components().count())
+    };
+    if holds(view.read(cx)).is_some() {
+        return view;
+    }
+    cx.windows()
+        .iter()
+        .filter_map(|window| {
+            window
+                .downcast::<gpui_kit::base::Root>()?
+                .read(cx)
+                .ok()?
+                .view()
+                .clone()
+                .downcast::<Workbench>()
+                .ok()
+        })
+        .filter_map(|other| Some((holds(other.read(cx))?, other)))
+        .max_by_key(|(depth, _)| *depth)
+        .map_or(view, |(_, other)| other)
 }
 
 /// Adds go to definition to a newly created editor for a supported language.
@@ -337,7 +386,18 @@ impl Workbench {
         self.nav.symbols.clone()
     }
 
+    /// The index was asked for and is not there yet, but is on its way.
+    fn symbol_index_building(&self) -> bool {
+        self.nav.symbols.is_none()
+            && self.nav.symbols_requested
+            && (self.nav.symbols_task.is_some() || self.index.is_none() && self.root.is_some())
+    }
+
     pub(super) fn build_symbol_index(&mut self, cx: &mut Context<Self>) {
+        if self.nav.symbols_task.is_some() {
+            self.nav.symbols_rebuild = true;
+            return;
+        }
         let Some(paths) = self.index.as_ref().map(|index| index.paths()) else {
             // build_index calls back here when the file list is ready.
             return;
@@ -364,10 +424,20 @@ impl Workbench {
                 this.nav.symbols_task = None;
                 if !cancel.load(Ordering::Relaxed) {
                     this.nav.symbols = Some(Arc::new(index));
-                    this.update_symbol_index(Vec::new(), cx);
                 }
+                this.after_symbol_task(cx);
             });
         }));
+    }
+
+    /// A build or update finished: one the file list asked for meanwhile, else the files that
+    /// changed meanwhile.
+    fn after_symbol_task(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.nav.symbols_rebuild) {
+            self.build_symbol_index(cx);
+        } else {
+            self.update_symbol_index(Vec::new(), cx);
+        }
     }
 
     /// Re-parses changed files into the symbol index (file watching).
@@ -394,7 +464,7 @@ impl Workbench {
             let _ = this.update(cx, |this, cx| {
                 this.nav.symbols_task = None;
                 this.nav.symbols = Some(Arc::new(next));
-                this.update_symbol_index(Vec::new(), cx);
+                this.after_symbol_task(cx);
             });
         }));
     }
@@ -523,7 +593,10 @@ impl Workbench {
             return;
         }
         self.nav.pending_place = Some((path.clone(), place));
-        self.open_file(path, self.root.clone(), window, cx);
+        // A file outside the folder (found through another window's) is read like a
+        // file-picker choice, as `open_in_background` does.
+        let root = self.root.clone().filter(|root| path.starts_with(root));
+        self.open_file(path, root, window, cx);
     }
 
     /// Applies a jump that was waiting for its file to open.
@@ -727,6 +800,9 @@ pub(super) struct NavState {
     pub(super) symbols_requested: bool,
     /// Files changed while the index was being built or updated, parsed again afterwards.
     pub(super) symbols_pending: std::collections::BTreeSet<PathBuf>,
+    /// The file list changed during a build or update: build again once it is done (restarting
+    /// it instead could keep a busy workspace from ever getting an index).
+    pub(super) symbols_rebuild: bool,
     pub(super) generation: u64,
     pub(super) targets: (u64, Vec<Target>),
     pub(super) back: Vec<NavPoint>,

@@ -259,6 +259,15 @@ async fn enter_sends_every_turn(cx: &mut TestAppContext) {
             String::new()
         )
     );
+    // Each finished turn shows how long it took under its last row, not under a user message.
+    this.read_with(cx, |p, _| {
+        let s = p.agent.current().unwrap();
+        assert_eq!(s.turn_times.len(), 2);
+        for index in s.turn_times.keys() {
+            let item = &s.thread.items[index - s.thread.dropped];
+            assert!(!matches!(item, Item::User { .. }));
+        }
+    });
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -769,5 +778,47 @@ async fn enter_in_the_file_picker_attaches_without_sending(cx: &mut TestAppConte
             [Attachment::File(root.join("alpha.rs"))]
         );
     });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A file link in a reply opens in ZJ, at its line; the system is not asked to open it.
+#[gpui_kit::test]
+async fn a_file_link_in_a_reply_opens_in_zj(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("link");
+    std::fs::create_dir_all(root.join("configs")).unwrap();
+    let file = root.join("configs/flower.py");
+    std::fs::write(&file, "a = 1\nb = 2\nc = 3\n").unwrap();
+    let (handle, this) = open(cx, Some(root.clone()));
+    // Relative to the folder, with a line, as agents write them.
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_open_link("configs/flower.py:3", window, cx)
+        });
+    })
+    .unwrap();
+    wait(
+        cx,
+        None,
+        Some(handle),
+        |cx| {
+            this.read_with(cx, |p, cx| {
+                p.active_document()
+                    .is_some_and(|(path, editor)| path == file && editor.read(cx).cursor() == 12)
+            })
+        },
+        |_| "the linked file never opened at its line".into(),
+    );
+    this.update(cx, |p, cx| {
+        p.message.clear();
+        cx.notify();
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_open_link("configs/missing.py", window, cx)
+        });
+    })
+    .unwrap();
+    this.read_with(cx, |p, _| assert!(p.message.contains("找不到链接的文件")));
     let _ = std::fs::remove_dir_all(root);
 }

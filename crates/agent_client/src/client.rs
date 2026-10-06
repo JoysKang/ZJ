@@ -185,8 +185,13 @@ pub(crate) struct SessionState {
     snapshots: Mutex<BTreeMap<PathBuf, Option<String>>>,
     /// The "too many snapshots" notice was shown.
     snapshots_full: AtomicBool,
+    /// Files of edit tool calls still running, by call id: an agent that writes them itself
+    /// (Codex) is reported as having written them once the call completes.
+    edits: Mutex<HashMap<String, Vec<PathBuf>>>,
     /// The agent's id for this session, kept across restarts so `session/load` can restore it.
     resume: Mutex<Option<acp::SessionId>>,
+    /// The (allowed) mode the session was last in: a restart returns to it.
+    mode: Mutex<Option<String>>,
     /// A prompt to send as soon as the session runs again (after moving to another process).
     pending_first: Mutex<Option<(TurnId, Vec<PromptPart>)>>,
     /// Running on a process, or waiting to.
@@ -234,20 +239,7 @@ impl SessionState {
     /// A file the agent's change cannot be reviewed for is said so in the thread, not
     /// silently left out of the changed files.
     async fn snapshot(&self, path: &Path) {
-        let known = |s: &Self| {
-            let snapshots = s.snapshots.lock().unwrap();
-            snapshots.contains_key(path) || snapshots.len() >= MAX_SNAPSHOTS
-        };
-        if known(self) {
-            let full = !self.snapshots.lock().unwrap().contains_key(path);
-            if full && !self.snapshots_full.swap(true, Ordering::Relaxed) {
-                self.emit(AgentEvent::Error {
-                    message: format!(
-                        "这个会话已记录 {MAX_SNAPSHOTS} 个文件改动前的内容，之后改动的文件不能对比或还原"
-                    ),
-                })
-                .await;
-            }
+        if !self.snapshot_wanted(path).await {
             return;
         }
         let before = match self.buffer_text(path).await {
@@ -265,6 +257,66 @@ impl SessionState {
                 }
             },
         };
+        self.keep_snapshot(path, before).await;
+    }
+
+    /// `path` has no snapshot yet and there is room for one (the notice says when there is not).
+    async fn snapshot_wanted(&self, path: &Path) -> bool {
+        let (known, full) = {
+            let snapshots = self.snapshots.lock().unwrap();
+            let known = snapshots.contains_key(path);
+            (known, !known && snapshots.len() >= MAX_SNAPSHOTS)
+        };
+        if full && !self.snapshots_full.swap(true, Ordering::Relaxed) {
+            self.emit(AgentEvent::Error {
+                message: format!(
+                    "这个会话已记录 {MAX_SNAPSHOTS} 个文件改动前的内容，之后改动的文件不能对比或还原"
+                ),
+            })
+            .await;
+        }
+        !known && !full
+    }
+
+    /// The file before an edit the agent applies itself (Codex writes its patches without ZJ):
+    /// when its notice arrives the file may already be written, so the text before is rebuilt
+    /// from the edit's hunks. `diffs` are the call's `(old, new)` texts for `path` (`old`
+    /// `None`: a new file).
+    async fn snapshot_edit(&self, path: &Path, diffs: &[(Option<String>, String)]) {
+        if !self.snapshot_wanted(path).await {
+            return;
+        }
+        let current = match read_disk(path) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            // Says why in the thread.
+            Err(_) => return self.snapshot(path).await,
+        };
+        let before = match (&current, diffs) {
+            // Created: unless the file was there with other text (overwritten).
+            (Some(current), [(None, new)]) if current != new => Some(current.clone()),
+            (_, [(None, _)]) => None,
+            // Deleted already: a delete's old text is the whole file.
+            (None, [(Some(old), new)]) if new.is_empty() => Some(old.clone()),
+            (None, _) => None,
+            (Some(current), _) => {
+                let hunks: Option<Vec<(&str, &str)>> = diffs
+                    .iter()
+                    .map(|(old, new)| Some((old.as_deref()?, new.as_str())))
+                    .collect();
+                // Not told apart: an agent writing through ZJ is snapshotted when it writes;
+                // one that wrote it itself is said so once the edit completes.
+                match hunks.and_then(|hunks| crate::review::text_before_hunks(current, &hunks)) {
+                    Some(before) => Some(before),
+                    None => return,
+                }
+            }
+        };
+        self.keep_snapshot(path, before).await;
+    }
+
+    /// Keeps `before` as `path`'s snapshot, within the session's limits.
+    async fn keep_snapshot(&self, path: &Path, before: Option<String>) {
         let over = {
             let mut snapshots = self.snapshots.lock().unwrap();
             if snapshots.contains_key(path) || snapshots.len() >= MAX_SNAPSHOTS {
@@ -462,7 +514,9 @@ impl AgentClient {
             replaying: AtomicBool::new(false),
             snapshots: Mutex::new(BTreeMap::new()),
             snapshots_full: AtomicBool::new(false),
+            edits: Mutex::new(HashMap::new()),
             resume: Mutex::new(options.resume_session.map(acp::SessionId::new)),
+            mode: Mutex::new(None),
             pending_first: Mutex::new(None),
             running: AtomicBool::new(false),
             idle: AtomicBool::new(false),
@@ -1026,11 +1080,18 @@ async fn session_body(
                         })?;
                     }
                     Ok(Command::SetMode(mode)) => {
-                        let request = cx.send_request(acp::SetSessionModeRequest::new(session.clone(), mode));
+                        let request = cx.send_request(acp::SetSessionModeRequest::new(session.clone(), mode.clone()));
                         let shared = s.clone();
                         cx.spawn(async move {
-                            if let Err(e) = request.block_task().await {
-                                shared.emit(AgentEvent::Error { message: format!("切换模式失败：{}", error_text(&e)) }).await;
+                            match request.block_task().await {
+                                // The answer is the switch: an agent need not also send
+                                // `current_mode_update` for a change the client asked for
+                                // (Codex does not).
+                                Ok(_) => {
+                                    *shared.mode.lock().unwrap() = Some(mode.clone());
+                                    shared.emit(AgentEvent::ModeChanged { mode_id: mode }).await
+                                }
+                                Err(e) => shared.emit(AgentEvent::Error { message: format!("切换模式失败：{}", error_text(&e)) }).await,
                             }
                             Ok(())
                         })?;
@@ -1257,8 +1318,9 @@ fn start_prompt(
     })
 }
 
-/// Starts in the preset's asking mode, whatever the agent's own settings chose; a forbidden
-/// current mode with no allowed alternative is reported.
+/// Starts in the mode the session was last in (back after an idle close or a restart), else in
+/// the preset's asking mode, whatever the agent's own settings chose; a forbidden current mode
+/// with no allowed alternative is reported.
 async fn enforce_mode(
     shared: &Arc<SessionState>,
     cx: &ConnectionTo<Agent>,
@@ -1269,10 +1331,16 @@ async fn enforce_mode(
         return;
     };
     let policy = &shared.preset.modes;
-    let target = match &policy.initial {
-        Some(initial) if modes.available.iter().any(|(id, _)| id == initial) => {
-            Some(initial.clone())
-        }
+    let offered = |id: &str| modes.available.iter().any(|(mode, _)| mode == id);
+    let chosen = shared
+        .mode
+        .lock()
+        .unwrap()
+        .clone()
+        .filter(|mode| policy.allows(mode) && offered(mode));
+    let target = match (chosen, &policy.initial) {
+        (Some(chosen), _) => Some(chosen),
+        (None, Some(initial)) if offered(initial) => Some(initial.clone()),
         _ if !policy.allows(&modes.current) => modes.available.first().map(|(id, _)| id.clone()),
         _ => None,
     };
@@ -1323,9 +1391,31 @@ pub(crate) async fn handle_update(
     let Some(mut event) = events::from_update(&notification.update) else {
         return;
     };
-    // Reviews diff against the file as it was before the first edit; an edit tool
-    // call announces its paths before it runs. Replayed history (`session/load`) is not about
-    // to edit anything.
+    // Reviews diff against the file as it was before the first edit. An edit that carries
+    // its diffs gives the text before even if the agent wrote the file first; otherwise the
+    // paths an edit tool call announces are read before it runs. Replayed history
+    // (`session/load`) is not about to edit anything.
+    let edit = edit_update(&notification.update);
+    if let Some(edit) = &edit
+        && !shared.replaying.load(Ordering::Relaxed)
+    {
+        let mut paths = Vec::new();
+        for (path, diffs) in &edit.diffs {
+            if let Ok(path) = shared.workspace.resolve(path) {
+                shared.snapshot_edit(&path, diffs).await;
+                paths.push(path);
+            }
+        }
+        if !paths.is_empty() {
+            let mut edits = shared.edits.lock().unwrap();
+            let known = edits.entry(edit.id.clone()).or_default();
+            for path in paths {
+                if !known.contains(&path) {
+                    known.push(path);
+                }
+            }
+        }
+    }
     if let AgentEvent::ToolCall(call) = &event
         && !shared.replaying.load(Ordering::Relaxed)
         && matches!(
@@ -1392,6 +1482,9 @@ pub(crate) async fn handle_update(
         }
         return;
     }
+    if let AgentEvent::ModeChanged { mode_id } = &event {
+        *shared.mode.lock().unwrap() = Some(mode_id.clone());
+    }
     let history = matches!(
         event,
         AgentEvent::UserMessageChunk { .. }
@@ -1405,6 +1498,72 @@ pub(crate) async fn handle_update(
         return;
     }
     shared.emit(event).await;
+    // The edit is done: the app recounts, reloads open editors and reviews against the
+    // snapshot (an agent writing through `fs/write_text_file` said so already; twice is fine).
+    if let Some(edit) = edit
+        && let Some(status) = edit.status
+        && matches!(
+            status,
+            acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed
+        )
+    {
+        let paths = shared.edits.lock().unwrap().remove(&edit.id);
+        if status == acp::ToolCallStatus::Completed {
+            for path in paths.into_iter().flatten() {
+                if !shared.snapshots.lock().unwrap().contains_key(&path) {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    shared
+                        .emit(AgentEvent::Error {
+                            message: format!("没能确定 {name} 改动前的内容，它不能对比或还原"),
+                        })
+                        .await;
+                }
+                shared.emit(AgentEvent::FileWritten { path }).await;
+            }
+        }
+    }
+}
+
+/// An edit's `(old, new)` texts for one file (`old` `None`: a new file).
+type EditDiffs = Vec<(Option<String>, String)>;
+
+/// A tool call (or update) as far as its file edits go.
+struct EditUpdate {
+    id: String,
+    status: Option<acp::ToolCallStatus>,
+    /// `(old, new)` texts by file, in the order the agent sent them.
+    diffs: Vec<(PathBuf, EditDiffs)>,
+}
+
+fn edit_update(update: &acp::SessionUpdate) -> Option<EditUpdate> {
+    let (id, status, content) = match update {
+        acp::SessionUpdate::ToolCall(call) => (
+            &call.tool_call_id,
+            Some(call.status),
+            Some(call.content.as_slice()),
+        ),
+        acp::SessionUpdate::ToolCallUpdate(update) => (
+            &update.tool_call_id,
+            update.fields.status,
+            update.fields.content.as_deref(),
+        ),
+        _ => return None,
+    };
+    let mut diffs: Vec<(PathBuf, EditDiffs)> = Vec::new();
+    for content in content.unwrap_or_default() {
+        if let acp::ToolCallContent::Diff(diff) = content {
+            let pair = (diff.old_text.clone(), diff.new_text.clone());
+            match diffs.iter_mut().find(|(path, _)| *path == diff.path) {
+                Some((_, pairs)) => pairs.push(pair),
+                None => diffs.push((diff.path.clone(), vec![pair])),
+            }
+        }
+    }
+    Some(EditUpdate {
+        id: id.to_string(),
+        status,
+        diffs,
+    })
 }
 
 /// Holds the dispatch loop only to register and announce the request; the answer is awaited

@@ -99,12 +99,26 @@ impl Workbench {
         };
         // Consecutive tool calls share one card: no gap between them.
         let gap = !(matches!(item, Item::Tool(_)) && next_tool);
+        // A user message starts a turn: more room above it than between a turn's rows.
+        let turn = matches!(item, Item::User { .. });
+        let took = session
+            .turn_times
+            .get(&(session.thread.dropped + i))
+            .map(|took| {
+                div()
+                    .pt_1()
+                    .text_size(theme::TEXT_CAPTION)
+                    .text_color(colors.muted)
+                    .child(agent_model::turn_took(*took))
+            });
         div()
             .w_full()
             .px_3()
             .when(index == 0, |row| row.pt_3())
+            .when(index > 0 && turn, |row| row.pt_3())
             .when(gap, |row| row.pb_3())
             .child(content)
+            .children(took)
             .into_any_element()
     }
 
@@ -118,18 +132,18 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = theme::colors(cx);
-        v_flex()
-            .w_full()
+        // A bubble on the right, like a chat: replies run full width on the left.
+        let bubble = v_flex()
+            .min_w_0()
+            .max_w(relative(theme::AGENT_USER_WIDTH))
             .gap_1()
+            .rounded(theme::RADIUS_LARGE)
+            .bg(colors.user_bubble)
             .map(|bubble| {
                 if compact {
-                    bubble.pl_3().border_l_2().border_color(colors.accent)
+                    bubble.px_2().py_1()
                 } else {
-                    bubble
-                        .px_3()
-                        .py_2()
-                        .rounded(theme::RADIUS_LARGE)
-                        .bg(colors.hover)
+                    bubble.px_3().py_2()
                 }
             })
             .when(!attachments.is_empty(), |bubble| {
@@ -145,7 +159,11 @@ impl Workbench {
                 agent_model::literal_markdown(text).into(),
                 false,
                 cx,
-            )))
+            )));
+        h_flex()
+            .w_full()
+            .justify_end()
+            .child(bubble)
             .into_any_element()
     }
 

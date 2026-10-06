@@ -211,6 +211,9 @@ pub const AGENT_RING_STROKE: Pixels = px(2.5);
 pub const AGENT_PLAN_BAR: Pixels = px(3.);
 pub const AGENT_PLAN_BAR_WIDTH: Pixels = px(160.);
 pub const AGENT_LINE: Pixels = px(22.);
+/// The widest a user message gets, as a share of the thread: it sits to the right, apart from
+/// the full-width replies.
+pub const AGENT_USER_WIDTH: f32 = 0.85;
 /// Between the paragraphs, lists and code blocks of a reply (8 px at the default rem).
 pub const AGENT_PARAGRAPH_GAP: Rems = rems(0.5);
 pub const AGENT_FILTER_CHIP: Pixels = px(22.);
@@ -321,6 +324,9 @@ pub struct Palette {
     pub attention_halo: u32,
     pub unread: u32,
     pub running: u32,
+    /// The user's messages in the agent panel: tinted apart from replies (plain on the panel)
+    /// and from cards and code blocks.
+    pub user_bubble: u32,
     /// Cards inside the agent panel and their borders; `strong_border` frames inputs.
     pub card: u32,
     pub card_border: u32,
@@ -386,6 +392,8 @@ pub const DARK: Palette = Palette {
     attention_halo: 0xb58900,
     unread: 0x268bd2,
     running: 0x2aa198,
+    // Solarized blue at 20% over the panel.
+    user_bubble: 0x08364c,
     card: 0x002b36,
     card_border: 0x0a3c49,
     strong_border: 0x0e4250,
@@ -448,6 +456,8 @@ pub const LIGHT: Palette = Palette {
     attention_halo: 0xd08770,
     unread: 0x4c6a94,
     running: 0x4c6a94,
+    // Nord frost #5E81AC at 20% over the panel.
+    user_bubble: 0xcad4e2,
     card: 0xeceff4,
     card_border: 0xd3d9e4,
     strong_border: 0xc9d1de,
@@ -623,6 +633,7 @@ pub struct Colors {
     pub attention_border: Hsla,
     pub unread: Hsla,
     pub running: Hsla,
+    pub user_bubble: Hsla,
     pub card: Hsla,
     pub card_border: Hsla,
     pub strong_border: Hsla,
@@ -638,6 +649,9 @@ pub struct Colors {
     pub selected_chip: Hsla,
     /// The feathered halo behind the window switch's name.
     pub switch_halo: Hsla,
+    /// Selection in Kit's TextView (agent replies), which paints it over the text: see-through,
+    /// unlike the editor's, which sits under the text.
+    pub text_selection: Hsla,
     pub focus_border: Hsla,
     /// Selected filter chips: accent tint and border.
     pub chip_on: Hsla,
@@ -705,6 +719,7 @@ impl Palette {
             attention_border: hsla(self.attention).opacity(0.45),
             unread: hsla(self.unread),
             running: hsla(self.running),
+            user_bubble: hsla(self.user_bubble),
             card: hsla(self.card),
             card_border: hsla(self.card_border),
             strong_border: hsla(self.strong_border),
@@ -714,6 +729,7 @@ impl Palette {
             selected_muted: hsla(self.selected_fg).opacity(0.82),
             selected_chip: hsla(self.selected_fg).opacity(0.14),
             switch_halo: hsla(self.editor).opacity(0.85),
+            text_selection: hsla(self.accent).opacity(0.3),
             focus_border: hsla(self.accent).opacity(0.7),
             control_hover: hsla(self.foreground).opacity(0.12),
             control_active: hsla(self.foreground).opacity(0.2),
@@ -986,10 +1002,12 @@ mod tests {
                     assert!(ratio >= 3.0, "{name} {what} on {surface}: {ratio:.2}");
                 }
             }
-            let fg = contrast(p.foreground, p.card);
-            let muted = contrast(p.muted, p.card);
-            assert!(fg >= 7.0, "{name} foreground on card: {fg:.2}");
-            assert!(muted >= 4.5, "{name} muted on card: {muted:.2}");
+            for (surface, bg) in [("card", p.card), ("user bubble", p.user_bubble)] {
+                let fg = contrast(p.foreground, bg);
+                let muted = contrast(p.muted, bg);
+                assert!(fg >= 7.0, "{name} foreground on {surface}: {fg:.2}");
+                assert!(muted >= 4.5, "{name} muted on {surface}: {muted:.2}");
+            }
             let attention = contrast(p.attention, p.panel);
             assert!(attention >= 4.5, "{name} 待批准 text: {attention:.2}");
         }

@@ -141,7 +141,7 @@ impl Workbench {
             })
             .with_muted_foreground(colors.muted)
             .with_link(colors.accent)
-            .with_selection(colors.selection)
+            .with_selection(colors.text_selection)
             .with_code_background(colors.editor)
             .with_border(colors.card_border)
             .with_paragraph_gap(theme::AGENT_PARAGRAPH_GAP)
@@ -166,9 +166,60 @@ impl Workbench {
                     .text_color(colors.code),
             );
         let weak = cx.weak_entity();
+        let links = weak.clone();
         TextView::markdown(id, text)
             .style(style)
             .code_block_actions(move |block, _, _| copy_button(weak.clone(), block.code()))
+            .on_link_click(move |url, _, window, cx| {
+                cx.stop_propagation();
+                let _ = links.update(cx, |this, cx| this.agent_open_link(url, window, cx));
+            })
+    }
+
+    /// A link in a reply: a file opens in ZJ (at its line, when the link has one); any other
+    /// URL in the system.
+    pub(super) fn agent_open_link(
+        &mut self,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root = self
+            .agent
+            .current()
+            .and_then(|s| s.root.clone())
+            .or_else(|| self.root.clone());
+        let Some(link) = agent_model::file_link(url, root.as_deref()) else {
+            cx.open_url(url);
+            return;
+        };
+        // One stat on a click; the canonical path matches an open tab.
+        let Some(path) = std::fs::canonicalize(&link.path)
+            .ok()
+            .filter(|path| path.is_file())
+        else {
+            self.message = format!("找不到链接的文件：{}", link.path.display());
+            cx.notify();
+            return;
+        };
+        let open = self
+            .documents
+            .iter()
+            .find(|doc| doc.path == path)
+            .map(|doc| doc.id);
+        match (link.line, open) {
+            (Some(line), _) => {
+                let place = super::navigation::Placement::Line {
+                    line: line - 1,
+                    column: link.column.map_or(0, |column| column - 1),
+                    center: true,
+                };
+                self.go(path, place, window, cx);
+            }
+            // Already open: shown where it was left.
+            (None, Some(id)) => self.select_pane(Pane::Document(id), window, cx),
+            (None, None) => self.go(path, super::navigation::Placement::Offset(0), window, cx),
+        }
     }
 
     // ----- the panel ----------------------------------------------------------------------
@@ -397,8 +448,9 @@ impl Workbench {
         });
         let empty = session.is_none_or(|s| s.thread.items.is_empty());
         // Refreshed by the spinner's frames while the turn runs.
-        let quiet =
-            session.and_then(|s| agent_model::quiet_note(&s.thread, s.last_output.elapsed()));
+        let running = session.and_then(|s| {
+            agent_model::running_line(&s.thread, s.starting(), s.turn_started.elapsed())
+        });
         v_flex()
             .flex_1()
             .min_h_0()
@@ -436,17 +488,22 @@ impl Workbench {
                 .w_full()
                 .into_any_element()
             })
-            .children(quiet.map(|note| {
-                div()
+            .children(self.render_agent_changes(cx))
+            // Above the composer, outside its box: what the session is doing right now.
+            .children(running.map(|line| {
+                h_flex()
+                    .id("agent-running")
                     .w_full()
                     .flex_shrink_0()
+                    .items_start()
+                    .gap_2()
                     .px_3()
                     .py_1()
                     .text_size(theme::TEXT_SECTION)
                     .text_color(colors.muted)
-                    .child(note)
+                    .child(div().flex_shrink_0().child(spinner(self.agent.spin, colors)))
+                    .child(div().min_w_0().child(line))
             }))
-            .children(self.render_agent_changes(cx))
             .child(self.render_agent_composer(cx))
             .into_any_element()
     }

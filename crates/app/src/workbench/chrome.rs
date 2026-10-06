@@ -163,22 +163,21 @@ impl Workbench {
     }
 
     /// (waiting for approval and the agent's name when there is one, running, done unread).
-    fn agent_status_counts(&self) -> ((usize, Option<String>), usize, usize) {
+    fn agent_status_counts(&self) -> ((usize, Option<String>), usize) {
         use crate::agent_model::RowStatus;
         let mut awaiting = (0, None);
-        let (mut running, mut unread) = (0, 0);
+        let mut unread = 0;
         for session in &self.agent.sessions {
             match session.row_status() {
                 RowStatus::Awaiting => {
                     awaiting.0 += 1;
                     awaiting.1 = Some(session.preset.display_name.clone());
                 }
-                RowStatus::Running => running += 1,
                 RowStatus::Unread => unread += 1,
                 _ => {}
             }
         }
-        (awaiting, running, unread)
+        (awaiting, unread)
     }
 
     pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -286,7 +285,7 @@ impl Workbench {
                         .child(self.message.clone()),
                 )
             });
-        let (awaiting, running, unread) = self.agent_status_counts();
+        let (awaiting, unread) = self.agent_status_counts();
         let right = h_flex()
             .h_full()
             .flex_shrink_0()
@@ -311,18 +310,6 @@ impl Workbench {
                         .on_click(
                             cx.listener(|this, _, window, cx| this.agent_next_approval(window, cx)),
                         ),
-                )
-            })
-            .when(running > 0, |bar| {
-                bar.child(
-                    status_item("status-agent-running", colors)
-                        .child(super::agent_panel::spinner(self.agent.spin, colors))
-                        .child(format!("{running} 运行中"))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if !this.agent.visible {
-                                this.set_agent_panel(true, window, cx);
-                            }
-                        })),
                 )
             })
             .when(unread > 0 && !self.agent.visible, |bar| {

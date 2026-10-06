@@ -2,7 +2,11 @@
 //! the composer's `@` mention and attachments, restoring threads from history, and how a
 //! tool call is summarized on its card. Rendering lives in `workbench/agent_*.rs`.
 
-use std::{ops::Range, path::PathBuf, time::Duration};
+use std::{
+    ops::Range,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use workspace_editor_agent::{
     AgentCommand, ConfigOption, Glyph, PromptPart, ToolCall, ToolContent, ToolKind, ToolStatus,
     thread::{Item, Status, Thread, ToolCard},
@@ -11,30 +15,31 @@ use workspace_editor_agent_history::{Message, Role, SessionStatus, SessionSummar
 
 const DAY_MS: i64 = 86_400_000;
 
-/// How long a running turn may stay silent before the panel says so.
-const QUIET_AFTER: Duration = Duration::from_secs(15);
+/// The line above the composer while the session works: how long the turn has run. `None`
+/// when idle or waiting for approval (the approval card says so).
+pub fn running_line(thread: &Thread, starting: bool, running_for: Duration) -> Option<String> {
+    if thread.status != Status::Running {
+        return starting.then(|| "正在启动 Agent".to_string());
+    }
+    Some(format!("运行中 · {}", duration_label(running_for)))
+}
 
-/// The note under a running turn that has produced nothing for `quiet`, e.g. while the agent
-/// retries a request the API refused (claude-agent-acp reports no 401 retries). `None` while a
-/// tool runs: a long command is silent on purpose.
-pub fn quiet_note(thread: &Thread, quiet: Duration) -> Option<String> {
-    if thread.status != Status::Running || quiet < QUIET_AFTER {
-        return None;
+/// Under a finished turn's last row: how long it took.
+pub fn turn_took(duration: Duration) -> String {
+    if duration < Duration::from_secs(1) {
+        return "耗时不到 1 秒".into();
     }
-    let tool_running = thread.items.iter().any(|item| {
-        matches!(item, Item::Tool(card)
-            if matches!(card.call.status, ToolStatus::Pending | ToolStatus::InProgress))
-    });
-    if tool_running {
-        return None;
-    }
-    let secs = quiet.as_secs();
-    let time = if secs < 60 {
+    format!("耗时 {}", duration_label(duration))
+}
+
+/// 32 s → "32 秒", 125 s → "2 分 05 秒".
+fn duration_label(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    if secs < 60 {
         format!("{secs} 秒")
     } else {
         format!("{} 分 {:02} 秒", secs / 60, secs % 60)
-    };
-    Some(format!("已 {time}没有输出，Agent 可能在重试请求"))
+    }
 }
 
 /// Seconds east of UTC at `ms` (local time zone, daylight saving included).
@@ -584,9 +589,129 @@ pub fn show_live_strip(active_sessions: usize) -> bool {
     active_sessions >= 2
 }
 
+/// A link in a reply that names a file: where it points, with a 1-based line and column
+/// when the link carries them.
+#[derive(Debug, PartialEq)]
+pub struct FileLink {
+    pub path: PathBuf,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+}
+
+/// Agents link files as `/abs/file.py`, `/abs/file.py:26`, `file.py:12:3`, `file.py#L26`,
+/// `file:///abs/file.py` or a path relative to the session's folder (`root`). `None` for a
+/// URL with another scheme (https:, mailto:), which the system opens.
+pub fn file_link(url: &str, root: Option<&Path>) -> Option<FileLink> {
+    let lower = url.to_ascii_lowercase();
+    let rest = if lower.starts_with("file://") {
+        let rest = &url[7..];
+        rest.strip_prefix("localhost").unwrap_or(rest)
+    } else {
+        // `README.MD:155` is a file and a line, not a scheme.
+        let scheme = url.split_once(':').is_some_and(|(scheme, after)| {
+            scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+                && !after.starts_with(|c: char| c.is_ascii_digit())
+        });
+        if scheme || url.starts_with("//") {
+            return None;
+        }
+        url
+    };
+    let (rest, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+    let rest = rest.split('?').next().unwrap_or_default();
+    let mut path = crate::md_images::percent_decode(rest);
+    let number = |text: &str| -> Option<u32> {
+        let digits: String = text.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok().filter(|n| *n > 0)
+    };
+    // `#L26`, `#L26C3`, `#L26-L30`.
+    let (mut line, mut column) = match fragment.strip_prefix('L') {
+        Some(at) => (
+            number(at),
+            at.split_once('C').and_then(|(_, column)| number(column)),
+        ),
+        None => (None, None),
+    };
+    // `:26`, `:26:3`, `:26-30` at the end.
+    let mut parts: Vec<&str> = path.rsplitn(3, ':').collect();
+    parts.reverse();
+    let numeric = |part: &str| {
+        !part.is_empty()
+            && part.chars().all(|c| c.is_ascii_digit() || c == '-')
+            && number(part).is_some()
+    };
+    let cut = match parts.as_slice() {
+        [file, l, c] if numeric(l) && numeric(c) && !file.is_empty() => {
+            line = line.or(number(l));
+            column = column.or(number(c));
+            Some(file.len())
+        }
+        [.., file, l] if numeric(l) && !file.is_empty() => {
+            line = line.or(number(l));
+            Some(path.len() - l.len() - 1)
+        }
+        _ => None,
+    };
+    if let Some(cut) = cut {
+        path.truncate(cut);
+    }
+    if path.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(path);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        root?.join(path)
+    };
+    Some(FileLink { path, line, column })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reply_links_to_files() {
+        let root = Path::new("/w/proj");
+        let link = |url: &str| file_link(url, Some(root));
+        let at = |path: &str, line, column| {
+            Some(FileLink {
+                path: PathBuf::from(path),
+                line,
+                column,
+            })
+        };
+        assert_eq!(link("/w/proj/a.py"), at("/w/proj/a.py", None, None));
+        assert_eq!(link("/w/proj/a.py:26"), at("/w/proj/a.py", Some(26), None));
+        assert_eq!(
+            link("/w/proj/a.py:26:3"),
+            at("/w/proj/a.py", Some(26), Some(3))
+        );
+        assert_eq!(
+            link("/w/proj/a.py:26-30"),
+            at("/w/proj/a.py", Some(26), None)
+        );
+        assert_eq!(
+            link("/w/proj/a.py#L7C2"),
+            at("/w/proj/a.py", Some(7), Some(2))
+        );
+        assert_eq!(
+            link("README.MD:155"),
+            at("/w/proj/README.MD", Some(155), None)
+        );
+        assert_eq!(link("../docs/x.md"), at("/w/proj/../docs/x.md", None, None));
+        assert_eq!(
+            link("file:///w/proj/%E7%AD%94.md"),
+            at("/w/proj/答.md", None, None)
+        );
+        assert_eq!(link("https://example.com/a.py"), None);
+        assert_eq!(link("mailto:a@b.c"), None);
+        assert_eq!(file_link("a.py", None), None);
+    }
     use std::path::Path;
     use workspace_editor_agent_history::{SessionId, TitleSource};
 
@@ -847,40 +972,24 @@ mod tests {
     }
 
     #[test]
-    fn silent_turns_get_a_note_unless_a_tool_runs() {
+    fn the_running_line_counts_the_turn() {
         let secs = Duration::from_secs;
         let mut thread = Thread::new();
-        assert_eq!(quiet_note(&thread, secs(60)), None);
-        thread.push_user("hi".into(), vec![], 1);
-        assert_eq!(quiet_note(&thread, secs(14)), None);
+        assert_eq!(running_line(&thread, false, secs(5)), None);
         assert_eq!(
-            quiet_note(&thread, secs(32)).unwrap(),
-            "已 32 秒没有输出，Agent 可能在重试请求"
+            running_line(&thread, true, secs(5)).as_deref(),
+            Some("正在启动 Agent")
         );
-        assert!(
-            quiet_note(&thread, secs(125))
-                .unwrap()
-                .starts_with("已 2 分 05 秒")
+        thread.push_user("hi".into(), vec![], 1);
+        assert_eq!(
+            running_line(&thread, false, secs(65)).as_deref(),
+            Some("运行中 · 1 分 05 秒")
         );
-        let call = ToolCall {
-            id: "1".into(),
-            title: "cargo build".into(),
-            kind: ToolKind::Execute,
-            status: ToolStatus::InProgress,
-            locations: vec![],
-            content: vec![],
-        };
-        thread.apply(&workspace_editor_agent::AgentEvent::ToolCall(call), true);
-        assert_eq!(quiet_note(&thread, secs(60)), None);
-        let done = workspace_editor_agent::ToolCallPatch {
-            id: "1".into(),
-            status: Some(ToolStatus::Completed),
-            ..Default::default()
-        };
-        thread.apply(
-            &workspace_editor_agent::AgentEvent::ToolCallUpdate(done),
-            true,
+        assert_eq!(
+            running_line(&thread, false, secs(32)).as_deref(),
+            Some("运行中 · 32 秒")
         );
-        assert!(quiet_note(&thread, secs(60)).is_some());
+        assert_eq!(turn_took(secs(125)), "耗时 2 分 05 秒");
+        assert_eq!(turn_took(Duration::from_millis(300)), "耗时不到 1 秒");
     }
 }

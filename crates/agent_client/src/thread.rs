@@ -351,21 +351,38 @@ impl Thread {
         if card.call.kind != ToolKind::Edit {
             return;
         }
+        // One call can edit several files, each in several hunks: every file gets its own.
+        let mut files: BTreeMap<&PathBuf, FileChange> = BTreeMap::new();
         for content in &card.call.content {
-            if let ToolContent::Diff { path, new_file, .. } = content {
-                let entry = self
-                    .changed_files
-                    .entry(path.clone())
-                    .or_insert(FileChange {
-                        added: 0,
-                        removed: 0,
-                        new_file: *new_file,
-                    });
-                // Until the app recomputes against the snapshot, show the call's own counts.
-                if entry.added == 0 && entry.removed == 0 {
-                    entry.added = card.added;
-                    entry.removed = card.removed;
-                }
+            if let ToolContent::Diff {
+                path,
+                new_file,
+                added,
+                removed,
+            } = content
+            {
+                let file = files.entry(path).or_insert(FileChange {
+                    added: 0,
+                    removed: 0,
+                    new_file: *new_file,
+                });
+                file.added += added;
+                file.removed += removed;
+            }
+        }
+        for (path, change) in files {
+            let entry = self
+                .changed_files
+                .entry(path.clone())
+                .or_insert(FileChange {
+                    added: 0,
+                    removed: 0,
+                    new_file: change.new_file,
+                });
+            // Until the app recomputes against the snapshot, show the call's own counts.
+            if entry.added == 0 && entry.removed == 0 {
+                entry.added = change.added;
+                entry.removed = change.removed;
             }
         }
     }
@@ -828,6 +845,38 @@ mod tests {
         );
         assert!(t.unread);
         assert_eq!(t.status, Status::Idle);
+    }
+
+    #[test]
+    fn one_call_editing_several_files_counts_each_on_its_own() {
+        let mut t = Thread::new();
+        t.push_user("go".into(), vec![], 1);
+        let diff = |path: &str, new_file, added, removed| ToolContent::Diff {
+            path: PathBuf::from(path),
+            new_file,
+            added,
+            removed,
+        };
+        let call = ToolCall {
+            id: "p1".into(),
+            title: "Editing files".into(),
+            kind: ToolKind::Edit,
+            status: ToolStatus::Completed,
+            locations: vec![],
+            // a.rs in two hunks, b.rs created.
+            content: vec![
+                diff("/w/a.rs", false, 2, 1),
+                diff("/w/b.rs", true, 5, 0),
+                diff("/w/a.rs", false, 1, 1),
+            ],
+        };
+        t.apply(&AgentEvent::ToolCall(call), true);
+        let count = |path: &str| {
+            let c = &t.changed_files[&PathBuf::from(path)];
+            (c.added, c.removed, c.new_file)
+        };
+        assert_eq!(count("/w/a.rs"), (3, 2, false));
+        assert_eq!(count("/w/b.rs"), (5, 0, true));
     }
 
     #[test]

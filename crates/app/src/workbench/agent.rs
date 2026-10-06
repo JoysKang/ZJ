@@ -156,6 +156,8 @@ pub(super) struct LiveSession {
     /// Reply texts by absolute item index (`thread.dropped + i`) for Kit's `TextView`: the
     /// same allocation every frame, so an unchanged reply is not compared again.
     pub md: HashMap<usize, SharedString>,
+    /// How long each finished turn took, by the absolute index of its last row.
+    pub turn_times: HashMap<usize, std::time::Duration>,
     /// Oldest stored message loaded (history threads page backwards from it).
     pub oldest_seq: Option<i64>,
     resume: Option<String>,
@@ -169,8 +171,8 @@ pub(super) struct LiveSession {
     queued: Option<(String, Vec<Attachment>)>,
     /// The last event, prompt or look at it: idle sessions are put away after a while.
     last_active: std::time::Instant,
-    /// The last event or prompt: a running turn silent for long gets a note.
-    pub last_output: std::time::Instant,
+    /// The last prompt: the line above the composer counts from it.
+    pub turn_started: std::time::Instant,
 }
 
 impl LiveSession {
@@ -188,6 +190,7 @@ impl LiveSession {
             started_at: workspace_editor_agent_history::now_ms(),
             branch: None,
             md: HashMap::new(),
+            turn_times: HashMap::new(),
             oldest_seq: None,
             resume: None,
             stored_status: None,
@@ -197,7 +200,7 @@ impl LiveSession {
             recount_pending: Some(Default::default()),
             queued: None,
             last_active: std::time::Instant::now(),
-            last_output: std::time::Instant::now(),
+            turn_started: std::time::Instant::now(),
         }
     }
 
@@ -217,12 +220,17 @@ impl LiveSession {
     }
 
     pub fn row_status(&self) -> agent_model::RowStatus {
-        let status = if self.starting && self.thread.status == agent_thread::Status::Idle {
+        let status = if self.starting() {
             agent_thread::Status::Running
         } else {
             self.thread.status
         };
         agent_model::RowStatus::of_thread(status, self.thread.unread)
+    }
+
+    /// Starting the agent with nothing sent yet.
+    pub fn starting(&self) -> bool {
+        self.starting && self.thread.status == agent_thread::Status::Idle
     }
 
     pub fn busy(&self) -> bool {

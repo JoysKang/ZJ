@@ -66,6 +66,50 @@ pub fn reject_written_hunk(before: &str, current: &str, index: usize) -> String 
     apply_hunks(before, current, &keep)
 }
 
+/// Where each part occurs in `text`, in order and without overlapping.
+fn find_in_order(text: &str, parts: &[&str]) -> Option<Vec<usize>> {
+    let mut at = 0;
+    parts
+        .iter()
+        .map(|part| {
+            let found = at + text.get(at..)?.find(part)?;
+            at = found + part.len();
+            Some(found)
+        })
+        .collect()
+}
+
+/// The file before an edit the agent applied itself, from the edit's hunks (`(old, new)`
+/// fragments with their context lines, as codex-acp sends them) and the file now, which may
+/// still be the old text (the notice came first) or already the new one (the agent wrote it
+/// first). `None` when that cannot be told: the fragments match neither, or both.
+pub fn text_before_hunks(current: &str, hunks: &[(&str, &str)]) -> Option<String> {
+    if hunks.is_empty()
+        || hunks
+            .iter()
+            .any(|(old, new)| old.is_empty() || new.is_empty())
+    {
+        return None;
+    }
+    let olds: Vec<&str> = hunks.iter().map(|(old, _)| *old).collect();
+    let news: Vec<&str> = hunks.iter().map(|(_, new)| *new).collect();
+    match (find_in_order(current, &olds), find_in_order(current, &news)) {
+        (Some(_), None) => Some(current.to_string()),
+        (None, Some(at)) => {
+            let mut before = String::with_capacity(current.len());
+            let mut from = 0;
+            for (start, (old, new)) in at.into_iter().zip(hunks) {
+                before.push_str(&current[from..start]);
+                before.push_str(old);
+                from = start + new.len();
+            }
+            before.push_str(&current[from..]);
+            Some(before)
+        }
+        _ => None,
+    }
+}
+
 /// The review base and current text of a changed file: (before, after). `None` when nothing
 /// is pending for it.
 pub fn review_texts(client: &AgentClient, path: &Path) -> Option<(Option<String>, String)> {
@@ -146,6 +190,19 @@ pub fn resolve_hunk(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_text_before_hunks_comes_from_either_side() {
+        let before = "a\nb\nc\nd\ne\n";
+        let after = "a\nB\nc\nd\ne\nf\n";
+        let hunks = [("a\nb\nc\n", "a\nB\nc\n"), ("d\ne\n", "d\ne\nf\n")];
+        // Written already, or not yet: the same text before.
+        assert_eq!(text_before_hunks(after, &hunks).as_deref(), Some(before));
+        assert_eq!(text_before_hunks(before, &hunks).as_deref(), Some(before));
+        // Neither side (the file moved on), or an empty fragment: unknown.
+        assert_eq!(text_before_hunks("x\n", &hunks), None);
+        assert_eq!(text_before_hunks(after, &[("a\n", "")]), None);
+    }
 
     #[test]
     fn patch_blocks_follow_hunks() {

@@ -197,12 +197,16 @@ pub fn builtin_presets() -> Vec<AgentPreset> {
                     args: vec![],
                 },
             ],
-            // codex-acp otherwise starts in "agent" (auto review).
-            env: vec![(s("INITIAL_AGENT_MODE"), EnvValue::Literal(s("read-only")))],
+            // codex-acp otherwise starts in "agent" (auto review). "Workspace access": edits in
+            // the workspace, asks before writing outside it or using the network.
+            env: vec![(
+                s("INITIAL_AGENT_MODE"),
+                EnvValue::Literal(s("workspace-write")),
+            )],
             install_hint: s(
                 "可以运行 npm i -g @agentclientprotocol/codex-acp 装成本机命令，或检查网络后重试（ZJ 会自动安装）",
             ),
-            modes: ModePolicy::new("read-only", &["agent-full-access"]),
+            modes: ModePolicy::new("workspace-write", &["agent-full-access"]),
             session_meta: None,
             local_cli: codex_cli(),
         },
