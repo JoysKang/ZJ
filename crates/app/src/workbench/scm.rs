@@ -5,6 +5,7 @@
 //! File row actions appear on hover; the status letter stays at the right edge.
 
 use super::SINGLE_LINE;
+use super::quick_open::StashAction;
 use super::scm_actions::CommitMode;
 use super::{Row, Workbench, sidebar::chevron};
 use crate::{file_icons, theme};
@@ -100,6 +101,21 @@ impl Workbench {
         let idle = !self.groups[g].write_pending;
         let (refresh, checkout, create, graph) =
             (view.clone(), view.clone(), view.clone(), view.clone());
+        let has_changes = self.groups[g]
+            .status
+            .as_ref()
+            .and_then(|s| s.as_ref().ok())
+            .is_some_and(|s| !s.changes.is_empty());
+        let stash_push = view.clone();
+        let stash_item = |label: &str, action: StashAction| {
+            let view = view.clone();
+            PopupMenuItem::new(label.to_string())
+                .disabled(!idle)
+                .on_click(move |_, window, cx| {
+                    let _ =
+                        view.update(cx, |this, cx| this.open_stash_picker(g, action, window, cx));
+                })
+        };
         let item = |label: &str, request: Option<WriteRequest>| match request {
             Some(request) => git_menu_item(label, request, view.clone()),
             None => PopupMenuItem::new(label.to_string()).disabled(true),
@@ -126,6 +142,18 @@ impl Workbench {
             .item(PopupMenuItem::new("Git 图").on_click(move |_, window, cx| {
                 let _ = graph.update(cx, |this, cx| this.open_git_graph(g, window, cx));
             }))
+            .separator()
+            .item(
+                PopupMenuItem::new("Stash…")
+                    .disabled(!idle || !has_changes)
+                    .on_click(move |_, window, cx| {
+                        let _ =
+                            stash_push.update(cx, |this, cx| this.open_stash_push(g, window, cx));
+                    }),
+            )
+            .item(stash_item("应用 Stash…", StashAction::Apply))
+            .item(stash_item("弹出 Stash…", StashAction::Pop))
+            .item(stash_item("删除 Stash…", StashAction::Drop))
             .separator()
             .when_some(stage, |menu, request| {
                 menu.item(git_menu_item("暂存所有更改", request, view.clone()))

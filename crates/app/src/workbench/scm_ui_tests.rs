@@ -243,3 +243,67 @@ fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
     );
     String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
+
+#[gpui_kit::test]
+async fn stash_with_a_message_then_pop_it(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("stash", 0);
+    std::fs::write(repo.join("a.txt"), "edited\n").unwrap();
+    let (window, this) = open(cx, repo.clone());
+    let changes = |cx: &mut TestAppContext| {
+        this.read_with(cx, |p, _| {
+            p.groups[0]
+                .status
+                .as_ref()
+                .and_then(|s| s.as_ref().ok())
+                .map(|s| s.changes.len())
+        })
+    };
+    settle(cx, None, |cx| changes(cx) == Some(1));
+
+    // Stash…: type the message, Enter on the first row (tracked changes only).
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_stash_push(0, window, cx));
+        window.render_frame(cx);
+        window.input("半成品", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("enter", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    settle(cx, None, |cx| changes(cx) == Some(0));
+    assert!(git_out(&repo, &["stash", "list"]).contains("半成品"));
+
+    // 弹出 Stash…: the list shows it; Enter pops it back.
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_stash_picker(0, super::super::quick_open::StashAction::Pop, window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| {
+            p.quick_open
+                .as_ref()
+                .and_then(|q| q.items.as_ref())
+                .is_some_and(|(items, _)| items.len() == 1 && items[0].label.ends_with("半成品"))
+        })
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("enter", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    settle(cx, None, |cx| changes(cx) == Some(1));
+    assert_eq!(git_out(&repo, &["stash", "list"]), "");
+    assert_eq!(
+        std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+        "edited\n"
+    );
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}

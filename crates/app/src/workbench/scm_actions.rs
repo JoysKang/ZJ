@@ -1,5 +1,5 @@
 //! UI intent captures repository identity, paths and the displayed version before prompting.
-use super::quick_open::{Pick, PickIcon, PickItem};
+use super::quick_open::{Pick, PickIcon, PickItem, StashAction};
 use super::*;
 use gpui_kit::assets::IconName;
 use std::path::Path;
@@ -633,6 +633,135 @@ impl Workbench {
                     cx.notify();
                 }
             });
+        })
+        .detach();
+    }
+
+    /// 暂存 (Stash)…: the message is typed in the picker; the two rows choose whether
+    /// untracked files go too.
+    pub(super) fn open_stash_push(
+        &mut self,
+        g: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group) = self.groups.get(g) else {
+            return;
+        };
+        let items = [false, true]
+            .into_iter()
+            .map(|untracked| PickItem {
+                label: String::new(),
+                detail: String::new(),
+                icon: PickIcon::Lucide(IconName::Archive),
+                keys: Vec::new(),
+                pick: Pick::StashPush {
+                    repo: group.repo.id.clone(),
+                    untracked,
+                },
+            })
+            .collect();
+        self.open_picker(items, "Stash 说明（可选）".into(), "", window, cx);
+    }
+
+    /// 应用 / 弹出 / 删除 Stash…: the stashes, newest first.
+    pub(super) fn open_stash_picker(
+        &mut self,
+        g: usize,
+        action: StashAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group) = self.groups.get(g) else {
+            return;
+        };
+        let repo = group.repo.clone();
+        let service = self.service.clone();
+        let job = cx.background_spawn({
+            let repo = repo.clone();
+            async move { service.stashes(&repo, &AtomicBool::new(false)) }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let stashes = job.await;
+            let _ = this.update_in(cx, |this, window, cx| match stashes {
+                Ok(stashes) if stashes.is_empty() => {
+                    this.message = "没有 stash".into();
+                    cx.notify();
+                }
+                Ok(stashes) => {
+                    let now = workspace_editor_agent_history::now_ms();
+                    let offset = crate::agent_model::local_offset(now);
+                    let items = stashes
+                        .into_iter()
+                        .map(|stash| PickItem {
+                            label: stash.message.replace(SINGLE_LINE, " "),
+                            detail: format!(
+                                "stash@{{{}}} · {}",
+                                stash.index,
+                                crate::agent_model::relative_time(stash.time * 1000, now, offset)
+                            ),
+                            icon: PickIcon::Lucide(IconName::Archive),
+                            keys: Vec::new(),
+                            pick: Pick::Stash {
+                                repo: repo.id.clone(),
+                                index: stash.index,
+                                oid: stash.oid,
+                                action,
+                            },
+                        })
+                        .collect();
+                    let placeholder = match action {
+                        StashAction::Apply => "选择要应用的 stash",
+                        StashAction::Pop => "选择要弹出的 stash（应用后删除）",
+                        StashAction::Drop => "选择要删除的 stash",
+                    };
+                    this.open_picker(items, placeholder.into(), "没有匹配的 stash", window, cx);
+                }
+                Err(error) => {
+                    this.message = format!("无法列出 stash：{error}");
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Runs a chosen stash action; deleting asks first.
+    pub(super) fn scm_stash_action(
+        &mut self,
+        repo: &RepoId,
+        index: usize,
+        oid: String,
+        action: StashAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let operation = match action {
+            StashAction::Apply | StashAction::Pop => WriteOperation::StashApply {
+                index,
+                oid,
+                pop: action == StashAction::Pop,
+            },
+            StashAction::Drop => WriteOperation::StashDrop { index, oid },
+        };
+        if action != StashAction::Drop {
+            self.scm_request_for(repo, operation, window, cx);
+            return;
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("删除 stash@{{{index}}}？"),
+            Some("删除后无法从这里恢复。"),
+            &crate::workbench::prompt_buttons(&["删除", "取消"]),
+            cx,
+        );
+        let repo = repo.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await == Ok(0) {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.scm_request_for(&repo, operation, window, cx)
+                });
+            }
         })
         .detach();
     }

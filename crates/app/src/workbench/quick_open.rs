@@ -64,6 +64,18 @@ pub(super) enum Pick {
         name: String,
         push: bool,
     },
+    /// Stashes the repository's changes with the query as the message (optional).
+    StashPush {
+        repo: RepoId,
+        untracked: bool,
+    },
+    /// A stash chosen for `action`.
+    Stash {
+        repo: RepoId,
+        index: usize,
+        oid: String,
+        action: StashAction,
+    },
     /// The checked-out branch: nothing to do.
     Close,
     /// `:N:C` in the file search: 0-based line and column; `None` (no file, or the line is
@@ -71,6 +83,14 @@ pub(super) enum Pick {
     Line(Option<(u32, u32)>),
     /// A `>` command palette row: the index into [`super::commands::COMMANDS`].
     Command(usize),
+}
+
+/// What a stash picker does with the chosen stash.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum StashAction {
+    Apply,
+    Pop,
+    Drop,
 }
 
 /// The ⌘P panel's state: file search, command palette (`>`) or go to line (`:`).
@@ -343,7 +363,8 @@ impl Workbench {
                 .filter_map(|(i, item)| {
                     if let Pick::CreateBranch { .. }
                     | Pick::TagName { .. }
-                    | Pick::CreateTag { .. } = item.pick
+                    | Pick::CreateTag { .. }
+                    | Pick::StashPush { .. } = item.pick
                     {
                         // First with an empty query (nothing is sorted then), after real
                         // matches otherwise, so Enter on a typed branch checks it out. The
@@ -539,6 +560,23 @@ impl Workbench {
                         push,
                     };
                     self.scm_request_for(&repo, operation, window, cx);
+                }
+                Some(Pick::StashPush { repo, untracked }) => {
+                    self.focus_active_editor(window, cx);
+                    let operation = workspace_editor_git::WriteOperation::StashPush {
+                        message: query,
+                        untracked,
+                    };
+                    self.scm_request_for(&repo, operation, window, cx);
+                }
+                Some(Pick::Stash {
+                    repo,
+                    index,
+                    oid,
+                    action,
+                }) => {
+                    self.focus_active_editor(window, cx);
+                    self.scm_stash_action(&repo, index, oid, action, window, cx);
                 }
                 Some(Pick::TagName { .. }) | Some(Pick::Close) | Some(Pick::Line(None)) | None => {
                     self.focus_active_editor(window, cx)
@@ -786,6 +824,17 @@ impl Workbench {
                     format!("创建{kind}标签“{name}”并推送到远程")
                 } else {
                     format!("创建{kind}标签“{name}”")
+                }
+            }
+            Pick::StashPush { untracked, .. } => {
+                let what = if *untracked {
+                    "Stash 所有更改（含未跟踪文件）"
+                } else {
+                    "Stash 更改"
+                };
+                match query() {
+                    query if query.is_empty() => what.to_string(),
+                    query => format!("{what}：“{query}”"),
                 }
             }
             _ => item.label.clone(),
