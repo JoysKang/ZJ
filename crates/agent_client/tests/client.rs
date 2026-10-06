@@ -597,7 +597,7 @@ fn prompts_wait_for_a_login_then_continue() {
     }
     assert!(client.is_busy());
     // Not signed in yet: asked again.
-    client.retry_login();
+    client.retry_login(BTreeMap::new());
     required(&events.until(|e| matches!(e, AgentEvent::AuthRequired { .. })));
     client.login("fake-login");
     let seen = events.turn();
@@ -618,6 +618,37 @@ fn prompts_wait_for_a_login_then_continue() {
     client.cancel();
     assert_eq!(outcome(&events.turn()), TurnOutcome::Cancelled);
     assert!(!client.is_busy());
+}
+
+#[test]
+fn retrying_a_login_restarts_the_agent_with_new_variables() {
+    let ws = Workspace::new("login-restart");
+    let var = |name: &str| {
+        BTreeMap::from([(
+            "FAKE_AUTH".to_string(),
+            ws.path(name).to_string_lossy().into_owned(),
+        )])
+    };
+    // Not declared by the preset: a settings-only variable still reaches the agent.
+    let mut options = options(&ws, &[]);
+    options.env_overrides = var("old");
+    let client = AgentClient::start(options).unwrap();
+    let events = Events::of(&client);
+    client.prompt(text("echo hi")).unwrap();
+    events.until(|e| matches!(e, AgentEvent::AuthRequired { .. }));
+    // The user put a working key in the settings: only the new process can see it.
+    std::fs::write(ws.path("new"), "").unwrap();
+    client.retry_login(var("new"));
+    let seen = events.turn();
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, AgentEvent::Starting { .. }))
+    );
+    assert!(!seen.iter().any(|e| matches!(e, AgentEvent::Exited { .. })));
+    assert_eq!(outcome(&seen), TurnOutcome::EndTurn);
+    assert_eq!(message(&seen), "hi");
+    assert!(!ws.path("old").exists());
+    client.shutdown();
 }
 
 #[test]
@@ -643,7 +674,7 @@ fn prompts_refused_for_a_login_are_sent_again() {
             .any(|e| matches!(e, AgentEvent::TurnEnded { .. }))
     );
     assert!(client.is_busy());
-    client.retry_login();
+    client.retry_login(BTreeMap::new());
     events.until(|e| matches!(e, AgentEvent::AuthRequired { .. }));
     client.login("fake-login");
     let seen = events.turn();

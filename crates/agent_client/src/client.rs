@@ -128,7 +128,7 @@ enum Command {
     Cancel,
     SetMode(String),
     Login(String),
-    RetryLogin,
+    RetryLogin(BTreeMap<String, String>),
     Shutdown,
 }
 
@@ -139,7 +139,8 @@ struct Shared {
     cancel_grace: Duration,
     handshake_timeout: Duration,
     resume_session: Option<String>,
-    env_overrides: BTreeMap<String, String>,
+    /// Replaced by [`AgentClient::retry_login`] (the settings may have changed meanwhile).
+    env_overrides: Mutex<BTreeMap<String, String>>,
     buffers: Option<Arc<dyn BufferProvider>>,
     /// Closed by [`AgentClient::stop`]: a read waiting for the editor gives up instead of
     /// holding the supervisor (and the UI thread joining it) until the timeout.
@@ -325,7 +326,7 @@ impl AgentClient {
             cancel_grace: options.cancel_grace,
             handshake_timeout: options.handshake_timeout,
             resume_session: options.resume_session,
-            env_overrides: options.env_overrides,
+            env_overrides: Mutex::new(options.env_overrides),
             buffers: options.buffers,
             stopping: stopping_rx,
             search: options.search_path.unwrap_or_else(SearchPath::from_env),
@@ -408,9 +409,11 @@ impl AgentClient {
         let _ = self.commands.try_send(Command::Login(method_id.into()));
     }
 
-    /// Tries the session again after a login finished elsewhere (in the terminal).
-    pub fn retry_login(&self) {
-        let _ = self.commands.try_send(Command::RetryLogin);
+    /// Tries again after a login finished elsewhere (in the terminal) or after the user changed
+    /// the agent's variables: the agent process restarts with `env_overrides` (resolved again
+    /// from the settings), and a prompt waiting for the login is sent once the session starts.
+    pub fn retry_login(&self, env_overrides: BTreeMap<String, String>) {
+        let _ = self.commands.try_send(Command::RetryLogin(env_overrides));
     }
 
     /// Answers a permission request with one of its option ids (`None` = dismissed, sent as
@@ -510,6 +513,9 @@ enum End {
     Closed,
     /// Handshake or session setup failed; already reported.
     Failed,
+    /// [`AgentClient::retry_login`]: start a new process at once, then send the prompt that
+    /// was waiting for the login.
+    Restart(Option<(TurnId, Vec<PromptPart>)>),
 }
 
 async fn supervise(
@@ -520,18 +526,25 @@ async fn supervise(
     // Kept across restarts so a crashed or idle-stopped agent can `session/load` it.
     let mut resume: Option<acp::SessionId> = shared.resume_session.clone().map(acp::SessionId::new);
     while let Ok(command) = commands.recv().await {
-        let first = match command {
+        let mut first = match command {
             Command::Shutdown => return,
             // The process exited while a login was pending: start over (asks again).
-            Command::Connect | Command::Login(_) | Command::RetryLogin => None,
+            Command::Connect | Command::Login(_) => None,
+            Command::RetryLogin(env) => {
+                *shared.env_overrides.lock().unwrap() = env;
+                None
+            }
             Command::Prompt { turn, parts } => Some((turn, parts)),
             // No process: nothing to cancel or switch.
             Command::Cancel | Command::SetMode(_) => continue,
         };
-        while turn_done.try_recv().is_ok() {}
-        if let End::Shutdown = run_process(&shared, &commands, &turn_done, first, &mut resume).await
-        {
-            return;
+        loop {
+            while turn_done.try_recv().is_ok() {}
+            match run_process(&shared, &commands, &turn_done, first, &mut resume).await {
+                End::Shutdown => return,
+                End::Restart(pending) => first = pending,
+                End::Idle | End::Closed | End::Failed => break,
+            }
         }
     }
 }
@@ -544,11 +557,10 @@ async fn run_process(
     resume: &mut Option<acp::SessionId>,
 ) -> End {
     let name = shared.preset.display_name.clone();
-    let plan = shared.preset.resolve(
-        &shared.search,
-        &shared.env_overrides,
-        shared.install_root.as_deref(),
-    );
+    let overrides = shared.env_overrides.lock().unwrap().clone();
+    let plan = shared
+        .preset
+        .resolve(&shared.search, &overrides, shared.install_root.as_deref());
     let launch = match plan {
         Ok(LaunchPlan::Ready(launch)) => launch,
         Ok(LaunchPlan::Install(install)) => match run_install(shared, install) {
@@ -651,6 +663,11 @@ async fn run_process(
     let status = process.terminate();
     let (code, signal) = describe(status);
     let reason = match end {
+        End::Restart(_) => {
+            // The turn and the login card stay open for the new process.
+            eprintln!("event=agent_restart agent={} pid={pid}", shared.preset.id);
+            return end;
+        }
         End::Idle => ExitReason::Idle,
         End::Shutdown => ExitReason::Shutdown,
         End::Failed => ExitReason::SetupFailed {
@@ -1011,7 +1028,7 @@ async fn run_session(
         futures::select! {
             command = command => match command {
                 Err(_) | Ok(Command::Shutdown) => return Ok(End::Shutdown),
-                Ok(Command::Connect | Command::Login(_) | Command::RetryLogin) => {}
+                Ok(Command::Connect | Command::Login(_) | Command::RetryLogin(_)) => {}
                 Ok(Command::Prompt { turn, parts }) => start_prompt(&shared, &cx, &session, turn, parts, can_login)?,
                 Ok(Command::Cancel) => {
                     shared.cancel_permissions();
@@ -1082,7 +1099,8 @@ struct Login<'a> {
 }
 
 impl Login<'_> {
-    /// `None`: try the session again. A prompt sent meanwhile is kept in `first`.
+    /// `None`: signed in, try the session again in this process. A prompt sent meanwhile is
+    /// kept in `first`.
     async fn run(
         &self,
         commands: &async_channel::Receiver<Command>,
@@ -1126,7 +1144,10 @@ impl Login<'_> {
                     shared.finish_turn(None, TurnOutcome::Cancelled).await;
                     return Some(End::Idle);
                 }
-                Ok(Command::RetryLogin) => return None,
+                Ok(Command::RetryLogin(env)) => {
+                    *shared.env_overrides.lock().unwrap() = env;
+                    return Some(End::Restart(first.take()));
+                }
                 Ok(Command::Login(id)) => {
                     if let Some(end) = self.login(&id, commands, first).await {
                         return end;

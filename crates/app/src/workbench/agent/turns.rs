@@ -629,10 +629,34 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Restarts the agent with its variables read again from the settings, so a key added
+    /// after the session started (e.g. `ANTHROPIC_API_KEY`) is used.
     pub(in crate::workbench) fn agent_retry_login(&mut self, key: u64, cx: &mut Context<Self>) {
-        if let Some(client) = self.agent.session_mut(key).and_then(|s| s.client.as_ref()) {
-            client.retry_login();
-        }
-        cx.notify();
+        let Some(session) = self.agent.session(key) else {
+            return;
+        };
+        let Some(client) = session.client.clone() else {
+            return;
+        };
+        let overrides = cx
+            .global::<crate::settings::Settings>()
+            .agent
+            .env_for(&session.preset.id);
+        // `keychain:` may wait for the system's "allow access" dialog.
+        let job = cx.background_spawn(async move {
+            crate::secrets::resolve(&overrides, |name| std::env::var(name).ok())
+        });
+        cx.spawn(async move |this, cx| match job.await {
+            Ok(env) => client.retry_login(env),
+            Err(error) => {
+                let _ = this.update(cx, |this, cx| {
+                    if let Some(session) = this.agent.session_mut(key) {
+                        session.thread.push_notice(error, true);
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
     }
 }
