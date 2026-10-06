@@ -346,3 +346,57 @@ async fn a_file_deleted_and_restored_unchanged_leaves_its_tab_clean(cx: &mut Tes
     settle(cx, Some(window), |cx| state(cx) == (false, false));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[gpui_kit::test]
+async fn a_change_on_disk_during_a_save_is_looked_at_afterwards(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-save-recheck-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("a.txt");
+    std::fs::write(&path, "one\n").unwrap();
+    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    wait(
+        cx,
+        Some(TICK),
+        None,
+        |cx| loaded(cx, &this),
+        |_| "never loaded".into(),
+    );
+    let folder = Some(root.clone());
+    let open_path = path.clone();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(open_path, folder, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let id = this.read_with(cx, |p, _| p.documents[0].id);
+    // The watcher reports a change while a save is writing.
+    std::fs::write(&path, "two\n").unwrap();
+    let changed = std::collections::BTreeSet::from([path.clone()]);
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.document_mut(id).unwrap().saving = true;
+            p.check_disk(Some(&changed), window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    this.read_with(cx, |p, _| assert!(p.documents[0].recheck));
+    // The save is done: the change is looked at then, and the unedited tab follows it.
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.document_mut(id).unwrap().saving = false;
+            p.recheck_after_save(id, window, cx);
+        });
+    })
+    .unwrap();
+    let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
+    settle(cx, Some(window), |cx| {
+        editor.read_with(cx, |s, _| s.text().to_string()) == "two\n"
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}

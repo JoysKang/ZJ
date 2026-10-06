@@ -450,13 +450,15 @@ impl Workbench {
                 if let Some(doc) = this.document_mut(id) {
                     doc.saving = false;
                 }
-                match result {
+                let next = match result {
                     Ok(state) => {
                         this.saved(id, &path, state, version, window, cx);
                         None
                     }
                     Err(error) => Some(this.save_failed(id, error, window, cx)),
-                }
+                };
+                this.recheck_after_save(id, window, cx);
+                next
             });
             match next {
                 Ok(None) => true,
@@ -850,6 +852,12 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         self.large_check_disk(paths, cx);
+        // A tab being saved is looked at once the save is done.
+        for doc in self.documents.iter_mut() {
+            if doc.saving && paths.is_none_or(|paths| paths.contains(&doc.path)) {
+                doc.recheck = true;
+            }
+        }
         let jobs: Vec<(DocumentId, PathBuf, DiskState)> = self
             .documents
             .iter()
@@ -886,6 +894,21 @@ impl Workbench {
             });
         })
         .detach();
+    }
+
+    /// The file changed on disk while it was being saved: compare it again now.
+    pub(super) fn recheck_after_save(
+        &mut self,
+        id: DocumentId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(doc) = self.document_mut(id).filter(|doc| doc.recheck) else {
+            return;
+        };
+        doc.recheck = false;
+        let paths = BTreeSet::from([doc.path.clone()]);
+        self.check_disk(Some(&paths), window, cx);
     }
 
     fn on_disk_changed(
@@ -1288,6 +1311,7 @@ impl Document {
             untitled: true,
             version: 0,
             saving: false,
+            recheck: false,
             deleted: false,
             unedited_when_deleted: None,
             banner: None,

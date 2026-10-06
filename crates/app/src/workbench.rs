@@ -201,6 +201,8 @@ struct Document {
     /// Counts edits, so a save that finishes after more typing keeps the tab edited.
     version: u64,
     saving: bool,
+    /// The watcher saw the file change while it was being saved: look again afterwards.
+    recheck: bool,
     /// The file was deleted on disk; the buffer is kept (and counts as edited).
     deleted: bool,
     /// The buffer's version when its file was deleted, if it had no edits then: a file that
