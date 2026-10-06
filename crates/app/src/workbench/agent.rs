@@ -157,6 +157,8 @@ pub(super) struct LiveSession {
     queued: Option<(String, Vec<Attachment>)>,
     /// The last event, prompt or look at it: idle sessions are put away after a while.
     last_active: std::time::Instant,
+    /// The last event or prompt: a running turn silent for long gets a note.
+    pub last_output: std::time::Instant,
 }
 
 impl LiveSession {
@@ -185,6 +187,7 @@ impl LiveSession {
             highlight_task: None,
             queued: None,
             last_active: std::time::Instant::now(),
+            last_output: std::time::Instant::now(),
         }
     }
 

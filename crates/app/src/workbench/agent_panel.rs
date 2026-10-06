@@ -403,6 +403,9 @@ impl Workbench {
             parts.join(" · ")
         });
         let empty = session.is_none_or(|s| s.thread.items.is_empty());
+        // Refreshed by the spinner's frames while the turn runs.
+        let quiet =
+            session.and_then(|s| agent_model::quiet_note(&s.thread, s.last_output.elapsed()));
         v_flex()
             .flex_1()
             .min_h_0()
@@ -440,6 +443,16 @@ impl Workbench {
                 .w_full()
                 .into_any_element()
             })
+            .children(quiet.map(|note| {
+                div()
+                    .w_full()
+                    .flex_shrink_0()
+                    .px_3()
+                    .py_1()
+                    .text_size(theme::TEXT_SECTION)
+                    .text_color(colors.muted)
+                    .child(note)
+            }))
             .children(self.render_agent_changes(cx))
             .child(self.render_agent_composer(cx))
             .into_any_element()

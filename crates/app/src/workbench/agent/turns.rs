@@ -189,6 +189,7 @@ impl Workbench {
             return;
         };
         session.last_active = std::time::Instant::now();
+        session.last_output = session.last_active;
         let Some(client) = session.client.clone() else {
             return;
         };
@@ -353,6 +354,7 @@ impl Workbench {
             return;
         };
         session.last_active = std::time::Instant::now();
+        session.last_output = session.last_active;
         let before = session.thread.items.len() + session.thread.dropped;
         let mut touched: Vec<String> = Vec::new();
         let mut title = None;

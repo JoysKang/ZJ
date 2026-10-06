@@ -2,14 +2,40 @@
 //! the composer's `@` mention and attachments, restoring threads from history, and how a
 //! tool call is summarized on its card. Rendering lives in `workbench/agent_*.rs`.
 
-use std::{ops::Range, path::PathBuf};
+use std::{ops::Range, path::PathBuf, time::Duration};
 use workspace_editor_agent::{
     Glyph, PromptPart, ToolCall, ToolContent, ToolKind, ToolStatus,
-    thread::{Item, Status, ToolCard},
+    thread::{Item, Status, Thread, ToolCard},
 };
 use workspace_editor_agent_history::{Message, Role, SessionStatus, SessionSummary};
 
 const DAY_MS: i64 = 86_400_000;
+
+/// How long a running turn may stay silent before the panel says so.
+const QUIET_AFTER: Duration = Duration::from_secs(15);
+
+/// The note under a running turn that has produced nothing for `quiet`, e.g. while the agent
+/// retries a request the API refused (claude-agent-acp reports no 401 retries). `None` while a
+/// tool runs: a long command is silent on purpose.
+pub fn quiet_note(thread: &Thread, quiet: Duration) -> Option<String> {
+    if thread.status != Status::Running || quiet < QUIET_AFTER {
+        return None;
+    }
+    let tool_running = thread.items.iter().any(|item| {
+        matches!(item, Item::Tool(card)
+            if matches!(card.call.status, ToolStatus::Pending | ToolStatus::InProgress))
+    });
+    if tool_running {
+        return None;
+    }
+    let secs = quiet.as_secs();
+    let time = if secs < 60 {
+        format!("{secs} 秒")
+    } else {
+        format!("{} 分 {:02} 秒", secs / 60, secs % 60)
+    };
+    Some(format!("已 {time}没有输出，Agent 可能在重试请求"))
+}
 
 /// Seconds east of UTC at `ms` (local time zone, daylight saving included).
 pub fn local_offset(ms: i64) -> i64 {
@@ -639,5 +665,43 @@ mod tests {
         );
         assert_eq!(stored_status(Status::Idle, true), SessionStatus::Completed);
         assert!(!show_live_strip(1) && show_live_strip(2));
+    }
+
+    #[test]
+    fn silent_turns_get_a_note_unless_a_tool_runs() {
+        let secs = Duration::from_secs;
+        let mut thread = Thread::new();
+        assert_eq!(quiet_note(&thread, secs(60)), None);
+        thread.push_user("hi".into(), vec![], 1);
+        assert_eq!(quiet_note(&thread, secs(14)), None);
+        assert_eq!(
+            quiet_note(&thread, secs(32)).unwrap(),
+            "已 32 秒没有输出，Agent 可能在重试请求"
+        );
+        assert!(
+            quiet_note(&thread, secs(125))
+                .unwrap()
+                .starts_with("已 2 分 05 秒")
+        );
+        let call = ToolCall {
+            id: "1".into(),
+            title: "cargo build".into(),
+            kind: ToolKind::Execute,
+            status: ToolStatus::InProgress,
+            locations: vec![],
+            content: vec![],
+        };
+        thread.apply(&workspace_editor_agent::AgentEvent::ToolCall(call), true);
+        assert_eq!(quiet_note(&thread, secs(60)), None);
+        let done = workspace_editor_agent::ToolCallPatch {
+            id: "1".into(),
+            status: Some(ToolStatus::Completed),
+            ..Default::default()
+        };
+        thread.apply(
+            &workspace_editor_agent::AgentEvent::ToolCallUpdate(done),
+            true,
+        );
+        assert!(quiet_note(&thread, secs(60)).is_some());
     }
 }
