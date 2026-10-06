@@ -70,7 +70,8 @@ pub fn reject_written_hunk(before: &str, current: &str, index: usize) -> String 
 /// is pending for it.
 pub fn review_texts(client: &AgentClient, path: &Path) -> Option<(Option<String>, String)> {
     let before = client.snapshot(path)?;
-    let after = match std::fs::read_to_string(path) {
+    // Bounded like the agent's own reads: a huge generated file is not read for a review.
+    let after = match crate::fs::read_disk(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(_) => return None,

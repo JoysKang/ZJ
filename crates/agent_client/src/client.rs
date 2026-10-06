@@ -111,8 +111,9 @@ const EVENT_CAPACITY: usize = 512;
 const COMMAND_CAPACITY: usize = 64;
 /// One JSON-RPC line from the agent (a tool call can carry two copies of a large file).
 const MAX_LINE: usize = 32 * 1024 * 1024;
-/// Files remembered for reviews per client.
+/// Files remembered for reviews per client, and their total size.
 const MAX_SNAPSHOTS: usize = 256;
+const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 /// How long a read waits for the editor's unsaved buffer.
 const BUFFER_TIMEOUT: Duration = Duration::from_secs(5);
 /// `authenticate` may wait for the user to finish signing in in the browser.
@@ -234,11 +235,27 @@ impl Shared {
                 }
             },
         };
-        if !known(self) {
-            self.snapshots
-                .lock()
-                .unwrap()
-                .insert(path.to_path_buf(), before);
+        let over = {
+            let mut snapshots = self.snapshots.lock().unwrap();
+            if snapshots.contains_key(path) || snapshots.len() >= MAX_SNAPSHOTS {
+                return;
+            }
+            let held: usize = snapshots.values().flatten().map(String::len).sum();
+            let over = held + before.as_ref().map_or(0, String::len) > MAX_SNAPSHOT_BYTES;
+            if !over {
+                snapshots.insert(path.to_path_buf(), before);
+            }
+            over
+        };
+        if over {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            self.emit(AgentEvent::Error {
+                message: format!(
+                    "这个会话记录的改动前内容已超过 {} MB，{name} 不能对比或还原",
+                    MAX_SNAPSHOT_BYTES / 1024 / 1024
+                ),
+            })
+            .await;
         }
     }
 }
