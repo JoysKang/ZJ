@@ -439,19 +439,51 @@ pub(in crate::workbench) enum HistoryOp {
     DeleteArchived(workspace_editor_agent_history::Scope),
 }
 
-/// Queues history writes off the UI thread. A failed write (reported by the writer thread a
-/// little later) shows in the status bar on the next call instead of being dropped.
+type HistoryJob = Box<dyn FnOnce(&History) + Send>;
+
+/// One queue for every history write of the app, run in order by a single background task:
+/// separate tasks per batch could reach the writer out of order (a reply's chunks swapped, a
+/// "running" status landing after "completed").
+struct HistoryQueue {
+    jobs: async_channel::Sender<(
+        Arc<History>,
+        HistoryJob,
+        async_channel::Sender<Option<String>>,
+    )>,
+    _task: Task<()>,
+}
+
+impl Global for HistoryQueue {}
+
+/// Queues a history write off the UI thread, after every write queued before it. A failed
+/// write (reported by the writer thread a little later) shows in the status bar of the
+/// window that queued it instead of being dropped.
 pub(super) fn background_history(
     cx: &mut Context<Workbench>,
     store: Arc<History>,
     work: impl FnOnce(&History) + Send + 'static,
 ) {
-    let job = cx.background_spawn(async move {
-        work(&store);
-        store.take_error()
-    });
+    if !cx.has_global::<HistoryQueue>() {
+        let (jobs, incoming) = async_channel::unbounded::<(
+            Arc<History>,
+            HistoryJob,
+            async_channel::Sender<Option<String>>,
+        )>();
+        let task = cx.background_spawn(async move {
+            while let Ok((store, work, done)) = incoming.recv().await {
+                work(&store);
+                let _ = done.try_send(store.take_error());
+            }
+        });
+        cx.set_global(HistoryQueue { jobs, _task: task });
+    }
+    let (done, result) = async_channel::bounded(1);
+    let _ = cx
+        .global::<HistoryQueue>()
+        .jobs
+        .try_send((store, Box::new(work), done));
     cx.spawn(async move |this, cx| {
-        if let Some(error) = job.await {
+        if let Ok(Some(error)) = result.recv().await {
             let _ = this.update(cx, |this, cx| {
                 this.message = format!("Agent 会话记录没能保存：{error}");
                 cx.notify();

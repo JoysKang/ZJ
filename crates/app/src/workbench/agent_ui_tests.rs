@@ -426,3 +426,51 @@ async fn loading_older_messages_never_drops_a_live_session(cx: &mut TestAppConte
     });
     let _ = std::fs::remove_dir_all(data);
 }
+
+#[gpui_kit::test]
+async fn history_writes_reach_the_database_in_the_order_they_were_queued(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let data = temp_root("history-order");
+    let store = Arc::new(History::new(data.join("history.sqlite")));
+    let (_, this) = open_with(cx, Some(data.clone()), empty_store());
+    let id = store
+        .create_session(workspace_editor_agent_history::NewSession {
+            workspace_root: data.clone(),
+            workspace_name: None,
+            agent_id: "fake".into(),
+            acp_session_id: None,
+            title: None,
+            first_prompt: None,
+            repo: None,
+            branch: None,
+            created_at: None,
+        })
+        .unwrap();
+    // Each batch of a turn queues its own write; the scheduler may run tasks in any order.
+    this.update(cx, |_, cx| {
+        for n in 0..30 {
+            let text = n.to_string();
+            super::history::background_history(cx, store.clone(), move |history| {
+                history.append_message(id, workspace_editor_agent_history::Role::Agent, text)
+            });
+        }
+    });
+    let mut texts = Vec::new();
+    for _ in 0..200 {
+        cx.run_until_parked();
+        store.flush().unwrap();
+        texts = store
+            .messages(id)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.text)
+            .collect::<Vec<_>>();
+        if texts.len() == 30 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let expected: Vec<String> = (0..30).map(|n| n.to_string()).collect();
+    assert_eq!(texts, expected);
+    let _ = std::fs::remove_dir_all(data);
+}
