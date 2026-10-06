@@ -279,13 +279,23 @@ impl Workbench {
 
     /// Clicking a block (by where it starts, which survives a split arriving in between) or,
     /// with `None`, the room after the last block.
-    fn markdown_edit(
+    pub(super) fn markdown_edit(
         &mut self,
         id: DocumentId,
         start: Option<usize>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Blocks split from an older text (a split still running after a reload, an agent's
+        // write or the source view) would put the typing at the wrong bytes. During a block
+        // edit the split lags on purpose and the edit keeps the ranges.
+        if let Some(doc) = self.document(id)
+            && let Some(md) = &doc.markdown
+            && md.editing.is_none()
+            && md.parsed != Some(doc.version)
+        {
+            return;
+        }
         self.markdown_finish(id, false, window, cx);
         let Some(doc) = self.document(id) else {
             return;

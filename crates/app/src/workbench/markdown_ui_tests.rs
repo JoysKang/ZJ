@@ -192,3 +192,39 @@ async fn local_images_resolve_remote_ones_do_not_and_relative_links_open_here(
     });
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[gpui_kit::test]
+async fn a_block_is_not_edited_from_a_split_of_older_text(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-markdown-stale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::write(root.join("a.md"), "one\n\ntwo\n").unwrap();
+    let (window, this) = open(cx, root.clone());
+    let path = root.join("a.md");
+    window_do(cx, window, |window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(path, Some(root.clone()), window, cx)
+        })
+    });
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1) && blocks(cx, &this).len() == 2
+    });
+    let (id, editor) = this.read_with(cx, |p, _| {
+        (p.documents[0].id, p.documents[0].editor.clone())
+    });
+    // Text arrives from elsewhere (an agent, a reload); the click comes before the new split.
+    cx.update_window(window.into(), |_, window, cx| {
+        editor.update(cx, |s, cx| {
+            s.replace_text_in_range(Some(0..0), "zero\n\n", window, cx)
+        });
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.markdown_edit(id, Some(5), window, cx));
+    })
+    .unwrap();
+    assert_eq!(editing(cx, &this), None);
+    let _ = std::fs::remove_dir_all(&root);
+}
