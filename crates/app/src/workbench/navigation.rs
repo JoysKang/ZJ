@@ -697,9 +697,11 @@ impl Placement {
             let (start, end) = match *self {
                 Placement::Line { .. } => return,
                 Placement::Point { line, column, len } => {
+                    // A column past the line (the file changed since the search) stays on it.
+                    let column = (column as usize).min(rope.line_len(line as usize));
                     let start = rope.point_to_offset(gpui_kit::component::input::Point::new(
                         line as usize,
-                        column as usize,
+                        column,
                     ));
                     (start, (start + len as usize).min(rope.len()))
                 }

@@ -297,9 +297,15 @@ impl Matcher {
                 continue;
             }
             bounds.push((start, end));
+            // The editor drops a byte order mark, so first-line columns start after it.
+            let bom = if start == 0 && bytes.starts_with("\u{feff}".as_bytes()) {
+                3
+            } else {
+                0
+            };
             lines.push(LineMatch {
                 line,
-                column: range.start as u32,
+                column: range.start.saturating_sub(bom) as u32,
                 len: (range.end - range.start) as u32,
                 preview: String::new(),
                 ranges: vec![range],
@@ -633,6 +639,15 @@ mod tests {
                 && lines[0].preview.chars().count() <= PREVIEW_MAX + 1
         );
         assert_eq!(&lines[0].preview[lines[0].ranges[0].clone()], "needle");
+    }
+
+    #[test]
+    fn first_line_columns_skip_a_byte_order_mark() {
+        let m = Matcher::new(&options("x")).unwrap();
+        let (lines, _) = m.search_bytes("\u{feff}ab x\nx\n".as_bytes(), 100).unwrap();
+        assert_eq!((lines[0].column, lines[1].column), (3, 0));
+        // The spans stay in file bytes, for replacing on disk.
+        assert_eq!(lines[0].spans[0], 6..7);
     }
 
     #[test]
