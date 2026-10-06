@@ -55,10 +55,10 @@ impl Workbench {
             Item::User { text, attachments } => {
                 self.render_user_message(text, attachments, compact, cx)
             }
-            Item::Agent { .. } => {
-                let blocks = session.md.get(&(session.thread.dropped + i)).cloned();
-                self.render_markdown(blocks.as_deref().map_or(&[][..], |b| b), &fonts, cx)
-            }
+            Item::Agent { .. } => match session.md.get(&(session.thread.dropped + i)).cloned() {
+                Some(blocks) => self.render_markdown(blocks.iter(), &fonts, cx),
+                None => self.render_markdown(std::iter::empty(), &fonts, cx),
+            },
             Item::Thought { text, streaming } => {
                 self.render_thought(session.key, i, text, *streaming, cx)
             }
@@ -129,9 +129,9 @@ impl Workbench {
             .into_any_element()
     }
 
-    pub(super) fn render_markdown(
+    pub(super) fn render_markdown<'a>(
         &self,
-        blocks: &[Block],
+        blocks: impl Iterator<Item = &'a Block>,
         fonts: &Fonts,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -143,7 +143,7 @@ impl Workbench {
             .w_full()
             .gap_2()
             .line_height(theme::AGENT_LINE)
-            .children(blocks.iter().enumerate().map(|(i, block)| {
+            .children(blocks.enumerate().map(|(i, block)| {
                 match block {
                     Block::Paragraph(inline) => div()
                         .child(styled(

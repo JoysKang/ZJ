@@ -232,30 +232,66 @@ pub fn parse(source: &str) -> Vec<Block> {
     blocks
 }
 
+/// The blocks of a reply: shared chunks that are final, then the tail still being written.
+/// Cloning shares the chunks, so a streaming reply is not copied on every batch.
+#[derive(Clone, Default)]
+pub struct Blocks {
+    chunks: Vec<std::rc::Rc<Vec<Block>>>,
+    tail: Vec<Block>,
+}
+
+impl Blocks {
+    pub fn iter(&self) -> impl Iterator<Item = &Block> {
+        self.chunks
+            .iter()
+            .flat_map(|chunk| chunk.iter())
+            .chain(&self.tail)
+    }
+
+    #[cfg(test)]
+    fn to_vec(&self) -> Vec<Block> {
+        self.iter().cloned().collect()
+    }
+}
+
+impl From<Vec<Block>> for Blocks {
+    fn from(blocks: Vec<Block>) -> Self {
+        Self {
+            chunks: Vec::new(),
+            tail: blocks,
+        }
+    }
+}
+
 /// Parses a reply while it streams without starting over each time: everything before the
 /// last blank line outside a code fence is final (the parser is line based and only a
-/// paragraph or an open fence carries across lines), so only the tail is parsed again.
+/// paragraph or an open fence carries across lines), so only the tail is parsed again, and
+/// the final blocks are kept in shared chunks rather than copied.
 #[derive(Default)]
 pub struct Streaming {
     /// Bytes of the source whose blocks are final.
     stable_len: usize,
-    stable: Vec<Block>,
+    stable: Vec<std::rc::Rc<Vec<Block>>>,
 }
 
 impl Streaming {
     /// The blocks of `source`, which must extend the source of the previous call.
-    pub fn update(&mut self, source: &str) -> Vec<Block> {
+    pub fn update(&mut self, source: &str) -> Blocks {
         if source.len() < self.stable_len || !source.is_char_boundary(self.stable_len) {
             *self = Self::default();
         }
         let split = stable_end(source, self.stable_len);
         if split > self.stable_len {
-            self.stable.extend(parse(&source[self.stable_len..split]));
+            let chunk = parse(&source[self.stable_len..split]);
+            if !chunk.is_empty() {
+                self.stable.push(std::rc::Rc::new(chunk));
+            }
             self.stable_len = split;
         }
-        let mut blocks = self.stable.clone();
-        blocks.extend(parse(&source[self.stable_len..]));
-        blocks
+        Blocks {
+            chunks: self.stable.clone(),
+            tail: parse(&source[self.stable_len..]),
+        }
     }
 }
 
@@ -314,14 +350,14 @@ mod tests {
                 end += 1;
             }
             assert_eq!(
-                streaming.update(&reply[..end]),
+                streaming.update(&reply[..end]).to_vec(),
                 parse(&reply[..end]),
                 "{end}"
             );
         }
         assert!(streaming.stable_len > 0);
         // A source that does not extend the previous one starts over.
-        assert_eq!(streaming.update("新的"), parse("新的"));
+        assert_eq!(streaming.update("新的").to_vec(), parse("新的"));
     }
 
     #[test]

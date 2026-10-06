@@ -482,10 +482,8 @@ impl Workbench {
                     {
                         session.streaming_md = None;
                     }
-                    markdown::parse(text)
-                };
-                if !streaming
-                    && blocks.iter().any(|b| {
+                    let parsed = markdown::parse(text);
+                    if parsed.iter().any(|b| {
                         matches!(
                             b,
                             Block::Code {
@@ -493,10 +491,11 @@ impl Workbench {
                                 ..
                             }
                         )
-                    })
-                {
-                    finished.push((index, blocks.clone()));
-                }
+                    }) {
+                        finished.push((index, parsed.clone()));
+                    }
+                    markdown::Blocks::from(parsed)
+                };
                 session.md.insert(index, Rc::new(blocks));
             }
         }
@@ -516,7 +515,9 @@ impl Workbench {
                 if let Some(session) = this.agent.session_mut(key) {
                     for (index, blocks) in highlighted {
                         if session.md.contains_key(&index) {
-                            session.md.insert(index, Rc::new(blocks));
+                            session
+                                .md
+                                .insert(index, Rc::new(markdown::Blocks::from(blocks)));
                         }
                     }
                     cx.notify();

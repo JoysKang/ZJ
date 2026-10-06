@@ -140,7 +140,7 @@ pub(super) struct LiveSession {
     pub started_at: i64,
     pub branch: Option<String>,
     /// Parsed replies by absolute item index (`thread.dropped + i`).
-    pub md: HashMap<usize, Rc<Vec<Block>>>,
+    pub md: HashMap<usize, Rc<markdown::Blocks>>,
     /// The reply being streamed (absolute index) and its incremental parse.
     streaming_md: Option<(usize, markdown::Streaming)>,
     /// Oldest stored message loaded (history threads page backwards from it).
