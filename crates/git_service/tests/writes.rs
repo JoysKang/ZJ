@@ -534,6 +534,25 @@ fn fetch_pull_sync_checkout_and_create_branch() {
         git(&root, &["rev-parse", "HEAD"])
     );
 
+    // The branch's own `rebase` setting is followed, not overridden with --no-rebase.
+    git(&root, &["config", "--unset", "pull.rebase"]);
+    git(&root, &["config", "branch.main.rebase", "true"]);
+    git(&other, &["pull", "-q", "--no-rebase", "origin", "main"]);
+    git(&other, &["commit", "--allow-empty", "-m", "remote three"]);
+    git(&other, &["push", "origin", "main"]);
+    fs::write(root.join("src/main.rs"), "local again\n").unwrap();
+    git(&root, &["commit", "-am", "local again"]);
+    write(&service, &root, WriteOperation::Pull).unwrap();
+    let merges = git(&root, &["log", "--merges", "--format=%s", "-1", "HEAD"]);
+    assert_eq!(
+        git(&root, &["log", "-1", "--format=%s"]).trim(),
+        "local again"
+    );
+    assert!(git(&root, &["log", "-2", "--format=%s"]).contains("remote three"));
+    assert!(!merges.contains("remote three"), "{merges}");
+    git(&root, &["config", "--unset", "branch.main.rebase"]);
+    git(&root, &["config", "pull.rebase", "false"]);
+
     // Checking out a remote-tracking branch creates the tracking local branch.
     git(&other, &["switch", "-c", "feature"]);
     git(&other, &["commit", "--allow-empty", "-m", "feature work"]);

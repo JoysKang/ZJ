@@ -340,17 +340,28 @@ impl GitService {
                     self.push_args(&request.repo, &current, cancel)?;
                 }
                 args.extend(["pull".into(), "--no-edit".into()]);
-                // Without either setting, Git refuses diverged branches outright; merging is
-                // what it did before asking.
-                let set = |key: &str| {
-                    self.run(
+                // Without any setting, Git refuses diverged branches outright; merging is what
+                // it did before asking. The branch's own `rebase` setting counts too (a
+                // command-line --no-rebase would override it). Only "not set" (exit 1, no
+                // output) means unset; another failure is reported.
+                let set = |key: String| -> io::Result<bool> {
+                    self.run_command(
                         &request.repo.worktree,
                         &["config".into(), "--get".into(), key.into()],
                         cancel,
+                        true,
                     )
-                    .is_ok()
+                    .map(|value| !value.is_empty())
                 };
-                if !set("pull.rebase") && !set("pull.ff") {
+                let mut keys = vec!["pull.rebase".to_string(), "pull.ff".to_string()];
+                if let Some(branch) = current.branch.as_deref().filter(|b| *b != "(detached)") {
+                    keys.push(format!("branch.{branch}.rebase"));
+                }
+                let mut configured = false;
+                for key in keys {
+                    configured |= set(key)?;
+                }
+                if !configured {
                     args.push("--no-rebase".into());
                 }
             }
