@@ -470,3 +470,53 @@ async fn repositories_added_by_hand_are_listed_and_can_be_removed(cx: &mut TestA
     });
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[gpui_kit::test]
+async fn staging_a_file_that_still_has_conflict_markers_asks_first(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("stage-conflict", 0);
+    std::fs::write(repo.join("a.txt"), "base\n").unwrap();
+    git(&repo, &["commit", "-q", "-am", "base"]);
+    git(&repo, &["switch", "-q", "-c", "feature"]);
+    std::fs::write(repo.join("a.txt"), "feature\n").unwrap();
+    git(&repo, &["commit", "-q", "-am", "feature"]);
+    git(&repo, &["switch", "-q", "main"]);
+    std::fs::write(repo.join("a.txt"), "main\n").unwrap();
+    git(&repo, &["commit", "-q", "-am", "main"]);
+    let merge = std::process::Command::new("git")
+        .args(["-C", repo.to_str().unwrap(), "merge", "-q", "feature"])
+        .output()
+        .unwrap();
+    assert!(!merge.status.success());
+    let (window, this) = open(cx, repo.clone());
+    let conflicted = |cx: &mut TestAppContext| {
+        this.read_with(cx, |p, _| {
+            p.groups[0]
+                .status
+                .as_ref()
+                .and_then(|s| s.as_ref().ok())
+                .is_some_and(|s| {
+                    s.changes
+                        .iter()
+                        .any(|c| c.kind == workspace_editor_git::ChangeKind::Conflict)
+                })
+        })
+    };
+    settle(cx, None, conflicted);
+    // 暂存所有更改: the file still has markers, so it asks; 取消 leaves it conflicted.
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            let request = p
+                .scm_paths(0, None, workspace_editor_git::DiffSide::Worktree)
+                .unwrap();
+            p.request_git_write(request, window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| cx.has_pending_prompt());
+    cx.simulate_prompt_answer("取消");
+    cx.run_until_parked();
+    assert!(conflicted(cx));
+    assert!(git_out(&repo, &["diff", "--name-only", "--diff-filter=U"]).contains("a.txt"));
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}

@@ -109,6 +109,74 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Staging a conflicted file marks it resolved: one that still holds conflict markers
+        // asks first, as in VS Code.
+        let conflicted: Vec<PathBuf> = match &request.operation {
+            WriteOperation::Stage { paths } => paths
+                .iter()
+                .filter(|path| {
+                    request
+                        .expected
+                        .changes
+                        .iter()
+                        .any(|c| &c.path == *path && c.kind == ChangeKind::Conflict)
+                })
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        };
+        if conflicted.is_empty() {
+            self.confirm_git_write(request, window, cx);
+            return;
+        }
+        let worktree = request.repo.worktree.clone();
+        let check = cx.background_spawn(async move {
+            conflicted
+                .into_iter()
+                .filter(|path| has_conflict_markers(&worktree.join(path)))
+                .collect::<Vec<_>>()
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let marked = check.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if marked.is_empty() {
+                    this.confirm_git_write(request, window, cx);
+                    return;
+                }
+                let names: Vec<String> = marked
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect();
+                let answer = window.prompt(
+                    PromptLevel::Warning,
+                    &format!("{} 个文件里还有冲突标记，仍要标记为已解决？", marked.len()),
+                    Some(&format!(
+                        "{}\n暂存后 Git 不再把它们当作冲突，标记会随提交进入历史。",
+                        names.join("\n")
+                    )),
+                    &crate::workbench::prompt_buttons(&["仍然暂存", "取消"]),
+                    cx,
+                );
+                cx.spawn_in(window, async move |this, cx| {
+                    if answer.await == Ok(0) {
+                        let _ = this.update_in(cx, |this, window, cx| {
+                            this.confirm_git_write(request, window, cx)
+                        });
+                    }
+                })
+                .detach();
+            });
+        })
+        .detach();
+    }
+
+    /// The confirmations other writes need (discarding, dirty buffers, syncing), then the write.
+    fn confirm_git_write(
+        &mut self,
+        request: WriteRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let warning = match &request.operation {
             WriteOperation::Stage { paths } if self.dirty_in(&request.repo, paths, cx) => Some((
                 "暂存磁盘版本？".to_string(),
@@ -776,6 +844,19 @@ impl Workbench {
     ) {
         self.open_file(path.to_path_buf(), self.root.clone(), window, cx);
     }
+}
+
+/// Whether a file (its first 8 MiB) still holds a complete conflict.
+fn has_conflict_markers(path: &Path) -> bool {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| {
+            file.take(crate::files::MAX_FILE_BYTES as u64)
+                .read_to_end(&mut bytes)
+        })
+        .is_ok()
+        && !crate::conflicts::find(&String::from_utf8_lossy(&bytes)).is_empty()
 }
 
 fn branch_items(repo: &RepoId, branches: Vec<Branch>) -> Vec<PickItem> {
