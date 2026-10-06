@@ -286,6 +286,15 @@ pub fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
             format!("\x1b[{code}").into_bytes()
         }
     };
+    // F1–F4 are SS3 (`ESC O P`) whatever the cursor mode, as xterm sends them; `ESC [ P`
+    // would be DCH (delete character).
+    let function = |code: char| -> Vec<u8> {
+        if modifier > 1 {
+            format!("\x1b[1;{modifier}{code}").into_bytes()
+        } else {
+            format!("\x1bO{code}").into_bytes()
+        }
+    };
     let tilde = |code: u8| -> Vec<u8> {
         if modifier > 1 {
             format!("\x1b[{code};{modifier}~").into_bytes()
@@ -318,10 +327,10 @@ pub fn key_bytes(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
         "delete" => tilde(3),
         "pageup" => tilde(5),
         "pagedown" => tilde(6),
-        "f1" => cursor('P'),
-        "f2" => cursor('Q'),
-        "f3" => cursor('R'),
-        "f4" => cursor('S'),
+        "f1" => function('P'),
+        "f2" => function('Q'),
+        "f3" => function('R'),
+        "f4" => function('S'),
         "f5" => tilde(15),
         "f6" => tilde(17),
         "f7" => tilde(18),
@@ -509,6 +518,10 @@ mod tests {
     fn keys_map_to_xterm_sequences() {
         let normal = TermMode::empty();
         assert_eq!(bytes("enter", normal).as_deref(), Some("\r"));
+        // F1–F4: SS3 in both cursor modes, CSI 1;m with modifiers.
+        assert_eq!(bytes("f1", normal).as_deref(), Some("\x1bOP"));
+        assert_eq!(bytes("f4", TermMode::APP_CURSOR).as_deref(), Some("\x1bOS"));
+        assert_eq!(bytes("shift-f2", normal).as_deref(), Some("\x1b[1;2Q"));
         assert_eq!(bytes("ctrl-c", normal).as_deref(), Some("\x03"));
         assert_eq!(bytes("ctrl-[", normal).as_deref(), Some("\x1b"));
         assert_eq!(bytes("ctrl-space", normal).as_deref(), Some("\0"));
