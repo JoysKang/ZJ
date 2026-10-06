@@ -137,6 +137,20 @@ impl Workbench {
                         menu
                     })
             });
+        let quota = self
+            .agent
+            .quota
+            .as_ref()
+            .filter(|_| self.agent_shows_quota())
+            .and_then(crate::quota::Quota::left_percent)
+            .map(|left| {
+                Button::new("agent-quota")
+                    .ghost()
+                    .xsmall()
+                    .label(format!("额度 {left:.0}%"))
+                    .tooltip("Codex 账户额度")
+                    .on_click(cx.listener(|this, _, _, cx| this.agent_toggle_quota(cx)))
+            });
         let ring = session.and_then(|s| agent_model::usage_ring(s.thread.usage));
         let send = if busy {
             Button::new("agent-stop")
@@ -307,6 +321,7 @@ impl Workbench {
                     .children(config_picker)
                     .when(!compact, |bar| bar.child(agent_picker))
                     .child(div().flex_1())
+                    .children(quota)
                     .when_some(ring, |bar, (fraction, label)| {
                         bar.child(
                             h_flex()
@@ -321,7 +336,8 @@ impl Workbench {
                     .child(send),
             )
             .children(self.render_mention_picker(cx))
-            .children(self.render_slash_picker(cx));
+            .children(self.render_slash_picker(cx))
+            .children(self.render_quota_card(cx));
         composer.into_any_element()
     }
 
@@ -518,6 +534,88 @@ impl Workbench {
                 .shadow_lg()
                 .occlude()
                 .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    /// The Codex quota's details: each limit's share left, when it resets, the credits.
+    fn render_quota_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.agent.quota_open || !self.agent_shows_quota() {
+            return None;
+        }
+        let quota = self.agent.quota.as_ref()?;
+        let colors = theme::colors(cx);
+        let now_ms = workspace_editor_agent_history::now_ms();
+        let offset = agent_model::local_offset(now_ms);
+        let line = |text: String| {
+            div()
+                .h(theme::ROW_HEIGHT)
+                .flex()
+                .items_center()
+                .text_size(theme::TEXT_CAPTION)
+                .child(text)
+        };
+        let title = match &quota.plan {
+            Some(plan) => format!("Codex 额度 · ChatGPT {}", agent_model::capitalized(plan)),
+            None => "Codex 额度".to_string(),
+        };
+        let windows = quota.windows.iter().map(|window| {
+            let left = window.left_percent();
+            let color = if left < 10.0 {
+                colors.deleted
+            } else if left < 25.0 {
+                colors.attention
+            } else {
+                colors.foreground
+            };
+            let reset = window.resets_at.map(|at| {
+                let (_, month, day, _, hour, minute) = agent_model::civil(at * 1000, offset);
+                format!(
+                    "{} 后重置（{month}/{day} {hour:02}:{minute:02}）",
+                    crate::quota::countdown(at - now_ms / 1000)
+                )
+            });
+            h_flex()
+                .h(theme::ROW_HEIGHT)
+                .gap_2()
+                .text_size(theme::TEXT_CAPTION)
+                .child(crate::quota::window_label(window.minutes))
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(color)
+                        .child(format!("剩余 {left:.0}%")),
+                )
+                .children(reset.map(|reset| div().text_color(colors.muted).child(reset)))
+        });
+        let (year, month, day, _, hour, minute) = agent_model::civil(quota.updated_ms, offset);
+        Some(
+            v_flex()
+                .absolute()
+                .right_0()
+                .bottom_full()
+                .mb_1()
+                .px_3()
+                .py_2()
+                .rounded(theme::RADIUS_LARGE)
+                .border_1()
+                .border_color(colors.strong_border)
+                .bg(colors.panel)
+                .shadow_lg()
+                .occlude()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.agent.quota_open = false;
+                    cx.notify();
+                }))
+                .child(line(title).font_weight(FontWeight::SEMIBOLD))
+                .children(windows)
+                .children(quota.credits.clone().map(|credits| line(format!("Credits 余额 {credits}"))))
+                .child(
+                    line(format!(
+                        "最后更新 {year}/{month:02}/{day:02} {hour:02}:{minute:02} · 来自 Codex 的本地记录"
+                    ))
+                    .text_color(colors.muted),
+                )
                 .into_any_element(),
         )
     }

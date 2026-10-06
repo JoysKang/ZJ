@@ -456,6 +456,10 @@ impl Workbench {
         if let Some((place, commands)) = learned {
             self.agent.known_commands.insert(place, commands);
         }
+        // Codex wrote the request's rate limits to its log.
+        if turn_ended {
+            self.agent_refresh_quota(cx);
+        }
         self.agent_sync_replies(key, before.saturating_sub(1));
         if recount {
             self.agent_recount(key, Some(written.clone()), window, cx);

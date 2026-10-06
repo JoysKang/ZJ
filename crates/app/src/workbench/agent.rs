@@ -30,6 +30,7 @@ mod composer;
 mod highlights;
 pub(super) mod history;
 mod permissions;
+mod quota;
 mod turns;
 use buffers::buffer_provider;
 pub(super) use history::HistoryOp;
@@ -272,6 +273,10 @@ pub(super) struct AgentPanel {
     /// The last commands each agent listed, by (preset id, workspace): a new or reopened
     /// session offers them before its agent has started.
     pub known_commands: HashMap<(String, PathBuf), Vec<AgentCommand>>,
+    /// The Codex account quota (see `crate::quota`) and whether its card is open.
+    pub quota: Option<crate::quota::Quota>,
+    pub quota_open: bool,
+    quota_task: Option<Task<()>>,
     pub history: HistoryList,
     pub search: Option<super::agent_search::SessionSearch>,
     pub thread_list: ListState,
@@ -339,6 +344,9 @@ impl AgentPanel {
             mention_generation: 0,
             slash: None,
             known_commands: HashMap::new(),
+            quota: None,
+            quota_open: false,
+            quota_task: None,
             history: HistoryList {
                 rows: Vec::new(),
                 grouped: Vec::new(),
@@ -521,6 +529,7 @@ impl Workbench {
         if view == AgentView::Thread {
             self.agent_mark_read(cx);
             self.agent_focus_composer(window, cx);
+            self.agent_refresh_quota(cx);
         } else if self
             .agent
             .composer

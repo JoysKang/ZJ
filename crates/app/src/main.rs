@@ -17,6 +17,7 @@ mod md_images;
 mod partial_patch;
 mod perf;
 mod platform;
+mod quota;
 mod recovery;
 mod refresh_plan;
 mod replace;

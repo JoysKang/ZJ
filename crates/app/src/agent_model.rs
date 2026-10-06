@@ -90,7 +90,7 @@ pub fn bucket(session: &SessionSummary, now: i64, offset: i64) -> Bucket {
 }
 
 /// (year, month, day, weekday 0 = Monday, hour, minute) of a local day / time.
-fn civil(ms: i64, offset: i64) -> (i64, u32, u32, u32, u32, u32) {
+pub fn civil(ms: i64, offset: i64) -> (i64, u32, u32, u32, u32, u32) {
     let local = ms / 1000 + offset;
     let days = local.div_euclid(86_400);
     let secs = local.rem_euclid(86_400);
@@ -372,6 +372,15 @@ pub fn slash_matches<'a>(commands: &'a [AgentCommand], query: &str) -> Vec<&'a A
 pub fn with_command(text: &str, name: &str) -> String {
     let end = text.find(char::is_whitespace).unwrap_or(text.len());
     format!("/{name} {}", text[end..].trim_start())
+}
+
+/// "pro" → "Pro".
+pub fn capitalized(word: &str) -> String {
+    let mut chars = word.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 /// The model button's label: the current choice of each setting, e.g. "Opus · High".
@@ -695,6 +704,8 @@ mod tests {
             },
         ];
         assert_eq!(config_label(&configs), "Opus · max");
+        assert_eq!(capitalized("pro"), "Pro");
+        assert_eq!(capitalized(""), "");
     }
 
     #[test]
