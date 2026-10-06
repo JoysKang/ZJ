@@ -436,14 +436,13 @@ impl Workbench {
         let colors = theme::colors(cx);
         let matches = self.agent_slash_matches(cx);
         let rows: Vec<AnyElement> = if matches.is_empty() {
-            let started = self
-                .agent
-                .current()
-                .is_some_and(|s| !s.thread.commands.is_empty());
-            let hint = if started {
+            let session = self.agent.current();
+            let hint = if !self.agent_commands(cx).is_empty() {
                 "没有匹配的命令"
+            } else if session.is_some_and(|s| s.thread.session_id.is_some()) {
+                "这个 Agent 没有提供命令"
             } else {
-                "发送第一条消息后可以补全命令，也可以直接输入完整命令发送"
+                "正在启动 Agent，稍后列出命令（也可以直接输入完整命令发送）"
             };
             vec![
                 div()

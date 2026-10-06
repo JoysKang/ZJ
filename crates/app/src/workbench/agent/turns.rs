@@ -149,6 +149,11 @@ impl Workbench {
                         }));
                         if let Some((text, attachments)) = queued {
                             this.agent_prompt(key, text, attachments, window, cx);
+                        } else if let Some(client) =
+                            this.agent.session(key).and_then(|s| s.client.clone())
+                        {
+                            // Started for its commands (`/` typed): open the session now.
+                            client.connect();
                         }
                     }
                     Err(error) => {
@@ -364,6 +369,7 @@ impl Workbench {
         let mut touched: Vec<String> = Vec::new();
         let mut title = None;
         let mut acp_id = None;
+        let mut learned = false;
         for event in &batch {
             session.thread.apply(event, visible);
             match event {
@@ -390,9 +396,20 @@ impl Workbench {
                     turn_ended = true;
                     recount = true;
                 }
+                AgentEvent::AvailableCommands(_) => learned = true,
                 _ => {}
             }
         }
+        // Later sessions of this agent in this workspace list them before they start.
+        let learned = learned
+            .then(|| {
+                session
+                    .root
+                    .clone()
+                    .map(|root| (session.preset.id.clone(), root))
+            })
+            .flatten()
+            .map(|place| (place, session.thread.commands.clone()));
         // Persist what the thread produced.
         let records: Vec<(HistoryRole, String)> = session
             .thread
@@ -435,6 +452,9 @@ impl Workbench {
             // Kept until the record is created; without a history there is nothing to wait for.
             (None, Some(_)) => session.pending.extend(records),
             (_, None) => {}
+        }
+        if let Some((place, commands)) = learned {
+            self.agent.known_commands.insert(place, commands);
         }
         self.agent_sync_replies(key, before.saturating_sub(1));
         if recount {

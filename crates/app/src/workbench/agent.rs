@@ -269,6 +269,9 @@ pub(super) struct AgentPanel {
     mention_generation: u64,
     /// The selected row of the `/` command picker, while the message starts with a command.
     pub slash: Option<usize>,
+    /// The last commands each agent listed, by (preset id, workspace): a new or reopened
+    /// session offers them before its agent has started.
+    pub known_commands: HashMap<(String, PathBuf), Vec<AgentCommand>>,
     pub history: HistoryList,
     pub search: Option<super::agent_search::SessionSearch>,
     pub thread_list: ListState,
@@ -335,6 +338,7 @@ impl AgentPanel {
             mention: None,
             mention_generation: 0,
             slash: None,
+            known_commands: HashMap::new(),
             history: HistoryList {
                 rows: Vec::new(),
                 grouped: Vec::new(),

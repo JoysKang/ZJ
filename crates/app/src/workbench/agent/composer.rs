@@ -74,6 +74,9 @@ impl Workbench {
         };
         let slash = agent_model::slash_at(&text, cursor).map(|_| 0);
         if slash != self.agent.slash {
+            if slash.is_some() && self.agent_commands(cx).is_empty() {
+                self.agent_warm_up(window, cx);
+            }
             self.agent.slash = slash;
             cx.notify();
         }
@@ -192,6 +195,42 @@ impl Workbench {
         }
     }
 
+    /// The current session's commands, or the ones its agent last listed in this workspace
+    /// while it has not started.
+    pub(in crate::workbench) fn agent_commands(&self, cx: &App) -> &[AgentCommand] {
+        let session = self.agent.current();
+        if let Some(session) = session
+            && !session.thread.commands.is_empty()
+        {
+            return &session.thread.commands;
+        }
+        let preset = session.map_or(&self.agent.agent_id, |s| &s.preset.id);
+        session
+            .and_then(|s| s.root.clone())
+            .or_else(|| self.agent_workspace(cx))
+            .and_then(|root| self.agent.known_commands.get(&(preset.clone(), root)))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// `/` with no commands to list: the agent starts now (instead of with the first message)
+    /// and sends them.
+    fn agent_warm_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.agent.current.is_none() {
+            self.agent_new_session(None, window, cx);
+        }
+        let Some(key) = self.agent.current else {
+            return;
+        };
+        let root = self
+            .agent
+            .session(key)
+            .filter(|s| s.client.is_none() && !s.starting)
+            .and_then(|s| s.root.clone().or_else(|| self.agent_workspace(cx)));
+        if let Some(root) = root {
+            self.agent_start_client(key, root, window, cx);
+        }
+    }
+
     /// The current agent's commands matching the `/command` being typed (as many as are
     /// shown).
     pub(in crate::workbench) fn agent_slash_matches(&self, cx: &App) -> Vec<AgentCommand> {
@@ -200,8 +239,7 @@ impl Workbench {
         let Some(query) = agent_model::slash_at(&text, composer.cursor()) else {
             return Vec::new();
         };
-        let commands = self.agent.current().map_or(&[][..], |s| &s.thread.commands);
-        agent_model::slash_matches(commands, query)
+        agent_model::slash_matches(self.agent_commands(cx), query)
             .into_iter()
             .take(theme::AGENT_MENTION_ROWS)
             .cloned()

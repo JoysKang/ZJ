@@ -142,30 +142,30 @@ async fn slash_commands_complete_and_model_settings_switch(cx: &mut TestAppConte
         })
         .unwrap();
     };
-    // The agent has not started: no list yet, and ⏎ is not taken from the composer.
+    // Nothing to list yet: typing `/` starts the agent, and its commands follow without a
+    // message being sent.
     typed(cx, "/re");
-    this.read_with(cx, |p, cx| {
-        assert_eq!(p.agent.slash, Some(0));
-        assert!(p.agent_slash_matches(cx).is_empty());
+    until(cx, &this, "the agent listed its commands", |p| {
+        p.agent
+            .current()
+            .is_some_and(|s| !s.thread.commands.is_empty())
     });
-    typed(cx, "");
-    send(cx, handle, &this, "echo hi");
-    settle(cx, &this);
-    typed(cx, "/re");
-    this.read_with(cx, |p, cx| {
-        let names: Vec<String> = p
-            .agent_slash_matches(cx)
-            .into_iter()
-            .map(|c| c.name)
-            .collect();
-        assert_eq!(names, ["review"]);
-    });
+    let names = |cx: &mut TestAppContext| {
+        this.read_with(cx, |p, cx| {
+            p.agent_slash_matches(cx)
+                .into_iter()
+                .map(|c| c.name)
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(names(cx), ["review"]);
+    assert!(sent(cx, &this).0.is_empty());
     cx.update_window(handle.into(), |_, window, cx| {
         window.press("enter", cx);
         window.render_frame(cx);
     })
     .unwrap();
-    assert_eq!(sent(cx, &this).1, "/review ");
+    assert_eq!(sent(cx, &this), (vec![], "/review ".to_string()));
     this.read_with(cx, |p, _| assert_eq!(p.agent.slash, None));
 
     // Model and effort are offered; the mode option is left to the mode menu.
@@ -185,6 +185,20 @@ async fn slash_commands_complete_and_model_settings_switch(cx: &mut TestAppConte
                 .first()
                 .is_some_and(|c| c.current == "opus")
         })
+    });
+
+    // A new session lists them before its own agent starts (an empty one would be reused).
+    typed(cx, "");
+    send(cx, handle, &this, "echo hi");
+    settle(cx, &this);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.agent_new_session(None, window, cx));
+    })
+    .unwrap();
+    typed(cx, "/re");
+    assert_eq!(names(cx), ["review"]);
+    this.read_with(cx, |p, _| {
+        assert!(p.agent.current().is_some_and(|s| s.client.is_none()));
     });
     let _ = std::fs::remove_dir_all(root);
 }

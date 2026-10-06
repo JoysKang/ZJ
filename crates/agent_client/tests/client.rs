@@ -160,8 +160,12 @@ fn handshake_streaming_and_reuse() {
         }
         other => panic!("{other:?}"),
     }
-    match &seen[2] {
-        AgentEvent::SessionStarted { resumed, modes, .. } => {
+    // The commands the agent sends after `session/new` may arrive before its answer.
+    match seen
+        .iter()
+        .find(|e| matches!(e, AgentEvent::SessionStarted { .. }))
+    {
+        Some(AgentEvent::SessionStarted { resumed, modes, .. }) => {
             assert!(!resumed);
             let modes = modes.as_ref().unwrap();
             assert_eq!(modes.current, "default");

@@ -584,7 +584,7 @@ fn main() -> sdk::Result<()> {
             .on_receive_request(
                 async move |request: acp::NewSessionRequest,
                             responder: Responder<acp::NewSessionResponse>,
-                            _cx| {
+                            cx: ConnectionTo<Client>| {
                     assert!(request.mcp_servers.is_empty());
                     if new_auth.as_ref().is_some_and(|f| !f.exists()) {
                         return responder.respond_with_error(sdk::Error::auth_required());
@@ -604,10 +604,22 @@ fn main() -> sdk::Result<()> {
                     } else {
                         "default"
                     };
+                    let id = acp::SessionId::new(format!("s-{}-{n}", std::process::id()));
                     responder.respond(
-                        acp::NewSessionResponse::new(format!("s-{}-{n}", std::process::id()))
+                        acp::NewSessionResponse::new(id.clone())
                             .modes(acp::SessionModeState::new(current, modes))
                             .config_options(config_options("sonnet")),
+                    )?;
+                    // Like the real adapters: the commands follow the new session.
+                    notify(
+                        &cx,
+                        &id,
+                        acp::SessionUpdate::AvailableCommandsUpdate(
+                            acp::AvailableCommandsUpdate::new(vec![acp::AvailableCommand::new(
+                                "review",
+                                "Review changes",
+                            )]),
+                        ),
                     )
                 },
                 sdk::on_receive_request!(),
