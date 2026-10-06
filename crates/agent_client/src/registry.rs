@@ -555,7 +555,8 @@ impl AgentPreset {
     }
 
     /// Picks the first available launch option and fills in the environment. `overrides`
-    /// (from the settings file) win over [`EnvValue::FromEnv`] lookups. `root` is where npm
+    /// (from the settings file) win over [`EnvValue::FromEnv`] lookups; ones the preset does
+    /// not declare (e.g. `ANTHROPIC_API_KEY` for Claude Code) are passed on as they are. `root` is where npm
     /// adapters are installed ([`provision::default_root`]); without it only installed
     /// commands are used.
     pub fn resolve(
@@ -584,6 +585,12 @@ impl AgentPreset {
         }
         let (has_cli, cli_env) = self.local_cli(search, overrides);
         env_vars.extend(cli_env);
+        env_vars.extend(
+            overrides
+                .iter()
+                .filter(|(key, _)| !self.env.iter().any(|(declared, _)| declared == *key))
+                .map(|(key, value)| (key.clone(), OsString::from(value))),
+        );
         let mut missing_program = None;
         let mut wanted_node = false;
         for launch in &self.launch {
@@ -803,7 +810,10 @@ mod tests {
         // The user's own choice wins.
         let overrides = BTreeMap::from([("CODEX_PATH".to_string(), "/x/codex".to_string())]);
         let launch = ready(codex.resolve(&search, &overrides, Some(&data)).unwrap());
-        assert_eq!(env_of(&launch.env, "CODEX_PATH"), None);
+        assert_eq!(
+            env_of(&launch.env, "CODEX_PATH"),
+            Some(&OsString::from("/x/codex"))
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
