@@ -120,9 +120,11 @@ impl Workbench {
                 let untracked = paths
                     .iter()
                     .filter(|path| {
-                        request.expected.changes.iter().any(|change| {
-                            &change.path == *path && change.kind == ChangeKind::Untracked
-                        })
+                        request
+                            .expected
+                            .changes
+                            .iter()
+                            .any(|change| &change.path == *path && change.new_in_worktree())
                     })
                     .count();
                 let tracked = paths.len() - untracked;

@@ -1050,3 +1050,27 @@ fn stash_push_list_apply_pop_drop_and_blame() {
     assert!(edited.uncommitted);
     assert!(service.blame_line(&repo, path, 9, None, &cancel).is_err());
 }
+
+#[test]
+fn discarding_an_intent_to_add_file_deletes_it_instead_of_emptying_it() {
+    common::hermetic();
+    let fixture = fixture();
+    let root = fixture.0.join("a");
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-qm", "init"]);
+    fs::write(root.join("ita.txt"), "only copy\n").unwrap();
+    git(&root, &["add", "-N", "ita.txt"]);
+    fs::write(root.join("src/main.rs"), "changed\n").unwrap();
+    let service = GitService::new(2, Duration::from_secs(10)).unwrap();
+    let discard = WriteOperation::Discard {
+        paths: vec!["ita.txt".into(), "src/main.rs".into()],
+    };
+    write(&service, &root, discard).unwrap();
+    // Gone (as the dialog says), not left as an empty file; the tracked file is restored.
+    assert!(!root.join("ita.txt").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("src/main.rs")).unwrap(),
+        "original\n"
+    );
+    assert_eq!(git(&root, &["status", "--porcelain"]), "");
+}

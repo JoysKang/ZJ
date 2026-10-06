@@ -170,6 +170,8 @@ impl GitService {
         let mut args: Vec<OsString> = vec!["--literal-pathspecs".into()];
         // Discarding untracked files deletes them with `git clean`, after the tracked restore.
         let mut untracked: Vec<PathBuf> = Vec::new();
+        // Of those, the ones added with `git add -N`, whose index entry goes first.
+        let mut intent: Vec<PathBuf> = Vec::new();
         let mut input = None;
         match &request.operation {
             WriteOperation::Stage { paths }
@@ -202,6 +204,12 @@ impl GitService {
                         WriteOperation::Discard { .. }
                             if selected.kind == ChangeKind::Untracked =>
                         {
+                            untracked.push(path.clone());
+                        }
+                        // `git add -N`: restoring from the empty index entry would empty the
+                        // file. Drop the entry, then delete it like an untracked file.
+                        WriteOperation::Discard { .. } if selected.new_in_worktree() => {
+                            intent.push(path.clone());
                             untracked.push(path.clone());
                         }
                         _ => {}
@@ -504,6 +512,19 @@ impl GitService {
         }
         let partial =
             |e: io::Error| error(format!("{e}。操作可能已经部分完成；请刷新检查仓库状态"));
+        if !intent.is_empty() {
+            let mut remove: Vec<OsString> = vec![
+                "--literal-pathspecs".into(),
+                "rm".into(),
+                "--cached".into(),
+                "-q".into(),
+                "--".into(),
+            ];
+            remove.extend(intent.iter().map(|p| p.as_os_str().to_owned()));
+            writer
+                .run_with_input(&request.repo.worktree, &remove, cancel, false, None)
+                .map_err(partial)?;
+        }
         if let WriteOperation::Commit { all: true, .. } = &request.operation {
             writer
                 .run_with_input(

@@ -36,6 +36,11 @@ impl Change {
     pub fn unstaged(&self) -> bool {
         self.worktree != b'.' || self.kind == ChangeKind::Untracked
     }
+    /// A file with no content in the index: untracked, or added with `git add -N` (whose
+    /// index entry is empty). Discarding it deletes it; restoring would empty it.
+    pub fn new_in_worktree(&self) -> bool {
+        self.kind == ChangeKind::Untracked || (self.index == b'.' && self.worktree == b'A')
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
