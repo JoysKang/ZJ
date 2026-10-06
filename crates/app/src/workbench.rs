@@ -650,6 +650,7 @@ impl Workbench {
                 symbols_task: None,
                 symbols_cancel: Arc::new(AtomicBool::new(false)),
                 symbols_requested: false,
+                symbols_pending: Default::default(),
                 generation: 0,
                 targets: (0, Vec::new()),
                 back: Vec::new(),

@@ -360,10 +360,11 @@ impl Workbench {
         });
         self.nav.symbols_task = Some(cx.spawn(async move |this, cx| {
             let (index, cancel) = job.await;
-            let _ = this.update(cx, |this, _| {
+            let _ = this.update(cx, |this, cx| {
                 this.nav.symbols_task = None;
                 if !cancel.load(Ordering::Relaxed) {
                     this.nav.symbols = Some(Arc::new(index));
+                    this.update_symbol_index(Vec::new(), cx);
                 }
             });
         }));
@@ -371,22 +372,29 @@ impl Workbench {
 
     /// Re-parses changed files into the symbol index (file watching).
     pub(super) fn update_symbol_index(&mut self, files: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let Some(index) = self.nav.symbols.clone() else {
-            return;
-        };
-        let files: Vec<PathBuf> = files
-            .into_iter()
-            .filter(|path| symbol_index::language(path).is_some())
-            .collect();
-        if files.is_empty() || self.nav.symbols_task.is_some() {
+        self.nav.symbols_pending.extend(
+            files
+                .into_iter()
+                .filter(|path| symbol_index::language(path).is_some()),
+        );
+        // A build or update in flight may have read these files already: after it.
+        if self.nav.symbols_task.is_some() || self.nav.symbols_pending.is_empty() {
             return;
         }
+        let Some(index) = self.nav.symbols.clone() else {
+            self.nav.symbols_pending.clear();
+            return;
+        };
+        let files: Vec<PathBuf> = std::mem::take(&mut self.nav.symbols_pending)
+            .into_iter()
+            .collect();
         let job = cx.background_spawn(async move { index.with_changes(&files) });
         self.nav.symbols_task = Some(cx.spawn(async move |this, cx| {
             let next = job.await;
-            let _ = this.update(cx, |this, _| {
+            let _ = this.update(cx, |this, cx| {
                 this.nav.symbols_task = None;
                 this.nav.symbols = Some(Arc::new(next));
+                this.update_symbol_index(Vec::new(), cx);
             });
         }));
     }
@@ -715,6 +723,8 @@ pub(super) struct NavState {
     pub(super) symbols_task: Option<Task<()>>,
     pub(super) symbols_cancel: Arc<AtomicBool>,
     pub(super) symbols_requested: bool,
+    /// Files changed while the index was being built or updated, parsed again afterwards.
+    pub(super) symbols_pending: std::collections::BTreeSet<PathBuf>,
     pub(super) generation: u64,
     pub(super) targets: (u64, Vec<Target>),
     pub(super) back: Vec<NavPoint>,
