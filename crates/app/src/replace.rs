@@ -62,17 +62,51 @@ impl Finder {
         })
     }
 
-    fn accepts(&self, found: &regex::Match) -> bool {
-        found.start() < found.end() && (self.multiline || !found.as_str().contains('\n'))
+    /// Where matches are looked for: the whole text when the pattern spans lines, otherwise
+    /// each line without its line break, so a candidate running over a line break never
+    /// hides the matches within a line (`[^,]+` in `a,b\nc,d` finds all four).
+    fn regions<'a>(&self, text: &'a str) -> Box<dyn Iterator<Item = Range<usize>> + 'a> {
+        if self.multiline {
+            Box::new(std::iter::once(0..text.len()))
+        } else {
+            Box::new(line_ranges(text))
+        }
+    }
+
+    /// The region holding byte `offset`.
+    fn region_at(&self, text: &str, offset: usize) -> Range<usize> {
+        if self.multiline {
+            return 0..text.len();
+        }
+        // Bytes, not chars: `offset` may come from an older text and miss a boundary.
+        let bytes = text.as_bytes();
+        let offset = offset.min(bytes.len());
+        let start = bytes[..offset]
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map_or(0, |i| i + 1);
+        let end = bytes[start..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(bytes.len(), |i| start + i);
+        let end = if bytes[start..end].ends_with(b"\r") {
+            end - 1
+        } else {
+            end
+        };
+        start..end
     }
 
     /// Byte ranges of all matches, in order, at most `limit`.
     pub fn find_all(&self, text: &str, limit: usize) -> Vec<Range<usize>> {
-        self.regex
-            .find_iter(text)
-            .filter(|found| self.accepts(found))
+        self.regions(text)
+            .flat_map(|region| {
+                self.regex
+                    .find_iter(&text[region.clone()])
+                    .filter(|found| found.start() < found.end())
+                    .map(move |found| found.start() + region.start..found.end() + region.start)
+            })
             .take(limit)
-            .map(|found| found.range())
             .collect()
     }
 
@@ -92,9 +126,15 @@ impl Finder {
         range: &Range<usize>,
         replace: &Replacement,
     ) -> Option<String> {
-        let captures = self.regex.captures_at(text, range.start)?;
+        let region = self.region_at(text, range.start);
+        if range.end > region.end {
+            return None;
+        }
+        let captures = self
+            .regex
+            .captures_at(&text[region.clone()], range.start - region.start)?;
         let whole = captures.get(0)?;
-        if whole.range() != *range {
+        if whole.start() + region.start != range.start || whole.end() + region.start != range.end {
             return None;
         }
         Some(replace.expand(&captures))
@@ -109,22 +149,25 @@ impl Finder {
         replace: &Replacement,
     ) -> Vec<(Range<usize>, String)> {
         let mut edits = Vec::new();
-        for captures in self.regex.captures_iter(text) {
-            let Some(whole) = captures.get(0) else {
-                continue;
-            };
-            if !self.accepts(&whole) {
-                continue;
-            }
-            if let Some(only) = only {
-                let wanted = only
-                    .binary_search_by_key(&whole.start(), |range| range.start)
-                    .is_ok_and(|i| only[i].end == whole.end());
-                if !wanted {
+        for region in self.regions(text) {
+            for captures in self.regex.captures_iter(&text[region.clone()]) {
+                let Some(whole) = captures.get(0) else {
+                    continue;
+                };
+                if whole.start() == whole.end() {
                     continue;
                 }
+                let range = whole.start() + region.start..whole.end() + region.start;
+                if let Some(only) = only {
+                    let wanted = only
+                        .binary_search_by_key(&range.start, |r| r.start)
+                        .is_ok_and(|i| only[i].end == range.end);
+                    if !wanted {
+                        continue;
+                    }
+                }
+                edits.push((range, replace.expand(&captures)));
             }
-            edits.push((whole.range(), replace.expand(&captures)));
         }
         edits
     }
@@ -155,6 +198,16 @@ impl Finder {
         let edits = self.edits(text, Some(&spans), replace);
         (edits.len() == spans.len()).then_some(edits)
     }
+}
+
+/// Each line's byte range, without its `\n` or `\r\n`.
+pub fn line_ranges(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+    let mut start = 0;
+    text.split_inclusive('\n').map(move |line| {
+        let range = start..start + line.trim_end_matches('\n').trim_end_matches('\r').len();
+        start += line.len();
+        range
+    })
 }
 
 /// The text with `edits` (sorted, non-overlapping) applied.
@@ -468,6 +521,29 @@ mod tests {
             regex,
         })
         .unwrap()
+    }
+
+    #[test]
+    fn matches_within_lines_are_not_lost_to_candidates_that_cross_a_line_break() {
+        let text = "a,b\r\nc,d\nend";
+        let found = finder("[^,]+", false, false, true).find_all(text, 100);
+        let words: Vec<&str> = found.iter().map(|r| &text[r.clone()]).collect();
+        assert_eq!(words, ["a", "b", "c", "d", "end"]);
+        // Replacing works line by line too, and keeps the CRLF.
+        let f = finder("[^,]+", false, false, true);
+        let (new, count) = f.replace(text, None, &Replacement::new("x".to_string(), true, false));
+        assert_eq!((new.as_str(), count), ("x,x\r\nx,x\nx", 5));
+        assert_eq!(
+            f.replacement_for(
+                text,
+                &(2..3),
+                &Replacement::new("<$0>".to_string(), true, false)
+            ),
+            Some("<b>".into())
+        );
+        // A pattern that asks for a line break still spans lines.
+        let found = finder("b\\r?\\nc", false, false, true).find_all(text, 100);
+        assert_eq!(found, vec![2..6]);
     }
 
     #[test]

@@ -246,31 +246,53 @@ impl Matcher {
         let mut scanned = 0usize;
         // Byte bounds of each line in `lines`, for building the previews afterwards.
         let mut bounds: Vec<(usize, usize)> = Vec::new();
-        for found in self.regex.find_iter(bytes) {
-            if found.start() == found.end()
-                || (!self.multiline && found.as_bytes().contains(&b'\n'))
-            {
+        // Line by line unless the pattern spans lines (as `replace::Finder` does), so a
+        // candidate running over a line break never hides the matches within a line.
+        let regions: Box<dyn Iterator<Item = Range<usize>>> = if self.multiline {
+            Box::new(std::iter::once(0..bytes.len()))
+        } else {
+            let mut start = 0;
+            Box::new(bytes.split_inclusive(|b| *b == b'\n').map(move |line| {
+                let mut end = start + line.len();
+                if bytes[..end].ends_with(b"\n") {
+                    end -= 1;
+                }
+                if bytes[start..end].ends_with(b"\r") {
+                    end -= 1;
+                }
+                let range = start..end;
+                start += line.len();
+                range
+            }))
+        };
+        let found_all = regions.flat_map(|region| {
+            self.regex
+                .find_iter(&bytes[region.clone()])
+                .map(move |found| found.start() + region.start..found.end() + region.start)
+        });
+        for found in found_all {
+            if found.start == found.end {
                 continue;
             }
             if count >= budget {
                 break;
             }
             count += 1;
-            line += memchr_count(&bytes[scanned..found.start()]) as u32;
-            scanned = found.start();
-            let start = bytes[..found.start()]
+            line += memchr_count(&bytes[scanned..found.start]) as u32;
+            scanned = found.start;
+            let start = bytes[..found.start]
                 .iter()
                 .rposition(|b| *b == b'\n')
                 .map_or(0, |i| i + 1);
-            let end = bytes[found.start()..]
+            let end = bytes[found.start..]
                 .iter()
                 .position(|b| *b == b'\n')
-                .map_or(bytes.len(), |i| found.start() + i);
-            let range = found.start() - start..found.end().min(end) - start;
+                .map_or(bytes.len(), |i| found.start + i);
+            let range = found.start - start..found.end.min(end) - start;
             if bounds.last() == Some(&(start, end)) {
                 if let Some(last) = lines.last_mut() {
                     last.ranges.push(range);
-                    last.spans.push(found.range());
+                    last.spans.push(found.clone());
                 }
                 continue;
             }
@@ -281,7 +303,7 @@ impl Matcher {
                 len: (range.end - range.start) as u32,
                 preview: String::new(),
                 ranges: vec![range],
-                spans: vec![found.range()],
+                spans: vec![found.clone()],
             });
         }
         for (found, (start, end)) in lines.iter_mut().zip(bounds) {
@@ -611,6 +633,19 @@ mod tests {
                 && lines[0].preview.chars().count() <= PREVIEW_MAX + 1
         );
         assert_eq!(&lines[0].preview[lines[0].ranges[0].clone()], "needle");
+    }
+
+    #[test]
+    fn workspace_search_keeps_matches_within_lines() {
+        let m = Matcher::new(&Options {
+            regex: true,
+            ..options("[^,]+")
+        })
+        .unwrap();
+        let (lines, count) = m.search_bytes(b"a,b\nc,d\n", 100).unwrap();
+        assert_eq!(count, 4);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1].spans, [4..5, 6..7]);
     }
 
     #[test]
