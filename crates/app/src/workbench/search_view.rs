@@ -43,12 +43,12 @@ enum SearchRow {
 
 pub(super) struct SearchState {
     pub query: Entity<InputState>,
-    include: Entity<InputState>,
+    pub include: Entity<InputState>,
     exclude: Entity<InputState>,
     pub case_sensitive: bool,
     pub whole_word: bool,
     pub regex: bool,
-    details: bool,
+    pub details: bool,
     pub results: Vec<FileMatches>,
     pub collapsed: HashSet<PathBuf>,
     rows: Vec<SearchRow>,
@@ -158,6 +158,28 @@ impl Workbench {
             input.select_all(window, cx);
         });
         cx.notify();
+    }
+
+    /// The Explorer's 「在文件夹中查找」: the Search view limited to `folder` (all files for
+    /// the root), its details open, the query focused.
+    pub(super) fn find_in_folder(
+        &mut self,
+        folder: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let include = self
+            .root
+            .as_deref()
+            .and_then(|root| folder.strip_prefix(root).ok())
+            .filter(|relative| !relative.as_os_str().is_empty())
+            .map(|relative| crate::text_search::folder_pattern(&relative.to_string_lossy()))
+            .unwrap_or_default();
+        self.search
+            .include
+            .update(cx, |input, cx| input.set_value(include, window, cx));
+        self.search.details = true;
+        self.find_in_files(window, cx);
     }
 
     fn search_options(&self, cx: &App) -> Options {

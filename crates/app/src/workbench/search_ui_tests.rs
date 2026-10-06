@@ -5,7 +5,7 @@ use super::test_support::{open, settle};
 use super::*;
 #[allow(unused_imports)]
 use core::prelude::v1::test;
-use gpui_kit::TestAppContext;
+use gpui_kit::{TestAppContext, test::TestWindowExt};
 
 #[gpui_kit::test]
 async fn replacing_in_an_edited_buffer_follows_the_results(cx: &mut TestAppContext) {
@@ -90,4 +90,46 @@ async fn replacing_in_an_edited_buffer_follows_the_results(cx: &mut TestAppConte
     let summary = this.read_with(cx, |p, _| p.search.replace.summary.clone().unwrap().0);
     assert!(summary.contains("对不上"), "{summary}");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[gpui_kit::test]
+async fn find_in_folder_searches_only_that_folder(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-find-in-folder-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for dir in ["sub", "other"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+        std::fs::write(root.join(dir).join("a.txt"), "needle\n").unwrap();
+    }
+    let root = std::fs::canonicalize(root).unwrap();
+    let (window, this) = open(cx, root.clone());
+    let sub = root.join("sub");
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.select_tree_path(sub.clone(), window, cx));
+        window.render_frame(cx);
+        window.dispatch_action(Box::new(FindInFolder), cx);
+    })
+    .unwrap();
+    this.read_with(cx, |p, cx| {
+        assert!(matches!(p.sidebar, Sidebar::Search));
+        assert_eq!(p.search.include.read(cx).value().as_ref(), "./sub");
+        assert!(p.search.details);
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.search
+                .query
+                .update(cx, |input, cx| input.set_value("needle", window, cx));
+            p.schedule_search(Duration::ZERO, window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| !p.search.results.is_empty())
+    });
+    this.read_with(cx, |p, _| {
+        let found: Vec<_> = p.search.results.iter().map(|f| f.path.clone()).collect();
+        assert_eq!(found, [sub.join("a.txt")]);
+    });
+    let _ = std::fs::remove_dir_all(root);
 }

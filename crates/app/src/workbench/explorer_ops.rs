@@ -27,7 +27,8 @@ gpui_kit::actions!(
         PasteFiles,
         CopyPath,
         CopyRelativePath,
-        RevealInFinder
+        RevealInFinder,
+        FindInFolder
     ]
 );
 
@@ -95,46 +96,60 @@ impl Workbench {
     /// The right-click menu for `path` (a row, or the workspace root for the header).
     pub(super) fn explorer_menu(&self, path: &Path, can_paste: bool, menu: PopupMenu) -> PopupMenu {
         let root = self.root.as_deref() == Some(path);
-        menu.action_context(self.explorer.focus.clone())
+        let folder = root
+            || self
+                .explorer
+                .rows
+                .iter()
+                .any(|row| row.entry.path == path && row.entry.directory);
+        let menu = menu
+            .action_context(self.explorer.focus.clone())
             .item(PopupMenuItem::new("新建文件…").action(Box::new(NewFile)))
             .item(PopupMenuItem::new("新建文件夹…").action(Box::new(NewFolder)))
             .item(PopupMenuItem::new(REVEAL_LABEL).action(Box::new(RevealInFinder)))
-            .separator()
-            .item(
-                PopupMenuItem::new("剪切")
-                    .disabled(root)
-                    .action(Box::new(CutFiles)),
-            )
-            .item(
-                PopupMenuItem::new("复制")
-                    .disabled(root)
-                    .action(Box::new(CopyFiles)),
-            )
-            .item(
-                PopupMenuItem::new("粘贴")
-                    .disabled(!can_paste)
-                    .action(Box::new(PasteFiles)),
-            )
-            .separator()
-            .item(PopupMenuItem::new("复制路径").action(Box::new(CopyPath)))
-            .item(PopupMenuItem::new("复制相对路径").action(Box::new(CopyRelativePath)))
-            .separator()
-            .item(
-                PopupMenuItem::new("重命名…")
-                    .disabled(root)
-                    .action(Box::new(Rename)),
-            )
-            .item(
-                PopupMenuItem::new("删除")
-                    .disabled(root)
-                    .action(Box::new(Delete)),
-            )
-            .separator()
-            .item(
-                PopupMenuItem::new("显示隐藏文件")
-                    .checked(self.explorer.show_hidden)
-                    .action(Box::new(super::ToggleHiddenFiles)),
-            )
+            .separator();
+        // As in VS Code: folders only, in a group of its own after the everyday entries.
+        let menu = if folder {
+            menu.item(PopupMenuItem::new("在文件夹中查找…").action(Box::new(FindInFolder)))
+                .separator()
+        } else {
+            menu
+        };
+        menu.item(
+            PopupMenuItem::new("剪切")
+                .disabled(root)
+                .action(Box::new(CutFiles)),
+        )
+        .item(
+            PopupMenuItem::new("复制")
+                .disabled(root)
+                .action(Box::new(CopyFiles)),
+        )
+        .item(
+            PopupMenuItem::new("粘贴")
+                .disabled(!can_paste)
+                .action(Box::new(PasteFiles)),
+        )
+        .separator()
+        .item(PopupMenuItem::new("复制路径").action(Box::new(CopyPath)))
+        .item(PopupMenuItem::new("复制相对路径").action(Box::new(CopyRelativePath)))
+        .separator()
+        .item(
+            PopupMenuItem::new("重命名…")
+                .disabled(root)
+                .action(Box::new(Rename)),
+        )
+        .item(
+            PopupMenuItem::new("删除")
+                .disabled(root)
+                .action(Box::new(Delete)),
+        )
+        .separator()
+        .item(
+            PopupMenuItem::new("显示隐藏文件")
+                .checked(self.explorer.show_hidden)
+                .action(Box::new(super::ToggleHiddenFiles)),
+        )
     }
 
     /// Starts an inline name edit: renaming the selection, or a new entry in the target folder.
@@ -563,6 +578,12 @@ impl Workbench {
                 cx.listener(|this, _: &CopyRelativePath, _, cx| this.copy_selection_path(true, cx)),
             )
             .on_action(cx.listener(|this, _: &RevealInFinder, _, cx| this.reveal_selection(cx)))
+            .on_action(cx.listener(|this, _: &FindInFolder, window, cx| {
+                // The selected folder, a selected file's folder, or the whole workspace.
+                if let Some(folder) = this.target_folder() {
+                    this.find_in_folder(&folder, window, cx);
+                }
+            }))
     }
 
     /// Opening a document from elsewhere moves the Explorer highlight back to it.

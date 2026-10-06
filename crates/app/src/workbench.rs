@@ -74,8 +74,8 @@ mod markdown_preview;
 #[path = "workbench/markdown_ui_tests.rs"]
 mod markdown_ui_tests;
 pub use explorer_ops::{
-    CopyFiles, CopyPath, CopyRelativePath, CutFiles, Delete as DeleteFile, NewFile, NewFolder,
-    PasteFiles, Rename as RenameFile, RevealInFinder,
+    CopyFiles, CopyPath, CopyRelativePath, CutFiles, Delete as DeleteFile, FindInFolder, NewFile,
+    NewFolder, PasteFiles, Rename as RenameFile, RevealInFinder,
 };
 pub use find_widget::{
     FindInFile, FindNext, FindPrevious, FindReplace, ReplaceAll, ReplaceOne, ToggleFindCase,

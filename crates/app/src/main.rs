@@ -346,6 +346,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 Some("Explorer"),
             ),
             KeyBinding::new("alt-cmd-r", workbench::RevealInFinder, Some("Explorer")),
+            KeyBinding::new("alt-shift-f", workbench::FindInFolder, Some("Explorer")),
             KeyBinding::new(
                 "secondary-shift-f",
                 workbench::FindInFiles,

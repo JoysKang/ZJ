@@ -137,6 +137,25 @@ impl Globs {
     }
 }
 
+/// The include pattern for one folder (relative to the root): anchored, with characters a glob
+/// would read as syntax made literal. A comma cannot be written in a glob list, so it matches
+/// any one character instead.
+pub fn folder_pattern(relative: &str) -> String {
+    let mut pattern = String::from("./");
+    for c in relative.chars() {
+        match c {
+            '*' | '?' | '[' | '{' | '}' => {
+                pattern.push('[');
+                pattern.push(c);
+                pattern.push(']');
+            }
+            ',' => pattern.push('?'),
+            c => pattern.push(c),
+        }
+    }
+    pattern
+}
+
 fn glob_to_regex(glob: &str) -> String {
     let mut out = String::new();
     let chars: Vec<char> = glob.chars().collect();
@@ -170,7 +189,14 @@ fn glob_to_regex(glob: &str) -> String {
                     let class: String = chars[i + 1..i + end].iter().collect();
                     let class = class.replacen('!', "^", usize::from(class.starts_with('!')));
                     out.push('[');
-                    out.push_str(&class.replace('\\', "\\\\"));
+                    // `[` would open a nested class in Rust's regex, `&&` / `~~` are set
+                    // operations there: all literal in a glob.
+                    for c in class.chars() {
+                        if matches!(c, '\\' | '[' | '&' | '~') {
+                            out.push('\\');
+                        }
+                        out.push(c);
+                    }
                     out.push(']');
                     i += end;
                 }
@@ -556,6 +582,24 @@ pub fn filter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_pattern_matches_only_that_folder() {
+        let pattern = folder_pattern("src/a,b/c*{x}[y]");
+        assert_eq!(pattern, "./src/a?b/c[*][{]x[}][[]y]");
+        let globs = Globs::parse(&pattern).unwrap();
+        assert!(globs.matches("src/a,b/c*{x}[y]/main.rs"));
+        assert!(globs.matches("src/a,b/c*{x}[y]/deep/mod.rs"));
+        assert!(!globs.matches("src/a,b/cd{x}[y]/main.rs"));
+        assert!(!globs.matches("other/src/a,b/c*{x}[y]/main.rs"));
+        assert!(
+            Globs::parse(&folder_pattern("app"))
+                .unwrap()
+                .matches("app/x.rs")
+        );
+        // Typed by hand: `&&` in a class is literal, not Rust regex's intersection.
+        assert!(Globs::parse("[&&~]x.rs").unwrap().matches("&x.rs"));
+    }
 
     fn options(pattern: &str) -> Options {
         Options {
