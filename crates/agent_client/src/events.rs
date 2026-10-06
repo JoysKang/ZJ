@@ -41,6 +41,8 @@ pub enum AgentEvent {
     ModeChanged {
         mode_id: String,
     },
+    /// The model settings the agent offers now (at session start and whenever they change).
+    ConfigOptions(Vec<ConfigOption>),
     Usage {
         used: u64,
         size: u64,
@@ -183,6 +185,62 @@ pub enum PlanStatus {
 pub struct PlanEntry {
     pub content: String,
     pub status: PlanStatus,
+}
+
+/// A model setting the agent offers in `configOptions`: the model, its thinking effort, fast
+/// mode. Only single-choice options of the model categories are kept: modes go through
+/// [`Modes`] (filtered by the preset's policy), and unknown categories are not shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigOption {
+    pub id: String,
+    pub name: String,
+    pub current: String,
+    /// (value id, name)
+    pub values: Vec<(String, String)>,
+}
+
+impl ConfigOption {
+    pub fn offers(&self, value: &str) -> bool {
+        self.values.iter().any(|(id, _)| id == value)
+    }
+}
+
+pub(crate) fn config_options(options: &[acp::SessionConfigOption]) -> Vec<ConfigOption> {
+    options
+        .iter()
+        .filter(|o| {
+            matches!(
+                o.category,
+                Some(
+                    acp::SessionConfigOptionCategory::Model
+                        | acp::SessionConfigOptionCategory::ThoughtLevel
+                        | acp::SessionConfigOptionCategory::ModelConfig
+                )
+            )
+        })
+        .filter_map(|o| {
+            let acp::SessionConfigKind::Select(select) = &o.kind else {
+                return None;
+            };
+            let flat: Vec<&acp::SessionConfigSelectOption> = match &select.options {
+                acp::SessionConfigSelectOptions::Ungrouped(options) => options.iter().collect(),
+                acp::SessionConfigSelectOptions::Grouped(groups) => {
+                    groups.iter().flat_map(|g| &g.options).collect()
+                }
+                _ => return None,
+            };
+            let values: Vec<(String, String)> = flat
+                .into_iter()
+                .map(|v| (v.value.to_string(), v.name.clone()))
+                .collect();
+            (!values.is_empty()).then(|| ConfigOption {
+                id: o.id.to_string(),
+                name: o.name.clone(),
+                current: select.current_value.to_string(),
+                values,
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -377,6 +435,9 @@ pub(crate) fn from_update(update: &acp::SessionUpdate) -> Option<AgentEvent> {
                 })
                 .collect(),
         ),
+        acp::SessionUpdate::ConfigOptionUpdate(u) => {
+            AgentEvent::ConfigOptions(config_options(&u.config_options))
+        }
         acp::SessionUpdate::CurrentModeUpdate(u) => AgentEvent::ModeChanged {
             mode_id: u.current_mode_id.to_string(),
         },

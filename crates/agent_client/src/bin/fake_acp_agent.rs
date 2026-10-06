@@ -12,6 +12,8 @@
 //! support terminal logins. With `FAKE_AUTH_AT=prompt` the session starts and
 //! `session/prompt` asks for the login instead (like claude-agent-acp).
 //! `FAKE_HANG_INIT=1` never answers `initialize` (a hung handshake).
+//! Sessions offer `model` / `effort` config options and a `mode` one; `configs` lists the
+//! options the client set.
 
 use agent_client_protocol::{
     self as sdk, Agent, Client, ConnectionTo, Responder, Stdio, schema::v1 as acp,
@@ -31,7 +33,32 @@ struct State {
     /// `_meta` of the last session/new or session/load, and every mode the client asked for.
     meta: std::sync::Mutex<String>,
     mode_requests: std::sync::Mutex<Vec<String>>,
+    /// `id=value` for every config option the client set.
+    config_requests: std::sync::Mutex<Vec<String>>,
     cwd: std::sync::Mutex<std::path::PathBuf>,
+}
+
+/// A model and an effort picker, plus a mode picker the client must not show.
+fn config_options(model: &str) -> Vec<acp::SessionConfigOption> {
+    let select = |id: &str, name: &str, current: &str, values: &[&str]| {
+        acp::SessionConfigOption::select(
+            id.to_string(),
+            name.to_string(),
+            current.to_string(),
+            values
+                .iter()
+                .map(|v| acp::SessionConfigSelectOption::new(v.to_string(), v.to_uppercase()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    vec![
+        select("mode", "Mode", "default", &["default", "bypassPermissions"])
+            .category(acp::SessionConfigOptionCategory::Mode),
+        select("model", "Model", model, &["sonnet", "opus"])
+            .category(acp::SessionConfigOptionCategory::Model),
+        select("effort", "Effort", "high", &["low", "high"])
+            .category(acp::SessionConfigOptionCategory::ThoughtLevel),
+    ]
 }
 
 fn text(t: impl Into<String>) -> acp::ContentBlock {
@@ -278,6 +305,14 @@ async fn run_prompt(
                 state.mode_requests.lock().unwrap().join(",")
             ),
         )?,
+        "configs" => say(
+            &cx,
+            &session,
+            format!(
+                "configs:{}",
+                state.config_requests.lock().unwrap().join(",")
+            ),
+        )?,
         "env" => say(
             &cx,
             &session,
@@ -480,6 +515,7 @@ fn main() -> sdk::Result<()> {
     let on_prompt = state.clone();
     let on_load = state.clone();
     let on_mode = state.clone();
+    let on_config = state.clone();
     // FAKE_BYPASS_DEFAULT=1: like a user whose Claude settings default to bypassPermissions.
     let bypass_default = std::env::var_os("FAKE_BYPASS_DEFAULT").is_some();
     let auth_file = std::env::var_os("FAKE_AUTH").map(std::path::PathBuf::from);
@@ -552,7 +588,8 @@ fn main() -> sdk::Result<()> {
                     };
                     responder.respond(
                         acp::NewSessionResponse::new(format!("s-{}-{n}", std::process::id()))
-                            .modes(acp::SessionModeState::new(current, modes)),
+                            .modes(acp::SessionModeState::new(current, modes))
+                            .config_options(config_options("sonnet")),
                     )
                 },
                 sdk::on_receive_request!(),
@@ -604,6 +641,28 @@ fn main() -> sdk::Result<()> {
                         )),
                     )?;
                     responder.respond(acp::SetSessionModeResponse::new())
+                },
+                sdk::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: acp::SetSessionConfigOptionRequest,
+                            responder: Responder<acp::SetSessionConfigOptionResponse>,
+                            _cx| {
+                    let value = request.value.as_value_id().map(ToString::to_string);
+                    let value = value.unwrap_or_default();
+                    on_config
+                        .config_requests
+                        .lock()
+                        .unwrap()
+                        .push(format!("{}={value}", request.config_id));
+                    let model = if request.config_id.to_string() == "model" {
+                        value.as_str()
+                    } else {
+                        "sonnet"
+                    };
+                    responder.respond(acp::SetSessionConfigOptionResponse::new(config_options(
+                        model,
+                    )))
                 },
                 sdk::on_receive_request!(),
             )

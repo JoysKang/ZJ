@@ -127,6 +127,22 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Picks a model setting (model, effort…) offered by the current session's agent.
+    pub(in crate::workbench) fn agent_set_config(
+        &mut self,
+        id: String,
+        value: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = self.agent.current.and_then(|k| self.agent.session(k))
+            && let Some(client) = &session.client
+            && !client.set_config_option(id, value)
+        {
+            self.message = "Agent 已不再提供这个选项".into();
+        }
+        cx.notify();
+    }
+
     /// Another window (or the settings file) changed agent settings.
     pub(in crate::workbench) fn agent_follow_settings(&mut self, cx: &mut Context<Self>) {
         let settings = cx.global::<crate::settings::Settings>().agent.clone();

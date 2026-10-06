@@ -5,9 +5,9 @@
 //! (`dropped` counts them) and come back from the history database on demand.
 
 use crate::events::{
-    AgentCommand, AgentEvent, AuthChoice, ExitReason, Modes, PermissionId, PermissionKind,
-    PermissionRequest, PlanEntry, ToolCall, ToolCallPatch, ToolContent, ToolKind, ToolStatus,
-    TurnId, TurnOutcome,
+    AgentCommand, AgentEvent, AuthChoice, ConfigOption, ExitReason, Modes, PermissionId,
+    PermissionKind, PermissionRequest, PlanEntry, ToolCall, ToolCallPatch, ToolContent, ToolKind,
+    ToolStatus, TurnId, TurnOutcome,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -116,6 +116,8 @@ pub struct Thread {
     pub session_id: Option<String>,
     pub modes: Option<Modes>,
     pub commands: Vec<AgentCommand>,
+    /// Model, effort and the like (see [`ConfigOption`]).
+    pub configs: Vec<ConfigOption>,
     /// (used, size) tokens of the context window.
     pub usage: Option<(u64, u64)>,
     pub changed_files: BTreeMap<PathBuf, FileChange>,
@@ -490,6 +492,7 @@ impl Thread {
                 }
             }
             AgentEvent::AvailableCommands(commands) => self.commands = commands.clone(),
+            AgentEvent::ConfigOptions(configs) => self.configs = configs.clone(),
             AgentEvent::ModeChanged { mode_id } => {
                 if let Some(modes) = &mut self.modes {
                     modes.current = mode_id.clone();

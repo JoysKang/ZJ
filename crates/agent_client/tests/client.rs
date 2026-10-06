@@ -910,6 +910,34 @@ fn sessions_start_in_ask_mode_and_never_request_bypass() {
 }
 
 #[test]
+fn model_settings_are_offered_but_modes_are_not() {
+    let ws = Workspace::new("configs");
+    let client = AgentClient::start(options(&ws, &[])).unwrap();
+    let events = Events::of(&client);
+    client.prompt(text("configs")).unwrap();
+    let seen = events.turn();
+    let configs = seen
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::ConfigOptions(configs) => Some(configs.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let ids: Vec<&str> = configs.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["model", "effort"]);
+    assert_eq!(configs[0].current, "sonnet");
+    assert_eq!(configs[0].values[1], ("opus".into(), "OPUS".into()));
+    // Only what the UI is shown can be set: not the mode option, not an unknown value.
+    assert!(!client.set_config_option("mode", "bypassPermissions"));
+    assert!(!client.set_config_option("model", "haiku"));
+    assert!(client.set_config_option("model", "opus"));
+    events.until(|e| matches!(e, AgentEvent::ConfigOptions(c) if c[0].current == "opus"));
+    client.prompt(text("configs")).unwrap();
+    assert_eq!(message(&events.turn()), "configs:model=opus");
+    client.shutdown();
+}
+
+#[test]
 fn direct_writes_remember_the_file_before_the_agent() {
     let ws = Workspace::new("snapshot");
     let client = AgentClient::start(options(&ws, &[])).unwrap();

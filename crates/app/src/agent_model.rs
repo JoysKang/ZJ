@@ -4,7 +4,7 @@
 
 use std::{ops::Range, path::PathBuf, time::Duration};
 use workspace_editor_agent::{
-    Glyph, PromptPart, ToolCall, ToolContent, ToolKind, ToolStatus,
+    ConfigOption, Glyph, PromptPart, ToolCall, ToolContent, ToolKind, ToolStatus,
     thread::{Item, Status, Thread, ToolCard},
 };
 use workspace_editor_agent_history::{Message, Role, SessionStatus, SessionSummary};
@@ -340,6 +340,20 @@ pub fn prompt_parts(text: &str, attachments: &[Attachment]) -> Vec<PromptPart> {
         .collect();
     parts.push(PromptPart::Text(text.to_string()));
     parts
+}
+
+/// The model button's label: the current choice of each setting, e.g. "Opus · High".
+pub fn config_label(configs: &[ConfigOption]) -> String {
+    configs
+        .iter()
+        .map(|c| {
+            c.values
+                .iter()
+                .find(|(id, _)| *id == c.current)
+                .map_or(c.current.as_str(), |(_, name)| name.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// An `@` mention being typed: the byte range from `@` to the cursor and the query after it.
@@ -703,5 +717,27 @@ mod tests {
             true,
         );
         assert!(quiet_note(&thread, secs(60)).is_some());
+    }
+
+    #[test]
+    fn the_model_button_shows_the_current_choices() {
+        let configs = [
+            ConfigOption {
+                id: "model".into(),
+                name: "Model".into(),
+                current: "opus".into(),
+                values: vec![
+                    ("sonnet".into(), "Sonnet".into()),
+                    ("opus".into(), "Opus".into()),
+                ],
+            },
+            ConfigOption {
+                id: "effort".into(),
+                name: "Effort".into(),
+                current: "max".into(),
+                values: vec![("high".into(), "High".into())],
+            },
+        ];
+        assert_eq!(config_label(&configs), "Opus · max");
     }
 }

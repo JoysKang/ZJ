@@ -100,6 +100,43 @@ impl Workbench {
                     menu
                 })
         });
+        let config_picker = session
+            .map(|s| s.thread.configs.clone())
+            .filter(|configs| !configs.is_empty())
+            .map(|configs| {
+                let weak = cx.weak_entity();
+                Button::new("agent-config")
+                    .ghost()
+                    .xsmall()
+                    .label(agent_model::config_label(&configs))
+                    .dropdown_caret(true)
+                    .tooltip("模型与思考强度")
+                    .dropdown_menu(move |menu, _, _| {
+                        let mut menu = menu;
+                        for (i, config) in configs.iter().enumerate() {
+                            if i > 0 {
+                                menu = menu.separator();
+                            }
+                            menu = menu.label(config.name.clone());
+                            for (value, name) in &config.values {
+                                let weak = weak.clone();
+                                let id = config.id.clone();
+                                let value = value.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(name.clone())
+                                        .checked(value == config.current)
+                                        .on_click(move |_, _, cx| {
+                                            let (id, value) = (id.clone(), value.clone());
+                                            let _ = weak.update(cx, |this, cx| {
+                                                this.agent_set_config(id, value, cx)
+                                            });
+                                        }),
+                                );
+                            }
+                        }
+                        menu
+                    })
+            });
         let ring = session.and_then(|s| agent_model::usage_ring(s.thread.usage));
         let send = if busy {
             Button::new("agent-stop")
@@ -255,6 +292,7 @@ impl Workbench {
                             })),
                     )
                     .children(mode_picker)
+                    .children(config_picker)
                     .when(!compact, |bar| bar.child(agent_picker))
                     .child(div().flex_1())
                     .when_some(ring, |bar, (fraction, label)| {

@@ -3,8 +3,8 @@
 
 use crate::{
     events::{
-        self, AgentEvent, AgentInfo, AuthChoice, ExitReason, Modes, PermissionId, TurnId,
-        TurnOutcome,
+        self, AgentEvent, AgentInfo, AuthChoice, ConfigOption, ExitReason, Modes, PermissionId,
+        TurnId, TurnOutcome,
     },
     fs::{BufferProvider, Workspace, read_disk, window, write_atomic},
     login,
@@ -127,6 +127,10 @@ enum Command {
     },
     Cancel,
     SetMode(String),
+    SetConfig {
+        id: String,
+        value: String,
+    },
     Login(String),
     RetryLogin(BTreeMap<String, String>),
     Shutdown,
@@ -139,6 +143,9 @@ struct Shared {
     cancel_grace: Duration,
     handshake_timeout: Duration,
     resume_session: Option<String>,
+    /// The model settings last offered: [`AgentClient::set_config_option`] only picks from
+    /// these, so an option ZJ does not show (e.g. a mode) cannot be set through it.
+    configs: Mutex<Vec<ConfigOption>>,
     /// Replaced by [`AgentClient::retry_login`] (the settings may have changed meanwhile).
     env_overrides: Mutex<BTreeMap<String, String>>,
     buffers: Option<Arc<dyn BufferProvider>>,
@@ -266,6 +273,13 @@ impl Shared {
         let _ = self.events.send(event).await;
     }
 
+    /// Remembers the model settings the agent offers and tells the UI.
+    async fn offer_configs(&self, options: &[acp::SessionConfigOption]) {
+        let configs = events::config_options(options);
+        *self.configs.lock().unwrap() = configs.clone();
+        self.emit(AgentEvent::ConfigOptions(configs)).await;
+    }
+
     /// Ends the current turn exactly once (from the prompt task or the supervisor).
     async fn finish_turn(&self, only: Option<TurnId>, outcome: TurnOutcome) {
         let turn = {
@@ -326,6 +340,7 @@ impl AgentClient {
             cancel_grace: options.cancel_grace,
             handshake_timeout: options.handshake_timeout,
             resume_session: options.resume_session,
+            configs: Mutex::new(Vec::new()),
             env_overrides: Mutex::new(options.env_overrides),
             buffers: options.buffers,
             stopping: stopping_rx,
@@ -436,6 +451,26 @@ impl AgentClient {
         self.commands.try_send(Command::SetMode(mode_id)).is_ok()
     }
 
+    /// Picks `value` for a model setting from [`AgentEvent::ConfigOptions`]; refused (`false`)
+    /// when the agent does not offer that option and value.
+    pub fn set_config_option(&self, id: impl Into<String>, value: impl Into<String>) -> bool {
+        let (id, value) = (id.into(), value.into());
+        let offered = self
+            .shared
+            .configs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|o| o.id == id && o.offers(&value));
+        if !offered {
+            eprintln!("event=agent_config_refused agent={}", self.shared.preset.id);
+            return false;
+        }
+        self.commands
+            .try_send(Command::SetConfig { id, value })
+            .is_ok()
+    }
+
     /// Paths the agent changed (or announced an edit for), with their content
     /// before that first change.
     pub fn snapshot_paths(&self) -> Vec<PathBuf> {
@@ -536,7 +571,7 @@ async fn supervise(
             }
             Command::Prompt { turn, parts } => Some((turn, parts)),
             // No process: nothing to cancel or switch.
-            Command::Cancel | Command::SetMode(_) => continue,
+            Command::Cancel | Command::SetMode(_) | Command::SetConfig { .. } => continue,
         };
         loop {
             while turn_done.try_recv().is_ok() {}
@@ -946,6 +981,9 @@ async fn run_session(
                     modes: started_modes.clone(),
                 })
                 .await;
+            shared
+                .offer_configs(response.config_options.as_deref().unwrap_or_default())
+                .await;
             session = Some(previous);
         } else {
             eprintln!("event=agent_session_load_failed agent={}", shared.preset.id);
@@ -976,6 +1014,9 @@ async fn run_session(
                             resumed: false,
                             modes: started_modes.clone(),
                         })
+                        .await;
+                    shared
+                        .offer_configs(response.config_options.as_deref().unwrap_or_default())
                         .await;
                     break response.session_id;
                 }
@@ -1053,6 +1094,17 @@ async fn run_session(
                             Ok(())
                         })?;
                     }
+                }
+                Ok(Command::SetConfig { id, value }) => {
+                    let request = cx.send_request(acp::SetSessionConfigOptionRequest::new(session.clone(), id, value.as_str()));
+                    let shared = shared.clone();
+                    cx.spawn(async move {
+                        match request.block_task().await {
+                            Ok(response) => shared.offer_configs(&response.config_options).await,
+                            Err(e) => shared.emit(AgentEvent::Error { message: format!("切换失败：{}", error_text(&e)) }).await,
+                        }
+                        Ok(())
+                    })?;
                 }
                 Ok(Command::SetMode(mode)) => {
                     let request = cx.send_request(acp::SetSessionModeRequest::new(session.clone(), mode));
@@ -1136,7 +1188,7 @@ impl Login<'_> {
             };
             match command {
                 Err(_) | Ok(Command::Shutdown) => return Some(End::Shutdown),
-                Ok(Command::Connect | Command::SetMode(_)) => {}
+                Ok(Command::Connect | Command::SetMode(_) | Command::SetConfig { .. }) => {}
                 Ok(Command::Prompt { turn, parts }) => {
                     first.get_or_insert((turn, parts));
                 }
@@ -1353,6 +1405,9 @@ async fn handle_update(
                 shared.snapshot(&path).await;
             }
         }
+    }
+    if let AgentEvent::ConfigOptions(configs) = &event {
+        *shared.configs.lock().unwrap() = configs.clone();
     }
     // The agent switched itself to a mode the preset forbids: it is switched straight back
     // (the UI keeps showing the allowed mode, which becomes true again once that succeeds).
