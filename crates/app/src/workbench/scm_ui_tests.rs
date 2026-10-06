@@ -331,6 +331,27 @@ async fn the_status_bar_blames_the_cursor_line(cx: &mut TestAppContext) {
     settle(cx, Some(window), |cx| shown(cx).is_some());
     assert_eq!(shown(cx), Some(Ok(("Fixture".to_string(), false))));
 
+    // The empty line after the last line break: no blame, and no error either.
+    let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        editor.update(cx, |state, cx| {
+            state.set_cursor_position(lsp_types::Position::new(1, 0), window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| shown(cx).is_none());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(shown(cx), None);
+    cx.update_window(window.into(), |_, window, cx| {
+        editor.update(cx, |state, cx| {
+            state.set_cursor_position(lsp_types::Position::new(0, 0), window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| shown(cx).is_some());
+
     // Typing on the line: blamed as typed, so not committed yet.
     let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
     cx.update_window(window.into(), |_, window, cx| {

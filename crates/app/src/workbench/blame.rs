@@ -5,7 +5,10 @@
 //! No timer runs while the cursor stays put; a newer request cancels the Git call in flight.
 
 use super::*;
-use gpui_kit::{component::h_flex, prelude::FluentBuilder};
+use gpui_kit::{
+    component::{h_flex, input::RopeExt},
+    prelude::FluentBuilder,
+};
 use workspace_editor_git::{Blame, ChangeKind};
 
 const BLAME_DELAY: Duration = Duration::from_millis(400);
@@ -52,10 +55,23 @@ impl Workbench {
         }));
     }
 
-    /// The repository's status changed (a commit, a checkout): blame the line again.
-    pub(super) fn refresh_blame(&mut self, cx: &mut Context<Self>) {
+    /// The status of `repo` changed (a commit, a checkout): blame the line again if it is in
+    /// that repository, keeping what is shown until the new answer comes (no flicker).
+    pub(super) fn refresh_blame(&mut self, repo: &RepoId, cx: &mut Context<Self>) {
+        let in_repo = self
+            .active_document_id()
+            .and_then(|id| self.document(id))
+            .zip(self.groups.iter().find(|g| &g.repo.id == repo))
+            .is_some_and(|(doc, group)| doc.path.starts_with(&group.repo.worktree));
+        if !in_repo {
+            return;
+        }
+        let (shown, line) = (self.blame.shown.take(), self.blame.key.map(|k| (k.0, k.1)));
         self.blame.key = None;
         self.schedule_blame(cx);
+        if self.blame.key.map(|k| (k.0, k.1)) == line {
+            self.blame.shown = shown;
+        }
     }
 
     fn run_blame(&mut self, key: BlameKey, cx: &mut Context<Self>) {
@@ -63,6 +79,18 @@ impl Workbench {
         let Some(doc) = self.document(id) else {
             return;
         };
+        // The empty line after the last line break (or an empty file) has no history: Git
+        // would answer "file has only N lines".
+        let empty_tail = {
+            let text = doc.editor.read(cx).text();
+            let lines = text.lines_len();
+            line as usize + 1 >= lines && text.line_len(line as usize) == 0
+        };
+        if empty_tail {
+            self.blame.shown = None;
+            cx.notify();
+            return;
+        }
         let Some(group) = self
             .groups
             .iter()
