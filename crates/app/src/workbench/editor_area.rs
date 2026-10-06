@@ -314,7 +314,12 @@ impl Workbench {
             .min_w_0()
             .overflow_x_scroll()
             .children(tabs)
-            .child(div().flex_1().h_full());
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::double_click_new_file)),
+            );
         h_flex()
             .h(theme::TAB_HEIGHT)
             .w_full()
@@ -400,6 +405,19 @@ impl Workbench {
             .into_any_element()
     }
 
+    /// As in VS Code: a double click on the welcome page or the empty end of the tab bar
+    /// opens a new untitled file.
+    fn double_click_new_file(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.click_count == 2 {
+            self.new_untitled(window, cx);
+        }
+    }
+
     fn render_welcome(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
         let keycaps = |keys: &[&'static str]| {
@@ -435,10 +453,14 @@ impl Workbench {
                 .text_color(colors.muted)
                 .child(label)
                 .child(keycaps(keys))
+                // A double click on an item is two clicks on it, not a new file.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
         };
         v_flex()
+            .id("welcome")
             .size_full()
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::double_click_new_file))
             .items_center()
             .justify_center()
             .gap_4()

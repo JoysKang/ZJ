@@ -122,6 +122,9 @@ mod soft_wrap_ui_tests;
 #[cfg(test)]
 #[path = "workbench/tab_menu_ui_tests.rs"]
 mod tab_menu_ui_tests;
+#[cfg(test)]
+#[path = "workbench/welcome_ui_tests.rs"]
+mod welcome_ui_tests;
 mod workspace_refresh;
 
 gpui_kit::actions!(
