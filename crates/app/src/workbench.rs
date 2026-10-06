@@ -1077,14 +1077,23 @@ impl Workbench {
         }
     }
 
+    /// The user chose a tab: a file still being opened is not wanted any more.
     fn select_pane(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+        self.file_generation += 1;
+        if self.file_task.take().is_some() && self.message.starts_with("正在打开") {
+            self.message.clear();
+        }
+        self.show_pane(pane, window, cx);
+    }
+
+    /// Shows a tab without cancelling an open the user asked for (a file another request
+    /// opened in the background).
+    fn show_pane(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
         if let Pane::Document(previous) = self.active
             && pane != self.active
         {
             self.auto_save_on_focus_change(Some(previous), window, cx);
         }
-        self.file_generation += 1;
-        self.file_task = None;
         self.active = pane;
         self.explorer.reveal_pending = matches!(pane, Pane::Document(_));
         self.clear_tree_selection_for(pane);
@@ -1522,7 +1531,7 @@ impl Workbench {
         this.scan_conflicts(cx);
         this.pending_tabs.retain(|tab| *tab != path_for_pending);
         eprintln!("event=document_opened");
-        this.select_pane(Pane::Document(id), window, cx);
+        this.show_pane(Pane::Document(id), window, cx);
         this.remember_tabs(true, window, cx);
         Some(id)
     }

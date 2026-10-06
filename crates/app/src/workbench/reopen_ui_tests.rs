@@ -139,3 +139,30 @@ async fn a_closed_file_from_outside_the_folder_reopens(cx: &mut TestAppContext) 
     });
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[gpui_kit::test]
+async fn a_background_open_finishing_does_not_cancel_the_users_open(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-open-race-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    for name in ["restored.txt", "clicked.txt"] {
+        std::fs::write(root.join(name), name).unwrap();
+    }
+    let (window, this) = open(cx, root.clone());
+    // The last session's active tab opens in the background while the user clicks another.
+    let (restored, clicked) = (root.join("restored.txt"), root.join("clicked.txt"));
+    let folder = Some(root.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_now(restored.clone(), window, cx);
+            p.open_file(clicked.clone(), folder, window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 2)
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
