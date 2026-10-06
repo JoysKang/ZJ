@@ -22,6 +22,7 @@ use gpui_kit::{
     prelude::FluentBuilder,
     *,
 };
+use workspace_editor_core::RepoId;
 use workspace_editor_git::{ChangeKind, DiffSide, WriteOperation, WriteRequest};
 
 pub(super) fn count_badge(count: usize, colors: theme::Colors) -> impl IntoElement {
@@ -38,6 +39,23 @@ pub(super) fn count_badge(count: usize, colors: theme::Colors) -> impl IntoEleme
         .text_color(colors.foreground)
         .text_size(theme::TEXT_SECTION)
         .child(count.to_string())
+}
+
+/// A menu item's click handler that runs `f` with the repository's current row, if it is
+/// still listed.
+fn on_repo(
+    view: &WeakEntity<Workbench>,
+    repo: &RepoId,
+    f: impl Fn(&mut Workbench, usize, &mut Window, &mut Context<Workbench>) + 'static,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+    let (view, repo) = (view.clone(), repo.clone());
+    move |_, window, cx| {
+        let _ = view.update(cx, |this, cx| {
+            if let Some(g) = this.group_of(&repo) {
+                f(this, g, window, cx);
+            }
+        });
+    }
 }
 
 /// A small icon button for row actions. Kit's ghost hover is the list hover color, which a
@@ -67,6 +85,11 @@ fn hover_actions(group: SharedString) -> Div {
 }
 
 impl Workbench {
+    /// The row of a repository in the list, by id.
+    pub(super) fn group_of(&self, repo: &RepoId) -> Option<usize> {
+        self.groups.iter().position(|group| &group.repo.id == repo)
+    }
+
     fn scm_push(&self, g: usize) -> Option<WriteRequest> {
         let group = &self.groups[g];
         group
@@ -105,22 +128,20 @@ impl Workbench {
             .filter(|_| upstream);
         let fetch = self.scm_request(g, WriteOperation::Fetch);
         let idle = !self.groups[g].write_pending;
-        let (refresh, checkout, create, graph) =
-            (view.clone(), view.clone(), view.clone(), view.clone());
+        // Items run after the menu opened: find the repository again by id, not by row.
+        let repo = self.groups[g].repo.id.clone();
+        let refresh = view.clone();
         let has_changes = self.groups[g]
             .status
             .as_ref()
             .and_then(|s| s.as_ref().ok())
             .is_some_and(|s| !s.changes.is_empty());
-        let stash_push = view.clone();
         let stash_item = |label: &str, action: StashAction| {
-            let view = view.clone();
             PopupMenuItem::new(label.to_string())
                 .disabled(!idle)
-                .on_click(move |_, window, cx| {
-                    let _ =
-                        view.update(cx, |this, cx| this.open_stash_picker(g, action, window, cx));
-                })
+                .on_click(on_repo(&view, &repo, move |this, g, window, cx| {
+                    this.open_stash_picker(g, action, window, cx)
+                }))
         };
         let item = |label: &str, request: Option<WriteRequest>| match request {
             Some(request) => git_menu_item(label, request, view.clone()),
@@ -131,31 +152,30 @@ impl Workbench {
             .item(
                 PopupMenuItem::new("签出到…")
                     .disabled(!idle)
-                    .on_click(move |_, window, cx| {
-                        let _ =
-                            checkout.update(cx, |this, cx| this.open_branch_picker(g, window, cx));
-                    }),
+                    .on_click(on_repo(&view, &repo, |this, g, window, cx| {
+                        this.open_branch_picker(g, window, cx)
+                    })),
             )
             .item(
                 PopupMenuItem::new("创建分支…")
                     .disabled(!idle)
-                    .on_click(move |_, window, cx| {
-                        let _ =
-                            create.update(cx, |this, cx| this.open_create_branch(g, window, cx));
-                    }),
+                    .on_click(on_repo(&view, &repo, |this, g, window, cx| {
+                        this.open_create_branch(g, window, cx)
+                    })),
             )
             .item(item("抓取", fetch))
-            .item(PopupMenuItem::new("Git 图").on_click(move |_, window, cx| {
-                let _ = graph.update(cx, |this, cx| this.open_git_graph(g, window, cx));
-            }))
+            .item(PopupMenuItem::new("Git 图").on_click(on_repo(
+                &view,
+                &repo,
+                |this, g, window, cx| this.open_git_graph(g, window, cx),
+            )))
             .separator()
             .item(
                 PopupMenuItem::new("Stash…")
                     .disabled(!idle || !has_changes)
-                    .on_click(move |_, window, cx| {
-                        let _ =
-                            stash_push.update(cx, |this, cx| this.open_stash_push(g, window, cx));
-                    }),
+                    .on_click(on_repo(&view, &repo, |this, g, window, cx| {
+                        this.open_stash_push(g, window, cx)
+                    })),
             )
             .item(stash_item("应用 Stash…", StashAction::Apply))
             .item(stash_item("弹出 Stash…", StashAction::Pop))
@@ -175,13 +195,13 @@ impl Workbench {
                 let _ = refresh.update(cx, |this, cx| this.refresh(window, cx));
             }))
             .when(extra, |menu| {
-                let remove = view.clone();
-                menu.item(PopupMenuItem::new("从列表移除（手动添加的仓库）").on_click(
-                    move |_, window, cx| {
-                        let _ = remove
-                            .update(cx, |this, cx| this.remove_extra_repository(g, window, cx));
-                    },
-                ))
+                menu.item(
+                    PopupMenuItem::new("从列表移除（手动添加的仓库）").on_click(on_repo(
+                        &view,
+                        &repo,
+                        |this, g, window, cx| this.remove_extra_repository(g, window, cx),
+                    )),
+                )
             })
     }
 
@@ -437,27 +457,35 @@ impl Workbench {
             )
             .child(
                 action(("scm-repo-graph", g), IconName::GitGraph, "Git 图", cx).on_click(
-                    cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.open_git_graph(g, window, cx);
+                    cx.listener({
+                        let id = id.clone();
+                        move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            if let Some(g) = this.group_of(&id) {
+                                this.open_git_graph(g, window, cx);
+                            }
+                        }
                     }),
                 ),
             )
-            .child(
+            .child({
+                let menu_repo = id.clone();
                 action(("scm-repo-more", g), IconName::Ellipsis, "更多操作", cx).dropdown_menu(
                     move |menu, _, cx| {
                         let view = weak.clone();
-                        match weak.upgrade() {
-                            Some(this) => {
-                                let this = this.read(cx);
-                                let extra = this.is_extra_repo(g, cx);
-                                this.scm_menu(g, menu, view, extra)
-                            }
-                            None => menu,
-                        }
+                        let Some(this) = weak.upgrade() else {
+                            return menu;
+                        };
+                        let this = this.read(cx);
+                        // The list may have changed since this row was drawn.
+                        let Some(g) = this.group_of(&menu_repo) else {
+                            return menu;
+                        };
+                        let extra = this.is_extra_repo(g, cx);
+                        this.scm_menu(g, menu, view, extra)
                     },
-                ),
-            );
+                )
+            });
         // A status item: icon and caption text that wraps, with the same hover and pressed
         // colors as the icon buttons beside it (the list hover would vanish on a hovered row).
         let item = |id: (&'static str, usize), icon: IconName, text: Option<String>| {
@@ -566,7 +594,9 @@ impl Workbench {
                 gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
             })
             .on_click(cx.listener(move |this, _, _, cx| {
-                let group = &mut this.groups[g];
+                let Some(group) = this.groups.get_mut(g) else {
+                    return;
+                };
                 if group.expandable() {
                     group.expanded = !group.expanded;
                 }
@@ -760,7 +790,9 @@ impl Workbench {
             )
             .child(count_badge(count, colors))
             .on_click(cx.listener(move |this, _, _, cx| {
-                let group = &mut this.groups[g];
+                let Some(group) = this.groups.get_mut(g) else {
+                    return;
+                };
                 match side {
                     DiffSide::Staged => group.staged_collapsed = !group.staged_collapsed,
                     DiffSide::Worktree => group.changes_collapsed = !group.changes_collapsed,
@@ -820,7 +852,9 @@ impl Workbench {
             )
             .child(count_badge(ahead, colors))
             .on_click(cx.listener(move |this, _, _, cx| {
-                let group = &mut this.groups[g];
+                let Some(group) = this.groups.get_mut(g) else {
+                    return;
+                };
                 group.outgoing_collapsed = !group.outgoing_collapsed;
                 this.rebuild_rows();
                 cx.notify();

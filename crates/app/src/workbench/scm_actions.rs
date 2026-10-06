@@ -780,12 +780,18 @@ impl Workbench {
                             },
                         })
                         .collect();
-                    let placeholder = match action {
+                    let what = match action {
                         StashAction::Apply => "选择要应用的 stash",
                         StashAction::Pop => "选择要弹出的 stash（应用后删除）",
                         StashAction::Drop => "选择要删除的 stash",
                     };
-                    this.open_picker(items, placeholder.into(), "没有匹配的 stash", window, cx);
+                    let name = repo
+                        .worktree
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    let placeholder = format!("{what} · {name}");
+                    this.open_picker(items, placeholder, "没有匹配的 stash", window, cx);
                 }
                 Err(error) => {
                     this.message = format!("无法列出 stash：{error}");

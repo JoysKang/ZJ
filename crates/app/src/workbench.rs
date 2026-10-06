@@ -1993,11 +1993,15 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let g = &self.groups[group];
+        let Some(g) = self.groups.get(group) else {
+            return;
+        };
         let Some(Ok(status)) = &g.status else {
             return;
         };
-        let change = &status.changes[index];
+        let Some(change) = status.changes.get(index) else {
+            return;
+        };
         let request = Request {
             repo: g.repo.clone(),
             generation: self.generation,
