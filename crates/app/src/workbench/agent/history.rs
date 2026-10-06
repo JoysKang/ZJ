@@ -233,7 +233,15 @@ impl Workbench {
             return;
         };
         let (Some(id), Some(before)) = (session.db, session.oldest_seq) else {
-            // A live thread longer than the memory cap: reopen it from history.
+            // A live thread longer than the memory cap. Reopening it from history replaces
+            // the session, so only when that loses nothing: not while its agent runs, nor
+            // while its changes can still be reviewed (the snapshots live in the client).
+            if session.client.is_some() || !session.thread.changed_files.is_empty() {
+                self.message =
+                    "会话进行中，较早的消息请用 ⌘J 搜索；结束并审阅完改动后可从历史重新打开".into();
+                cx.notify();
+                return;
+            }
             if let Some(id) = session.db {
                 self.agent.sessions.retain(|s| s.key != key || s.busy());
                 if self.agent.session(key).is_none() {

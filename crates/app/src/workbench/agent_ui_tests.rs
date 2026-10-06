@@ -394,3 +394,35 @@ async fn a_stored_session_reopens_with_its_messages(cx: &mut TestAppContext) {
     );
     let _ = std::fs::remove_dir_all(data);
 }
+
+#[gpui_kit::test]
+async fn loading_older_messages_never_drops_a_live_session(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let data = temp_root("load-older");
+    let (handle, this) = open_with(
+        cx,
+        Some(data.clone()),
+        AgentStore {
+            history: Some(Arc::new(History::new(data.join("history.sqlite")))),
+            default_workspace: None,
+        },
+    );
+    send(cx, handle, &this, "echo hi");
+    settle(cx, &this);
+    until(cx, &this, "the session is in the history", |p| {
+        p.agent.current().is_some_and(|s| s.db.is_some())
+    });
+    let key = this.read_with(cx, |p, _| p.agent.current.unwrap());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.agent_load_older(window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    // Still the same live session, with its agent (and so its review snapshots).
+    this.read_with(cx, |p, _| {
+        let session = p.agent.session(key).expect("the live session stays");
+        assert!(session.client.is_some());
+        assert!(p.message.contains("会话进行中"), "{}", p.message);
+    });
+    let _ = std::fs::remove_dir_all(data);
+}
