@@ -1428,10 +1428,18 @@ impl Workbench {
     ) -> Option<DocumentId> {
         let this = self;
         let id = loaded.id;
+        // The same file: by path, or (a hard link) by the file the tab now has on disk. Not by
+        // the id a tab was opened with: Save As and atomic saves move a tab to another inode.
+        let same_file = |doc: &Document| {
+            doc.path == loaded.path
+                || doc.disk.is_some_and(|disk| {
+                    disk.stamp.device == id.device && disk.stamp.inode == id.inode
+                })
+        };
         if let Some(existing) = this
             .documents
             .iter()
-            .find(|doc| doc.id == id || doc.path == loaded.path)
+            .find(|doc| same_file(doc))
             .map(|doc| doc.id)
         {
             this.select_pane(Pane::Document(existing), window, cx);
@@ -1443,7 +1451,7 @@ impl Workbench {
             .owners
             .borrow()
             .iter()
-            .find(|(key, owner)| **key == id || owner.path == loaded.path)
+            .find(|(_, owner)| owner.path == loaded.path)
             .map(|(id, owner)| (*id, owner.clone()));
         if let Some((existing, owner)) = owner {
             if cx

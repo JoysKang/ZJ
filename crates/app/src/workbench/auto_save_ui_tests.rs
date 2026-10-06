@@ -255,3 +255,48 @@ async fn a_focused_editor_is_still_when_nothing_happens(cx: &mut TestAppContext)
     assert_eq!(repaints.get(), 0, "the idle editor repainted");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[gpui_kit::test]
+async fn after_save_as_the_original_file_opens_in_its_own_tab(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-save-as-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let (a, b) = (root.join("a.rs"), root.join("b.rs"));
+    std::fs::write(&a, "fn a() {}\n").unwrap();
+    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    wait(
+        cx,
+        Some(TICK),
+        None,
+        |cx| loaded(cx, &this),
+        |_| "never loaded".into(),
+    );
+    let open = |cx: &mut TestAppContext, path: PathBuf| {
+        let folder = Some(root.clone());
+        cx.update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| p.open_file(path, folder, window, cx));
+        })
+        .unwrap();
+    };
+    open(cx, a.clone());
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let id = this.read_with(cx, |p, _| p.documents[0].id);
+    let save = cx
+        .update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| p.write_as(id, b.clone(), window, cx))
+        })
+        .unwrap();
+    assert!(save.await);
+    assert_eq!(this.read_with(cx, |p, _| p.documents[0].path.clone()), b);
+    // a.rs is another file now: it opens beside b.rs instead of focusing it.
+    open(cx, a.clone());
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 2)
+    });
+    this.read_with(cx, |p, _| assert!(p.documents.iter().any(|d| d.path == a)));
+    let _ = std::fs::remove_dir_all(&root);
+}

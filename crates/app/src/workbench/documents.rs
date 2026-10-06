@@ -639,6 +639,16 @@ impl Workbench {
             cx.notify();
             return Task::ready(false);
         }
+        if self
+            .owners
+            .borrow()
+            .iter()
+            .any(|(key, owner)| *key != id && owner.path == path)
+        {
+            self.message = format!("「{}」已在另一个窗口中打开", path.display());
+            cx.notify();
+            return Task::ready(false);
+        }
         let Some(doc) = self.document(id) else {
             return Task::ready(false);
         };
