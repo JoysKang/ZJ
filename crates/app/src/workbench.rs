@@ -117,6 +117,9 @@ mod idle_ui_tests;
 #[path = "workbench/indent_ui_tests.rs"]
 mod indent_ui_tests;
 #[cfg(test)]
+#[path = "workbench/settings_ui_tests.rs"]
+mod settings_ui_tests;
+#[cfg(test)]
 #[path = "workbench/soft_wrap_ui_tests.rs"]
 mod soft_wrap_ui_tests;
 #[cfg(test)]
@@ -139,7 +142,8 @@ gpui_kit::actions!(
         ZoomOut,
         ZoomReset,
         ToggleHiddenFiles,
-        FindInFiles
+        FindInFiles,
+        OpenSettingsFile
     ]
 );
 
@@ -920,6 +924,59 @@ impl Workbench {
             }
         })
         .detach();
+    }
+
+    /// ⌘,: the settings file in a tab, written first if it does not exist yet. Saving it puts
+    /// it into effect (`apply_saved_settings`).
+    fn open_settings_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = crate::settings::Settings::path() else {
+            self.message = "找不到设置目录（HOME 未设置）".into();
+            cx.notify();
+            return;
+        };
+        let current = cx.global::<crate::settings::Settings>().clone();
+        let target = path.clone();
+        let written = cx.background_spawn(async move {
+            if target.exists() {
+                Ok(())
+            } else {
+                current.save_to(&target)
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = written.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(()) => this.open_file(path, None, window, cx),
+                Err(error) => {
+                    this.message = format!("没能创建设置文件：{error}");
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// A saved buffer that is the settings file: its text goes into effect in every window,
+    /// or the status bar says why not.
+    pub(super) fn apply_saved_settings(&mut self, id: DocumentId, cx: &mut Context<Self>) {
+        let Some(doc) = self.document(id) else {
+            return;
+        };
+        let is_settings = crate::settings::Settings::path()
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .is_some_and(|path| path == doc.path);
+        if !is_settings {
+            return;
+        }
+        let text = doc.editor.read(cx).text().to_string();
+        match crate::settings::Settings::parse(text.as_bytes()) {
+            Ok(settings) => {
+                crate::settings::apply(settings, cx);
+                self.message = "设置已生效".into();
+            }
+            Err(error) => self.message = format!("{error}；仍使用原来的设置"),
+        }
+        cx.notify();
     }
 
     /// Shows or hides dot files in every window's Explorer and quick open (⌘⇧.).
@@ -2109,6 +2166,9 @@ impl Render for Workbench {
             }))
             .on_action(cx.listener(|this, _: &OpenFolder, window, cx| {
                 this.choose_path(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettingsFile, window, cx| {
+                this.open_settings_file(window, cx);
             }))
             .on_action(cx.listener(|this, _: &Save, window, cx| this.save_active(window, cx)))
             .on_action(cx.listener(|this, _: &SaveAs, window, cx| this.save_active_as(window, cx)))

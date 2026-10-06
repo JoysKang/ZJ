@@ -499,6 +499,7 @@ impl Workbench {
         if was_deleted && let Some(parent) = path.parent() {
             self.relist_folder(parent.to_path_buf(), window, cx);
         }
+        self.apply_saved_settings(id, cx);
         notify_saved(path, cx);
         cx.notify();
     }

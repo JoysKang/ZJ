@@ -290,6 +290,16 @@ impl Settings {
         })
     }
 
+    /// Settings from the file the user edited by hand: unlike `load_from`, a file that does
+    /// not parse is an error, so a typo never puts the defaults into effect.
+    pub fn parse(bytes: &[u8]) -> Result<Self, String> {
+        match serde_json::from_slice::<Value>(bytes) {
+            Ok(value @ Value::Object(_)) => Ok(Self::from_json(&value)),
+            Ok(_) => Err("设置文件不是 JSON 对象".into()),
+            Err(error) => Err(format!("设置文件不是有效的 JSON：{error}")),
+        }
+    }
+
     /// Writes through a temporary file and a rename, so a crash never leaves half a file. Keys
     /// this version does not know are kept. A file that is not a JSON object is left alone and
     /// reported, so a typo made by hand never costs the rest of the settings.
@@ -342,6 +352,13 @@ fn save_in_order(
     Ok(())
 }
 
+/// Puts settings read from the file into effect in every window, without writing them back.
+pub fn apply(settings: Settings, cx: &mut gpui_kit::App) {
+    crate::theme::apply_editor_font(settings.editor_font_size, cx);
+    cx.set_global(settings);
+    cx.refresh_windows();
+}
+
 /// Changes the settings for every window and saves them in the background. Returns the
 /// receiver of the write result so the caller can show a failure.
 pub fn update(
@@ -365,6 +382,15 @@ pub fn update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hand_edited_files_parse_or_say_why() {
+        let parsed = Settings::parse(br#"{"editor_font_size": 18, "show_hidden": true}"#).unwrap();
+        assert_eq!(parsed.editor_font_size, 18.);
+        assert!(parsed.show_hidden);
+        assert!(Settings::parse(b"{ \"editor_font_size\": 18,").is_err());
+        assert!(Settings::parse(b"[]").is_err());
+    }
 
     #[test]
     fn tests_never_touch_the_users_settings_file() {

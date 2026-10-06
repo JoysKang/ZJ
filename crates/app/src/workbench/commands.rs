@@ -55,6 +55,7 @@ pub(super) const COMMANDS: &[Command] = &[
     command!("文件: 在 Finder 中显示活动文件", RevealActiveInFinder),
     command!("文件: 在资源管理器视图中显示", RevealActiveInExplorer),
     command!("文件: 退出 ZJ", Quit),
+    command!("首选项: 打开设置 (JSON)", OpenSettingsFile),
     command!("视图: 转到文件…", QuickOpenFile),
     command!("视图: 显示所有命令", ShowAllCommands),
     command!("视图: 切换主侧栏", ToggleSidebar),
