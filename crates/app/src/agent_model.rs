@@ -4,7 +4,7 @@
 
 use std::{ops::Range, path::PathBuf, time::Duration};
 use workspace_editor_agent::{
-    ConfigOption, Glyph, PromptPart, ToolCall, ToolContent, ToolKind, ToolStatus,
+    AgentCommand, ConfigOption, Glyph, PromptPart, ToolCall, ToolContent, ToolKind, ToolStatus,
     thread::{Item, Status, Thread, ToolCard},
 };
 use workspace_editor_agent_history::{Message, Role, SessionStatus, SessionSummary};
@@ -338,8 +338,40 @@ pub fn prompt_parts(text: &str, attachments: &[Attachment]) -> Vec<PromptPart> {
             },
         })
         .collect();
-    parts.push(PromptPart::Text(text.to_string()));
+    // Agents only run a `/command` when it is the first thing in the prompt.
+    if text.starts_with('/') {
+        parts.insert(0, PromptPart::Text(text.to_string()));
+    } else {
+        parts.push(PromptPart::Text(text.to_string()));
+    }
     parts
+}
+
+/// The `/command` being typed: the message starts with `/` and the cursor is still in its
+/// first word. Returns what follows the `/`.
+pub fn slash_at(text: &str, cursor: usize) -> Option<&str> {
+    text.strip_prefix('/')?;
+    let end = text.find(char::is_whitespace).unwrap_or(text.len());
+    (1..=end).contains(&cursor).then(|| &text[1..end])
+}
+
+/// The agent's commands matching `query`: names starting with it first, then names
+/// containing it.
+pub fn slash_matches<'a>(commands: &'a [AgentCommand], query: &str) -> Vec<&'a AgentCommand> {
+    let query = query.to_lowercase();
+    let (mut matches, rest): (Vec<_>, Vec<_>) = commands
+        .iter()
+        .filter(|c| c.name.to_lowercase().contains(&query))
+        .partition(|c| c.name.to_lowercase().starts_with(&query));
+    matches.extend(rest);
+    matches
+}
+
+/// The message with its first word replaced by `/name`, followed by a space for the
+/// arguments.
+pub fn with_command(text: &str, name: &str) -> String {
+    let end = text.find(char::is_whitespace).unwrap_or(text.len());
+    format!("/{name} {}", text[end..].trim_start())
 }
 
 /// The model button's label: the current choice of each setting, e.g. "Opus · High".
@@ -599,6 +631,62 @@ mod tests {
         assert_eq!(mention_at("@", 1), Some((0..1, String::new())));
         assert_eq!(mention_at("mail a@b", 8), None);
         assert_eq!(mention_at("@a b", 4), None);
+    }
+
+    #[test]
+    fn the_model_button_shows_the_current_choices() {
+        let configs = [
+            ConfigOption {
+                id: "model".into(),
+                name: "Model".into(),
+                current: "opus".into(),
+                values: vec![
+                    ("sonnet".into(), "Sonnet".into()),
+                    ("opus".into(), "Opus".into()),
+                ],
+            },
+            ConfigOption {
+                id: "effort".into(),
+                name: "Effort".into(),
+                current: "max".into(),
+                values: vec![("high".into(), "High".into())],
+            },
+        ];
+        assert_eq!(config_label(&configs), "Opus · max");
+    }
+
+    #[test]
+    fn slash_commands_are_completed_and_sent_first() {
+        assert_eq!(slash_at("/rev", 4), Some("rev"));
+        assert_eq!(slash_at("/", 1), Some(""));
+        assert_eq!(slash_at("/review src", 3), Some("review"));
+        assert_eq!(slash_at("/review src", 9), None);
+        assert_eq!(slash_at("a /b", 4), None);
+        assert_eq!(slash_at("/rev", 0), None);
+        let command = |name: &str| AgentCommand {
+            name: name.into(),
+            description: String::new(),
+            input_hint: None,
+        };
+        let commands = [command("pr-review"), command("compact"), command("review")];
+        let names: Vec<&str> = slash_matches(&commands, "Rev")
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, ["review", "pr-review"]);
+        assert_eq!(slash_matches(&commands, "").len(), 3);
+        assert_eq!(with_command("/rev", "review"), "/review ");
+        assert_eq!(with_command("/rev  src/a.rs", "review"), "/review src/a.rs");
+        let file = Attachment::File("/w/a.rs".into());
+        assert!(matches!(
+            prompt_parts("/review", std::slice::from_ref(&file)).first(),
+            Some(PromptPart::Text(t)) if t == "/review"
+        ));
+        assert!(matches!(
+            prompt_parts("look", &[file]).first(),
+            Some(PromptPart::File(_))
+        ));
+
         assert_eq!(
             mark_ranges("修复重连后序列号缺口", "重连 缺口"),
             vec![6..12, 24..30]
@@ -717,27 +805,5 @@ mod tests {
             true,
         );
         assert!(quiet_note(&thread, secs(60)).is_some());
-    }
-
-    #[test]
-    fn the_model_button_shows_the_current_choices() {
-        let configs = [
-            ConfigOption {
-                id: "model".into(),
-                name: "Model".into(),
-                current: "opus".into(),
-                values: vec![
-                    ("sonnet".into(), "Sonnet".into()),
-                    ("opus".into(), "Opus".into()),
-                ],
-            },
-            ConfigOption {
-                id: "effort".into(),
-                name: "Effort".into(),
-                current: "max".into(),
-                values: vec![("high".into(), "High".into())],
-            },
-        ];
-        assert_eq!(config_label(&configs), "Opus · max");
     }
 }

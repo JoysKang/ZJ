@@ -1,4 +1,5 @@
-//! The composer's context: selections, attachments and the @ file picker.
+//! The composer's context: selections, attachments, the @ file picker and the / command
+//! picker.
 
 use super::*;
 
@@ -71,6 +72,11 @@ impl Workbench {
             let composer = self.agent.composer.read(cx);
             (composer.value().to_string(), composer.cursor())
         };
+        let slash = agent_model::slash_at(&text, cursor).map(|_| 0);
+        if slash != self.agent.slash {
+            self.agent.slash = slash;
+            cx.notify();
+        }
         let Some((range, query)) = agent_model::mention_at(&text, cursor) else {
             if self.agent.mention.take().is_some() {
                 cx.notify();
@@ -182,6 +188,60 @@ impl Workbench {
 
     pub(in crate::workbench) fn agent_close_mention(&mut self, cx: &mut Context<Self>) {
         if self.agent.mention.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The current agent's commands matching the `/command` being typed (as many as are
+    /// shown).
+    pub(in crate::workbench) fn agent_slash_matches(&self, cx: &App) -> Vec<AgentCommand> {
+        let composer = self.agent.composer.read(cx);
+        let text = composer.value();
+        let Some(query) = agent_model::slash_at(&text, composer.cursor()) else {
+            return Vec::new();
+        };
+        let commands = self.agent.current().map_or(&[][..], |s| &s.thread.commands);
+        agent_model::slash_matches(commands, query)
+            .into_iter()
+            .take(theme::AGENT_MENTION_ROWS)
+            .cloned()
+            .collect()
+    }
+
+    pub(in crate::workbench) fn agent_move_slash(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.agent_slash_matches(cx).len();
+        if let Some(selected) = self.agent.slash.as_mut()
+            && count > 0
+        {
+            *selected = selected.saturating_add_signed(delta).min(count - 1);
+            cx.notify();
+        }
+    }
+
+    /// Replaces the first word with the picked `/command`.
+    pub(in crate::workbench) fn agent_pick_slash(
+        &mut self,
+        index: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(selected) = self.agent.slash.take() else {
+            return;
+        };
+        if let Some(command) = self.agent_slash_matches(cx).get(index.unwrap_or(selected)) {
+            let text = self.agent.composer.read(cx).value().to_string();
+            let next = agent_model::with_command(&text, &command.name);
+            self.agent
+                .composer
+                .update(cx, |composer, cx| composer.set_value(next, window, cx));
+            self.agent.slash = None;
+        }
+        self.agent_focus_composer(window, cx);
+        cx.notify();
+    }
+
+    pub(in crate::workbench) fn agent_close_slash(&mut self, cx: &mut Context<Self>) {
+        if self.agent.slash.take().is_some() {
             cx.notify();
         }
     }

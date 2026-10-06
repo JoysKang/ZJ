@@ -15,7 +15,8 @@ use crate::agent_model::{self, Attachment};
 use crate::markdown::{self, Block};
 use gpui_kit::component::input::InputState;
 use workspace_editor_agent::{
-    AgentClient, AgentEvent, AgentPreset, ClientOptions, PermissionKind, builtin_presets,
+    AgentClient, AgentCommand, AgentEvent, AgentPreset, ClientOptions, PermissionKind,
+    builtin_presets,
     review::{line_counts, resolve_file, review_texts},
     thread::{self as agent_thread, FileChange, Item, PermissionState, Record, Thread},
 };
@@ -269,6 +270,8 @@ pub(super) struct AgentPanel {
     pub attachments: Vec<Attachment>,
     pub mention: Option<Mention>,
     mention_generation: u64,
+    /// The selected row of the `/` command picker, while the message starts with a command.
+    pub slash: Option<usize>,
     pub history: HistoryList,
     pub search: Option<super::agent_search::SessionSearch>,
     pub thread_list: ListState,
@@ -332,6 +335,7 @@ impl AgentPanel {
             attachments: Vec::new(),
             mention: None,
             mention_generation: 0,
+            slash: None,
             history: HistoryList {
                 rows: Vec::new(),
                 grouped: Vec::new(),
@@ -539,6 +543,7 @@ impl Workbench {
         self.agent_reclaim_idle(cx);
         self.agent.attachments.clear();
         self.agent.mention = None;
+        self.agent.slash = None;
         self.agent_sync_list(true);
         self.agent_show(AgentView::Thread, window, cx);
     }

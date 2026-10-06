@@ -125,6 +125,71 @@ async fn mention_without_a_folder_says_so(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn slash_commands_complete_and_model_settings_switch(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("slash");
+    let (handle, this) = open(cx, Some(root.clone()));
+    let typed = |cx: &mut TestAppContext, text: &str| {
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |this, cx| {
+                this.agent_focus_composer(window, cx);
+                this.agent
+                    .composer
+                    .update(cx, |c, cx| c.set_value("", window, cx));
+            });
+            window.input(text, cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+    };
+    // The agent has not started: no list yet, and ⏎ is not taken from the composer.
+    typed(cx, "/re");
+    this.read_with(cx, |p, cx| {
+        assert_eq!(p.agent.slash, Some(0));
+        assert!(p.agent_slash_matches(cx).is_empty());
+    });
+    typed(cx, "");
+    send(cx, handle, &this, "echo hi");
+    settle(cx, &this);
+    typed(cx, "/re");
+    this.read_with(cx, |p, cx| {
+        let names: Vec<String> = p
+            .agent_slash_matches(cx)
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, ["review"]);
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press("enter", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    assert_eq!(sent(cx, &this).1, "/review ");
+    this.read_with(cx, |p, _| assert_eq!(p.agent.slash, None));
+
+    // Model and effort are offered; the mode option is left to the mode menu.
+    this.read_with(cx, |p, _| {
+        let configs = &p.agent.current().unwrap().thread.configs;
+        let ids: Vec<&str> = configs.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["model", "effort"]);
+        assert_eq!(agent_model::config_label(configs), "SONNET · HIGH");
+    });
+    this.update(cx, |p, cx| {
+        p.agent_set_config("model".into(), "opus".into(), cx)
+    });
+    until(cx, &this, "the model switched", |p| {
+        p.agent.current().is_some_and(|s| {
+            s.thread
+                .configs
+                .first()
+                .is_some_and(|c| c.current == "opus")
+        })
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
 async fn enter_sends_every_turn(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = temp_root("send");

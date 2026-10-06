@@ -29,6 +29,11 @@ impl Workbench {
             self.agent_pick_mention(None, window, cx);
             return;
         }
+        // ⏎ in the `/` picker completes the command; with nothing listed it sends as typed.
+        if self.agent.slash.is_some() && !self.agent_slash_matches(cx).is_empty() {
+            self.agent_pick_slash(None, window, cx);
+            return;
+        }
         let text = self.agent.composer.read(cx).value().trim().to_string();
         if text.is_empty() {
             return;

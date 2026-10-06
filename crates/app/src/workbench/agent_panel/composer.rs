@@ -1,4 +1,4 @@
-//! The composer: attachments, the input, the toolbar and the @ file picker.
+//! The composer: attachments, the input, the toolbar and the @ file and / command pickers.
 
 use super::*;
 
@@ -190,6 +190,18 @@ impl Workbench {
                     cx.stop_propagation();
                     return;
                 }
+                if this.agent.slash.is_some() {
+                    let any = !this.agent_slash_matches(cx).is_empty();
+                    match key {
+                        "up" if any => this.agent_move_slash(-1, cx),
+                        "down" if any => this.agent_move_slash(1, cx),
+                        "tab" if plain && any => this.agent_pick_slash(None, window, cx),
+                        "escape" => this.agent_close_slash(cx),
+                        _ => return,
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 // With an empty composer, ⏎ allows once and Esc rejects the pending request.
                 let empty = this.agent.composer.read(cx).value().trim().is_empty();
                 if !empty || !plain {
@@ -308,7 +320,8 @@ impl Workbench {
                     })
                     .child(send),
             )
-            .children(self.render_mention_picker(cx));
+            .children(self.render_mention_picker(cx))
+            .children(self.render_slash_picker(cx));
         composer.into_any_element()
     }
 
@@ -392,6 +405,100 @@ impl Workbench {
                         )
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.agent_pick_mention(Some(i), window, cx)
+                        }))
+                        .into_any_element()
+                })
+                .collect()
+        };
+        Some(
+            v_flex()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_full()
+                .mb_1()
+                .p_1()
+                .rounded(theme::RADIUS_LARGE)
+                .border_1()
+                .border_color(colors.strong_border)
+                .bg(colors.panel)
+                .shadow_lg()
+                .occlude()
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    /// The agent's commands while the message starts with `/` (empty until the agent has
+    /// started once).
+    pub(super) fn render_slash_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let selected = self.agent.slash?;
+        let colors = theme::colors(cx);
+        let matches = self.agent_slash_matches(cx);
+        let rows: Vec<AnyElement> = if matches.is_empty() {
+            let started = self
+                .agent
+                .current()
+                .is_some_and(|s| !s.thread.commands.is_empty());
+            let hint = if started {
+                "没有匹配的命令"
+            } else {
+                "发送第一条消息后可以补全命令，也可以直接输入完整命令发送"
+            };
+            vec![
+                div()
+                    .px_3()
+                    .h(theme::ROW_HEIGHT)
+                    .flex()
+                    .items_center()
+                    .text_size(theme::TEXT_CAPTION)
+                    .text_color(colors.muted)
+                    .child(hint)
+                    .into_any_element(),
+            ]
+        } else {
+            matches
+                .into_iter()
+                .enumerate()
+                .map(|(i, command)| {
+                    let selected = i == selected;
+                    let detail = match &command.input_hint {
+                        Some(hint) if command.description.is_empty() => hint.clone(),
+                        Some(hint) => format!("{} · {hint}", command.description),
+                        None => command.description.clone(),
+                    };
+                    h_flex()
+                        .id(("agent-slash", i))
+                        .h(theme::ROW_HEIGHT)
+                        .px_2()
+                        .gap_2()
+                        .rounded(theme::RADIUS)
+                        .text_size(theme::TEXT_CAPTION)
+                        .cursor_pointer()
+                        .map(|row| {
+                            if selected {
+                                row.bg(colors.selected).text_color(colors.selected_fg)
+                            } else {
+                                row.hover(|row| row.bg(colors.hover))
+                            }
+                        })
+                        .child(div().flex_shrink_0().child(format!("/{}", command.name)))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(theme::TEXT_SECTION)
+                                .text_color(if selected {
+                                    colors.selected_fg
+                                } else {
+                                    colors.muted
+                                })
+                                .child(detail),
+                        )
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.agent_pick_slash(Some(i), window, cx)
                         }))
                         .into_any_element()
                 })
