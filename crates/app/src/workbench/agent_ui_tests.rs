@@ -260,14 +260,11 @@ async fn a_permission_waits_for_the_user_and_allow_once_continues(cx: &mut TestA
     .unwrap();
     settle(cx, &this);
     assert!(replies(cx, &this).contains("selected:allow"));
-    // Allowing once adds no rule.
-    let rules = cx.read(|cx| cx.global::<crate::settings::Settings>().agent.allow.clone());
-    assert!(rules.is_empty(), "{rules:?}");
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[gpui_kit::test]
-async fn always_allow_saves_a_rule_that_answers_the_next_request(cx: &mut TestAppContext) {
+async fn always_allow_picks_the_agents_own_option_and_zj_keeps_no_rule(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = temp_root("permission-always");
     let (handle, this) = open(cx, Some(root.clone()));
@@ -278,27 +275,18 @@ async fn always_allow_saves_a_rule_that_answers_the_next_request(cx: &mut TestAp
     let (key, id) = this.read_with(cx, |p, _| pending_permission(p).unwrap());
     cx.update_window(handle.into(), |_, window, cx| {
         this.update(cx, |p, cx| {
-            p.agent_answer(
-                key,
-                id,
-                PermissionChoice::Always("cargo test".into()),
-                window,
-                cx,
-            )
+            p.agent_answer(key, id, PermissionChoice::Always, window, cx)
         });
     })
     .unwrap();
     settle(cx, &this);
-    let rules = cx.read(|cx| cx.global::<crate::settings::Settings>().agent.allow.clone());
-    assert_eq!(
-        rules.get(&root.display().to_string()),
-        Some(&vec!["cargo test".to_string()]),
-        "{rules:?}"
-    );
-    // The same command again is answered by the rule: the session never waits.
+    // The agent got its own "always allow" option and remembers it itself.
+    assert!(replies(cx, &this).contains("selected:allow_always"));
+    // ZJ answers nothing on its own: the same request asks again.
     send(cx, handle, &this, "permission");
-    settle(cx, &this);
-    assert_eq!(replies(cx, &this).matches("selected:allow").count(), 2);
+    until(cx, &this, "the second request waits for the user", |p| {
+        pending_permission(p).is_some()
+    });
     let _ = std::fs::remove_dir_all(root);
 }
 

@@ -343,18 +343,6 @@ impl Workbench {
             && self.agent.current == Some(key)
             && self.agent.view == AgentView::Thread
             && window.is_window_active();
-        let rules: Vec<String> = self
-            .agent
-            .session(key)
-            .and_then(|s| s.root.as_ref())
-            .and_then(|root| {
-                cx.global::<crate::settings::Settings>()
-                    .agent
-                    .allow
-                    .get(&root.to_string_lossy().into_owned())
-                    .cloned()
-            })
-            .unwrap_or_default();
         let store = history(cx);
         let mut written = Vec::new();
         let mut recount = false;
@@ -370,24 +358,10 @@ impl Workbench {
         for event in &batch {
             session.thread.apply(event, visible);
             match event {
-                AgentEvent::PermissionRequested(request) => {
-                    if agent_thread::rule_matches(request, &rules)
-                        && let Some(option) = request
-                            .options
-                            .iter()
-                            .find(|o| o.kind == PermissionKind::AllowOnce)
-                        && let Some(client) = &session.client
-                        && client.respond_permission(request.id, Some(option.id.clone()))
-                    {
-                        let command = agent_thread::permission_command(request).unwrap_or_default();
-                        eprintln!("event=agent_permission_rule agent={}", session.preset.id);
-                        session.thread.answer_permission(
-                            request.id,
-                            PermissionState::Rule(agent_thread::command_prefix(&command)),
-                        );
-                    } else {
-                        eprintln!("event=agent_permission_asked agent={}", session.preset.id);
-                    }
+                AgentEvent::PermissionRequested(_) => {
+                    // Every request is the user's to answer; the agent keeps its own
+                    // "always allow" rules (ADR 0004).
+                    eprintln!("event=agent_permission_asked agent={}", session.preset.id);
                 }
                 AgentEvent::FileWritten { path } => {
                     written.push(path.clone());

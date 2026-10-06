@@ -36,8 +36,6 @@ pub struct AgentSettings {
     /// agent id → variable → `$NAME` | `keychain:ACCOUNT`.
     pub env: BTreeMap<String, BTreeMap<String, String>>,
     pub custom: Vec<UserAgentConfig>,
-    /// Workspace root → "始终允许" command prefixes.
-    pub allow: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for AgentSettings {
@@ -49,7 +47,6 @@ impl Default for AgentSettings {
             idle_minutes: AGENT_IDLE_DEFAULT,
             env: BTreeMap::new(),
             custom: Vec::new(),
-            allow: BTreeMap::new(),
         }
     }
 }
@@ -122,25 +119,6 @@ impl AgentSettings {
                         .collect()
                 })
                 .unwrap_or_default(),
-            allow: value
-                .get("allow")
-                .and_then(Value::as_object)
-                .map(|o| {
-                    o.iter()
-                        .map(|(k, v)| {
-                            let rules = v
-                                .as_array()
-                                .map(|a| {
-                                    a.iter()
-                                        .filter_map(|r| r.as_str().map(str::to_string))
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            (k.clone(), rules)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
         }
     }
 
@@ -158,7 +136,6 @@ impl AgentSettings {
                 "args": agent.args,
                 "env": agent.env,
             })).collect::<Vec<_>>(),
-            "allow": self.allow,
         })
     }
 }
@@ -450,7 +427,6 @@ mod tests {
                     args: vec!["acp".into()],
                     env: BTreeMap::new(),
                 }],
-                allow: BTreeMap::from([("/w".into(), vec!["cargo test".into()])]),
             },
             auto_save: crate::save::AutoSave::AfterDelay,
             extra_repos: BTreeMap::from([("/w".into(), vec!["/w/deep/repo".into()])]),

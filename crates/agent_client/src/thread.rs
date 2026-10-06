@@ -41,8 +41,6 @@ pub enum PermissionState {
     Pending,
     /// Answered with this option (its kind decides the card's color).
     Answered(PermissionKind, String),
-    /// Answered by a stored "always allow" rule.
-    Rule(String),
     Cancelled,
 }
 
@@ -210,40 +208,6 @@ pub fn permission_command(request: &PermissionRequest) -> Option<String> {
     let title = request.tool_call.title.as_deref()?.trim();
     let title = title.trim_matches('`').trim();
     (!title.is_empty()).then(|| title.to_string())
-}
-
-/// The "始终允许" prefix for a command: its first two words (`cargo test`, `npm run`), or the
-/// first word when that is all there is.
-pub fn command_prefix(command: &str) -> String {
-    command
-        .split_whitespace()
-        .take(2)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Whether a stored rule covers this request. Only command executions can be allowed by rule;
-/// edits always ask.
-pub fn rule_matches(request: &PermissionRequest, rules: &[String]) -> bool {
-    if request.tool_call.kind != Some(ToolKind::Execute) {
-        return false;
-    }
-    let Some(command) = permission_command(request) else {
-        return false;
-    };
-    // Chained or substituted commands never match a prefix rule.
-    // `&` also covers `&&` and background jobs; `|` covers `||`.
-    if ["&", "|", ";", "`", "$(", ">", "<", "\n", "\r"]
-        .iter()
-        .any(|s| command.contains(s))
-    {
-        return false;
-    }
-    let words: Vec<&str> = command.split_whitespace().collect();
-    rules.iter().any(|rule| {
-        let rule: Vec<&str> = rule.split_whitespace().collect();
-        !rule.is_empty() && words.len() >= rule.len() && words[..rule.len()] == rule[..]
-    })
 }
 
 impl Thread {
@@ -933,34 +897,5 @@ mod tests {
         }]);
         assert_eq!(t.items.len(), MAX_ITEMS);
         assert_eq!(t.dropped, MAX_ITEMS - 1);
-    }
-
-    #[test]
-    fn prefix_rules_only_cover_plain_commands() {
-        let rules = vec![command_prefix("cargo test --test reconnect")];
-        assert_eq!(rules[0], "cargo test");
-        let ok = request(1, "`cargo test -p zj`", ToolKind::Execute);
-        assert!(rule_matches(&ok, &rules));
-        for title in [
-            "cargo testing",
-            "cargo build",
-            "cargo test && rm -rf /",
-            "cargo test & rm -rf ~",
-            "cargo test || curl x",
-            "cargo test\rrm -rf ~",
-            "cargo test; curl x",
-            "cargo test $(whoami)",
-        ] {
-            assert!(
-                !rule_matches(&request(2, title, ToolKind::Execute), &rules),
-                "{title}"
-            );
-        }
-        // Edits never match a rule.
-        assert!(!rule_matches(
-            &request(3, "cargo test", ToolKind::Edit),
-            &rules
-        ));
-        assert!(!rule_matches(&request(4, "", ToolKind::Execute), &rules));
     }
 }

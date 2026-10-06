@@ -187,6 +187,11 @@ async fn run_prompt(
                         acp::PermissionOptionKind::AllowOnce,
                     ),
                     acp::PermissionOption::new(
+                        "allow_always",
+                        "Always allow",
+                        acp::PermissionOptionKind::AllowAlways,
+                    ),
+                    acp::PermissionOption::new(
                         "reject",
                         "Reject",
                         acp::PermissionOptionKind::RejectOnce,

@@ -143,11 +143,6 @@ impl Workbench {
                         .child(line)
                 }))
         });
-        let rules = self
-            .agent_workspace(cx)
-            .and_then(|root| settings.allow.get(&root.to_string_lossy().into_owned()))
-            .cloned()
-            .unwrap_or_default();
         v_flex()
             .id("agent-settings")
             .flex_1()
@@ -158,38 +153,6 @@ impl Workbench {
             .child(section("会话"))
             .child(line("新会话默认使用", default_agent.into_any_element()))
             .child(line("空闲多久后停止 Agent 进程", idle.into_any_element()))
-            .child(section("此工作区的始终允许"))
-            .when(rules.is_empty(), |s| {
-                s.child(
-                    div()
-                        .text_size(theme::TEXT_SECTION)
-                        .text_color(colors.muted)
-                        .child("还没有规则。审批卡上的“始终允许”只对这个工作区的同一命令前缀生效；带 && ; | 等的命令每次都会询问。"),
-                )
-            })
-            .children(rules.into_iter().enumerate().map(|(i, rule)| {
-                let remove = rule.clone();
-                h_flex()
-                    .h(theme::AGENT_FILE_ROW)
-                    .gap_2()
-                    .text_size(theme::TEXT_CAPTION)
-                    .child(
-                        div()
-                            .flex_1()
-                            .font_family(gpui_kit::component::Theme::global(cx).mono_font_family.clone())
-                            .child(rule),
-                    )
-                    .child(
-                        Button::new(("agent-rule-remove", i))
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Close)
-                            .tooltip("移除规则")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.agent_remove_rule(remove.clone(), window, cx)
-                            })),
-                    )
-            }))
             .child(section("Agent 与环境变量"))
             .children(agents)
             .child(

@@ -137,7 +137,7 @@ fn a_crash_shows_a_notice_and_an_error_status() {
 fn a_full_turn_reviews_hunk_by_hunk() {
     use workspace_editor_agent::{
         review::{STALE_REVIEW, full_context_patch, resolve_file, resolve_hunk, review_texts},
-        thread::{command_prefix, permission_command, rule_matches},
+        thread::permission_command,
     };
     let root = std::env::temp_dir().join(format!("zj-thread-demo-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
@@ -205,8 +205,6 @@ fn a_full_turn_reviews_hunk_by_hunk() {
     assert_eq!(thread.status, Status::Awaiting);
     let command = permission_command(&request).unwrap();
     assert_eq!(command, "cargo test --test reconnect -- --nocapture");
-    assert!(!rule_matches(&request, &[]));
-    assert!(rule_matches(&request, &[command_prefix(&command)]));
     assert_eq!(thread.changed_files.len(), 2);
     assert!(
         thread

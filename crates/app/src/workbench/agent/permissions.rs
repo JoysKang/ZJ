@@ -1,4 +1,4 @@
-//! Permission requests and 始终允许 rules, session modes and following the settings.
+//! Permission requests, session modes and following the settings.
 
 use super::*;
 
@@ -16,7 +16,6 @@ impl Workbench {
         let Some(session) = self.agent.session_mut(key) else {
             return;
         };
-        let root = session.root.clone();
         let Some(card) = session
             .thread
             .pending_permissions()
@@ -47,12 +46,13 @@ impl Workbench {
                 allow.map(|o| o.id.clone()),
                 PermissionState::Answered(PermissionKind::AllowOnce, "已允许一次".into()),
             ),
-            PermissionChoice::Always(prefix) => (
-                allow.map(|o| o.id.clone()),
-                PermissionState::Answered(
-                    PermissionKind::AllowAlways,
-                    format!("已始终允许 {prefix}"),
-                ),
+            // The agent's own "always allow": it decides what the rule covers.
+            PermissionChoice::Always => (
+                options
+                    .iter()
+                    .find(|o| o.kind == PermissionKind::AllowAlways)
+                    .map(|o| o.id.clone()),
+                PermissionState::Answered(PermissionKind::AllowAlways, "已始终允许".into()),
             ),
             PermissionChoice::Reject => (
                 reject.map(|o| o.id.clone()),
@@ -68,19 +68,10 @@ impl Workbench {
             session.preset.id,
             match choice {
                 PermissionChoice::Once => "once",
-                PermissionChoice::Always(_) => "always",
+                PermissionChoice::Always => "always",
                 PermissionChoice::Reject => "reject",
             }
         );
-        if let (PermissionChoice::Always(prefix), Some(root)) = (choice, root) {
-            let root = root.to_string_lossy().into_owned();
-            self.change_settings(window, cx, move |s| {
-                let rules = s.agent.allow.entry(root).or_default();
-                if !rules.contains(&prefix) {
-                    rules.push(prefix);
-                }
-            });
-        }
         self.agent_sync_list(false);
         self.agent_update_spin(window, cx);
         cx.notify();
@@ -116,26 +107,6 @@ impl Workbench {
         }
     }
 
-    pub(in crate::workbench) fn agent_remove_rule(
-        &mut self,
-        rule: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(root) = self
-            .agent_workspace(cx)
-            .map(|r| r.to_string_lossy().into_owned())
-        else {
-            return;
-        };
-        self.change_settings(window, cx, move |s| {
-            if let Some(rules) = s.agent.allow.get_mut(&root) {
-                rules.retain(|r| *r != rule);
-            }
-        });
-        cx.notify();
-    }
-
     // ----- modes and settings -------------------------------------------------------------
 
     pub(in crate::workbench) fn agent_set_mode(&mut self, mode: String, cx: &mut Context<Self>) {
@@ -162,6 +133,7 @@ impl Workbench {
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::workbench) enum PermissionChoice {
     Once,
-    Always(String),
+    /// The agent's own "always allow" option (offered only when the agent has one).
+    Always,
     Reject,
 }

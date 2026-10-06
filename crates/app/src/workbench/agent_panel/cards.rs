@@ -445,11 +445,6 @@ impl Workbench {
                     PermissionState::Answered(_, label) => {
                         (IconName::ShieldCheck, colors.added, label.clone())
                     }
-                    PermissionState::Rule(rule) => (
-                        IconName::ShieldCheck,
-                        colors.added,
-                        format!("按规则自动允许「{rule}」"),
-                    ),
                     PermissionState::Cancelled => {
                         (IconName::Ban, colors.muted, "请求已取消".to_string())
                     }
@@ -479,9 +474,10 @@ impl Workbench {
         }
         let key = session.key;
         let id = request.id;
-        let prefix = (kind == Some(ToolKind::Execute))
-            .then(|| workspace_editor_agent::thread::command_prefix(&command))
-            .filter(|p| !p.is_empty());
+        let offers_always = request
+            .options
+            .iter()
+            .any(|o| o.kind == PermissionKind::AllowAlways);
         let heading = match kind {
             Some(ToolKind::Execute) => format!("{agent} 请求运行命令"),
             Some(ToolKind::Edit) | Some(ToolKind::Delete) | Some(ToolKind::Move) => {
@@ -517,25 +513,14 @@ impl Workbench {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.agent_answer(key, id, PermissionChoice::Once, window, cx)
             }));
-        let always = prefix.clone().map(|prefix| {
-            let label = if compact {
-                "始终".to_string()
-            } else {
-                format!("始终允许 {prefix}")
-            };
+        let always = offers_always.then(|| {
             Button::new(("agent-allow-always", id))
                 .outline()
                 .xsmall()
-                .label(label)
-                .tooltip("只对这个工作区生效；保存在设置里，可在 Agent 设置中移除")
+                .label(if compact { "始终" } else { "始终允许" })
+                .tooltip(format!("由 {agent} 记住这类请求，通常在本会话内有效"))
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.agent_answer(
-                        key,
-                        id,
-                        PermissionChoice::Always(prefix.clone()),
-                        window,
-                        cx,
-                    )
+                    this.agent_answer(key, id, PermissionChoice::Always, window, cx)
                 }))
         });
         let reject = Button::new(("agent-reject", id))
