@@ -301,9 +301,16 @@ fn memchr_count(bytes: &[u8]) -> usize {
 /// that are not UTF-8 are shown lossily; ranges that no longer line up are dropped.
 fn preview_line(text: &[u8], matches: &[Range<usize>]) -> (String, Vec<Range<usize>>) {
     let text = text.strip_suffix(b"\r").unwrap_or(text);
-    let first = matches.first().map_or(0, |r| r.start).min(text.len());
+    // Work in the decoded line: an invalid byte becomes a 3-byte U+FFFD there, so the match
+    // offsets move with it.
+    let (lossy, to_lossy) = decode_lossy(text);
+    let matches: Vec<Range<usize>> = matches
+        .iter()
+        .map(|r| to_lossy(r.start.min(text.len()))..to_lossy(r.end.min(text.len())))
+        .collect();
+    let matches = matches.as_slice();
+    let first = matches.first().map_or(0, |r| r.start);
     // Keep a little context before the first match, starting at a character boundary.
-    let lossy = String::from_utf8_lossy(text);
     let lead_bytes = lossy[..first.min(lossy.len())]
         .char_indices()
         .rev()
@@ -346,6 +353,49 @@ fn preview_line(text: &[u8], matches: &[Range<usize>]) -> (String, Vec<Range<usi
     (preview, ranges)
 }
 
+/// The line decoded lossily, and a map from a byte offset in `bytes` to the matching offset
+/// in the decoded text (an offset inside an invalid sequence maps to its replacement).
+fn decode_lossy(bytes: &[u8]) -> (String, impl Fn(usize) -> usize) {
+    let mut text = String::with_capacity(bytes.len());
+    // (offset in `bytes`, offset in `text`) where each invalid sequence starts and ends.
+    let mut breaks: Vec<(usize, usize, usize)> = Vec::new();
+    let mut rest = bytes;
+    let mut at = 0;
+    loop {
+        match std::str::from_utf8(rest) {
+            Ok(valid) => {
+                text.push_str(valid);
+                break;
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                // The first `valid_up_to` bytes are valid UTF-8.
+                text.push_str(std::str::from_utf8(&rest[..valid]).unwrap_or_default());
+                let bad = error.error_len().unwrap_or(rest.len() - valid);
+                breaks.push((at + valid, at + valid + bad, text.len()));
+                text.push(char::REPLACEMENT_CHARACTER);
+                at += valid + bad;
+                rest = &rest[valid + bad..];
+            }
+        }
+    }
+    let map = move |offset: usize| {
+        // Each invalid sequence before `offset` changes the length by 3 − its byte count.
+        let mut lossy = offset as isize;
+        for &(start, end, replaced) in &breaks {
+            if offset < start {
+                break;
+            }
+            if offset < end {
+                return replaced;
+            }
+            lossy += 3 - (end - start) as isize;
+        }
+        lossy.max(0) as usize
+    };
+    (text, map)
+}
+
 /// Searches `files` (workspace-relative) under `root` with a few threads, appending to
 /// `progress` as files finish, until done, cancelled or [`MAX_MATCHES`] is reached.
 pub fn run(
@@ -355,6 +405,14 @@ pub fn run(
     progress: &Progress,
     cancel: &AtomicBool,
 ) {
+    // Marks the search done however it ends, so the view never polls a search that died.
+    struct Finished<'a>(&'a AtomicBool);
+    impl Drop for Finished<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+    let _finished = Finished(&progress.done);
     let queue = Mutex::new(files.into_iter());
     let threads = std::thread::available_parallelism().map_or(2, |n| n.get().clamp(2, 4));
     std::thread::scope(|scope| {
@@ -419,7 +477,6 @@ pub fn run(
             });
         }
     });
-    progress.done.store(true, Ordering::Relaxed);
 }
 
 /// Every file below `root` except `.git` and symlinks, for searching with excludes off.
@@ -554,6 +611,20 @@ mod tests {
                 && lines[0].preview.chars().count() <= PREVIEW_MAX + 1
         );
         assert_eq!(&lines[0].preview[lines[0].ranges[0].clone()], "needle");
+    }
+
+    #[test]
+    fn previews_of_lines_that_are_not_utf8_keep_their_matches() {
+        // "中文 hello" in GBK: four invalid bytes for UTF-8, then ASCII.
+        let line = b"\xd6\xd0\xce\xc4 hello";
+        let (preview, ranges) = preview_line(line, std::slice::from_ref(&(5..10)));
+        assert_eq!(&preview[ranges[0].clone()], "hello");
+        // Matches right after lone invalid bytes.
+        let (preview, ranges) = preview_line(b"\xe9a \xe9b", &[1..2, 4..5]);
+        assert_eq!(&preview[ranges[0].clone()], "a");
+        assert_eq!(&preview[ranges[1].clone()], "b");
+        let (preview, _) = preview_line(b"\xff\xfe x", std::slice::from_ref(&(1..3)));
+        assert!(preview.ends_with(" x"));
     }
 
     #[test]
