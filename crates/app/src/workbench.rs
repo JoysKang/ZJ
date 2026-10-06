@@ -515,6 +515,10 @@ impl Workbench {
                 }
                 this.agent_follow_settings(cx);
             });
+        // Sessions deleted from the history (here or in another window).
+        let deletions = cx.observe_global::<agent::history::HistoryDeletions>(|this, cx| {
+            this.agent_forget_deleted(cx)
+        });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.agent_update_spin(window, cx);
             if window.is_window_active() {
@@ -678,7 +682,7 @@ impl Workbench {
                 ignore_cache: Default::default(),
             },
             agent,
-            _subscriptions: vec![appearance, activation, settings, frame],
+            _subscriptions: vec![appearance, activation, settings, deletions, frame],
         };
         this.start_watching(window, cx);
         this.refresh_tree(window, cx);

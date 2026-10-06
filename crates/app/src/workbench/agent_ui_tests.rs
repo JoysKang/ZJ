@@ -474,3 +474,43 @@ async fn history_writes_reach_the_database_in_the_order_they_were_queued(cx: &mu
     assert_eq!(texts, expected);
     let _ = std::fs::remove_dir_all(data);
 }
+
+#[gpui_kit::test]
+async fn a_live_session_whose_record_was_deleted_lets_go_of_it(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let data = temp_root("deleted-record");
+    let store = Arc::new(History::new(data.join("history.sqlite")));
+    let (handle, this) = open_with(
+        cx,
+        Some(data.clone()),
+        AgentStore {
+            history: Some(store.clone()),
+            default_workspace: None,
+        },
+    );
+    send(cx, handle, &this, "echo hi");
+    settle(cx, &this);
+    until(cx, &this, "the session is in the history", |p| {
+        p.agent.current().is_some_and(|s| s.db.is_some())
+    });
+    let id = this.read_with(cx, |p, _| p.agent.current().unwrap().db.unwrap());
+    // Archive the still-open session, then 删除已归档.
+    for op in [
+        super::history::HistoryOp::Archive(id, true),
+        super::history::HistoryOp::DeleteArchived(Default::default()),
+    ] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| p.agent_history_op(op, window, cx));
+        })
+        .unwrap();
+        cx.run_until_parked();
+        store.flush().unwrap();
+    }
+    until(
+        cx,
+        &this,
+        "the live session forgets the deleted record",
+        |p| p.agent.current().is_some_and(|s| s.db.is_none()),
+    );
+    let _ = std::fs::remove_dir_all(data);
+}

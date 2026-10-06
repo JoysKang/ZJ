@@ -324,6 +324,7 @@ impl Workbench {
                                 session.db = None;
                             }
                             this.message = "会话已删除".into();
+                            HistoryDeletions::bump(cx);
                         }
                         Err(error) => this.message = format!("删除失败：{error}"),
                     }
@@ -333,6 +334,7 @@ impl Workbench {
             .detach();
             return;
         }
+        let deleted = matches!(op, HistoryOp::DeleteArchived(_));
         let job = cx.background_spawn(async move {
             match op {
                 HistoryOp::Pin(id) => store.pin(id),
@@ -352,6 +354,9 @@ impl Workbench {
             let _ = this.update_in(cx, |this, window, cx| {
                 if let Err(error) = result {
                     this.message = format!("会话历史未能更新：{error}");
+                }
+                if deleted {
+                    HistoryDeletions::bump(cx);
                 }
                 this.agent_reload_history(window, cx);
             });
@@ -437,6 +442,47 @@ pub(in crate::workbench) enum HistoryOp {
     Rename(SessionId, String),
     Delete(SessionId, String),
     DeleteArchived(workspace_editor_agent_history::Scope),
+}
+
+/// Bumped after sessions are deleted from the history: every window then lets go of the
+/// records its live sessions no longer have (their next prompt starts a new record),
+/// instead of writing into deleted rows.
+#[derive(Default)]
+pub(in crate::workbench) struct HistoryDeletions(u64);
+
+impl Global for HistoryDeletions {}
+
+impl HistoryDeletions {
+    fn bump(cx: &mut App) {
+        cx.default_global::<HistoryDeletions>().0 += 1;
+    }
+}
+
+impl Workbench {
+    /// Live sessions whose history record was deleted forget it (checked in the background).
+    pub(in crate::workbench) fn agent_forget_deleted(&mut self, cx: &mut Context<Self>) {
+        let Some(store) = history(cx) else { return };
+        let ids: Vec<SessionId> = self.agent.sessions.iter().filter_map(|s| s.db).collect();
+        if ids.is_empty() {
+            return;
+        }
+        let job = cx.background_spawn(async move {
+            ids.into_iter()
+                .filter(|id| matches!(store.session(*id), Ok(None)))
+                .collect::<Vec<_>>()
+        });
+        cx.spawn(async move |this, cx| {
+            let gone = job.await;
+            let _ = this.update(cx, |this, _| {
+                for session in this.agent.sessions.iter_mut() {
+                    if session.db.is_some_and(|id| gone.contains(&id)) {
+                        session.db = None;
+                    }
+                }
+            });
+        })
+        .detach();
+    }
 }
 
 type HistoryJob = Box<dyn FnOnce(&History) + Send>;

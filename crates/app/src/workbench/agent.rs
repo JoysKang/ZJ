@@ -26,7 +26,7 @@ use workspace_editor_agent_history::{
 mod buffers;
 mod changes;
 mod composer;
-mod history;
+pub(super) mod history;
 mod permissions;
 mod turns;
 use buffers::buffer_provider;
