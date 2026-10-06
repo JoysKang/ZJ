@@ -57,6 +57,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `settings.rs`：所有窗口共用的设置文件（字号、显示隐藏文件、Diff 布局、隐藏无变更仓库、搜索排除、Dock 图标闪烁、自动保存、按工作区手动添加的仓库 `extra_repos`）。⌘, 在标签里打开它，保存后在所有窗口生效，JSON 写错时保留原设置并在状态栏说明。
   - `perf.rs`：给 `tools/measure_budget.py` 用的打点（首帧耗时；`ZJ_LATENCY_LOG=1` 时记录按键到下一帧画完的耗时），平时只有一行首帧日志。
   - `platform.rs`：少量 macOS 系统接口（“减少动态效果”、Dock 图标替换与闪烁），其他平台为空实现。
+  - `workbench/switch_hud.rs`：从另一个 ZJ 窗口切过来时，在窗口中央闪现工作区名称（放大淡入、停留、淡出，约 1 秒的一次性动画，结束后不再出帧；窗口第一次激活、从别的 App 切回时不显示；开启“减少动态效果”时不缩放、不渐变）。
   - `file_ops.rs`：资源管理器的新建、重命名、复制、移动和移到废纸篓；`workbench/explorer_ops.rs`：右键菜单、快捷键和行内改名；`workbench/tab_menu.rs`：编辑器标签页的右键菜单、对应快捷键和 ⇧⌘T 重开已关闭标签的栈。
   - Markdown 预览：`markdown_blocks.rs` 把文件切成顶层块（纯函数）；`md_images.rs` 解析图片地址（本地图片按文件头尺寸检查解码预算，远程 / data: 不加载，纯函数），预览在后台和分块一起解析，渲染时只查表（用 Kit 基础 `TextView` 的 `image_source`）；相对链接在 ZJ 里打开；`workbench/markdown_preview.rs` 按块用 Kit `TextView` 渲染，点击的块换成源码文本框并直接写回缓冲区，⇧⌘V 切换源码。源码视图下不切分。
   - 终端（docs/adr/0006）：`terminal.rs` 是 `alacritty_terminal` 的衔接层（起 shell、事件、按键编码、ANSI 颜色映射），不依赖界面状态；`workbench/terminal_view.rs` 画网格并处理键鼠和输入法；`workbench/terminal_panel.rs` 是底部面板的分组、拆分和关闭。终端没有定时器，只在 shell 有输出时重画。

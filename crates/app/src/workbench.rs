@@ -99,6 +99,7 @@ mod search_view;
 #[path = "workbench/session_ui_tests.rs"]
 mod session_ui_tests;
 mod sidebar;
+mod switch_hud;
 mod tab_menu;
 mod terminal_panel;
 pub use terminal_panel::{KillTerminal, NewTerminal, SplitTerminal, ToggleTerminal};
@@ -447,6 +448,8 @@ pub struct Workbench {
     /// Tabs restored from the last session that have not been opened yet: shown in the tab
     /// bar, read only when chosen (开发说明: clean tabs load on demand).
     pending_tabs: Vec<PathBuf>,
+    /// The workspace name flashed when coming from another ZJ window.
+    switch_hud: switch_hud::SwitchHud,
     terminals: terminal_panel::Terminals,
     generation: u64,
     cancel: Arc<AtomicBool>,
@@ -522,6 +525,7 @@ impl Workbench {
             this.agent_forget_deleted(cx)
         });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
+            this.switch_hud_activation(window, cx);
             this.agent_update_spin(window, cx);
             this.agent_reclaim_idle(cx);
             if window.is_window_active() {
@@ -667,6 +671,7 @@ impl Workbench {
             tab_menu_focus: None,
             closed_tabs: Default::default(),
             pending_tabs: Vec::new(),
+            switch_hud: Default::default(),
             terminals: Default::default(),
             generation: 0,
             cancel: Arc::new(AtomicBool::new(false)),
@@ -2419,5 +2424,6 @@ impl Render for Workbench {
             .child(self.render_status_bar(cx))
             .children(self.render_quick_open(cx))
             .children(self.render_agent_search(cx))
+            .children(self.render_switch_hud(cx))
     }
 }

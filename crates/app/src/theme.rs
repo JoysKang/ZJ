@@ -229,6 +229,19 @@ pub const AGENT_OVERLAY_ROW: Pixels = px(80.);
 pub const AGENT_OVERLAY_ROWS: usize = 7;
 pub const RADIUS_OVERLAY: Pixels = px(8.);
 pub const TEXT_OVERLAY_INPUT: Pixels = px(15.);
+/// The workspace name flashed when switching between ZJ windows (`workbench/switch_hud.rs`):
+/// gray text on a feathered halo of the editor's color, no box, a little above the middle.
+pub const SWITCH_HUD_TEXT: Pixels = px(100.);
+pub const SWITCH_HUD_PAD_X: Pixels = px(144.);
+pub const SWITCH_HUD_PAD_Y: Pixels = px(72.);
+pub const SWITCH_HUD_BLUR: Pixels = px(144.);
+pub const SWITCH_HUD_SPREAD: Pixels = px(24.);
+/// Where its middle sits, as a share of the window's height from the top.
+pub const SWITCH_HUD_TOP: f32 = 0.3;
+/// Widest it gets, as a share of the window's width (a longer name is cut short).
+pub const SWITCH_HUD_MAX_WIDTH: f32 = 0.9;
+/// Its opacity at full strength: see-through, the code stays visible.
+pub const SWITCH_HUD_OPACITY: f32 = 0.6;
 /// The diff editor's agent toolbar ("Claude Code 建议的修改 … 接受此文件").
 pub const AGENT_REVIEW_BAR: Pixels = px(32.);
 
@@ -617,6 +630,8 @@ pub struct Colors {
     /// border.
     pub selected_muted: Hsla,
     pub selected_chip: Hsla,
+    /// The feathered halo behind the window switch's name.
+    pub switch_halo: Hsla,
     pub focus_border: Hsla,
     /// Selected filter chips: accent tint and border.
     pub chip_on: Hsla,
@@ -692,6 +707,7 @@ impl Palette {
             chip_on: hsla(self.accent).opacity(0.16),
             selected_muted: hsla(self.selected_fg).opacity(0.82),
             selected_chip: hsla(self.selected_fg).opacity(0.14),
+            switch_halo: hsla(self.editor).opacity(0.85),
             focus_border: hsla(self.accent).opacity(0.7),
             control_hover: hsla(self.foreground).opacity(0.12),
             control_active: hsla(self.foreground).opacity(0.2),
