@@ -56,6 +56,8 @@ pub enum OnDisk {
         state: DiskState,
         bytes: Vec<u8>,
     },
+    /// Changed, and now larger than the editor opens: not read.
+    TooLarge,
     Deleted,
 }
 
@@ -68,6 +70,9 @@ pub fn check(path: &Path, known: &DiskState) -> io::Result<OnDisk> {
     };
     if stamp == known.stamp {
         return Ok(OnDisk::Same);
+    }
+    if stamp.len > crate::files::MAX_FILE_BYTES as u64 {
+        return Ok(OnDisk::TooLarge);
     }
     let bytes = fs::read(path)?;
     let state = DiskState::of(stamp, &bytes);
@@ -164,7 +169,7 @@ pub fn write(
     if let (Some(expected), Some(_)) = (expected, &metadata) {
         match check(&target, expected)? {
             OnDisk::Same | OnDisk::Touched(_) | OnDisk::Deleted => {}
-            OnDisk::Changed { .. } => return Err(SaveError::Conflict),
+            OnDisk::Changed { .. } | OnDisk::TooLarge => return Err(SaveError::Conflict),
         }
     }
     if let Some(metadata) = &metadata
@@ -435,6 +440,23 @@ mod tests {
 
     fn state(path: &Path) -> DiskState {
         DiskState::of(FileStamp::read(path).unwrap(), &fs::read(path).unwrap())
+    }
+
+    #[test]
+    fn a_file_grown_past_the_limit_is_not_read_and_saving_over_it_is_a_conflict() {
+        let root = temp("too-large");
+        let path = root.join("log.txt");
+        fs::write(&path, "small\n").unwrap();
+        let known = state(&path);
+        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(crate::files::MAX_FILE_BYTES as u64 + 1)
+            .unwrap();
+        assert!(matches!(check(&path, &known).unwrap(), OnDisk::TooLarge));
+        assert!(matches!(
+            write(&path, b"mine\n", Some(&known)),
+            Err(SaveError::Conflict)
+        ));
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

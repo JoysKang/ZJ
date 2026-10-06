@@ -915,6 +915,14 @@ impl Workbench {
         match on_disk {
             OnDisk::Same => {}
             OnDisk::Touched(state) => doc.disk = Some(state),
+            OnDisk::TooLarge => {
+                // Not read into memory; a save will report the conflict.
+                self.message = format!(
+                    "「{}」在磁盘上已超过 8 MiB，不再跟随磁盘；可以关闭后以只读方式查看",
+                    doc.name()
+                );
+                cx.notify();
+            }
             OnDisk::Deleted => {
                 if !doc.deleted {
                     doc.deleted = true;
@@ -1011,6 +1019,7 @@ impl Workbench {
             return;
         };
         let work = cx.background_spawn(async move {
+            refuse_too_large(&path)?;
             let bytes = std::fs::read(&path)?;
             let stamp = crate::files::FileStamp::read(&path)?;
             Ok::<_, std::io::Error>((DiskState::of(stamp, &bytes), bytes))
@@ -1076,6 +1085,7 @@ impl Workbench {
         let work = cx.background_spawn({
             let path = path.clone();
             async move {
+                refuse_too_large(&path)?;
                 let bytes = std::fs::read(&path)?;
                 let (disk, ..) =
                     decode(&bytes).ok_or_else(|| std::io::Error::other("不是 UTF-8 文本"))?;
@@ -1242,6 +1252,14 @@ impl Workbench {
                 .into_any_element(),
         )
     }
+}
+
+/// Reloading or comparing reads the whole file: not one the editor would not open.
+fn refuse_too_large(path: &Path) -> std::io::Result<()> {
+    if std::fs::metadata(path)?.len() > crate::files::MAX_FILE_BYTES as u64 {
+        return Err(std::io::Error::other("磁盘上的文件超过 8 MiB，未读取"));
+    }
+    Ok(())
 }
 
 impl Document {
