@@ -58,7 +58,10 @@ measure it are in [docs/adr/0005-gpu-memory.md](../docs/adr/0005-gpu-memory.md).
   Upstream blinks every 500 ms, and each blink repaints the whole window: an idle focused
   editor then costs about 3% CPU, and the renderer never goes 3 s without a frame, so it keeps
   its spare drawable and path textures (about 190 MB instead of 67 MB, one window). There is
-  no switch for it in Kit. `crates/app` tests that an idle focused editor does not repaint.
+  no switch for it in Kit. The blink loop, its constants and its tests are removed (the
+  file's own tests now describe the steady cursor; vendor crates are not workspace members,
+  so they do not run in CI). `crates/app`'s `idle_ui_tests` checks that an idle focused
+  editor leaves no timer.
 - `Cargo.toml`: the same lint override.
 
 `gpui-pre-macos`:

@@ -1,8 +1,4 @@
-use gpui::{Context, Pixels, Task, px};
-use instant::Duration;
-
-static INTERVAL: Duration = Duration::from_millis(500);
-static PAUSE_DELAY: Duration = Duration::from_millis(300);
+use gpui::{Context, Pixels, px};
 
 // On Windows, Linux, we should use integer to avoid blurry cursor.
 #[cfg(not(target_os = "macos"))]
@@ -10,103 +6,54 @@ pub(super) const CURSOR_WIDTH: Pixels = px(2.);
 #[cfg(target_os = "macos")]
 pub(super) const CURSOR_WIDTH: Pixels = px(1.5);
 
-/// To manage the Input cursor blinking.
+/// The Input cursor's visibility.
 ///
-/// It will start blinking with a interval of 500ms.
-/// Every loop will notify the view to update the `visible`, and Input will observe this update to touch repaint.
+/// ZJ patch: the cursor is steady (CLAUDE.md: an idle editor draws nothing). Upstream blinks
+/// it every 500 ms, which repaints the whole window twice a second, keeps the CPU busy and
+/// keeps the renderer from giving back its spare drawable. Here it shows while the input is
+/// focused, with no timer; the blink loop and its pause delay are gone.
 ///
-/// The input painter will check if this in visible state, then it will draw the cursor.
+/// The input painter checks [`Self::visible`] before drawing the cursor.
 pub(crate) struct BlinkCursor {
     visible: bool,
-    paused: bool,
+    /// Zero before the first [`Self::start`] and after [`Self::stop`]: not focused.
     epoch: usize,
-
-    _task: Task<()>,
 }
 
 impl BlinkCursor {
     pub(crate) fn new() -> Self {
         Self {
             visible: false,
-            paused: false,
             epoch: 0,
-            _task: Task::ready(()),
         }
     }
 
-    /// Start the blinking
-    ///
-    /// ZJ patch: the cursor is steady instead (CLAUDE.md: an idle editor draws nothing). It
-    /// shows while the input is focused, with no timer: a blinking cursor repaints the whole
-    /// window twice a second, which keeps the CPU busy and the renderer from giving back its
-    /// spare drawable. `blink` is no longer reached.
+    /// The input got focus: show the cursor.
     pub(crate) fn start(&mut self, cx: &mut Context<Self>) {
-        self.next_epoch();
-        self.paused = false;
+        self.epoch += 1;
         if !self.visible {
             self.visible = true;
             cx.notify();
         }
     }
 
-    /// Stop the blinking and clear the blink state, so the next [`Self::start`]
-    /// begins from a visible cursor instead of resuming a stale pause.
+    /// The input lost focus: hide the cursor, so the next [`Self::start`] shows it again.
     pub(crate) fn stop(&mut self, cx: &mut Context<Self>) {
         self.epoch = 0;
-        self.paused = false;
         self.visible = false;
-        self._task = Task::ready(());
         cx.notify();
-    }
-
-    fn next_epoch(&mut self) -> usize {
-        self.epoch += 1;
-        self.epoch
-    }
-
-    fn blink(&mut self, epoch: usize, cx: &mut Context<Self>) {
-        // A task from an earlier blink lifecycle must not mutate the current state.
-        if epoch != self.epoch {
-            return;
-        }
-
-        if self.paused {
-            self.visible = true;
-            return;
-        }
-
-        self.visible = !self.visible;
-        cx.notify();
-
-        // Schedule the next blink
-        let epoch = self.next_epoch();
-        self._task = cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(INTERVAL).await;
-            if let Some(this) = this.upgrade() {
-                this.update(cx, |this, cx| this.blink(epoch, cx));
-            }
-        });
     }
 
     pub(crate) fn visible(&self) -> bool {
-        // Keep showing the cursor if paused
-        self.paused || self.visible
+        self.visible
     }
 
-    /// Show the cursor immediately and restart the idle delay before blinking resumes.
-    ///
-    /// This is a no-op on a cursor that is not blinking. `epoch` is zero only
-    /// before the first [`Self::start`] and after [`Self::stop`], so a zero
-    /// epoch means the input is not focused, and there is no cursor on screen
-    /// to keep visible. Pausing it anyway would start a blink loop that no blur
-    /// is left to stop, and every blink repaints the view that the input is in.
+    /// A keystroke: the cursor stays visible. A no-op on an input that is not focused (a
+    /// programmatic `set_value` on an unfocused input must not show a cursor).
     pub(crate) fn pause(&mut self, cx: &mut Context<Self>) {
         if self.epoch == 0 {
             return;
         }
-
-        // ZJ patch: a steady cursor is already visible; keystrokes neither repaint for it nor
-        // start a timer that would resume blinking.
         if !self.visible {
             self.visible = true;
             cx.notify();
@@ -118,125 +65,41 @@ impl BlinkCursor {
 mod tests {
     use super::*;
     use gpui::{AppContext as _, TestAppContext};
-    use std::{cell::Cell, rc::Rc};
+    use std::{cell::Cell, rc::Rc, time::Duration};
 
     #[gpui::test]
-    fn repeated_pauses_keep_cursor_visible_until_idle(cx: &mut TestAppContext) {
+    fn a_focused_cursor_stays_visible_without_repainting(cx: &mut TestAppContext) {
         let cursor = cx.new(|_| BlinkCursor::new());
         assert!(!cursor.read_with(cx, |cursor, _| cursor.visible()));
-        // Only a focused input blinks, and only a blinking cursor pauses.
         cursor.update(cx, |cursor, cx| cursor.start(cx));
         cx.run_until_parked();
-        for _ in 0..5 {
-            cursor.update(cx, |cursor, cx| cursor.pause(cx));
-            cx.run_until_parked();
-            cx.executor().advance_clock(Duration::from_millis(200));
-            cx.run_until_parked();
-            assert!(cursor.read_with(cx, |cursor, _| cursor.visible()));
-        }
-        cx.executor().advance_clock(Duration::from_millis(100));
-        cx.run_until_parked();
-        assert!(!cursor.read_with(cx, |cursor, _| cursor.visible()));
-        cx.executor().advance_clock(INTERVAL);
-        cx.run_until_parked();
-        assert!(cursor.read_with(cx, |cursor, _| cursor.visible()));
-    }
-
-    #[gpui::test]
-    fn pausing_a_cursor_that_is_not_blinking_does_not_start_it(cx: &mut TestAppContext) {
-        // Never focused, so `start` was never called: the epoch is still zero.
-        let cursor = cx.new(|_| BlinkCursor::new());
-
-        // What a programmatic `set_value` on an unfocused input does.
-        cursor.update(cx, |cursor, cx| cursor.pause(cx));
-        cx.run_until_parked();
-        cx.executor().advance_clock(PAUSE_DELAY);
-        cx.run_until_parked();
-        assert!(!cursor.read_with(cx, |cursor, _| cursor.visible()));
-
         let notifies = Rc::new(Cell::new(0usize));
         let counter = notifies.clone();
         let _observer =
             cx.update(|cx| cx.observe(&cursor, move |_, _| counter.set(counter.get() + 1)));
-        cx.run_until_parked();
-
-        cx.executor().advance_clock(INTERVAL * 6);
-        cx.run_until_parked();
-
-        assert_eq!(
-            notifies.get(),
-            0,
-            "a cursor that was never started is blinking, and every blink repaints the view"
-        );
+        for _ in 0..5 {
+            cursor.update(cx, |cursor, cx| cursor.pause(cx));
+            cx.executor().advance_clock(Duration::from_secs(1));
+            cx.run_until_parked();
+            assert!(cursor.read_with(cx, |cursor, _| cursor.visible()));
+        }
+        assert_eq!(notifies.get(), 0, "a steady cursor repainted");
     }
 
     #[gpui::test]
-    fn blurring_a_paused_cursor_leaves_the_next_focus_blinking(cx: &mut TestAppContext) {
+    fn an_unfocused_cursor_stays_hidden(cx: &mut TestAppContext) {
         let cursor = cx.new(|_| BlinkCursor::new());
-        cursor.update(cx, |cursor, cx| cursor.start(cx));
-        cx.run_until_parked();
-
-        // Typing pauses the blink, then the input is blurred before the pause
-        // elapses: tabbing away right after a keystroke does exactly this.
         cursor.update(cx, |cursor, cx| cursor.pause(cx));
         cx.run_until_parked();
-        cursor.update(cx, |cursor, cx| cursor.stop(cx));
+        assert!(!cursor.read_with(cx, |cursor, _| cursor.visible()));
+        cursor.update(cx, |cursor, cx| {
+            cursor.start(cx);
+            cursor.stop(cx);
+            cursor.pause(cx);
+        });
         cx.run_until_parked();
         assert!(!cursor.read_with(cx, |cursor, _| cursor.visible()));
-
-        // Focusing again shows the cursor and blinks it, rather than leaving a
-        // stale pause to swallow the start.
         cursor.update(cx, |cursor, cx| cursor.start(cx));
-        cx.run_until_parked();
         assert!(cursor.read_with(cx, |cursor, _| cursor.visible()));
-        cx.executor().advance_clock(INTERVAL);
-        cx.run_until_parked();
-        assert!(!cursor.read_with(cx, |cursor, _| cursor.visible()));
-    }
-
-    #[gpui::test]
-    fn stopping_a_paused_cursor_ends_the_blink_loop(cx: &mut TestAppContext) {
-        let cursor = cx.new(|_| BlinkCursor::new());
-        cursor.update(cx, |cursor, cx| cursor.start(cx));
-        cx.run_until_parked();
-        cursor.update(cx, |cursor, cx| cursor.pause(cx));
-        cx.run_until_parked();
-        cursor.update(cx, |cursor, cx| cursor.stop(cx));
-        cx.run_until_parked();
-
-        let notifications = Rc::new(Cell::new(0usize));
-        let count = notifications.clone();
-        let _observer = cx.update(|cx| cx.observe(&cursor, move |_, _| count.set(count.get() + 1)));
-        cx.run_until_parked();
-
-        cx.executor().advance_clock(Duration::from_secs(3));
-        cx.run_until_parked();
-
-        assert!(!cursor.read_with(cx, |cursor, _| cursor.visible()));
-        assert_eq!(notifications.get(), 0, "a stopped cursor kept blinking");
-
-        cursor.update(cx, |cursor, cx| cursor.start(cx));
-        cx.run_until_parked();
-        assert!(cursor.read_with(cx, |cursor, _| cursor.visible()));
-    }
-
-    #[gpui::test]
-    fn stopping_a_blinking_cursor_ends_the_blink_loop(cx: &mut TestAppContext) {
-        let cursor = cx.new(|_| BlinkCursor::new());
-        cursor.update(cx, |cursor, cx| cursor.start(cx));
-        cx.run_until_parked();
-        cursor.update(cx, |cursor, cx| cursor.stop(cx));
-        cx.run_until_parked();
-
-        let notifications = Rc::new(Cell::new(0usize));
-        let count = notifications.clone();
-        let _observer = cx.update(|cx| cx.observe(&cursor, move |_, _| count.set(count.get() + 1)));
-        cx.run_until_parked();
-
-        cx.executor().advance_clock(Duration::from_secs(3));
-        cx.run_until_parked();
-
-        assert!(!cursor.read_with(cx, |cursor, _| cursor.visible()));
-        assert_eq!(notifications.get(), 0, "a stopped cursor kept blinking");
     }
 }
