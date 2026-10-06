@@ -514,3 +514,31 @@ async fn a_live_session_whose_record_was_deleted_lets_go_of_it(cx: &mut TestAppC
     );
     let _ = std::fs::remove_dir_all(data);
 }
+
+#[gpui_kit::test]
+async fn answering_a_request_the_agent_no_longer_waits_for_changes_nothing(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let root = temp_root("stale-permission");
+    let (handle, this) = open(cx, Some(root.clone()));
+    send(cx, handle, &this, "permission");
+    until(cx, &this, "a permission request", |p| {
+        pending_permission(p).is_some()
+    });
+    let (key, id) = this.read_with(cx, |p, _| pending_permission(p).unwrap());
+    // 停止 answers the request `cancelled`; the card stays until the turn ends.
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_cancel(cx);
+            p.agent_answer(key, id, PermissionChoice::Once, window, cx);
+        });
+    })
+    .unwrap();
+    this.read_with(cx, |p, _| {
+        assert!(p.message.contains("已失效"), "{}", p.message)
+    });
+    settle(cx, &this);
+    assert!(!replies(cx, &this).contains("selected:allow"));
+    let _ = std::fs::remove_dir_all(root);
+}

@@ -423,7 +423,9 @@ impl Workbench {
                     });
                 }
             }
-            _ => session.pending.extend(records),
+            // Kept until the record is created; without a history there is nothing to wait for.
+            (None, Some(_)) => session.pending.extend(records),
+            (_, None) => {}
         }
         self.agent_parse_from(key, before.saturating_sub(1), cx);
         if recount {

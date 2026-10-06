@@ -185,6 +185,17 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Opened meanwhile (a double click loads it twice): one live session per record.
+        if let Some(key) = self
+            .agent
+            .sessions
+            .iter()
+            .find(|s| s.db == Some(summary.id))
+            .map(|s| s.key)
+        {
+            self.agent_select(key, window, cx);
+            return;
+        }
         let preset = self
             .agent
             .preset(&summary.agent_id)

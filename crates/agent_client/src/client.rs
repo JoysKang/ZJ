@@ -363,6 +363,9 @@ impl AgentClient {
             *current = Some(turn);
             turn
         };
+        // A new turn clears an earlier stop. Not when the install starts: a stop pressed
+        // while the agent was still being resolved would be lost.
+        self.shared.install_cancel.store(false, Ordering::Relaxed);
         if let Err(e) = self.commands.try_send(Command::Prompt { turn, parts }) {
             *self.shared.turn.lock().unwrap() = None;
             return Err(if e.is_full() {
@@ -667,7 +670,6 @@ fn run_install(
     shared: &Shared,
     install: crate::registry::PackageInstall,
 ) -> Result<crate::registry::ResolvedLaunch, InstallError> {
-    shared.install_cancel.store(false, Ordering::Relaxed);
     eprintln!("event=agent_install_start agent={}", shared.preset.id);
     let progress = |message: String| {
         let _ = shared

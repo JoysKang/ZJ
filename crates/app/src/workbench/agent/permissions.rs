@@ -59,8 +59,16 @@ impl Workbench {
                 PermissionState::Answered(PermissionKind::RejectOnce, "已拒绝".into()),
             ),
         };
-        if let Some(client) = &session.client {
-            client.respond_permission(request, option);
+        // The client answered `cancelled` already (a stop, the agent exited): the card waits
+        // for the turn's end instead of claiming an answer the agent never got.
+        let delivered = session
+            .client
+            .as_ref()
+            .is_some_and(|client| client.respond_permission(request, option));
+        if !delivered {
+            self.message = "这个请求已失效（会话已停止或 Agent 已退出）".into();
+            cx.notify();
+            return;
         }
         session.thread.answer_permission(request, state);
         eprintln!(
