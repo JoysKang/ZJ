@@ -662,6 +662,8 @@ pub(super) struct DiffPane {
     pub(super) inline: bool,
     pub(super) scroll: UniformListScrollHandle,
     pub(super) stale: bool,
+    /// The patch is being (re)loaded: what is shown may be older than the status.
+    pub(super) loading: bool,
     pub(super) task: Option<Task<()>>,
     pub(super) cancel: Arc<AtomicBool>,
     pub(super) generation: u64,

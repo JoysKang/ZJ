@@ -151,13 +151,28 @@ impl Workbench {
             })
     }
 
-    /// Whether lines of this diff can be staged, unstaged or reverted on their own.
+    /// Whether lines of this diff can be staged, unstaged or reverted on their own: not while
+    /// the patch is older than the repository's status (a refresh is reloading it), and never
+    /// for a commit's diff, which has nothing to stage.
     pub(super) fn diff_partial_ok(&self) -> bool {
         self.diff
             .raw
             .as_ref()
             .is_some_and(|raw| !raw.whole_file_only)
             && self.diff.doc.is_some()
+            && !self.diff.stale
+            && !self.diff.loading
+            && self
+                .diff
+                .tab
+                .as_ref()
+                .and_then(|tab| tab.request())
+                .is_some_and(|request| {
+                    !matches!(
+                        request.operation,
+                        workspace_editor_git::Operation::CommitDiff { .. }
+                    )
+                })
             && !self
                 .diff
                 .tab

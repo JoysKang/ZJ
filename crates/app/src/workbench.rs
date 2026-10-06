@@ -633,6 +633,7 @@ impl Workbench {
                 inline: cx.global::<crate::settings::Settings>().diff_inline,
                 scroll: UniformListScrollHandle::new(),
                 stale: false,
+                loading: false,
                 task: None,
                 cancel: Arc::new(AtomicBool::new(false)),
                 generation: 0,
@@ -2033,6 +2034,7 @@ impl Workbench {
             request.generation = self.diff.generation;
         }
         self.diff.stale = false;
+        self.diff.loading = true;
         self.diff.cancel = Arc::new(AtomicBool::new(false));
         let cancel = self.diff.cancel.clone();
         let service = self.service.clone();
@@ -2079,6 +2081,7 @@ impl Workbench {
                         if this.diff.generation != version {
                             return;
                         }
+                        this.diff.loading = false;
                         let restore_focus = this.active == Pane::Diff
                             && (this.focus_handle.is_focused(window)
                                 || this.diff.fallback.as_ref().is_some_and(|editor| {

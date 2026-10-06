@@ -183,6 +183,9 @@ async fn the_graph_shows_lanes_refs_details_and_diffs(cx: &mut TestAppContext) {
         assert_eq!(path, &PathBuf::from("b.txt"));
         assert_eq!(commit.len(), 40);
     });
+    // A commit's diff offers no staging, once loaded either.
+    settle(cx, None, |cx| this.read_with(cx, |p, _| p.diff.doc.is_some()));
+    this.read_with(cx, |p, _| assert!(!p.diff_partial_ok()));
 
     // The branch filter narrows the history to one branch.
     cx.update_window(window.into(), |_, window, cx| {
