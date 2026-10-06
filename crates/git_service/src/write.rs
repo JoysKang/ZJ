@@ -172,6 +172,9 @@ impl GitService {
         let mut untracked: Vec<PathBuf> = Vec::new();
         // Of those, the ones added with `git add -N`, whose index entry goes first.
         let mut intent: Vec<PathBuf> = Vec::new();
+        // Every path the discard deletes, checked afterwards: `git clean -f` skips nested
+        // repositories without failing.
+        let mut deleting: Vec<PathBuf> = Vec::new();
         let mut input = None;
         match &request.operation {
             WriteOperation::Stage { paths }
@@ -215,6 +218,7 @@ impl GitService {
                         _ => {}
                     }
                 }
+                deleting = untracked.clone();
                 match &request.operation {
                     WriteOperation::Stage { .. } => args.extend(["add".into(), "-A".into()]),
                     WriteOperation::Unstage { .. }
@@ -585,6 +589,17 @@ impl GitService {
                     .run_with_input(&request.repo.worktree, &clean, cancel, false, None)
                     .map_err(partial)?,
             );
+        }
+        let left: Vec<String> = deleting
+            .iter()
+            .filter(|path| fs::symlink_metadata(request.repo.worktree.join(path)).is_ok())
+            .map(|path| path.display().to_string())
+            .collect();
+        if !left.is_empty() {
+            return Err(error(format!(
+                "没能删除：{}（嵌套的 Git 仓库等不会被删除，请在终端处理）",
+                left.join("、")
+            )));
         }
         Ok(Reply {
             repo: request.repo.id.clone(),

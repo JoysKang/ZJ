@@ -1093,3 +1093,28 @@ fn discarding_an_intent_to_add_file_deletes_it_instead_of_emptying_it() {
     );
     assert_eq!(git(&root, &["status", "--porcelain"]), "");
 }
+
+#[test]
+fn deleting_an_untracked_nested_repository_reports_that_it_stayed() {
+    common::hermetic();
+    let fixture = fixture();
+    let root = fixture.0.join("a");
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-qm", "init"]);
+    let nested = root.join("nested");
+    fs::create_dir(&nested).unwrap();
+    git(&nested, &["init", "-q"]);
+    fs::write(nested.join("x.txt"), "x\n").unwrap();
+    let service = GitService::new(2, Duration::from_secs(10)).unwrap();
+    let error = write(
+        &service,
+        &root,
+        WriteOperation::Discard {
+            paths: vec!["nested/".into()],
+        },
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("nested"), "{error}");
+    assert!(nested.join("x.txt").exists());
+}
