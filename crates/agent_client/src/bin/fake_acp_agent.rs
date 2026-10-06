@@ -13,7 +13,9 @@
 //! `session/prompt` asks for the login instead (like claude-agent-acp).
 //! `FAKE_HANG_INIT=1` never answers `initialize` (a hung handshake).
 //! Sessions offer `model` / `effort` config options and a `mode` one; `configs` lists the
-//! options the client set.
+//! options the client set. One process serves many sessions: `session` says which one and its
+//! `cwd`, `closes` lists the sessions closed with `session/close` (`FAKE_NO_CLOSE=1` leaves
+//! that capability out).
 
 use agent_client_protocol::{
     self as sdk, Agent, Client, ConnectionTo, Responder, Stdio, schema::v1 as acp,
@@ -21,14 +23,15 @@ use agent_client_protocol::{
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 
 #[derive(Default)]
 struct State {
-    cancelled: AtomicBool,
+    /// Sessions whose current prompt was cancelled.
+    cancelled: std::sync::Mutex<std::collections::HashSet<String>>,
     sessions: AtomicU64,
     /// `_meta` of the last session/new or session/load, and every mode the client asked for.
     meta: std::sync::Mutex<String>,
@@ -36,6 +39,9 @@ struct State {
     /// `id=value` for every config option the client set.
     config_requests: std::sync::Mutex<Vec<String>>,
     cwd: std::sync::Mutex<std::path::PathBuf>,
+    /// Each session's `cwd`, and the sessions the client closed.
+    cwds: std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>>,
+    closed: std::sync::Mutex<Vec<String>>,
 }
 
 /// A model and an effort picker, plus a mode picker the client must not show.
@@ -91,8 +97,8 @@ async fn run_prompt(
     responder: Responder<acp::PromptResponse>,
     cx: ConnectionTo<Client>,
 ) -> sdk::Result<()> {
-    state.cancelled.store(false, Ordering::SeqCst);
     let session = request.session_id.clone();
+    state.cancelled.lock().unwrap().remove(&session.to_string());
     let prompt: String = request
         .prompt
         .iter()
@@ -267,7 +273,12 @@ async fn run_prompt(
         }
         "slow" => {
             for i in 0..500 {
-                if state.cancelled.load(Ordering::SeqCst) {
+                if state
+                    .cancelled
+                    .lock()
+                    .unwrap()
+                    .contains(&session.to_string())
+                {
                     stop = acp::StopReason::Cancelled;
                     break;
                 }
@@ -322,6 +333,28 @@ async fn run_prompt(
                 state.meta.lock().unwrap(),
                 state.mode_requests.lock().unwrap().join(",")
             ),
+        )?,
+        // Which session this is, in which folder: sessions may share this process.
+        "session" => {
+            let cwd = state
+                .cwds
+                .lock()
+                .unwrap()
+                .get(&session.to_string())
+                .cloned();
+            say(
+                &cx,
+                &session,
+                format!(
+                    "session:{session} cwd:{}",
+                    cwd.unwrap_or_default().display()
+                ),
+            )?
+        }
+        "closes" => say(
+            &cx,
+            &session,
+            format!("closes:{}", state.closed.lock().unwrap().join(",")),
         )?,
         "configs" => say(
             &cx,
@@ -534,6 +567,9 @@ fn main() -> sdk::Result<()> {
     let on_load = state.clone();
     let on_mode = state.clone();
     let on_config = state.clone();
+    let on_close = state.clone();
+    // FAKE_NO_CLOSE=1: an agent without `session/close`.
+    let can_close = std::env::var_os("FAKE_NO_CLOSE").is_none();
     // FAKE_BYPASS_DEFAULT=1: like a user whose Claude settings default to bypassPermissions.
     let bypass_default = std::env::var_os("FAKE_BYPASS_DEFAULT").is_some();
     let auth_file = std::env::var_os("FAKE_AUTH").map(std::path::PathBuf::from);
@@ -572,6 +608,11 @@ fn main() -> sdk::Result<()> {
                             .agent_capabilities(
                                 acp::AgentCapabilities::new()
                                     .load_session(load)
+                                    .session_capabilities(
+                                        acp::SessionCapabilities::new().close(
+                                            can_close.then(acp::SessionCloseCapabilities::new),
+                                        ),
+                                    )
                                     .prompt_capabilities(
                                         acp::PromptCapabilities::new().embedded_context(true),
                                     ),
@@ -592,6 +633,12 @@ fn main() -> sdk::Result<()> {
                     *on_new.meta.lock().unwrap() = serde_json::to_string(&request.meta).unwrap();
                     let n = on_new.sessions.fetch_add(1, Ordering::SeqCst);
                     *on_new.cwd.lock().unwrap() = request.cwd.clone();
+                    let id_text = format!("s-{}-{n}", std::process::id());
+                    on_new
+                        .cwds
+                        .lock()
+                        .unwrap()
+                        .insert(id_text, request.cwd.clone());
                     let mut modes = vec![
                         acp::SessionMode::new("default", "Default"),
                         acp::SessionMode::new("plan", "Plan"),
@@ -629,6 +676,11 @@ fn main() -> sdk::Result<()> {
                             responder: Responder<acp::LoadSessionResponse>,
                             cx: ConnectionTo<Client>| {
                     *on_load.meta.lock().unwrap() = serde_json::to_string(&request.meta).unwrap();
+                    on_load
+                        .cwds
+                        .lock()
+                        .unwrap()
+                        .insert(request.session_id.to_string(), request.cwd.clone());
                     // Replay: the client must not show these again.
                     notify(
                         &cx,
@@ -675,6 +727,19 @@ fn main() -> sdk::Result<()> {
                 sdk::on_receive_request!(),
             )
             .on_receive_request(
+                async move |request: acp::CloseSessionRequest,
+                            responder: Responder<acp::CloseSessionResponse>,
+                            _cx| {
+                    on_close
+                        .closed
+                        .lock()
+                        .unwrap()
+                        .push(request.session_id.to_string());
+                    responder.respond(acp::CloseSessionResponse::new())
+                },
+                sdk::on_receive_request!(),
+            )
+            .on_receive_request(
                 async move |request: acp::SetSessionConfigOptionRequest,
                             responder: Responder<acp::SetSessionConfigOptionResponse>,
                             _cx| {
@@ -711,8 +776,12 @@ fn main() -> sdk::Result<()> {
                 sdk::on_receive_request!(),
             )
             .on_receive_notification(
-                async move |_n: acp::CancelNotification, _cx| {
-                    on_cancel.cancelled.store(true, Ordering::SeqCst);
+                async move |n: acp::CancelNotification, _cx| {
+                    on_cancel
+                        .cancelled
+                        .lock()
+                        .unwrap()
+                        .insert(n.session_id.to_string());
                     Ok(())
                 },
                 sdk::on_receive_notification!(),

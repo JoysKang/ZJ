@@ -1,5 +1,6 @@
-//! The client: one supervisor thread per agent, which starts the process on demand, runs the
-//! ACP connection, stops the process when idle and restarts it on the next prompt.
+//! A session with an agent: its commands, turns, permission requests and review snapshots.
+//! It runs as a task on the agent's process (`host.rs`), which starts on demand, may be shared
+//! with other sessions of the same agent, and restarts on the next prompt after it stopped.
 
 use crate::{
     events::{
@@ -7,14 +8,14 @@ use crate::{
         TurnId, TurnOutcome,
     },
     fs::{BufferProvider, Workspace, read_disk, window, write_atomic},
+    host::{AgentPool, Host, HostInner, HostKey},
     login,
-    process::{AgentProcess, describe},
-    provision::{self, InstallError},
-    registry::{AgentPreset, LaunchPlan, ResolvedLaunch, SearchPath},
+    process::AgentProcess,
+    provision,
+    registry::{AgentPreset, ResolvedLaunch, SearchPath},
 };
 use agent_client_protocol::{
-    self as sdk, Agent, ByteStreams, Client, ConnectionTo, Responder,
-    schema::{ProtocolVersion, v1 as acp},
+    self as sdk, Agent, ByteStreams, ConnectionTo, Responder, schema::v1 as acp,
 };
 use async_io::{Async, Timer};
 use futures::{AsyncRead, FutureExt, channel::oneshot, future::Either};
@@ -29,7 +30,6 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll},
-    thread,
     time::Duration,
 };
 
@@ -54,6 +54,9 @@ pub struct ClientOptions {
     /// An ACP session id from an earlier run (history); restored with `session/load` when the
     /// agent supports it, otherwise a new session starts.
     pub resume_session: Option<String>,
+    /// Shares the agent's process with the pool's other sessions of the same agent and
+    /// variables; `None` gives this session a process of its own.
+    pub pool: Option<Arc<AgentPool>>,
 }
 
 impl ClientOptions {
@@ -69,6 +72,7 @@ impl ClientOptions {
             search_path: None,
             install_root: provision::default_root(),
             resume_session: None,
+            pool: None,
         }
     }
 }
@@ -111,15 +115,17 @@ const EVENT_CAPACITY: usize = 512;
 const COMMAND_CAPACITY: usize = 64;
 /// One JSON-RPC line from the agent (a tool call can carry two copies of a large file).
 const MAX_LINE: usize = 32 * 1024 * 1024;
-/// Files remembered for reviews per client, and their total size.
+/// Files remembered for reviews per session, and their total size.
 const MAX_SNAPSHOTS: usize = 256;
 const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 /// How long a read waits for the editor's unsaved buffer.
 const BUFFER_TIMEOUT: Duration = Duration::from_secs(5);
 /// `authenticate` may wait for the user to finish signing in in the browser.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// `session/close` when a session goes idle or away.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
-enum Command {
+pub(crate) enum Command {
     Connect,
     Prompt {
         turn: TurnId,
@@ -136,29 +142,35 @@ enum Command {
     Shutdown,
 }
 
-struct Shared {
+/// What the agent said about itself in `initialize`, for every session on its process.
+pub(crate) struct Init {
+    pub info: AgentInfo,
+    pub load_session: bool,
+    pub close_session: bool,
+    pub embedded_context: bool,
+    pub auth_methods: Vec<acp::AuthMethod>,
+}
+
+/// One session: its commands, turn, permission requests and review snapshots. It runs as a
+/// task on its agent's process ([`Host`]), which it may share with other sessions.
+pub(crate) struct SessionState {
     preset: AgentPreset,
     workspace: Workspace,
     idle_timeout: Duration,
     cancel_grace: Duration,
     handshake_timeout: Duration,
-    resume_session: Option<String>,
     /// The model settings last offered: [`AgentClient::set_config_option`] only picks from
     /// these, so an option ZJ does not show (e.g. a mode) cannot be set through it.
     configs: Mutex<Vec<ConfigOption>>,
-    /// Replaced by [`AgentClient::retry_login`] (the settings may have changed meanwhile).
-    env_overrides: Mutex<BTreeMap<String, String>>,
     buffers: Option<Arc<dyn BufferProvider>>,
     /// Closed by [`AgentClient::stop`]: a read waiting for the editor gives up instead of
-    /// holding the supervisor (and the UI thread joining it) until the timeout.
+    /// holding the session until the timeout.
     stopping: async_channel::Receiver<()>,
-    search: SearchPath,
-    install_root: Option<PathBuf>,
-    /// Set by [`AgentClient::cancel`]: a running first-use install stops.
-    install_cancel: AtomicBool,
     events: async_channel::Sender<AgentEvent>,
+    commands: async_channel::Receiver<Command>,
     /// Wakes the session loop when a turn finishes (re-arms the idle timer).
     turn_done: async_channel::Sender<()>,
+    turn_done_rx: async_channel::Receiver<()>,
     /// A prompt the agent refused with "auth required" (sent before `turn_done`): the turn
     /// stays open, the session loop asks for a login and sends it again.
     parked: Mutex<Option<(TurnId, Vec<PromptPart>)>>,
@@ -168,18 +180,28 @@ struct Shared {
     next_turn: AtomicU64,
     /// `session/load` replays history as updates; the UI already has it.
     replaying: AtomicBool,
-    embedded_context: AtomicBool,
-    pid: Mutex<Option<u32>>,
-    /// Each file's content before the agent first touched it in this client
+    /// Each file's content before the agent first touched it in this session
     /// (`None` = the file did not exist), for "working tree vs. before the agent" reviews.
     snapshots: Mutex<BTreeMap<PathBuf, Option<String>>>,
     /// The "too many snapshots" notice was shown.
     snapshots_full: AtomicBool,
+    /// The agent's id for this session, kept across restarts so `session/load` can restore it.
+    resume: Mutex<Option<acp::SessionId>>,
+    /// A prompt to send as soon as the session runs again (after moving to another process).
+    pending_first: Mutex<Option<(TurnId, Vec<PromptPart>)>>,
+    /// Running on a process, or waiting to.
+    running: AtomicBool,
+    /// Idle on an agent that cannot close sessions: the process may stop.
+    idle: AtomicBool,
+    /// This run on the process already ended with an `Exited` event.
+    exit_told: AtomicBool,
+    /// Cleared by [`AgentClient::stop`]; the last client of a process stops it.
+    host: Mutex<Option<Arc<Host>>>,
+    pool: Option<Arc<AgentPool>>,
 }
 
-impl Shared {
-    /// Waits for a handshake reply at most `limit`, and not at all once the client stops:
-    /// `stop` joins this thread on the UI thread, so it must not sit out a hung handshake.
+impl SessionState {
+    /// Waits for a reply at most `limit`, and not at all once the client stops.
     async fn bounded<T>(&self, future: impl Future<Output = T>, limit: Duration) -> Option<T> {
         let future = std::pin::pin!(future);
         let stopping = std::pin::pin!(self.stopping.recv());
@@ -266,11 +288,14 @@ impl Shared {
             .await;
         }
     }
-}
 
-impl Shared {
-    async fn emit(&self, event: AgentEvent) {
+    pub(crate) async fn emit(&self, event: AgentEvent) {
         let _ = self.events.send(event).await;
+    }
+
+    /// From the process's thread outside of async code (install progress).
+    pub(crate) fn emit_blocking(&self, event: AgentEvent) {
+        let _ = self.events.send_blocking(event);
     }
 
     /// Remembers the model settings the agent offers and tells the UI.
@@ -280,8 +305,8 @@ impl Shared {
         self.emit(AgentEvent::ConfigOptions(configs)).await;
     }
 
-    /// Ends the current turn exactly once (from the prompt task or the supervisor).
-    async fn finish_turn(&self, only: Option<TurnId>, outcome: TurnOutcome) {
+    /// Ends the current turn exactly once (from the prompt task or the process).
+    pub(crate) async fn finish_turn(&self, only: Option<TurnId>, outcome: TurnOutcome) {
         let turn = {
             let mut current = self.turn.lock().unwrap();
             match *current {
@@ -303,6 +328,78 @@ impl Shared {
         // Dropping the senders answers every pending request with `cancelled`.
         self.permissions.lock().unwrap().clear();
     }
+
+    pub(crate) fn handshake_timeout(&self) -> Duration {
+        self.handshake_timeout
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.stopping.is_closed()
+    }
+
+    pub(crate) fn is_idle(&self) -> bool {
+        self.idle.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_running(&self, running: bool) {
+        self.running.store(running, Ordering::SeqCst);
+    }
+
+    /// Starts running on the process.
+    pub(crate) fn joined(&self) {
+        self.idle.store(false, Ordering::Relaxed);
+        self.exit_told.store(false, Ordering::SeqCst);
+    }
+
+    fn host(&self) -> Option<Arc<Host>> {
+        self.host.lock().unwrap().clone()
+    }
+
+    /// Something needs the agent: the session asks its process to run it (started if needed).
+    fn kick(self: &Arc<Self>) {
+        if self.is_stopped() || self.running.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if !self
+            .host()
+            .is_some_and(|host| host.inner.attach(self.clone()))
+        {
+            self.set_running(false);
+        }
+    }
+
+    /// The process could not start: what asked for it is dropped (its turn already failed or
+    /// was cancelled), so it is not asked again until the user does something.
+    pub(crate) fn abandon(&self) {
+        while self.commands.try_recv().is_ok() {}
+        self.pending_first.lock().unwrap().take();
+    }
+
+    /// After the session stopped running: commands that came meanwhile start it again.
+    fn kick_if_pending(self: &Arc<Self>) {
+        if !self.commands.is_empty() || self.pending_first.lock().unwrap().is_some() {
+            self.kick();
+        }
+    }
+
+    /// The process this session ran on stopped (idle, crashed, shut down or failed to start).
+    pub(crate) async fn process_gone(self: &Arc<Self>, reason: &ExitReason, name: &str) {
+        self.cancel_permissions();
+        if self.exit_told.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.replaying.store(false, Ordering::Relaxed);
+        if !matches!(reason, ExitReason::Idle) {
+            self.finish_turn(None, TurnOutcome::Failed(format!("「{name}」进程已退出")))
+                .await;
+        }
+        self.emit(AgentEvent::Exited {
+            reason: reason.clone(),
+        })
+        .await;
+        self.set_running(false);
+        self.kick_if_pending();
+    }
 }
 
 fn outcome_tag(outcome: &TurnOutcome) -> &'static str {
@@ -316,62 +413,68 @@ fn outcome_tag(outcome: &TurnOutcome) -> &'static str {
     }
 }
 
+/// One session with an agent. Sessions of the same agent and variables share its process when
+/// they come from the same [`AgentPool`].
 pub struct AgentClient {
-    shared: Arc<Shared>,
+    session: Arc<SessionState>,
     commands: async_channel::Sender<Command>,
     events: async_channel::Receiver<AgentEvent>,
     stopping: async_channel::Sender<()>,
-    supervisor: Option<thread::JoinHandle<()>>,
 }
 
 impl AgentClient {
-    /// Starts the supervisor thread. The agent process itself starts on the first
-    /// [`prompt`](Self::prompt) or [`connect`](Self::connect).
+    /// The agent process itself starts (or is joined) on the first [`prompt`](Self::prompt)
+    /// or [`connect`](Self::connect).
     pub fn start(options: ClientOptions) -> io::Result<Self> {
         let workspace = Workspace::new(&options.workspace_root)?;
+        let key = HostKey {
+            preset: options.preset.clone(),
+            env: options.env_overrides,
+            search: options.search_path.unwrap_or_else(SearchPath::from_env),
+            install_root: options.install_root,
+        };
+        let host = match &options.pool {
+            Some(pool) => pool.host(key, options.buffers.clone())?,
+            None => Host::spawn(key, options.buffers.clone())?,
+        };
         let (events_tx, events_rx) = async_channel::bounded(EVENT_CAPACITY);
         let (commands_tx, commands_rx) = async_channel::bounded(COMMAND_CAPACITY);
         let (done_tx, done_rx) = async_channel::unbounded();
         let (stopping_tx, stopping_rx) = async_channel::bounded(1);
-        let shared = Arc::new(Shared {
+        let session = Arc::new(SessionState {
             preset: options.preset,
             workspace,
             idle_timeout: options.idle_timeout,
             cancel_grace: options.cancel_grace,
             handshake_timeout: options.handshake_timeout,
-            resume_session: options.resume_session,
             configs: Mutex::new(Vec::new()),
-            env_overrides: Mutex::new(options.env_overrides),
             buffers: options.buffers,
             stopping: stopping_rx,
-            search: options.search_path.unwrap_or_else(SearchPath::from_env),
-            install_root: options.install_root,
-            install_cancel: AtomicBool::new(false),
             events: events_tx,
+            commands: commands_rx,
             turn_done: done_tx,
+            turn_done_rx: done_rx,
             parked: Mutex::new(None),
             permissions: Mutex::new(HashMap::new()),
             next_permission: AtomicU64::new(1),
             turn: Mutex::new(None),
             next_turn: AtomicU64::new(1),
             replaying: AtomicBool::new(false),
-            embedded_context: AtomicBool::new(false),
-            pid: Mutex::new(None),
             snapshots: Mutex::new(BTreeMap::new()),
             snapshots_full: AtomicBool::new(false),
+            resume: Mutex::new(options.resume_session.map(acp::SessionId::new)),
+            pending_first: Mutex::new(None),
+            running: AtomicBool::new(false),
+            idle: AtomicBool::new(false),
+            exit_told: AtomicBool::new(false),
+            host: Mutex::new(Some(host)),
+            pool: options.pool,
         });
-        let supervisor_shared = shared.clone();
-        let supervisor = thread::Builder::new()
-            .name(format!("agent-{}", shared.preset.id))
-            .spawn(move || {
-                async_io::block_on(supervise(supervisor_shared, commands_rx, done_rx));
-            })?;
         Ok(Self {
-            shared,
+            session,
             commands: commands_tx,
             events: events_rx,
             stopping: stopping_tx,
-            supervisor: Some(supervisor),
         })
     }
 
@@ -384,37 +487,44 @@ impl AgentClient {
     /// prompt.
     pub fn connect(&self) {
         let _ = self.commands.try_send(Command::Connect);
+        self.session.kick();
     }
 
     pub fn prompt(&self, parts: Vec<PromptPart>) -> Result<TurnId, ClientError> {
+        let session = &self.session;
         let turn = {
-            let mut current = self.shared.turn.lock().unwrap();
+            let mut current = session.turn.lock().unwrap();
             if current.is_some() {
                 return Err(ClientError::Busy);
             }
-            let turn = self.shared.next_turn.fetch_add(1, Ordering::Relaxed);
+            let turn = session.next_turn.fetch_add(1, Ordering::Relaxed);
             *current = Some(turn);
             turn
         };
         // A new turn clears an earlier stop. Not when the install starts: a stop pressed
         // while the agent was still being resolved would be lost.
-        self.shared.install_cancel.store(false, Ordering::Relaxed);
+        if let Some(host) = session.host() {
+            host.inner.install_cancel.store(false, Ordering::Relaxed);
+        }
         if let Err(e) = self.commands.try_send(Command::Prompt { turn, parts }) {
-            *self.shared.turn.lock().unwrap() = None;
+            *session.turn.lock().unwrap() = None;
             return Err(if e.is_full() {
                 ClientError::Busy
             } else {
                 ClientError::Stopped
             });
         }
+        session.kick();
         Ok(turn)
     }
 
     /// `session/cancel`; pending permission requests are answered `cancelled`. The turn ends
     /// with [`TurnOutcome::Cancelled`] once the agent stops.
     pub fn cancel(&self) {
-        self.shared.install_cancel.store(true, Ordering::Relaxed);
-        self.shared.cancel_permissions();
+        if let Some(host) = self.session.host() {
+            host.inner.install_cancel.store(true, Ordering::Relaxed);
+        }
+        self.session.cancel_permissions();
         let _ = self.commands.try_send(Command::Cancel);
     }
 
@@ -422,19 +532,22 @@ impl AgentClient {
     /// agent methods (e.g. Codex opens the browser), Terminal.app for terminal methods.
     pub fn login(&self, method_id: impl Into<String>) {
         let _ = self.commands.try_send(Command::Login(method_id.into()));
+        self.session.kick();
     }
 
     /// Tries again after a login finished elsewhere (in the terminal) or after the user changed
-    /// the agent's variables: the agent process restarts with `env_overrides` (resolved again
-    /// from the settings), and a prompt waiting for the login is sent once the session starts.
+    /// the agent's variables: with other `env_overrides` (resolved again from the settings) the
+    /// session moves to a process started with them; a prompt waiting for the login is sent
+    /// once the session starts.
     pub fn retry_login(&self, env_overrides: BTreeMap<String, String>) {
         let _ = self.commands.try_send(Command::RetryLogin(env_overrides));
+        self.session.kick();
     }
 
     /// Answers a permission request with one of its option ids (`None` = dismissed, sent as
     /// `cancelled`). Returns `false` if the request is no longer pending.
     pub fn respond_permission(&self, id: PermissionId, option_id: Option<String>) -> bool {
-        match self.shared.permissions.lock().unwrap().remove(&id) {
+        match self.session.permissions.lock().unwrap().remove(&id) {
             Some(tx) => tx.send(option_id).is_ok(),
             None => false,
         }
@@ -444,8 +557,8 @@ impl AgentClient {
     /// and `false` is returned.
     pub fn set_mode(&self, mode_id: impl Into<String>) -> bool {
         let mode_id = mode_id.into();
-        if !self.shared.preset.modes.allows(&mode_id) {
-            eprintln!("event=agent_mode_refused agent={}", self.shared.preset.id);
+        if !self.session.preset.modes.allows(&mode_id) {
+            eprintln!("event=agent_mode_refused agent={}", self.session.preset.id);
             return false;
         }
         self.commands.try_send(Command::SetMode(mode_id)).is_ok()
@@ -456,14 +569,17 @@ impl AgentClient {
     pub fn set_config_option(&self, id: impl Into<String>, value: impl Into<String>) -> bool {
         let (id, value) = (id.into(), value.into());
         let offered = self
-            .shared
+            .session
             .configs
             .lock()
             .unwrap()
             .iter()
             .any(|o| o.id == id && o.offers(&value));
         if !offered {
-            eprintln!("event=agent_config_refused agent={}", self.shared.preset.id);
+            eprintln!(
+                "event=agent_config_refused agent={}",
+                self.session.preset.id
+            );
             return false;
         }
         self.commands
@@ -474,7 +590,7 @@ impl AgentClient {
     /// Paths the agent changed (or announced an edit for), with their content
     /// before that first change.
     pub fn snapshot_paths(&self) -> Vec<PathBuf> {
-        self.shared
+        self.session
             .snapshots
             .lock()
             .unwrap()
@@ -485,13 +601,13 @@ impl AgentClient {
 
     /// `Some(None)`: the file did not exist before the agent created it.
     pub fn snapshot(&self, path: &Path) -> Option<Option<String>> {
-        self.shared.snapshots.lock().unwrap().get(path).cloned()
+        self.session.snapshots.lock().unwrap().get(path).cloned()
     }
 
     /// Replaces a file's "before" version after a partial review (`None` forgets the file:
     /// everything the agent changed in it was accepted or reverted).
     pub fn set_snapshot(&self, path: &Path, before: Option<Option<String>>) {
-        let mut snapshots = self.shared.snapshots.lock().unwrap();
+        let mut snapshots = self.session.snapshots.lock().unwrap();
         match before {
             Some(before) => {
                 snapshots.insert(path.to_path_buf(), before);
@@ -504,34 +620,36 @@ impl AgentClient {
 
     /// Forgets the "before" versions (after the user reviewed them, or for a new session).
     pub fn clear_snapshots(&self) {
-        self.shared.snapshots.lock().unwrap().clear();
+        self.session.snapshots.lock().unwrap().clear();
     }
 
-    /// Process id while the agent runs (for the status bar's RSS sample).
+    /// The agent's process id while it runs (shared with the other sessions on it).
     pub fn pid(&self) -> Option<u32> {
-        *self.shared.pid.lock().unwrap()
+        self.session
+            .host()
+            .and_then(|host| *host.inner.pid.lock().unwrap())
     }
 
     pub fn is_busy(&self) -> bool {
-        self.shared.turn.lock().unwrap().is_some()
+        self.session.turn.lock().unwrap().is_some()
     }
 
-    /// Stops the agent (process group included) and waits for the supervisor.
+    /// Ends the session; the last session on a process stops it (process group included) and
+    /// waits for it.
     pub fn shutdown(mut self) {
         self.stop();
     }
 
     fn stop(&mut self) {
-        self.shared.cancel_permissions();
-        // A full queue must not keep the supervisor alive: closing it ends `recv`.
+        self.session.cancel_permissions();
+        // The session's task closes it in the agent; a full queue must not keep it alive.
         let _ = self.commands.try_send(Command::Shutdown);
         self.commands.close();
-        // Nobody may read events any more; unblock a supervisor waiting to send one.
+        // Nobody may read events any more; unblock a task waiting to send one.
         self.events.close();
         self.stopping.close();
-        if let Some(handle) = self.supervisor.take() {
-            let _ = handle.join();
-        }
+        // The last handle stops the process and joins its thread.
+        drop(self.session.host.lock().unwrap().take());
     }
 }
 
@@ -541,401 +659,185 @@ impl Drop for AgentClient {
     }
 }
 
-enum End {
+enum SessionEnd {
+    /// Closed after the idle timeout (or a cancelled login); runs again on the next prompt.
     Idle,
     Shutdown,
-    /// The agent closed stdout (exited or crashed).
+    /// The connection closed: the process tells the session.
     Closed,
-    /// Handshake or session setup failed; already reported.
+    /// Session setup failed; already reported.
     Failed,
-    /// [`AgentClient::retry_login`]: start a new process at once, then send the prompt that
-    /// was waiting for the login.
-    Restart(Option<(TurnId, Vec<PromptPart>)>),
+    /// [`AgentClient::retry_login`] with other variables: the session continues on a process
+    /// started with them.
+    Move(BTreeMap<String, String>),
 }
 
-async fn supervise(
-    shared: Arc<Shared>,
-    commands: async_channel::Receiver<Command>,
-    turn_done: async_channel::Receiver<()>,
-) {
-    // Kept across restarts so a crashed or idle-stopped agent can `session/load` it.
-    let mut resume: Option<acp::SessionId> = shared.resume_session.clone().map(acp::SessionId::new);
-    while let Ok(command) = commands.recv().await {
-        let mut first = match command {
-            Command::Shutdown => return,
-            // The process exited while a login was pending: start over (asks again).
-            Command::Connect | Command::Login(_) => None,
-            Command::RetryLogin(env) => {
-                *shared.env_overrides.lock().unwrap() = env;
-                None
-            }
-            Command::Prompt { turn, parts } => Some((turn, parts)),
-            // No process: nothing to cancel or switch.
-            Command::Cancel | Command::SetMode(_) | Command::SetConfig { .. } => continue,
-        };
-        loop {
-            while turn_done.try_recv().is_ok() {}
-            match run_process(&shared, &commands, &turn_done, first, &mut resume).await {
-                End::Shutdown => return,
-                End::Restart(pending) => first = pending,
-                End::Idle | End::Closed | End::Failed => break,
-            }
+/// A session's task on its process: opens (or restores) it, runs its commands and turns, and
+/// closes it when idle or shut down.
+pub(crate) async fn run_session(
+    session: Arc<SessionState>,
+    cx: ConnectionTo<Agent>,
+    init: Arc<Init>,
+    launch: Arc<ResolvedLaunch>,
+    host: Arc<HostInner>,
+) -> Result<(), sdk::Error> {
+    while session.turn_done_rx.try_recv().is_ok() {}
+    let end = match session_body(&session, &cx, &init, &launch, &host).await {
+        Ok(end) => end,
+        Err(e) => {
+            eprintln!(
+                "event=agent_session_error agent={} error={}",
+                session.preset.id,
+                error_text(&e)
+            );
+            SessionEnd::Closed
         }
-    }
-}
-
-async fn run_process(
-    shared: &Arc<Shared>,
-    commands: &async_channel::Receiver<Command>,
-    turn_done: &async_channel::Receiver<()>,
-    first: Option<(TurnId, Vec<PromptPart>)>,
-    resume: &mut Option<acp::SessionId>,
-) -> End {
-    let name = shared.preset.display_name.clone();
-    let overrides = shared.env_overrides.lock().unwrap().clone();
-    let plan = shared
-        .preset
-        .resolve(&shared.search, &overrides, shared.install_root.as_deref());
-    let launch = match plan {
-        Ok(LaunchPlan::Ready(launch)) => launch,
-        Ok(LaunchPlan::Install(install)) => match run_install(shared, install) {
-            Ok(launch) => launch,
-            Err(InstallError::Aborted) => {
-                eprintln!("event=agent_install_aborted agent={}", shared.preset.id);
-                shared.finish_turn(None, TurnOutcome::Cancelled).await;
-                return if shared.stopping.is_closed() {
-                    End::Shutdown
-                } else {
-                    End::Failed
-                };
-            }
-            Err(InstallError::Failed(detail)) => {
-                eprintln!("event=agent_install_failed agent={}", shared.preset.id);
-                let message = format!(
-                    "安装「{name}」失败：{detail}。{}。",
-                    shared.preset.install_hint
-                );
-                shared
-                    .emit(AgentEvent::Error {
-                        message: message.clone(),
+    };
+    host.leave(&session);
+    let closed = matches!(end, SessionEnd::Closed);
+    match end {
+        // The last session leaving stops the process, which then says so; with others still on
+        // it, the session says it now.
+        SessionEnd::Idle if host.has_members() => {
+            if !session.exit_told.swap(true, Ordering::SeqCst) {
+                session
+                    .emit(AgentEvent::Exited {
+                        reason: ExitReason::Idle,
                     })
                     .await;
-                shared.finish_turn(None, TurnOutcome::Failed(message)).await;
-                return End::Failed;
             }
-        },
+        }
+        SessionEnd::Failed => {
+            if !session.exit_told.swap(true, Ordering::SeqCst) {
+                session
+                    .emit(AgentEvent::Exited {
+                        reason: ExitReason::SetupFailed {
+                            stderr_tail: String::new(),
+                        },
+                    })
+                    .await;
+            }
+        }
+        SessionEnd::Move(env) => move_session(&session, &host, env).await,
+        SessionEnd::Idle | SessionEnd::Shutdown | SessionEnd::Closed => {}
+    }
+    if !closed {
+        session.set_running(false);
+        session.kick_if_pending();
+    }
+    Ok(())
+}
+
+/// Hands the session to the process for `env` (started if needed); this process no longer
+/// tells it anything.
+async fn move_session(
+    session: &Arc<SessionState>,
+    host: &HostInner,
+    env: BTreeMap<String, String>,
+) {
+    let mut key = host.key.clone();
+    key.env = env;
+    let next = match &session.pool {
+        Some(pool) => pool.host(key, host.buffers.clone()),
+        None => Host::spawn(key, host.buffers.clone()),
+    };
+    match next {
+        Ok(next) => {
+            session.exit_told.store(true, Ordering::SeqCst);
+            let mut slot = session.host.lock().unwrap();
+            if slot.is_some() {
+                // May let go of this process's last handle; it then stops by itself.
+                *slot = Some(next);
+            }
+        }
         Err(e) => {
-            eprintln!("event=agent_launch_unavailable agent={}", shared.preset.id);
-            let message = e.to_string();
-            shared
+            let message = format!("无法启动「{}」：{e}", session.preset.display_name);
+            session
                 .emit(AgentEvent::Error {
                     message: message.clone(),
                 })
                 .await;
-            shared.finish_turn(None, TurnOutcome::Failed(message)).await;
-            return End::Failed;
-        }
-    };
-    let mut process = match AgentProcess::spawn(&launch, shared.workspace.root()) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("event=agent_spawn_failed agent={}", shared.preset.id);
-            let message = format!("启动「{name}」失败：{e}");
-            shared
-                .emit(AgentEvent::Error {
-                    message: message.clone(),
-                })
+            session.pending_first.lock().unwrap().take();
+            session
+                .finish_turn(None, TurnOutcome::Failed(message))
                 .await;
-            shared.finish_turn(None, TurnOutcome::Failed(message)).await;
-            return End::Failed;
         }
-    };
-    let pid = process.pid();
-    *shared.pid.lock().unwrap() = Some(pid);
-    eprintln!("event=agent_spawn agent={} pid={pid}", shared.preset.id);
-    shared.emit(AgentEvent::Starting { pid }).await;
-
-    let end = match transport(&mut process) {
-        Ok(transport) => {
-            match connect(
-                shared.clone(),
-                transport,
-                &launch,
-                commands,
-                turn_done,
-                first,
-                resume,
-            )
-            .await
-            {
-                Ok(end) => end,
-                Err(e) => {
-                    eprintln!("event=agent_connection_error agent={}", shared.preset.id);
-                    // A plain EOF is reported by the exit event (with the stderr tail).
-                    if !sdk::is_incoming_transport_closed(&e) {
-                        shared
-                            .emit(AgentEvent::Error {
-                                message: format!("与「{name}」的连接出错：{}", error_text(&e)),
-                            })
-                            .await;
-                    }
-                    End::Closed
-                }
-            }
-        }
-        Err(e) => {
-            shared
-                .emit(AgentEvent::Error {
-                    message: format!("无法连接「{name}」的标准输入输出：{e}"),
-                })
-                .await;
-            End::Failed
-        }
-    };
-
-    shared.cancel_permissions();
-    *shared.pid.lock().unwrap() = None;
-    let status = process.terminate();
-    let (code, signal) = describe(status);
-    let reason = match end {
-        End::Restart(_) => {
-            // The turn and the login card stay open for the new process.
-            eprintln!("event=agent_restart agent={} pid={pid}", shared.preset.id);
-            return end;
-        }
-        End::Idle => ExitReason::Idle,
-        End::Shutdown => ExitReason::Shutdown,
-        End::Failed => ExitReason::SetupFailed {
-            stderr_tail: process.stderr_tail(),
-        },
-        End::Closed => ExitReason::Crashed {
-            code,
-            signal,
-            stderr_tail: process.stderr_tail(),
-        },
-    };
-    eprintln!(
-        "event=agent_exit agent={} pid={pid} reason={} code={code:?} signal={signal:?}",
-        shared.preset.id,
-        match reason {
-            ExitReason::Idle => "idle",
-            ExitReason::Shutdown => "shutdown",
-            ExitReason::SetupFailed { .. } => "setup_failed",
-            ExitReason::Crashed { .. } => "crashed",
-        }
-    );
-    if !matches!(reason, ExitReason::Idle) {
-        shared
-            .finish_turn(None, TurnOutcome::Failed(format!("「{name}」进程已退出")))
-            .await;
-    }
-    shared.emit(AgentEvent::Exited { reason }).await;
-    end
-}
-
-/// Blocks this client's thread (it has nothing else to do before the process exists); stops
-/// when the client shuts down or the user cancels.
-fn run_install(
-    shared: &Shared,
-    install: crate::registry::PackageInstall,
-) -> Result<crate::registry::ResolvedLaunch, InstallError> {
-    eprintln!("event=agent_install_start agent={}", shared.preset.id);
-    let progress = |message: String| {
-        let _ = shared
-            .events
-            .send_blocking(AgentEvent::Progress { message });
-    };
-    let abort = || shared.stopping.is_closed() || shared.install_cancel.load(Ordering::Relaxed);
-    let launch = install.run(&progress, &abort)?;
-    eprintln!("event=agent_install_done agent={}", shared.preset.id);
-    Ok(launch)
-}
-
-type Transport =
-    ByteStreams<Async<std::process::ChildStdin>, BoundedLines<Async<std::process::ChildStdout>>>;
-
-fn transport(process: &mut AgentProcess) -> io::Result<Transport> {
-    let stdin = process
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("stdin 不可用"))?;
-    let stdout = process
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("stdout 不可用"))?;
-    Ok(ByteStreams::new(
-        Async::new(stdin)?,
-        BoundedLines {
-            inner: Async::new(stdout)?,
-            since_newline: 0,
-        },
-    ))
-}
-
-/// The agent's message plus its `data` detail (often the real reason), shortened. Shown to
-/// the user, never logged.
-fn error_text(e: &sdk::Error) -> String {
-    let mut text = e.message.clone();
-    if let Some(data) = &e.data {
-        let detail = match data {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
-        text.push('：');
-        text.extend(detail.chars().take(400));
-    }
-    text
-}
-
-fn fs_error(e: io::Error) -> sdk::Error {
-    match e.kind() {
-        io::ErrorKind::NotFound => sdk::Error::resource_not_found(None).data(e.to_string()),
-        _ => sdk::Error::new(-32603, e.to_string()),
     }
 }
 
-async fn connect(
-    shared: Arc<Shared>,
-    transport: Transport,
-    launch: &ResolvedLaunch,
-    commands: &async_channel::Receiver<Command>,
-    turn_done: &async_channel::Receiver<()>,
-    first: Option<(TurnId, Vec<PromptPart>)>,
-    resume: &mut Option<acp::SessionId>,
-) -> Result<End, sdk::Error> {
-    let on_update = shared.clone();
-    let on_permission = shared.clone();
-    let on_read = shared.clone();
-    let on_write = shared.clone();
-    let session_shared = shared.clone();
-    Client
-        .builder()
-        .name("zj")
-        .on_receive_notification(
-            async move |notification: acp::SessionNotification, cx: ConnectionTo<Agent>| {
-                handle_update(&on_update, notification, &cx).await;
-                Ok(())
-            },
-            sdk::on_receive_notification!(),
-        )
-        .on_receive_request(
-            async move |request: acp::RequestPermissionRequest,
-                        responder: Responder<acp::RequestPermissionResponse>,
-                        cx: ConnectionTo<Agent>| {
-                handle_permission(&on_permission, request, responder, &cx).await
-            },
-            sdk::on_receive_request!(),
-        )
-        .on_receive_request(
-            async move |request: acp::ReadTextFileRequest,
-                        responder: Responder<acp::ReadTextFileResponse>,
-                        _cx: ConnectionTo<Agent>| {
-                responder.respond_with_result(handle_read(&on_read, &request).await)
-            },
-            sdk::on_receive_request!(),
-        )
-        .on_receive_request(
-            async move |request: acp::WriteTextFileRequest,
-                        responder: Responder<acp::WriteTextFileResponse>,
-                        _cx: ConnectionTo<Agent>| {
-                let result = handle_write(&on_write, request).await;
-                responder.respond_with_result(result)
-            },
-            sdk::on_receive_request!(),
-        )
-        .connect_with(transport, async move |cx: ConnectionTo<Agent>| {
-            run_session(
-                session_shared,
-                cx,
-                launch,
-                commands,
-                turn_done,
-                first,
-                resume,
-            )
-            .await
-        })
+/// Frees the session in the agent (Claude ends its CLI, Codex its thread subscription).
+async fn close_session(
+    session: &SessionState,
+    cx: &ConnectionTo<Agent>,
+    init: &Init,
+    host: &HostInner,
+    id: &acp::SessionId,
+) {
+    host.unregister(id);
+    if !init.close_session {
+        return;
+    }
+    let request = cx.send_request(acp::CloseSessionRequest::new(id.clone()));
+    if with_timeout(request.block_task(), CLOSE_TIMEOUT)
         .await
-}
-
-async fn with_timeout<T>(future: impl Future<Output = T>, limit: Duration) -> Option<T> {
-    let future = std::pin::pin!(future);
-    match futures::future::select(future, Timer::after(limit)).await {
-        Either::Left((value, _)) => Some(value),
-        Either::Right(_) => None,
-    }
-}
-
-async fn run_session(
-    shared: Arc<Shared>,
-    cx: ConnectionTo<Agent>,
-    launch: &ResolvedLaunch,
-    commands: &async_channel::Receiver<Command>,
-    turn_done: &async_channel::Receiver<()>,
-    mut first: Option<(TurnId, Vec<PromptPart>)>,
-    resume: &mut Option<acp::SessionId>,
-) -> Result<End, sdk::Error> {
-    let name = shared.preset.display_name.clone();
-    let timeout = shared.handshake_timeout;
-    let fail = |shared: Arc<Shared>, message: String| async move {
-        eprintln!("event=agent_handshake_failed agent={}", shared.preset.id);
-        shared
-            .emit(AgentEvent::Error {
-                message: message.clone(),
-            })
-            .await;
-        shared.finish_turn(None, TurnOutcome::Failed(message)).await;
-        Ok(End::Failed)
-    };
-
-    let capabilities = acp::ClientCapabilities::new()
-        .fs(acp::FileSystemCapabilities::new()
-            .read_text_file(true)
-            .write_text_file(true))
-        // Not advertised in v1: agents run commands with their own tools, behind permission
-        // requests, instead of in an editor-owned terminal.
-        .terminal(false)
-        .auth(acp::AuthCapabilities::new().terminal(login::SUPPORTED));
-    let request = acp::InitializeRequest::new(ProtocolVersion::V1)
-        .client_capabilities(capabilities)
-        .client_info(acp::Implementation::new("zj", env!("CARGO_PKG_VERSION")).title("ZJ"));
-    let init = match shared
-        .bounded(cx.send_request(request).block_task(), timeout)
-        .await
+        .is_none_or(|answer| answer.is_err())
     {
-        Some(Ok(init)) => init,
-        Some(Err(e)) => {
-            return fail(shared, format!("「{name}」握手失败：{}", error_text(&e))).await;
-        }
-        None => {
-            return fail(
-                shared,
-                format!("「{name}」在 {} 秒内没有响应握手", timeout.as_secs()),
-            )
-            .await;
-        }
-    };
-    let caps = &init.agent_capabilities;
-    shared
-        .embedded_context
-        .store(caps.prompt_capabilities.embedded_context, Ordering::Relaxed);
-    let info = AgentInfo {
-        name: init.agent_info.as_ref().map(|i| i.name.clone()),
-        title: init.agent_info.as_ref().and_then(|i| i.title.clone()),
-        version: init.agent_info.as_ref().map(|i| i.version.clone()),
-        load_session: caps.load_session,
-        embedded_context: caps.prompt_capabilities.embedded_context,
-        image: caps.prompt_capabilities.image,
-        auth_methods: init
-            .auth_methods
-            .iter()
-            .map(|m| m.id().to_string())
-            .collect(),
-    };
-    shared.emit(AgentEvent::Ready(info)).await;
+        eprintln!(
+            "event=agent_session_close_failed agent={}",
+            session.preset.id
+        );
+    }
+}
 
-    let root = shared.workspace.root().to_path_buf();
-    let policy = shared.preset.modes.clone();
+async fn fail(session: &SessionState, message: String) -> Result<SessionEnd, sdk::Error> {
+    eprintln!("event=agent_session_failed agent={}", session.preset.id);
+    session
+        .emit(AgentEvent::Error {
+            message: message.clone(),
+        })
+        .await;
+    session
+        .finish_turn(None, TurnOutcome::Failed(message))
+        .await;
+    Ok(SessionEnd::Failed)
+}
+
+async fn session_body(
+    s: &Arc<SessionState>,
+    cx: &ConnectionTo<Agent>,
+    init: &Init,
+    launch: &ResolvedLaunch,
+    host: &HostInner,
+) -> Result<SessionEnd, sdk::Error> {
+    let name = s.preset.display_name.clone();
+    let timeout = s.handshake_timeout;
+    // What started the session: a prompt is sent first; a stop or a mode switch sent while it
+    // was not running is moot.
+    let mut first = s.pending_first.lock().unwrap().take();
+    if first.is_none() {
+        loop {
+            match s.commands.try_recv() {
+                Ok(Command::Prompt { turn, parts }) => {
+                    first = Some((turn, parts));
+                    break;
+                }
+                Ok(Command::Connect | Command::Login(_)) => break,
+                Ok(Command::RetryLogin(env)) if env != host.key.env => {
+                    return Ok(SessionEnd::Move(env));
+                }
+                Ok(Command::RetryLogin(_)) => break,
+                Ok(Command::Cancel | Command::SetMode(_) | Command::SetConfig { .. }) => {}
+                Ok(Command::Shutdown) | Err(async_channel::TryRecvError::Closed) => {
+                    return Ok(SessionEnd::Shutdown);
+                }
+                Err(async_channel::TryRecvError::Empty) => break,
+            }
+        }
+    }
+    s.emit(AgentEvent::Ready(init.info.clone())).await;
+
+    let root = s.workspace.root().to_path_buf();
+    let policy = s.preset.modes.clone();
     // Forbidden modes never reach the UI.
     let modes = |m: Option<acp::SessionModeState>| {
         m.map(|m| Modes {
@@ -948,23 +850,26 @@ async fn run_session(
                 .collect(),
         })
     };
-    let meta = shared
+    let meta = s
         .preset
         .session_meta
         .as_ref()
         .and_then(|m| m.as_object().cloned());
     let mut started_modes: Option<Modes> = None;
     let mut session = None;
-    if let Some(previous) = resume.clone()
-        && caps.load_session
+    let resume = s.resume.lock().unwrap().clone();
+    if let Some(previous) = resume
+        && init.load_session
     {
-        shared.replaying.store(true, Ordering::Relaxed);
+        // Routed before the request: the replay arrives as updates for this id.
+        host.register(&previous, s);
+        s.replaying.store(true, Ordering::Relaxed);
         let request =
             acp::LoadSessionRequest::new(previous.clone(), root.clone()).meta(meta.clone());
-        let loaded = shared
+        let loaded = s
             .bounded(cx.send_request(request).block_task(), timeout)
             .await;
-        shared.replaying.store(false, Ordering::Relaxed);
+        s.replaying.store(false, Ordering::Relaxed);
         if let Some(Ok(response)) = loaded {
             let raw_current = response
                 .modes
@@ -974,19 +879,18 @@ async fn run_session(
             if let (Some(m), Some(current)) = (started_modes.as_mut(), raw_current) {
                 m.current = current;
             }
-            shared
-                .emit(AgentEvent::SessionStarted {
-                    session_id: previous.to_string(),
-                    resumed: true,
-                    modes: started_modes.clone(),
-                })
-                .await;
-            shared
-                .offer_configs(response.config_options.as_deref().unwrap_or_default())
+            s.emit(AgentEvent::SessionStarted {
+                session_id: previous.to_string(),
+                resumed: true,
+                modes: started_modes.clone(),
+            })
+            .await;
+            s.offer_configs(response.config_options.as_deref().unwrap_or_default())
                 .await;
             session = Some(previous);
         } else {
-            eprintln!("event=agent_session_load_failed agent={}", shared.preset.id);
+            host.unregister(&previous);
+            eprintln!("event=agent_session_load_failed agent={}", s.preset.id);
         }
     }
     let session = match session {
@@ -995,11 +899,12 @@ async fn run_session(
             let request = acp::NewSessionRequest::new(root.clone())
                 .mcp_servers(Vec::new())
                 .meta(meta.clone());
-            match shared
+            match s
                 .bounded(cx.send_request(request).block_task(), timeout)
                 .await
             {
                 Some(Ok(response)) => {
+                    let early = host.register(&response.session_id, s);
                     let raw_current = response
                         .modes
                         .as_ref()
@@ -1008,135 +913,162 @@ async fn run_session(
                     if let (Some(m), Some(current)) = (started_modes.as_mut(), raw_current) {
                         m.current = current;
                     }
-                    shared
-                        .emit(AgentEvent::SessionStarted {
-                            session_id: response.session_id.to_string(),
-                            resumed: false,
-                            modes: started_modes.clone(),
-                        })
+                    s.emit(AgentEvent::SessionStarted {
+                        session_id: response.session_id.to_string(),
+                        resumed: false,
+                        modes: started_modes.clone(),
+                    })
+                    .await;
+                    s.offer_configs(response.config_options.as_deref().unwrap_or_default())
                         .await;
-                    shared
-                        .offer_configs(response.config_options.as_deref().unwrap_or_default())
-                        .await;
+                    // Updates the agent sent before its answer (e.g. the command list).
+                    for notification in early {
+                        handle_update(s, notification, cx).await;
+                    }
                     break response.session_id;
                 }
                 Some(Err(e))
                     if e.code == acp::ErrorCode::AuthRequired && !init.auth_methods.is_empty() =>
                 {
                     let wait = Login {
-                        shared: &shared,
-                        cx: &cx,
+                        shared: s,
+                        cx,
                         launch,
                         methods: &init.auth_methods,
+                        host_env: &host.key.env,
                     };
-                    if let Some(end) = wait.run(commands, &mut first).await {
+                    if let Some(end) = wait.run(&mut first).await {
                         return Ok(end);
                     }
                 }
                 Some(Err(e)) => {
-                    return fail(
-                        shared,
-                        format!("「{name}」无法新建会话：{}", error_text(&e)),
-                    )
-                    .await;
+                    return fail(s, format!("「{name}」无法新建会话：{}", error_text(&e))).await;
                 }
-                None => return fail(shared, format!("「{name}」新建会话超时")).await,
+                None => return fail(s, format!("「{name}」新建会话超时")).await,
             }
         },
     };
-    *resume = Some(session.clone());
-    enforce_mode(&shared, &cx, &session, started_modes.as_ref()).await;
+    *s.resume.lock().unwrap() = Some(session.clone());
+    enforce_mode(s, cx, &session, started_modes.as_ref()).await;
 
     let can_login = !init.auth_methods.is_empty();
+    let embedded = init.embedded_context;
     if let Some((turn, parts)) = first {
-        start_prompt(&shared, &cx, &session, turn, parts, can_login)?;
+        start_prompt(s, cx, &session, turn, parts, can_login, embedded)?;
     }
     loop {
-        let busy = shared.turn.lock().unwrap().is_some();
-        let idle_timeout = shared.idle_timeout;
+        let busy = s.turn.lock().unwrap().is_some();
+        let resting = s.is_idle();
+        let idle_timeout = s.idle_timeout;
         let idle = async move {
-            if busy {
+            if busy || resting {
                 futures::future::pending::<()>().await;
             } else {
                 Timer::after(idle_timeout).await;
             }
         };
-        let command = commands.recv().fuse();
-        let done = turn_done.recv().fuse();
+        let command = s.commands.recv().fuse();
+        let done = s.turn_done_rx.recv().fuse();
         let idle = idle.fuse();
         let closed = cx.incoming_closed().fuse();
         futures::pin_mut!(command, done, idle, closed);
         futures::select! {
-            command = command => match command {
-                Err(_) | Ok(Command::Shutdown) => return Ok(End::Shutdown),
-                Ok(Command::Connect | Command::Login(_) | Command::RetryLogin(_)) => {}
-                Ok(Command::Prompt { turn, parts }) => start_prompt(&shared, &cx, &session, turn, parts, can_login)?,
-                Ok(Command::Cancel) => {
-                    shared.cancel_permissions();
-                    cx.send_notification(acp::CancelNotification::new(session.clone()))?;
-                    // An agent that never answers the prompt would keep the turn (and the idle
-                    // timer) stuck; its late answer is ignored once the turn has ended.
-                    let turn = *shared.turn.lock().unwrap();
-                    if let Some(turn) = turn {
-                        let shared = shared.clone();
+            command = command => {
+                s.idle.store(false, Ordering::Relaxed);
+                match command {
+                    Err(_) | Ok(Command::Shutdown) => {
+                        close_session(s, cx, init, host, &session).await;
+                        return Ok(SessionEnd::Shutdown);
+                    }
+                    Ok(Command::Connect | Command::Login(_)) => {}
+                    Ok(Command::RetryLogin(env)) => {
+                        if env != host.key.env {
+                            close_session(s, cx, init, host, &session).await;
+                            return Ok(SessionEnd::Move(env));
+                        }
+                    }
+                    Ok(Command::Prompt { turn, parts }) => {
+                        start_prompt(s, cx, &session, turn, parts, can_login, embedded)?
+                    }
+                    Ok(Command::Cancel) => {
+                        s.cancel_permissions();
+                        cx.send_notification(acp::CancelNotification::new(session.clone()))?;
+                        // An agent that never answers the prompt would keep the turn (and the
+                        // idle timer) stuck; its late answer is ignored once the turn has ended.
+                        let turn = *s.turn.lock().unwrap();
+                        if let Some(turn) = turn {
+                            let shared = s.clone();
+                            cx.spawn(async move {
+                                Timer::after(shared.cancel_grace).await;
+                                if *shared.turn.lock().unwrap() == Some(turn) {
+                                    eprintln!("event=agent_cancel_unanswered agent={}", shared.preset.id);
+                                    shared
+                                        .finish_turn(
+                                            Some(turn),
+                                            TurnOutcome::Failed("Agent 没有响应取消，已结束这一轮".into()),
+                                        )
+                                        .await;
+                                    let _ = shared.turn_done.send(()).await;
+                                }
+                                Ok(())
+                            })?;
+                        }
+                    }
+                    Ok(Command::SetConfig { id, value }) => {
+                        let request = cx.send_request(acp::SetSessionConfigOptionRequest::new(session.clone(), id, value.as_str()));
+                        let shared = s.clone();
                         cx.spawn(async move {
-                            Timer::after(shared.cancel_grace).await;
-                            if *shared.turn.lock().unwrap() == Some(turn) {
-                                eprintln!("event=agent_cancel_unanswered agent={}", shared.preset.id);
-                                shared
-                                    .finish_turn(
-                                        Some(turn),
-                                        TurnOutcome::Failed("Agent 没有响应取消，已结束这一轮".into()),
-                                    )
-                                    .await;
-                                let _ = shared.turn_done.send(()).await;
+                            match request.block_task().await {
+                                Ok(response) => shared.offer_configs(&response.config_options).await,
+                                Err(e) => shared.emit(AgentEvent::Error { message: format!("切换失败：{}", error_text(&e)) }).await,
+                            }
+                            Ok(())
+                        })?;
+                    }
+                    Ok(Command::SetMode(mode)) => {
+                        let request = cx.send_request(acp::SetSessionModeRequest::new(session.clone(), mode));
+                        let shared = s.clone();
+                        cx.spawn(async move {
+                            if let Err(e) = request.block_task().await {
+                                shared.emit(AgentEvent::Error { message: format!("切换模式失败：{}", error_text(&e)) }).await;
                             }
                             Ok(())
                         })?;
                     }
                 }
-                Ok(Command::SetConfig { id, value }) => {
-                    let request = cx.send_request(acp::SetSessionConfigOptionRequest::new(session.clone(), id, value.as_str()));
-                    let shared = shared.clone();
-                    cx.spawn(async move {
-                        match request.block_task().await {
-                            Ok(response) => shared.offer_configs(&response.config_options).await,
-                            Err(e) => shared.emit(AgentEvent::Error { message: format!("切换失败：{}", error_text(&e)) }).await,
-                        }
-                        Ok(())
-                    })?;
-                }
-                Ok(Command::SetMode(mode)) => {
-                    let request = cx.send_request(acp::SetSessionModeRequest::new(session.clone(), mode));
-                    let shared = shared.clone();
-                    cx.spawn(async move {
-                        if let Err(e) = request.block_task().await {
-                            shared.emit(AgentEvent::Error { message: format!("切换模式失败：{}", error_text(&e)) }).await;
-                        }
-                        Ok(())
-                    })?;
-                }
             },
             _ = done => {
-                let parked = shared.parked.lock().unwrap().take();
+                let parked = s.parked.lock().unwrap().take();
                 if let Some(prompt) = parked {
                     let mut pending = Some(prompt);
                     let wait = Login {
-                        shared: &shared,
-                        cx: &cx,
+                        shared: s,
+                        cx,
                         launch,
                         methods: &init.auth_methods,
+                        host_env: &host.key.env,
                     };
-                    if let Some(end) = wait.run(commands, &mut pending).await {
+                    if let Some(end) = wait.run(&mut pending).await {
+                        if matches!(end, SessionEnd::Move(_)) {
+                            close_session(s, cx, init, host, &session).await;
+                        }
                         return Ok(end);
                     }
                     if let Some((turn, parts)) = pending {
-                        start_prompt(&shared, &cx, &session, turn, parts, can_login)?;
+                        start_prompt(s, cx, &session, turn, parts, can_login, embedded)?;
                     }
                 }
             }
-            _ = idle => return Ok(End::Idle),
-            _ = closed => return Ok(End::Closed),
+            _ = idle => {
+                if init.close_session {
+                    close_session(s, cx, init, host, &session).await;
+                    return Ok(SessionEnd::Idle);
+                }
+                // The agent cannot free it: the process stops once every session rests.
+                s.idle.store(true, Ordering::Relaxed);
+                host.wake();
+            }
+            _ = closed => return Ok(SessionEnd::Closed),
         }
     }
 }
@@ -1144,21 +1076,20 @@ async fn run_session(
 /// Waiting for the user to sign in after `session/new` or `session/prompt` answered "auth
 /// required".
 struct Login<'a> {
-    shared: &'a Arc<Shared>,
+    shared: &'a Arc<SessionState>,
     cx: &'a ConnectionTo<Agent>,
     launch: &'a ResolvedLaunch,
     methods: &'a [acp::AuthMethod],
+    /// The variables of the process the session runs on.
+    host_env: &'a BTreeMap<String, String>,
 }
 
 impl Login<'_> {
     /// `None`: signed in, try the session again in this process. A prompt sent meanwhile is
     /// kept in `first`.
-    async fn run(
-        &self,
-        commands: &async_channel::Receiver<Command>,
-        first: &mut Option<(TurnId, Vec<PromptPart>)>,
-    ) -> Option<End> {
+    async fn run(&self, first: &mut Option<(TurnId, Vec<PromptPart>)>) -> Option<SessionEnd> {
         let shared = self.shared;
+        let commands = &shared.commands;
         eprintln!("event=agent_auth_required agent={}", shared.preset.id);
         let methods = self
             .methods
@@ -1182,24 +1113,25 @@ impl Login<'_> {
                     shared
                         .finish_turn(None, TurnOutcome::Failed("等待登录超时".into()))
                         .await;
-                    return Some(End::Idle);
+                    return Some(SessionEnd::Idle);
                 }
-                _ = closed => return Some(End::Closed),
+                _ = closed => return Some(SessionEnd::Closed),
             };
             match command {
-                Err(_) | Ok(Command::Shutdown) => return Some(End::Shutdown),
+                Err(_) | Ok(Command::Shutdown) => return Some(SessionEnd::Shutdown),
                 Ok(Command::Connect | Command::SetMode(_) | Command::SetConfig { .. }) => {}
                 Ok(Command::Prompt { turn, parts }) => {
                     first.get_or_insert((turn, parts));
                 }
                 Ok(Command::Cancel) => {
                     shared.finish_turn(None, TurnOutcome::Cancelled).await;
-                    return Some(End::Idle);
+                    return Some(SessionEnd::Idle);
                 }
-                Ok(Command::RetryLogin(env)) => {
-                    *shared.env_overrides.lock().unwrap() = env;
-                    return Some(End::Restart(first.take()));
+                Ok(Command::RetryLogin(env)) if env != *self.host_env => {
+                    *shared.pending_first.lock().unwrap() = first.take();
+                    return Some(SessionEnd::Move(env));
                 }
+                Ok(Command::RetryLogin(_)) => return None,
                 Ok(Command::Login(id)) => {
                     if let Some(end) = self.login(&id, commands, first).await {
                         return end;
@@ -1215,7 +1147,7 @@ impl Login<'_> {
         id: &str,
         commands: &async_channel::Receiver<Command>,
         first: &mut Option<(TurnId, Vec<PromptPart>)>,
-    ) -> Option<Option<End>> {
+    ) -> Option<Option<SessionEnd>> {
         let shared = self.shared;
         let error = |message: String| shared.emit(AgentEvent::Error { message });
         let progress = |message: String| shared.emit(AgentEvent::Progress { message });
@@ -1280,10 +1212,10 @@ impl Login<'_> {
                     return None;
                 }
                 command = command => match command {
-                    Err(_) | Ok(Command::Shutdown) => return Some(Some(End::Shutdown)),
+                    Err(_) | Ok(Command::Shutdown) => return Some(Some(SessionEnd::Shutdown)),
                     Ok(Command::Cancel) => {
                         shared.finish_turn(None, TurnOutcome::Cancelled).await;
-                        return Some(Some(End::Idle));
+                        return Some(Some(SessionEnd::Idle));
                     }
                     Ok(Command::Prompt { turn, parts }) => {
                         first.get_or_insert((turn, parts));
@@ -1296,16 +1228,17 @@ impl Login<'_> {
 }
 
 /// `can_login`: the agent offered login methods, so an "auth required" answer parks the
-/// prompt (see [`Shared::parked`]) instead of failing the turn.
+/// prompt (see [`SessionState::parked`]) instead of failing the turn.
 fn start_prompt(
-    shared: &Arc<Shared>,
+    shared: &Arc<SessionState>,
     cx: &ConnectionTo<Agent>,
     session: &acp::SessionId,
     turn: TurnId,
     parts: Vec<PromptPart>,
     can_login: bool,
+    embedded: bool,
 ) -> Result<(), sdk::Error> {
-    let blocks = prompt_blocks(&parts, shared.embedded_context.load(Ordering::Relaxed));
+    let blocks = prompt_blocks(&parts, embedded);
     let request = cx.send_request(acp::PromptRequest::new(session.clone(), blocks));
     let shared = shared.clone();
     cx.spawn(async move {
@@ -1327,7 +1260,7 @@ fn start_prompt(
 /// Starts in the preset's asking mode, whatever the agent's own settings chose; a forbidden
 /// current mode with no allowed alternative is reported.
 async fn enforce_mode(
-    shared: &Arc<Shared>,
+    shared: &Arc<SessionState>,
     cx: &ConnectionTo<Agent>,
     session: &acp::SessionId,
     modes: Option<&Modes>,
@@ -1382,8 +1315,8 @@ async fn enforce_mode(
     }
 }
 
-async fn handle_update(
-    shared: &Arc<Shared>,
+pub(crate) async fn handle_update(
+    shared: &Arc<SessionState>,
     notification: acp::SessionNotification,
     cx: &ConnectionTo<Agent>,
 ) {
@@ -1476,8 +1409,8 @@ async fn handle_update(
 
 /// Holds the dispatch loop only to register and announce the request; the answer is awaited
 /// in a spawned task.
-async fn handle_permission(
-    shared: &Arc<Shared>,
+pub(crate) async fn handle_permission(
+    shared: &Arc<SessionState>,
     request: acp::RequestPermissionRequest,
     responder: Responder<acp::RequestPermissionResponse>,
     cx: &ConnectionTo<Agent>,
@@ -1503,8 +1436,8 @@ async fn handle_permission(
     })
 }
 
-async fn handle_read(
-    shared: &Shared,
+pub(crate) async fn handle_read(
+    shared: &SessionState,
     request: &acp::ReadTextFileRequest,
 ) -> Result<acp::ReadTextFileResponse, sdk::Error> {
     let path = shared.workspace.resolve(&request.path).map_err(fs_error)?;
@@ -1519,8 +1452,8 @@ async fn handle_read(
     )))
 }
 
-async fn handle_write(
-    shared: &Shared,
+pub(crate) async fn handle_write(
+    shared: &SessionState,
     request: acp::WriteTextFileRequest,
 ) -> Result<acp::WriteTextFileResponse, sdk::Error> {
     let path = shared.workspace.resolve(&request.path).map_err(fs_error)?;
@@ -1528,6 +1461,57 @@ async fn handle_write(
     write_atomic(&path, &request.content).map_err(fs_error)?;
     shared.emit(AgentEvent::FileWritten { path }).await;
     Ok(acp::WriteTextFileResponse::new())
+}
+
+pub(crate) type Transport =
+    ByteStreams<Async<std::process::ChildStdin>, BoundedLines<Async<std::process::ChildStdout>>>;
+
+pub(crate) fn transport(process: &mut AgentProcess) -> io::Result<Transport> {
+    let stdin = process
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("stdin 不可用"))?;
+    let stdout = process
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("stdout 不可用"))?;
+    Ok(ByteStreams::new(
+        Async::new(stdin)?,
+        BoundedLines {
+            inner: Async::new(stdout)?,
+            since_newline: 0,
+        },
+    ))
+}
+
+/// The agent's message plus its `data` detail (often the real reason), shortened. Shown to
+/// the user, never logged.
+pub(crate) fn error_text(e: &sdk::Error) -> String {
+    let mut text = e.message.clone();
+    if let Some(data) = &e.data {
+        let detail = match data {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        text.push('：');
+        text.extend(detail.chars().take(400));
+    }
+    text
+}
+
+fn fs_error(e: io::Error) -> sdk::Error {
+    match e.kind() {
+        io::ErrorKind::NotFound => sdk::Error::resource_not_found(None).data(e.to_string()),
+        _ => sdk::Error::new(-32603, e.to_string()),
+    }
+}
+
+pub(crate) async fn with_timeout<T>(future: impl Future<Output = T>, limit: Duration) -> Option<T> {
+    let future = std::pin::pin!(future);
+    match futures::future::select(future, Timer::after(limit)).await {
+        Either::Left((value, _)) => Some(value),
+        Either::Right(_) => None,
+    }
 }
 
 fn file_uri(path: &Path) -> String {

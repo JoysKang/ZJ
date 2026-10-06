@@ -101,6 +101,7 @@ impl Workbench {
         let overrides = settings.env_for(&preset.id);
         let idle = Duration::from_secs(u64::from(settings.idle_minutes) * 60);
         let buffers = buffer_provider(cx);
+        let pool = agent_pool(cx);
         let create = default_workspace(cx).as_ref() == Some(&root);
         let job = cx.background_spawn(async move {
             if create {
@@ -113,6 +114,7 @@ impl Workbench {
             options.env_overrides = env;
             options.resume_session = resume;
             options.buffers = Some(buffers);
+            options.pool = Some(pool);
             AgentClient::start(options).map_err(|e| format!("无法启动 Agent：{e}"))
         });
         cx.spawn_in(window, async move |this, cx| {

@@ -45,7 +45,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 - `crates/core`：身份模型与共享常量（`RepoId`、`DocumentId`、`EXCLUDED_DIRS`、按 Git 规则校验 `.git` 的 `git_marker`），**不依赖 GPUI**。
 - `crates/git_service`：调用系统 git，负责有界输出、超时、取消、全局限流，**不依赖 GPUI**。仓库发现最多向下 4 层，跳过 `EXCLUDED_DIRS` 和上层仓库忽略的目录，无效的 `.git` 静默跳过（自动发现找不到的仓库可以手动添加，见 `settings.rs` 的 `extra_repos`）。`lib.rs` 是服务本体（进程、限流、发现、查询），解析放在各自的文件里：`status.rs`（porcelain v2）、`refs.rs`（分支）、`log.rs`（未推送的提交）、`graph.rs`（Git 图的分页和提交详情）、`ls_files.rs`（快速打开的路径）、`stash.rs`（stash 和 blame），写操作在 `write.rs`。
-- `crates/agent_client`：ACP 客户端（Agent 预设、子进程、会话、权限、`fs/*`、改动前快照与审阅、空闲退出），**不依赖 GPUI**，见 docs/adr/0004。
+- `crates/agent_client`：ACP 客户端（Agent 预设、子进程、会话、权限、`fs/*`、改动前快照与审阅、空闲退出），**不依赖 GPUI**，见 docs/adr/0004。`client.rs` 是一个会话（`AgentClient`），`host.rs` 是 Agent 进程：同一种 Agent、同样的环境变量在整个应用里共用一个进程（`AgentPool`），请求按会话 id 分发，会话空闲时 `session/close`，没有会话时进程退出。
 - `crates/agent_history`：Agent 会话历史（SQLite + FTS5，后台写线程、搜索、钉住、硬删除），**不依赖 GPUI**。
 - `crates/app`：GPUI 界面。
   - `theme.rs`：唯一允许写字面尺寸和颜色的地方。

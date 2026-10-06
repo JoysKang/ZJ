@@ -10,8 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 use workspace_editor_agent::{
-    AgentClient, AgentEvent, AgentPreset, BufferProvider, ClientError, ClientOptions, ExitReason,
-    Glyph, PermissionKind, PromptPart, SearchPath, ToolContent, ToolKind, ToolStatus, TurnOutcome,
+    AgentClient, AgentEvent, AgentPool, AgentPreset, BufferProvider, ClientError, ClientOptions,
+    ExitReason, Glyph, PermissionKind, PromptPart, SearchPath, ToolContent, ToolKind, ToolStatus,
+    TurnOutcome,
     registry::{EnvValue, Launch},
 };
 
@@ -1016,6 +1017,34 @@ fn dropping_the_client_does_not_wait_out_a_hung_handshake() {
 }
 
 #[test]
+fn a_failed_handshake_fails_the_turn_and_is_not_retried_by_itself() {
+    let ws = Workspace::new("hang-fail");
+    let mut opts = options(&ws, &[("FAKE_HANG_INIT", "1")]);
+    opts.handshake_timeout = Duration::from_millis(300);
+    let client = AgentClient::start(opts).unwrap();
+    let events = Events::of(&client);
+    client.prompt(text("echo hi")).unwrap();
+    let seen = events.until(|e| matches!(e, AgentEvent::Exited { .. }));
+    assert!(seen.iter().any(|e| matches!(
+        e,
+        AgentEvent::TurnEnded {
+            outcome: TurnOutcome::Failed(_),
+            ..
+        }
+    )));
+    assert!(matches!(
+        seen.last(),
+        Some(AgentEvent::Exited {
+            reason: ExitReason::SetupFailed { .. }
+        })
+    ));
+    // The prompt that started it is gone: nothing starts the agent again on its own.
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(events.rx.try_recv().is_err());
+    assert!(!client.is_busy());
+}
+
+#[test]
 fn a_file_without_a_snapshot_is_reported() {
     let ws = Workspace::new("nosnap");
     let file = ws.path("data.bin");
@@ -1053,4 +1082,205 @@ fn a_cancel_the_agent_ignores_still_ends_the_turn() {
     );
     // The next prompt is not refused as "a turn is running".
     client.prompt(text("echo again")).unwrap();
+}
+
+// ----- sessions sharing one process (AgentPool) ---------------------------------------------
+
+fn pooled(ws: &Workspace, pool: &Arc<AgentPool>, env: &[(&str, &str)]) -> ClientOptions {
+    let mut opts = options(ws, env);
+    opts.pool = Some(pool.clone());
+    opts
+}
+
+/// `session:<id> cwd:<path>` from the `session` script.
+fn session_of(client: &AgentClient, events: &Events) -> (String, String) {
+    client.prompt(text("session")).unwrap();
+    let reply = message(&events.turn());
+    let (id, cwd) = reply
+        .strip_prefix("session:")
+        .and_then(|rest| rest.split_once(" cwd:"))
+        .unwrap();
+    (id.to_string(), cwd.to_string())
+}
+
+#[test]
+fn sessions_of_one_agent_share_its_process() {
+    let (wa, wb) = (Workspace::new("pool-a"), Workspace::new("pool-b"));
+    let pool = Arc::new(AgentPool::new());
+    let a = AgentClient::start(pooled(&wa, &pool, &[])).unwrap();
+    let b = AgentClient::start(pooled(&wb, &pool, &[])).unwrap();
+    let (ea, eb) = (Events::of(&a), Events::of(&b));
+    a.prompt(text("pid")).unwrap();
+    let pid = pid_of(&ea.turn());
+    b.prompt(text("pid")).unwrap();
+    let seen = eb.turn();
+    assert_eq!(pid_of(&seen), pid);
+    assert_eq!(b.pid(), Some(pid));
+    // Joined the running process: nothing was started for it.
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Starting { .. }))
+    );
+    // Each session has its own id and folder.
+    let (id_a, cwd_a) = session_of(&a, &ea);
+    let (id_b, cwd_b) = session_of(&b, &eb);
+    assert_ne!(id_a, id_b);
+    assert_eq!(cwd_a, wa.0.display().to_string());
+    assert_eq!(cwd_b, wb.0.display().to_string());
+
+    // Turns run side by side; a cancel stays in its session.
+    a.prompt(text("slow")).unwrap();
+    ea.until(|e| matches!(e, AgentEvent::MessageChunk { .. }));
+    b.prompt(text("echo hi")).unwrap();
+    let seen = eb.turn();
+    assert_eq!(outcome(&seen), TurnOutcome::EndTurn);
+    assert_eq!(message(&seen), "hi");
+    assert!(a.is_busy());
+    a.cancel();
+    assert_eq!(outcome(&ea.turn()), TurnOutcome::Cancelled);
+
+    // Writes are snapshotted in the session that made them.
+    let target = wb.path("src/b.rs");
+    b.prompt(text(&format!("write {} from-b", target.display())))
+        .unwrap();
+    assert_eq!(outcome(&eb.turn()), TurnOutcome::EndTurn);
+    assert_eq!(b.snapshot_paths(), vec![target]);
+    assert!(a.snapshot_paths().is_empty());
+
+    // A session going away is closed in the agent; the process stays for the other one.
+    drop(b);
+    a.prompt(text("closes")).unwrap();
+    assert_eq!(message(&ea.turn()), format!("closes:{id_b}"));
+    assert!(alive(pid));
+    a.shutdown();
+    assert!(!alive(pid), "the last session left the process running");
+}
+
+#[test]
+fn the_process_stops_once_its_last_session_is_closed() {
+    let (wa, wb) = (Workspace::new("pool-idle-a"), Workspace::new("pool-idle-b"));
+    let pool = Arc::new(AgentPool::new());
+    let mut quick = pooled(&wa, &pool, &[]);
+    quick.idle_timeout = Duration::from_millis(300);
+    let a = AgentClient::start(quick).unwrap();
+    let mut slow = pooled(&wb, &pool, &[]);
+    slow.idle_timeout = Duration::from_millis(1500);
+    let b = AgentClient::start(slow).unwrap();
+    let (ea, eb) = (Events::of(&a), Events::of(&b));
+    a.prompt(text("pid")).unwrap();
+    let pid = pid_of(&ea.turn());
+    b.prompt(text("pid")).unwrap();
+    eb.turn();
+    // The first to rest is closed while the other keeps the process.
+    let seen = ea.until(|e| matches!(e, AgentEvent::Exited { .. }));
+    assert!(matches!(
+        seen.last(),
+        Some(AgentEvent::Exited {
+            reason: ExitReason::Idle
+        })
+    ));
+    assert!(alive(pid));
+    eb.until(|e| matches!(e, AgentEvent::Exited { .. }));
+    assert!(!alive(pid), "no session left, but the process runs");
+    assert_eq!(b.pid(), None);
+    // Back on a new process, restored where it was.
+    a.prompt(text("echo again")).unwrap();
+    let seen = ea.turn();
+    assert!(matches!(seen[0], AgentEvent::Starting { .. }));
+    assert_eq!(message(&seen), "again");
+}
+
+#[test]
+fn without_session_close_the_process_waits_until_every_session_rests() {
+    let (wa, wb) = (
+        Workspace::new("pool-noclose-a"),
+        Workspace::new("pool-noclose-b"),
+    );
+    let pool = Arc::new(AgentPool::new());
+    let env = [("FAKE_NO_CLOSE", "1")];
+    let mut quick = pooled(&wa, &pool, &env);
+    quick.idle_timeout = Duration::from_millis(200);
+    let a = AgentClient::start(quick).unwrap();
+    let mut slow = pooled(&wb, &pool, &env);
+    slow.idle_timeout = Duration::from_millis(1200);
+    let b = AgentClient::start(slow).unwrap();
+    let (ea, eb) = (Events::of(&a), Events::of(&b));
+    a.prompt(text("pid")).unwrap();
+    let pid = pid_of(&ea.turn());
+    b.prompt(text("pid")).unwrap();
+    eb.turn();
+    std::thread::sleep(Duration::from_millis(600));
+    // `a` rests, but the agent cannot free it and `b` is still active.
+    assert!(alive(pid));
+    let seen = eb.until(|e| matches!(e, AgentEvent::Exited { .. }));
+    assert!(matches!(
+        seen.last(),
+        Some(AgentEvent::Exited {
+            reason: ExitReason::Idle
+        })
+    ));
+    assert!(!alive(pid));
+    assert!(matches!(
+        ea.until(|e| matches!(e, AgentEvent::Exited { .. })).last(),
+        Some(AgentEvent::Exited {
+            reason: ExitReason::Idle
+        })
+    ));
+}
+
+#[test]
+fn a_crash_reaches_every_session_and_each_comes_back() {
+    let (wa, wb) = (
+        Workspace::new("pool-crash-a"),
+        Workspace::new("pool-crash-b"),
+    );
+    let pool = Arc::new(AgentPool::new());
+    let env = [("FAKE_LOAD_SESSION", "1")];
+    let a = AgentClient::start(pooled(&wa, &pool, &env)).unwrap();
+    let b = AgentClient::start(pooled(&wb, &pool, &env)).unwrap();
+    let (ea, eb) = (Events::of(&a), Events::of(&b));
+    let (id_a, _) = session_of(&a, &ea);
+    let (id_b, _) = session_of(&b, &eb);
+    a.prompt(text("crash")).unwrap();
+    for events in [&ea, &eb] {
+        let seen = events.until(|e| matches!(e, AgentEvent::Exited { .. }));
+        assert!(
+            matches!(
+                seen.last(),
+                Some(AgentEvent::Exited {
+                    reason: ExitReason::Crashed { .. }
+                })
+            ),
+            "{seen:?}"
+        );
+    }
+    // Each restores its own session on the new process.
+    assert_eq!(session_of(&b, &eb).0, id_b);
+    assert_eq!(session_of(&a, &ea).0, id_a);
+    assert_eq!(a.pid(), b.pid());
+}
+
+#[test]
+fn other_variables_move_only_that_session_to_another_process() {
+    let (wa, wb) = (Workspace::new("pool-env-a"), Workspace::new("pool-env-b"));
+    let pool = Arc::new(AgentPool::new());
+    let a = AgentClient::start(pooled(&wa, &pool, &[])).unwrap();
+    let b = AgentClient::start(pooled(&wb, &pool, &[])).unwrap();
+    let (ea, eb) = (Events::of(&a), Events::of(&b));
+    a.prompt(text("pid")).unwrap();
+    let pid = pid_of(&ea.turn());
+    b.prompt(text("pid")).unwrap();
+    eb.turn();
+    a.retry_login(BTreeMap::from([(
+        "ZJ_TEST_KEY".to_string(),
+        "new".to_string(),
+    )]));
+    a.prompt(text("env ZJ_TEST_KEY")).unwrap();
+    let seen = ea.turn();
+    assert_eq!(message(&seen), "env:new");
+    assert!(!seen.iter().any(|e| matches!(e, AgentEvent::Exited { .. })));
+    assert_ne!(a.pid(), Some(pid));
+    b.prompt(text("pid")).unwrap();
+    assert_eq!(pid_of(&eb.turn()), pid);
 }

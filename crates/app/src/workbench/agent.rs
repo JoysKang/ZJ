@@ -15,7 +15,7 @@ use crate::agent_model::{self, Attachment};
 use crate::markdown;
 use gpui_kit::component::input::InputState;
 use workspace_editor_agent::{
-    AgentClient, AgentCommand, AgentEvent, AgentPreset, ClientOptions, PermissionKind,
+    AgentClient, AgentCommand, AgentEvent, AgentPool, AgentPreset, ClientOptions, PermissionKind,
     builtin_presets,
     review::{line_counts, resolve_file, review_texts},
     thread::{self as agent_thread, FileChange, Item, PermissionState, Record, Thread},
@@ -101,6 +101,17 @@ fn default_workspace_path() -> Option<PathBuf> {
 fn history(cx: &App) -> Option<Arc<History>> {
     cx.try_global::<AgentStore>()
         .and_then(|store| store.history.clone())
+}
+
+/// The agent processes of all windows: sessions of the same agent with the same variables
+/// share one (ADR 0004).
+#[derive(Default)]
+struct AgentProcesses(Arc<AgentPool>);
+
+impl Global for AgentProcesses {}
+
+pub(super) fn agent_pool(cx: &mut App) -> Arc<AgentPool> {
+    cx.default_global::<AgentProcesses>().0.clone()
 }
 
 pub(super) fn default_workspace(cx: &App) -> Option<PathBuf> {

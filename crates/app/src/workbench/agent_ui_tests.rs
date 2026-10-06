@@ -1,7 +1,7 @@
 //! The agent panel in a headless window with the fake ACP agent: sending from the composer,
 //! permissions and 始终允许 rules, reviewing and rejecting a change, reopening a stored session.
 
-use super::super::test_support::{empty_store, open_window, wait};
+use super::super::test_support::{empty_store, new_window, open_window, wait};
 use super::*;
 // `super::*` brings in GPUI's `test` macro through `gpui_kit::*`; `#[gpui_kit::test]` expands
 // to the built-in one.
@@ -219,6 +219,28 @@ async fn finished_replies_get_their_code_highlighted(cx: &mut TestAppContext) {
         |_| "the rust block was never highlighted".into(),
     );
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn windows_share_one_agent_process(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (ra, rb) = (temp_root("share-a"), temp_root("share-b"));
+    let (ha, a) = open(cx, Some(ra.clone()));
+    let (hb, b) = cx.update(|cx| {
+        let documents = cx.global::<crate::workbench::OpenDocuments>().0.clone();
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1400.), px(900.)));
+        let (window, this) = new_window(cx, Some(rb.clone()), documents, bounds);
+        (window.downcast::<Root>().unwrap(), this)
+    });
+    send(cx, ha, &a, "pid");
+    settle(cx, &a);
+    send(cx, hb, &b, "pid");
+    settle(cx, &b);
+    let first = replies(cx, &a);
+    assert!(first.starts_with("pid:"), "{first}");
+    assert_eq!(replies(cx, &b), first);
+    let _ = std::fs::remove_dir_all(ra);
+    let _ = std::fs::remove_dir_all(rb);
 }
 
 #[gpui_kit::test]
