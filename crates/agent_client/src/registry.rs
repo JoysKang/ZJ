@@ -679,6 +679,61 @@ impl AgentPreset {
 }
 
 /// This machine's Node.js `bin` directory when it is new enough and has npm next to it.
+/// The same configured/local/bundled CLI choices used by the Codex adapter, without installing.
+pub(crate) fn codex_app_server(
+    search: &SearchPath,
+    overrides: &BTreeMap<String, String>,
+    root: Option<&Path>,
+    inherited: Option<&std::ffi::OsStr>,
+) -> Option<ResolvedLaunch> {
+    let env: Vec<_> = overrides
+        .iter()
+        .map(|(k, v)| (k.clone(), OsString::from(v)))
+        .collect();
+    let configured = overrides
+        .get("CODEX_PATH")
+        .map(std::ffi::OsStr::new)
+        .or(inherited.filter(|p| !p.is_empty()));
+    let native = if let Some(path) = configured {
+        Some(search.find(path.to_str()?)?)
+    } else {
+        search.find("codex").filter(|p| {
+            provision::cli_version(p).is_some_and(|v| v >= codex_cli().unwrap().min_version)
+        })
+    };
+    if let Some(program) = native {
+        let mut env = env;
+        env.push(("PATH".into(), search.path_env(None)));
+        return Some(ResolvedLaunch {
+            program,
+            args: vec!["app-server".into()],
+            env,
+        });
+    }
+    let entry = root
+        .and_then(|r| provision::installed_entry(r, CODEX_ACP_PACKAGE, "codex-acp", true))
+        .or_else(|| {
+            search
+                .find("codex-acp")
+                .and_then(|p| std::fs::canonicalize(p).ok())
+        })?;
+    let modules = entry
+        .ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n == "node_modules"))?;
+    let codex = modules.join("@openai/codex/bin/codex.js");
+    if !codex.is_file() {
+        return None;
+    }
+    let node = local_node(search).or_else(|| root.and_then(provision::managed_node_bin))?;
+    Some(node_launch(
+        &node,
+        &codex,
+        &["app-server".into()],
+        env,
+        search,
+    ))
+}
+
 fn local_node(search: &SearchPath) -> Option<PathBuf> {
     let node = search.find("node")?;
     let bin = node.parent()?.to_path_buf();
@@ -690,6 +745,52 @@ fn local_node(search: &SearchPath) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn quota_cli_honors_config_inheritance_and_the_bundled_install() {
+        let root = std::env::temp_dir().join(format!("zj-quota-cli-{}", std::process::id()));
+        let bin = root.join("bin");
+        let data = root.join("data");
+        let cli = script(&bin, "custom-codex", "echo codex-cli 0.159.0");
+        let old = script(&bin, "codex", "echo codex-cli 0.158.9");
+        let node = script(&bin, "node", "echo v24.0.0");
+        script(&bin, "npm", "echo 11.0.0");
+        let search = SearchPath::new(vec![bin]);
+        let overrides = BTreeMap::from([("CODEX_PATH".into(), cli.display().to_string())]);
+        assert_eq!(
+            codex_app_server(&search, &overrides, Some(&data), None)
+                .unwrap()
+                .program,
+            cli
+        );
+        assert_eq!(
+            codex_app_server(
+                &search,
+                &BTreeMap::new(),
+                Some(&data),
+                Some(cli.as_os_str())
+            )
+            .unwrap()
+            .program,
+            cli
+        );
+        let adapter = provision::tests::fake_install(&data, CODEX_ACP_PACKAGE, "codex-acp", true);
+        let modules = adapter
+            .ancestors()
+            .find(|p| p.file_name().is_some_and(|n| n == "node_modules"))
+            .unwrap();
+        let bundled = modules.join("@openai/codex/bin/codex.js");
+        std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+        std::fs::write(&bundled, "// fixture").unwrap();
+        let launch = codex_app_server(&search, &BTreeMap::new(), Some(&data), None).unwrap();
+        assert_eq!(launch.program, node);
+        assert_eq!(
+            launch.args,
+            [bundled.display().to_string(), "app-server".into()]
+        );
+        std::fs::remove_file(old).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn fake_bin(dir: &Path, name: &str) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();

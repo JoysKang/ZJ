@@ -35,11 +35,11 @@ impl Workbench {
             return;
         }
         let text = self.agent.composer.read(cx).value().trim().to_string();
-        if text.is_empty() {
+        if (text.is_empty() && self.agent.attachments.is_empty()) || self.agent.images_loading > 0 {
             return;
         }
         if self.agent.current.is_none() {
-            self.agent_new_session(None, window, cx);
+            self.agent_ensure_session();
         }
         let Some(key) = self.agent.current else {
             return;
@@ -77,6 +77,7 @@ impl Workbench {
         self.agent
             .composer
             .update(cx, |composer, cx| composer.set_value("", window, cx));
+        self.agent_clear_attachments(cx);
         cx.notify();
     }
 
@@ -224,7 +225,10 @@ impl Workbench {
                         "{}\n{text}",
                         attachments
                             .iter()
-                            .map(|a| format!("@{}", a.path().display()))
+                            .map(|a| a.path().map_or_else(
+                                || format!("[图片：{}]", a.label()),
+                                |path| format!("@{}", path.display())
+                            ))
                             .collect::<Vec<_>>()
                             .join(" ")
                     )
@@ -249,7 +253,9 @@ impl Workbench {
                             background_history(cx, store, move |h| {
                                 h.append_message(id, HistoryRole::User, stored);
                                 for attachment in attachments {
-                                    h.touch_file(id, attachment.path().display().to_string());
+                                    if let Some(path) = attachment.path() {
+                                        h.touch_file(id, path.display().to_string());
+                                    }
                                 }
                             });
                         }
@@ -536,28 +542,51 @@ impl Workbench {
     pub(in crate::workbench) fn agent_sync_list(&mut self, switched: bool) {
         let Some(session) = self.agent.current() else {
             self.agent.thread_list.reset(0);
+            self.agent.thread_rows.clear();
             self.agent.list_shape = (0, 0, 0, false);
             return;
         };
         let older = self.agent.older_row();
-        let shape = (
-            session.key,
-            session.thread.dropped,
-            session.thread.items.len(),
-            older,
-        );
+        let groups = agent_model::thread_rows(&session.thread.items);
+        let mut rows = Vec::new();
+        for row in groups {
+            let expanded = row.process
+                && self
+                    .agent
+                    .expanded_processes
+                    .contains(&(session.key, session.thread.dropped + row.range.start));
+            let range = row.range.clone();
+            rows.push(row);
+            if expanded {
+                rows.extend(range.map(|i| agent_model::ThreadRow {
+                    range: i..i + 1,
+                    process: false,
+                }));
+            }
+        }
+        let shape = (session.key, session.thread.dropped, rows.len(), older);
         let count = shape.2 + usize::from(older);
+        let prefix = self
+            .agent
+            .thread_rows
+            .iter()
+            .zip(&rows)
+            .take_while(|(a, b)| a.process == b.process && a.range.start == b.range.start)
+            .count();
+        self.agent.thread_rows = rows;
         let old = self.agent.list_shape;
-        if switched || old.0 != shape.0 || old.1 != shape.1 || old.3 != shape.3 || shape.2 < old.2 {
+        if switched || old.0 != shape.0 || old.1 != shape.1 || old.3 != shape.3 {
             self.agent.thread_list.reset(count);
             if switched {
                 self.agent.thread_list.set_follow_mode(FollowMode::Tail);
             }
-        } else if shape.2 > old.2 {
-            let at = old.2 + usize::from(older);
-            self.agent.thread_list.splice(at..at, shape.2 - old.2);
-            self.agent.thread_list.remeasure();
         } else {
+            if prefix < old.2 || prefix < shape.2 {
+                let offset = usize::from(older);
+                self.agent
+                    .thread_list
+                    .splice(prefix + offset..old.2 + offset, shape.2 - prefix);
+            }
             self.agent.thread_list.remeasure();
         }
         self.agent.list_shape = shape;

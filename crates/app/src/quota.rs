@@ -1,7 +1,6 @@
-//! The Codex CLI's account quota (ChatGPT plans): the rate limits Codex last wrote to its
-//! session logs (`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl`, `token_count` events).
-//! Bounded reads off the UI thread; no network and no credentials. Up to date as of Codex's
-//! last request, from ZJ or anywhere else.
+//! Codex account quota: bounded local rollout reads for passive updates, plus parsing of
+//! the live app-server response. The agent client owns that short-lived connection;
+//! this module never reads credentials or makes network requests.
 
 use serde_json::Value;
 use std::{
@@ -23,6 +22,7 @@ pub struct Quota {
     pub credits: Option<String>,
     /// When Codex wrote it (Unix ms).
     pub updated_ms: i64,
+    pub live: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -145,6 +145,54 @@ fn parse(line: &str) -> Option<Quota> {
             .and_then(Value::as_str)
             .and_then(utc_ms)
             .unwrap_or(0),
+        live: false,
+    })
+}
+
+/// The official app-server response, queried now rather than read from a rollout log.
+pub fn from_live(result: &Value, now_ms: i64) -> Result<Quota, String> {
+    let limits = result
+        .pointer("/rateLimitsByLimitId/codex")
+        .or_else(|| result.get("rateLimits"))
+        .ok_or("Codex 未返回账户额度")?;
+    let windows: Vec<Window> = ["primary", "secondary"]
+        .iter()
+        .filter_map(|key| {
+            let w = limits.get(key)?;
+            let used = w.get("usedPercent")?.as_f64()?;
+            let minutes = w.get("windowDurationMins")?.as_u64()?;
+            (used.is_finite() && minutes > 0).then(|| Window {
+                minutes,
+                used_percent: used,
+                resets_at: w.get("resetsAt").and_then(Value::as_i64),
+            })
+        })
+        .collect();
+    if windows.is_empty() {
+        return Err("当前 Codex 账户没有可查询的套餐额度".into());
+    }
+    let credits = limits.get("credits").and_then(|c| {
+        if c.get("unlimited").and_then(Value::as_bool) == Some(true) {
+            return Some("无限".into());
+        }
+        if c.get("hasCredits").and_then(Value::as_bool) != Some(true) {
+            return None;
+        }
+        let balance = c.get("balance")?;
+        let n = balance
+            .as_f64()
+            .or_else(|| balance.as_str()?.parse().ok())?;
+        Some(format!("{n:.2}"))
+    });
+    Ok(Quota {
+        windows,
+        credits,
+        plan: limits
+            .get("planType")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        updated_ms: now_ms,
+        live: true,
     })
 }
 
@@ -227,6 +275,17 @@ mod tests {
         assert_eq!(quota.updated_ms, 1_791_259_992_390);
         assert_eq!(read_codex(&home.join("missing")), None);
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn live_limits_use_the_codex_bucket_and_the_query_time() {
+        let result = serde_json::json!({"rateLimits":{"primary":{"usedPercent":99,"windowDurationMins":300}},"rateLimitsByLimitId":{"codex":{"planType":"pro","primary":{"usedPercent":12,"windowDurationMins":300,"resetsAt":100},"secondary":{"usedPercent":40,"windowDurationMins":10080},"credits":{"hasCredits":true,"unlimited":false,"balance":"10.5"}}}});
+        let quota = from_live(&result, 12345).unwrap();
+        assert!(quota.live);
+        assert_eq!(quota.updated_ms, 12345);
+        assert_eq!(quota.left_percent(), Some(60.0));
+        assert_eq!(quota.credits.as_deref(), Some("10.50"));
+        assert!(from_live(&serde_json::json!({"rateLimits":{"primary":null}}), 9).is_err());
     }
 
     #[test]

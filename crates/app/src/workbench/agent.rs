@@ -139,6 +139,7 @@ pub(super) enum AgentView {
 
 /// A session in this window. The client starts with the first prompt.
 pub(super) struct LiveSession {
+    pub changes_collapsed: bool,
     pub key: u64,
     pub preset: AgentPreset,
     pub client: Option<Arc<AgentClient>>,
@@ -178,6 +179,7 @@ pub(super) struct LiveSession {
 impl LiveSession {
     fn new(key: u64, preset: AgentPreset) -> Self {
         Self {
+            changes_collapsed: true,
             key,
             preset,
             client: None,
@@ -285,6 +287,9 @@ pub(super) struct AgentPanel {
     next_key: u64,
     pub composer: Entity<TextareaState>,
     pub attachments: Vec<Attachment>,
+    pub image_previews: HashMap<u64, Arc<Image>>,
+    pub images_loading: usize,
+    image_generation: u64,
     pub mention: Option<Mention>,
     mention_generation: u64,
     /// The selected row of the `/` command picker, while the message starts with a command.
@@ -295,18 +300,22 @@ pub(super) struct AgentPanel {
     /// The Codex account quota (see `crate::quota`) and whether its card is open.
     pub quota: Option<crate::quota::Quota>,
     pub quota_open: bool,
+    pub quota_pinned: bool,
+    pub quota_loading: bool,
+    pub quota_error: Option<String>,
     quota_task: Option<Task<()>>,
     pub history: HistoryList,
     pub search: Option<super::agent_search::SessionSearch>,
     pub thread_list: ListState,
+    pub thread_rows: Vec<agent_model::ThreadRow>,
     list_shape: (u64, usize, usize, bool),
     pub spin: usize,
     spin_task: Option<Task<()>>,
     width_task: Option<Task<()>>,
     pub expanded_tools: HashSet<(u64, String)>,
     pub expanded_thoughts: HashSet<(u64, usize)>,
+    pub expanded_processes: HashSet<(u64, usize)>,
     pub collapsed_plans: HashSet<u64>,
-    pub changes_collapsed: bool,
     pub strip_collapsed: bool,
     pub switcher_open: bool,
     pub presets: Vec<AgentPreset>,
@@ -359,12 +368,18 @@ impl AgentPanel {
             next_key: 1,
             composer,
             attachments: Vec::new(),
+            image_previews: HashMap::new(),
+            images_loading: 0,
+            image_generation: 0,
             mention: None,
             mention_generation: 0,
             slash: None,
             known_commands: HashMap::new(),
             quota: None,
             quota_open: false,
+            quota_pinned: false,
+            quota_loading: false,
+            quota_error: None,
             quota_task: None,
             history: HistoryList {
                 rows: Vec::new(),
@@ -380,14 +395,15 @@ impl AgentPanel {
             },
             search: None,
             thread_list,
+            thread_rows: Vec::new(),
             list_shape: (0, 0, 0, false),
             spin: 0,
             spin_task: None,
             width_task: None,
             expanded_tools: HashSet::new(),
             expanded_thoughts: HashSet::new(),
+            expanded_processes: HashSet::new(),
             collapsed_plans: HashSet::new(),
-            changes_collapsed: false,
             strip_collapsed: false,
             switcher_open: false,
             agent_id: settings.default_agent.clone(),
@@ -573,7 +589,7 @@ impl Workbench {
         }
         self.agent.current = Some(key);
         self.agent_reclaim_idle(cx);
-        self.agent.attachments.clear();
+        self.agent_clear_attachments(cx);
         self.agent.mention = None;
         self.agent.slash = None;
         self.agent_sync_list(true);
@@ -644,7 +660,7 @@ impl Workbench {
             self.agent.sessions.push(session);
             self.agent.current = Some(key);
         }
-        self.agent.attachments.clear();
+        self.agent_clear_attachments(cx);
         self.agent_reclaim_idle(cx);
         self.agent_sync_list(true);
         self.agent_show(AgentView::Thread, window, cx);

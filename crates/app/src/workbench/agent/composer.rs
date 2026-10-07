@@ -6,6 +6,14 @@ use super::*;
 impl Workbench {
     // ----- composer context ---------------------------------------------------------------
 
+    pub(super) fn agent_clear_attachments(&mut self, cx: &mut Context<Self>) {
+        self.agent.attachments.clear();
+        self.agent.image_generation += 1;
+        for (_, preview) in self.agent.image_previews.drain() {
+            preview.remove_asset(cx);
+        }
+    }
+
     /// ⌘L: the editor's selection (or the whole file) becomes a chip and the composer gets
     /// the focus.
     pub(in crate::workbench) fn agent_add_selection(
@@ -57,10 +65,154 @@ impl Workbench {
         index: usize,
         cx: &mut Context<Self>,
     ) {
-        if index < self.agent.attachments.len() {
-            self.agent.attachments.remove(index);
+        if index < self.agent.attachments.len()
+            && let Attachment::Image { id, .. } = self.agent.attachments.remove(index)
+            && !self
+                .agent
+                .attachments
+                .iter()
+                .any(|a| matches!(a, Attachment::Image { id: other, .. } if *other == id))
+            && let Some(preview) = self.agent.image_previews.remove(&id)
+        {
+            preview.remove_asset(cx);
         }
         cx.notify();
+    }
+
+    pub(in crate::workbench) fn agent_paste_images(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return false;
+        };
+        let mut handled = false;
+        for entry in clipboard.entries {
+            match entry {
+                ClipboardEntry::Image(image) => {
+                    handled = true;
+                    let name = format!("粘贴的图片.{}", image.format.extension());
+                    self.agent_load_image(
+                        move || crate::agent_images::from_bytes(name, None, image.bytes),
+                        cx,
+                    );
+                }
+                ClipboardEntry::ExternalPaths(paths)
+                    if paths
+                        .paths()
+                        .iter()
+                        .all(|p| crate::agent_images::is_image(p)) =>
+                {
+                    handled = true;
+                    self.agent_attach_images(paths.paths().to_vec(), cx);
+                }
+                ClipboardEntry::String(text) => {
+                    if let Some(paths) = crate::agent_images::pasted_paths(&text.text) {
+                        handled = true;
+                        self.agent_attach_images(paths, cx);
+                    }
+                }
+                _ => {}
+            }
+        }
+        handled
+    }
+
+    pub(in crate::workbench) fn agent_attach_images(
+        &mut self,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        for path in paths {
+            self.agent_load_image(move || crate::agent_images::from_path(path), cx);
+        }
+    }
+
+    fn agent_load_image(
+        &mut self,
+        load: impl FnOnce() -> Result<(Attachment, Arc<Image>), String> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let count = self
+            .agent
+            .attachments
+            .iter()
+            .filter(|a| matches!(a, Attachment::Image { .. }))
+            .count();
+        if count + self.agent.images_loading >= crate::agent_images::MAX_IMAGES {
+            self.message = format!("最多添加 {} 张图片", crate::agent_images::MAX_IMAGES);
+            cx.notify();
+            return;
+        }
+        self.agent.images_loading += 1;
+        let generation = self.agent.image_generation;
+        let job = cx.background_spawn(async move { load() });
+        cx.spawn(async move |this, cx| {
+            let result = job.await;
+            let _ = this.update(cx, |this, cx| {
+                this.agent.images_loading -= 1;
+                if this.agent.image_generation != generation {
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok((attachment, preview)) => {
+                        if this.agent.attachments.contains(&attachment) {
+                            cx.notify();
+                            return;
+                        }
+                        let total: usize = this
+                            .agent
+                            .attachments
+                            .iter()
+                            .map(|a| match a {
+                                Attachment::Image { data, .. } => data.len(),
+                                _ => 0,
+                            })
+                            .sum();
+                        if let Attachment::Image { id, data, .. } = &attachment {
+                            if total + data.len()
+                                > crate::md_images::MAX_FILE_BYTES as usize * 4 / 3 + 4
+                            {
+                                this.message = "所有图片的总大小不能超过 16 MB".into();
+                                cx.notify();
+                                return;
+                            }
+                            this.agent.image_previews.insert(*id, preview);
+                        }
+                        if !this.agent.attachments.contains(&attachment) {
+                            this.agent.attachments.push(attachment);
+                        }
+                    }
+                    Err(error) => this.message = error,
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(in crate::workbench) fn agent_pick_images(&mut self, cx: &mut Context<Self>) {
+        let answer = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("添加图片".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let result = answer.await;
+            let _ = this.update(cx, |this, cx| match result {
+                Ok(Ok(Some(paths))) => this.agent_attach_images(paths, cx),
+                Ok(Ok(None)) => {}
+                Ok(Err(e)) => {
+                    this.message = format!("无法选择图片：{e}");
+                    cx.notify();
+                }
+                Err(e) => {
+                    this.message = format!("无法选择图片：{e}");
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub(in crate::workbench) fn agent_composer_changed(
@@ -181,9 +333,13 @@ impl Workbench {
                 .composer
                 .update(cx, |composer, cx| composer.set_value(next, window, cx));
         }
-        let attachment = Attachment::File(path);
-        if !self.agent.attachments.contains(&attachment) {
-            self.agent.attachments.push(attachment);
+        if crate::agent_images::is_image(&path) {
+            self.agent_attach_images(vec![path], cx);
+        } else {
+            let attachment = Attachment::File(path);
+            if !self.agent.attachments.contains(&attachment) {
+                self.agent.attachments.push(attachment);
+            }
         }
         self.agent_focus_composer(window, cx);
         cx.notify();

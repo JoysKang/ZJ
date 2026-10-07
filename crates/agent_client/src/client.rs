@@ -87,6 +87,11 @@ impl ClientOptions {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PromptPart {
     Text(String),
+    /// Base64 image bytes, as ACP's image content block.
+    Image {
+        data: Arc<str>,
+        mime_type: String,
+    },
     /// A file reference (`resource_link`); the agent reads it itself.
     File(PathBuf),
     /// Lines `start_line..=end_line` (1-based). With `text` and an agent that accepts embedded
@@ -105,6 +110,7 @@ pub enum ClientError {
     Busy,
     /// This adapter did not advertise the steering extension.
     SteeringUnavailable,
+    ImagesUnavailable,
     Stopped,
 }
 
@@ -116,6 +122,7 @@ impl std::fmt::Display for ClientError {
                 "当前 Agent 尚不能接收运行中的补充指令，可等待完成或先停止"
             }
             ClientError::Stopped => "Agent 客户端已关闭",
+            ClientError::ImagesUnavailable => "当前 Agent 不支持图片输入，请更换支持图片的 Agent",
         })
     }
 }
@@ -196,6 +203,7 @@ pub(crate) struct SessionState {
     turn: Mutex<Option<TurnId>>,
     steering: Mutex<steering::Steering>,
     steering_supported: AtomicBool,
+    image_support: Mutex<Option<bool>>,
     next_turn: AtomicU64,
     /// `session/load` replays history as updates; the UI already has it.
     replaying: AtomicBool,
@@ -560,6 +568,7 @@ impl AgentClient {
             turn: Mutex::new(None),
             steering: Mutex::new(Default::default()),
             steering_supported: AtomicBool::new(false),
+            image_support: Mutex::new(None),
             next_turn: AtomicU64::new(1),
             replaying: AtomicBool::new(false),
             snapshots: Mutex::new(BTreeMap::new()),
@@ -596,6 +605,11 @@ impl AgentClient {
 
     pub fn prompt(&self, parts: Vec<PromptPart>) -> Result<TurnId, ClientError> {
         let session = &self.session;
+        if *session.image_support.lock().unwrap() == Some(false)
+            && parts.iter().any(|p| matches!(p, PromptPart::Image { .. }))
+        {
+            return Err(ClientError::ImagesUnavailable);
+        }
         let turn = {
             let mut current = session.turn.lock().unwrap();
             if current.is_some() {
@@ -630,6 +644,11 @@ impl AgentClient {
     /// Adds instructions to the running turn without cancelling it or its permissions.
     /// Only one steering request is in flight; a rejected submission stays with the caller.
     pub fn steer(&self, parts: Vec<PromptPart>) -> Result<TurnId, ClientError> {
+        if *self.session.image_support.lock().unwrap() == Some(false)
+            && parts.iter().any(|p| matches!(p, PromptPart::Image { .. }))
+        {
+            return Err(ClientError::ImagesUnavailable);
+        }
         let current = self.session.turn.lock().unwrap();
         let Some(turn) = *current else {
             return Err(ClientError::Busy);
@@ -1110,6 +1129,7 @@ async fn session_body(
 
     let can_login = !init.auth_methods.is_empty();
     let embedded = init.embedded_context;
+    *s.image_support.lock().unwrap() = Some(init.info.image);
     s.steering_supported
         .store(init.steering && !s.text_only, Ordering::Relaxed);
     if let Some((turn, parts)) = first {
@@ -1430,6 +1450,22 @@ fn start_prompt(
     embedded: bool,
 ) -> Result<(), sdk::Error> {
     let blocks = prompt_blocks(&parts, embedded);
+    if *shared.image_support.lock().unwrap() == Some(false)
+        && parts.iter().any(|p| matches!(p, PromptPart::Image { .. }))
+    {
+        let shared = shared.clone();
+        cx.spawn(async move {
+            shared
+                .finish_turn(
+                    Some(turn),
+                    TurnOutcome::Failed(ClientError::ImagesUnavailable.to_string()),
+                )
+                .await;
+            let _ = shared.turn_done.send(()).await;
+            Ok(())
+        })?;
+        return Ok(());
+    }
     let request = cx.send_request(acp::PromptRequest::new(session.clone(), blocks));
     let shared = shared.clone();
     cx.spawn(async move {
@@ -1841,6 +1877,9 @@ pub(crate) fn prompt_blocks(parts: &[PromptPart], embedded: bool) -> Vec<acp::Co
         .iter()
         .map(|part| match part {
             PromptPart::Text(text) => acp::ContentBlock::Text(acp::TextContent::new(text.clone())),
+            PromptPart::Image { data, mime_type } => acp::ContentBlock::Image(
+                acp::ImageContent::new(data.to_string(), mime_type.clone()),
+            ),
             PromptPart::File(path) => acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
                 file_name(path),
                 file_uri(path),

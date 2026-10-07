@@ -1,3 +1,4 @@
+mod agent_images;
 mod agent_model;
 mod assets;
 mod conflicts;

@@ -295,7 +295,13 @@ impl Workbench {
                 this.agent_sync_list(true);
                 this.agent.thread_list.set_follow_mode(FollowMode::Normal);
                 this.agent.thread_list.scroll_to(ListOffset {
-                    item_ix: page.len(),
+                    item_ix: this
+                        .agent
+                        .thread_rows
+                        .iter()
+                        .position(|row| row.range.end > page.len())
+                        .unwrap_or(this.agent.thread_rows.len().saturating_sub(1))
+                        + usize::from(this.agent.older_row()),
                     offset_in_item: Pixels::ZERO,
                 });
                 cx.notify();

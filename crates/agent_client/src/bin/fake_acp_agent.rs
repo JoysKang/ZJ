@@ -121,6 +121,22 @@ async fn run_prompt(
     let rest = words.next().unwrap_or_default().to_string();
     let mut stop = acp::StopReason::EndTurn;
     match command.as_str() {
+        "images" | ""
+            if request
+                .prompt
+                .iter()
+                .any(|b| matches!(b, acp::ContentBlock::Image(_))) =>
+        {
+            let images: Vec<_> = request
+                .prompt
+                .iter()
+                .filter_map(|b| match b {
+                    acp::ContentBlock::Image(i) => Some(format!("{}:{}", i.mime_type, i.data)),
+                    _ => None,
+                })
+                .collect();
+            say(&cx, &session, images.join("\n"))?;
+        }
         "echo" => {
             let body = format!("{arg} {rest}").trim().to_string();
             notify(
@@ -683,7 +699,7 @@ fn main() -> sdk::Result<()> {
                                         ),
                                     )
                                     .prompt_capabilities(
-                                        acp::PromptCapabilities::new().embedded_context(true),
+                                        acp::PromptCapabilities::new().embedded_context(true).image(std::env::var("FAKE_NO_IMAGES").is_err()),
                                     ),
                             )
                             .agent_info(acp::Implementation::new("fake-agent", "1.0.0"))

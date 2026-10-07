@@ -55,6 +55,7 @@ pub const EXTRA: &[(&str, &[u8])] = &[
     embed!("icons/square-pen.svg"),
     embed!("icons/at-sign.svg"),
     embed!("icons/paperclip.svg"),
+    embed!("icons/image.svg"),
     embed!("icons/shield-check.svg"),
     embed!("icons/shield-alert.svg"),
     embed!("icons/list-todo.svg"),

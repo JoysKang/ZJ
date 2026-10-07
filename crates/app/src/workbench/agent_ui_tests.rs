@@ -104,6 +104,195 @@ fn temp_root(name: &str) -> PathBuf {
 }
 
 #[gpui_kit::test]
+async fn pasted_images_preview_remove_and_send_as_image_only(cx: &mut TestAppContext) {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    cx.executor().allow_parking();
+    let root = temp_root("image-composer");
+    let (handle, this) = open(cx, Some(root.clone()));
+    let bytes = crate::agent_images::tests::png();
+    cx.update_window(handle.into(), |_, window, cx| {
+        cx.write_to_clipboard(ClipboardItem::new_string("普通文字".into()));
+        this.update(cx, |p, cx| p.agent_focus_composer(window, cx));
+        window.render_frame(cx);
+        window.press("cmd-v", cx);
+        this.update(cx, |p, cx| {
+            assert_eq!(p.agent.composer.read(cx).value().as_ref(), "普通文字");
+            p.agent
+                .composer
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        });
+    })
+    .unwrap();
+    let paste = |cx: &mut TestAppContext| {
+        cx.update_window(handle.into(), |_, window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+                ImageFormat::Png,
+                bytes.clone(),
+            )));
+            this.update(cx, |p, cx| p.agent_focus_composer(window, cx));
+            window.render_frame(cx);
+            window.press("cmd-v", cx);
+        })
+        .unwrap();
+        until(cx, &this, "image preview loaded", |p| {
+            p.agent.images_loading == 0 && p.agent.attachments.len() == 1
+        });
+    };
+    paste(cx);
+    this.read_with(cx, |p, cx| {
+        assert!(p.agent.composer.read(cx).value().is_empty());
+        assert_eq!(p.agent.image_previews.len(), 1);
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("agent-chip-remove", 0usize), cx);
+    })
+    .unwrap();
+    this.read_with(cx, |p, _| {
+        assert!(p.agent.attachments.is_empty());
+        assert!(p.agent.image_previews.is_empty());
+    });
+    paste(cx);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("agent-send", cx);
+    })
+    .unwrap();
+    settle(cx, &this);
+    assert!(replies(cx, &this).contains(&format!("image/png:{}", STANDARD.encode(bytes))));
+    this.read_with(cx, |p, _| {
+        assert!(p.agent.attachments.is_empty());
+        assert!(p.agent.image_previews.is_empty());
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn quota_hover_and_click_query_now_and_anchor_to_the_button(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
+    cx.executor().allow_parking();
+    let root = temp_root("quota-popup");
+    let script = root.join("codex");
+    let response = root.join("response.json");
+    std::fs::write(&script, format!("#!/bin/sh\nread -r init\nprintf '%s\\n' '{{\"id\":1,\"result\":{{}}}}'\nread -r initialized\nread -r limits\ncat '{}'\n", response.display())).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let limits = |used| serde_json::json!({"rateLimits":{"primary":{"usedPercent":used,"windowDurationMins":300}}});
+    let write = |used| {
+        std::fs::write(
+            &response,
+            serde_json::json!({"id":2,"result":limits(used)}).to_string(),
+        )
+        .unwrap()
+    };
+    write(20);
+    let (handle, this) = open(cx, Some(root.clone()));
+    cx.update_window(handle.into(), |_, window, cx| {
+        cx.global_mut::<crate::settings::Settings>()
+            .agent
+            .env
+            .insert(
+                "codex".into(),
+                std::collections::BTreeMap::from([(
+                    "CODEX_PATH".into(),
+                    script.display().to_string(),
+                )]),
+            );
+        this.update(cx, |p, cx| {
+            p.agent_new_session(None, window, cx);
+            let key = p.agent.current.unwrap();
+            p.agent.session_mut(key).unwrap().preset.id = "codex".into();
+            p.agent.quota = Some(crate::quota::from_live(&limits(90), 1).unwrap());
+        });
+        window.render_frame(cx);
+        window.hover("agent-quota", cx);
+        window.render_frame(cx);
+        let button = window.find("agent-quota").bounds();
+        let card = window.find("agent-quota-card").bounds();
+        assert!(card.bottom() <= button.top());
+        assert!((card.right() - button.right()).abs() <= theme::ROW_INSET);
+    })
+    .unwrap();
+    until(cx, &this, "hover refreshes old quota", |p| {
+        !p.agent.quota_loading
+            && p.agent
+                .quota
+                .as_ref()
+                .is_some_and(|q| q.left_percent() == Some(80.0))
+    });
+    write(30);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("agent-quota", cx);
+    })
+    .unwrap();
+    until(cx, &this, "click refreshes quota again", |p| {
+        !p.agent.quota_loading
+            && p.agent
+                .quota
+                .as_ref()
+                .is_some_and(|q| q.left_percent() == Some(70.0))
+    });
+    this.read_with(cx, |p, _| {
+        assert!(p.agent.quota_open);
+        assert!(p.agent.quota_pinned);
+        assert!(p.agent.quota.as_ref().unwrap().updated_ms > 1);
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn expanded_process_details_stay_individual_virtual_rows(cx: &mut TestAppContext) {
+    let (handle, this) = open(cx, None);
+    let mut group = (0, 0);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_ensure_session();
+            let key = p.agent.current.unwrap();
+            let session = p.agent.session_mut(key).unwrap();
+            session.thread.items.push_back(Item::User {
+                text: "task".into(),
+                attachments: vec![],
+            });
+            for _ in 0..200 {
+                session.thread.items.push_back(Item::Thought {
+                    text: "details".into(),
+                    streaming: false,
+                });
+            }
+            session.thread.items.push_back(Item::Agent {
+                text: "final".into(),
+                streaming: false,
+            });
+            group = (key, 1);
+            p.agent_sync_replies(key, 0);
+            p.agent_sync_list(false);
+            cx.notify();
+        });
+        window.render_frame(cx);
+        window.click(("agent-process", group.1), cx);
+    })
+    .unwrap();
+    this.read_with(cx, |p, _| {
+        assert!(p.agent.expanded_processes.contains(&group));
+        assert_eq!(p.agent.thread_rows.len(), 203);
+        assert!(
+            p.agent.thread_rows[2..]
+                .iter()
+                .all(|row| !row.process && row.range.len() == 1)
+        );
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("agent-process", group.1), cx);
+    })
+    .unwrap();
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.agent.thread_rows.len(), 3);
+        assert_eq!(p.agent.thread_rows.last().unwrap().range, 201..202);
+    });
+}
+
+#[gpui_kit::test]
 async fn steering_works_from_enter_and_send_with_context_and_a_separate_stop_button(
     cx: &mut TestAppContext,
 ) {

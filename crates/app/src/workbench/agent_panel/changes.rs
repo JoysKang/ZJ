@@ -16,7 +16,7 @@ impl Workbench {
         let (added, removed) = files
             .values()
             .fold((0, 0), |(a, r), c| (a + c.added, r + c.removed));
-        let collapsed = compact || self.agent.changes_collapsed;
+        let collapsed = session.changes_collapsed;
         let key = session.key;
         let head =
             h_flex()
@@ -53,8 +53,10 @@ impl Workbench {
                                 .text_color(colors.deleted)
                                 .child(format!("−{removed}")),
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.agent.changes_collapsed = !this.agent.changes_collapsed;
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(session) = this.agent.session_mut(key) {
+                                session.changes_collapsed = !session.changes_collapsed;
+                            }
                             cx.notify();
                         })),
                 )

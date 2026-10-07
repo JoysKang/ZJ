@@ -5,6 +5,7 @@
 use std::{
     ops::Range,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 use workspace_editor_agent::{
@@ -14,6 +15,38 @@ use workspace_editor_agent::{
 use workspace_editor_agent_history::{Message, Role, SessionStatus, SessionSummary};
 
 const DAY_MS: i64 = 86_400_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThreadRow {
+    pub range: Range<usize>,
+    pub process: bool,
+}
+
+/// Merge execution details and intermediate replies; the trailing reply stays visible.
+/// Approval, login, notices and failed tools always form their own visible rows.
+pub fn thread_rows(items: &std::collections::VecDeque<Item>) -> Vec<ThreadRow> {
+    let detail = |i: usize| match &items[i] {
+        Item::Thought { .. } | Item::Plan(_) => true,
+        Item::Tool(card) => card.call.status != ToolStatus::Failed,
+        Item::Agent { .. } => items.get(i + 1).is_some_and(|next| {
+            matches!(next, Item::Thought { .. } | Item::Plan(_) | Item::Tool(_))
+        }),
+        _ => false,
+    };
+    let mut rows: Vec<ThreadRow> = Vec::new();
+    for i in 0..items.len() {
+        let process = detail(i);
+        if process && let Some(last) = rows.last_mut().filter(|row| row.process) {
+            last.range.end = i + 1;
+        } else {
+            rows.push(ThreadRow {
+                range: i..i + 1,
+                process,
+            });
+        }
+    }
+    rows
+}
 
 /// The line above the composer while the session works: how long the turn has run. `None`
 /// when idle or waiting for approval (the approval card says so).
@@ -286,6 +319,13 @@ pub fn mark_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Attachment {
     File(PathBuf),
+    Image {
+        id: u64,
+        name: String,
+        path: Option<PathBuf>,
+        data: Arc<str>,
+        mime_type: String,
+    },
     /// 1-based inclusive lines with the selected text.
     Selection {
         path: PathBuf,
@@ -299,6 +339,7 @@ impl Attachment {
     pub fn label(&self) -> String {
         match self {
             Attachment::File(path) => file_name(path),
+            Attachment::Image { name, .. } => name.clone(),
             Attachment::Selection {
                 path, start, end, ..
             } => {
@@ -311,9 +352,10 @@ impl Attachment {
         }
     }
 
-    pub fn path(&self) -> &PathBuf {
+    pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Attachment::File(path) | Attachment::Selection { path, .. } => path,
+            Attachment::File(path) | Attachment::Selection { path, .. } => Some(path),
+            Attachment::Image { path, .. } => path.as_ref(),
         }
     }
 }
@@ -330,6 +372,12 @@ pub fn prompt_parts(text: &str, attachments: &[Attachment]) -> Vec<PromptPart> {
         .iter()
         .map(|a| match a {
             Attachment::File(path) => PromptPart::File(path.clone()),
+            Attachment::Image {
+                data, mime_type, ..
+            } => PromptPart::Image {
+                data: data.clone(),
+                mime_type: mime_type.clone(),
+            },
             Attachment::Selection {
                 path,
                 start,
@@ -938,6 +986,76 @@ mod tests {
         ]);
         assert!(matches!(&items[0], Item::User { text, .. } if text == "q"));
         assert!(matches!(&items[1], Item::Tool(card) if card.call.title == "Read a.rs"));
+    }
+
+    #[test]
+    fn process_groups_keep_final_replies_and_errors_visible() {
+        let tool = |status| {
+            Item::Tool(ToolCard {
+                call: ToolCall {
+                    id: "t".into(),
+                    title: "Read".into(),
+                    kind: ToolKind::Read,
+                    status,
+                    locations: vec![],
+                    content: vec![],
+                },
+                added: 0,
+                removed: 0,
+            })
+        };
+        let items = [
+            Item::User {
+                text: "task".into(),
+                attachments: vec![],
+            },
+            Item::Thought {
+                text: "reasoning".into(),
+                streaming: false,
+            },
+            tool(ToolStatus::Completed),
+            Item::Agent {
+                text: "progress".into(),
+                streaming: false,
+            },
+            Item::Plan(vec![]),
+            Item::Agent {
+                text: "final".into(),
+                streaming: false,
+            },
+            Item::Notice {
+                text: "error".into(),
+                error: true,
+            },
+            tool(ToolStatus::Failed),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            thread_rows(&items),
+            [
+                ThreadRow {
+                    range: 0..1,
+                    process: false
+                },
+                ThreadRow {
+                    range: 1..5,
+                    process: true
+                },
+                ThreadRow {
+                    range: 5..6,
+                    process: false
+                },
+                ThreadRow {
+                    range: 6..7,
+                    process: false
+                },
+                ThreadRow {
+                    range: 7..8,
+                    process: false
+                }
+            ]
+        );
     }
 
     #[test]

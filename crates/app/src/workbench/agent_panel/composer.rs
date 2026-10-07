@@ -11,7 +11,8 @@ impl Workbench {
         let session = self.agent.current();
         let attached = session.is_some_and(|s| !s.thread.changed_files.is_empty());
         let busy = session.is_some_and(LiveSession::busy);
-        let empty = self.agent.composer.read(cx).value().trim().is_empty();
+        let empty = self.agent.composer.read(cx).value().trim().is_empty()
+            && self.agent.attachments.is_empty();
         let chips = self
             .agent
             .attachments
@@ -20,18 +21,59 @@ impl Workbench {
             .map(|(i, a)| {
                 let icon = match a {
                     Attachment::File(_) => None,
+                    Attachment::Image { .. } => Some(IconName::Image),
                     Attachment::Selection { .. } => Some(IconName::SquareDashedText),
                 };
-                chip(&a.label(), icon, colors).child(
-                    div()
-                        .id(("agent-chip-remove", i))
-                        .cursor_pointer()
-                        .text_color(colors.muted)
-                        .child(Icon::new(IconName::Close).size(theme::SMALL_ICON_SIZE))
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.agent_remove_attachment(i, cx)),
-                        ),
-                )
+                let remove = Button::new(("agent-chip-remove", i))
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .tooltip("删除附件")
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.agent_remove_attachment(i, cx)),
+                    );
+                if let Attachment::Image { id, .. } = a {
+                    v_flex()
+                        .w(theme::AGENT_IMAGE_WIDTH)
+                        .gap_1()
+                        .child(
+                            div()
+                                .relative()
+                                .w_full()
+                                .h(theme::AGENT_IMAGE_HEIGHT)
+                                .rounded(theme::RADIUS)
+                                .overflow_hidden()
+                                .bg(colors.editor)
+                                .children(self.agent.image_previews.get(id).map(|image| {
+                                    img(image.clone())
+                                        .size_full()
+                                        .object_fit(ObjectFit::Contain)
+                                }))
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .right_0()
+                                        .bg(colors.card)
+                                        .rounded(theme::RADIUS)
+                                        .child(remove),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(theme::TEXT_BADGE)
+                                .text_color(colors.muted)
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(a.label()),
+                        )
+                        .into_any_element()
+                } else {
+                    chip(&a.label(), icon, colors)
+                        .child(remove)
+                        .into_any_element()
+                }
             })
             .collect::<Vec<_>>();
         let agent_picker = {
@@ -137,20 +179,39 @@ impl Workbench {
                         menu
                     })
             });
-        let quota = self
-            .agent
-            .quota
-            .as_ref()
-            .filter(|_| self.agent_shows_quota())
-            .and_then(crate::quota::Quota::left_percent)
-            .map(|left| {
+        let quota = self.agent_shows_quota().then(|| {
+            let label = self
+                .agent
+                .quota
+                .as_ref()
+                .and_then(crate::quota::Quota::left_percent)
+                .map_or_else(|| "额度".into(), |left| format!("额度 {left:.0}%"));
+            gpui_kit::base::Popup::new(
+                "agent-quota-popup",
                 Button::new("agent-quota")
                     .ghost()
                     .xsmall()
-                    .label(format!("额度 {left:.0}%"))
-                    .tooltip("Codex 账户额度")
-                    .on_click(cx.listener(|this, _, _, cx| this.agent_toggle_quota(cx)))
-            });
+                    .label(label)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.agent.quota_open = true;
+                        this.agent.quota_pinned = true;
+                        this.agent_query_quota(cx);
+                        cx.notify();
+                    })),
+            )
+            .anchor(Anchor::BottomRight)
+            .offset(theme::ROW_INSET)
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.agent.quota_open = *hovered || this.agent.quota_pinned;
+                if *hovered {
+                    this.agent_query_quota(cx);
+                }
+                cx.notify();
+            }))
+            .when_some(self.render_quota_card(cx), |popup, card| {
+                popup.content(card)
+            })
+        });
         let ring = session.and_then(|s| agent_model::usage_ring(s.thread.usage));
         let can_steer = session
             .and_then(|s| s.client.as_ref())
@@ -166,7 +227,7 @@ impl Workbench {
             } else {
                 "发送（⏎）"
             })
-            .disabled(empty || (busy && !can_steer))
+            .disabled(empty || self.agent.images_loading > 0 || (busy && !can_steer))
             .on_click(cx.listener(|this, _, window, cx| this.agent_submit(window, cx)));
         let composer = v_flex()
             .id("agent-composer")
@@ -188,6 +249,13 @@ impl Workbench {
                     c.rounded(theme::RADIUS_LARGE)
                 }
             })
+            .capture_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Paste, _, cx| {
+                    if !this.agent_paste_images(cx) {
+                        cx.propagate();
+                    }
+                }),
+            )
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
                 let plain = !event.keystroke.modifiers.modified();
@@ -217,7 +285,8 @@ impl Workbench {
                     return;
                 }
                 // With an empty composer, ⏎ allows once and Esc rejects the pending request.
-                let empty = this.agent.composer.read(cx).value().trim().is_empty();
+                let empty = this.agent.composer.read(cx).value().trim().is_empty()
+                    && this.agent.attachments.is_empty();
                 if !empty || !plain {
                     return;
                 }
@@ -236,6 +305,9 @@ impl Workbench {
                     this.agent_answer(session, id, choice, window, cx);
                     cx.stop_propagation();
                 }
+            }))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.agent_attach_images(paths.paths().to_vec(), cx)
             }))
             .when(!chips.is_empty() || !compact, |c| {
                 c.child(
@@ -282,11 +354,28 @@ impl Workbench {
                         .aria_label("给 Agent 的消息"),
                 ),
             )
+            .when(self.agent.images_loading > 0, |composer| {
+                composer.child(
+                    div()
+                        .px_2()
+                        .text_size(theme::TEXT_CAPTION)
+                        .text_color(colors.muted)
+                        .child("正在载入图片…"),
+                )
+            })
             .child(
                 h_flex()
                     .h(theme::AGENT_COMPOSER_BAR)
                     .px_1()
                     .gap_1()
+                    .child(
+                        Button::new("agent-add-image")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Image)
+                            .tooltip("添加图片（也可粘贴或拖入）")
+                            .on_click(cx.listener(|this, _, _, cx| this.agent_pick_images(cx))),
+                    )
                     .child(
                         Button::new("agent-attach")
                             .ghost()
@@ -346,8 +435,7 @@ impl Workbench {
                     }),
             )
             .children(self.render_mention_picker(cx))
-            .children(self.render_slash_picker(cx))
-            .children(self.render_quota_card(cx));
+            .children(self.render_slash_picker(cx));
         composer.into_any_element()
     }
 
@@ -553,7 +641,7 @@ impl Workbench {
         if !self.agent.quota_open || !self.agent_shows_quota() {
             return None;
         }
-        let quota = self.agent.quota.as_ref()?;
+        let quota = self.agent.quota.as_ref();
         let colors = theme::colors(cx);
         let now_ms = workspace_editor_agent_history::now_ms();
         let offset = agent_model::local_offset(now_ms);
@@ -565,46 +653,57 @@ impl Workbench {
                 .text_size(theme::TEXT_CAPTION)
                 .child(text)
         };
-        let title = match &quota.plan {
+        let title = match quota.and_then(|quota| quota.plan.as_ref()) {
             Some(plan) => format!("Codex 额度 · ChatGPT {}", agent_model::capitalized(plan)),
             None => "Codex 额度".to_string(),
         };
-        let windows = quota.windows.iter().map(|window| {
-            let left = window.left_percent();
-            let color = if left < 10.0 {
-                colors.deleted
-            } else if left < 25.0 {
-                colors.attention
-            } else {
-                colors.foreground
-            };
-            let reset = window.resets_at.map(|at| {
-                let (_, month, day, _, hour, minute) = agent_model::civil(at * 1000, offset);
-                format!(
-                    "{} 后重置（{month}/{day} {hour:02}:{minute:02}）",
-                    crate::quota::countdown(at - now_ms / 1000)
-                )
+        let windows = quota
+            .into_iter()
+            .flat_map(|quota| &quota.windows)
+            .map(|window| {
+                let left = window.left_percent();
+                let color = if left < 10.0 {
+                    colors.deleted
+                } else if left < 25.0 {
+                    colors.attention
+                } else {
+                    colors.foreground
+                };
+                let reset = window.resets_at.map(|at| {
+                    let (_, month, day, _, hour, minute) = agent_model::civil(at * 1000, offset);
+                    format!(
+                        "{} 后重置（{month}/{day} {hour:02}:{minute:02}）",
+                        crate::quota::countdown(at - now_ms / 1000)
+                    )
+                });
+                h_flex()
+                    .h(theme::ROW_HEIGHT)
+                    .gap_2()
+                    .text_size(theme::TEXT_CAPTION)
+                    .child(crate::quota::window_label(window.minutes))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(color)
+                            .child(format!("剩余 {left:.0}%")),
+                    )
+                    .children(reset.map(|reset| div().text_color(colors.muted).child(reset)))
             });
-            h_flex()
-                .h(theme::ROW_HEIGHT)
-                .gap_2()
-                .text_size(theme::TEXT_CAPTION)
-                .child(crate::quota::window_label(window.minutes))
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(color)
-                        .child(format!("剩余 {left:.0}%")),
-                )
-                .children(reset.map(|reset| div().text_color(colors.muted).child(reset)))
+        let updated = quota.map(|quota| {
+            let (year, month, day, _, hour, minute) = agent_model::civil(quota.updated_ms, offset);
+            format!(
+                "{} {year}/{month:02}/{day:02} {hour:02}:{minute:02}",
+                if quota.live {
+                    "已刷新"
+                } else {
+                    "上次记录"
+                }
+            )
         });
-        let (year, month, day, _, hour, minute) = agent_model::civil(quota.updated_ms, offset);
         Some(
             v_flex()
-                .absolute()
-                .right_0()
-                .bottom_full()
-                .mb_1()
+                .id("agent-quota-card")
+                .w(theme::AGENT_QUOTA_WIDTH)
                 .px_3()
                 .py_2()
                 .rounded(theme::RADIUS_LARGE)
@@ -615,18 +714,38 @@ impl Workbench {
                 .occlude()
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.agent.quota_open = false;
+                    this.agent.quota_pinned = false;
                     cx.notify();
                 }))
                 .child(line(title).font_weight(FontWeight::SEMIBOLD))
-                .children(windows)
-                .children(quota.credits.clone().map(|credits| line(format!("Credits 余额 {credits}"))))
-                .child(
-                    line(format!(
-                        "最后更新 {year}/{month:02}/{day:02} {hour:02}:{minute:02} · 来自 Codex 的本地记录"
-                    ))
-                    .text_color(colors.muted),
-                )
-                .into_any_element(),
+                .when(self.agent.quota_loading, |card| {
+                    card.child(line("正在刷新…".into()).text_color(colors.muted))
+                })
+                .when_some(self.agent.quota_error.clone(), |card, error| {
+                    card.child(
+                        div()
+                            .text_size(theme::TEXT_CAPTION)
+                            .text_color(colors.deleted)
+                            .child(error),
+                    )
+                })
+                .when(!self.agent.quota_loading, |card| {
+                    card.children(windows)
+                        .children(
+                            quota
+                                .and_then(|q| q.credits.clone())
+                                .map(|credits| line(format!("Credits 余额 {credits}"))),
+                        )
+                        .children(updated.map(|text| line(text).text_color(colors.muted)))
+                })
+                .map(|card| {
+                    #[cfg(test)]
+                    let card = {
+                        use gpui_kit::test::TestSupportExt;
+                        card.test_support()
+                    };
+                    card.into_any_element()
+                }),
         )
     }
 }

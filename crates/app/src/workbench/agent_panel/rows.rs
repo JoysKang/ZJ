@@ -38,7 +38,64 @@ impl Workbench {
                 )
                 .into_any_element();
         }
-        let i = index - usize::from(older);
+        let Some(row) = self.agent.thread_rows.get(index - usize::from(older)) else {
+            return div().into_any_element();
+        };
+        if !row.process {
+            return self.render_agent_item(row.range.start, window, cx);
+        }
+        let key = session.key;
+        let start = row.range.start + session.thread.dropped;
+        let expanded = self.agent.expanded_processes.contains(&(key, start));
+        let active = session.busy() && row.range.end == session.thread.items.len();
+        v_flex()
+            .w_full()
+            .px_3()
+            .pb_3()
+            .gap_1()
+            .child(
+                Button::new(("agent-process", start))
+                    .ghost()
+                    .xsmall()
+                    .w_full()
+                    .justify_start()
+                    .h(theme::AGENT_TOOL_ROW)
+                    .gap_1()
+                    .cursor_pointer()
+                    .text_size(theme::TEXT_CAPTION)
+                    .text_color(colors.muted)
+                    .icon(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .label(format!(
+                        "{} · {} 项",
+                        if active { "执行中" } else { "执行过程" },
+                        row.range.len()
+                    ))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.agent.expanded_processes.remove(&(key, start)) {
+                            this.agent.expanded_processes.insert((key, start));
+                        }
+                        this.agent.thread_list.set_follow_mode(FollowMode::Normal);
+                        this.agent_sync_list(false);
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_agent_item(
+        &self,
+        i: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = theme::colors(cx);
+        let Some(session) = self.agent.current() else {
+            return div().into_any_element();
+        };
         let Some(item) = session.thread.items.get(i) else {
             return div().into_any_element();
         };
@@ -114,8 +171,8 @@ impl Workbench {
         div()
             .w_full()
             .px_3()
-            .when(index == 0, |row| row.pt_3())
-            .when(index > 0 && turn, |row| row.pt_3())
+            .when(i == 0, |row| row.pt_3())
+            .when(i > 0 && turn, |row| row.pt_3())
             .when(gap, |row| row.pb_3())
             .child(content)
             .children(took)

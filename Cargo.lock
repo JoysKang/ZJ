@@ -9127,7 +9127,9 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "async-channel",
+ "base64 0.22.1",
  "gpui-kit",
+ "image",
  "libc",
  "lsp-types",
  "markdown",
