@@ -269,6 +269,8 @@ pub struct PermissionOption {
 pub struct PermissionRequest {
     pub id: PermissionId,
     pub tool_call: ToolCallPatch,
+    /// Original parameters needed to show what is being approved, not just a tool title.
+    pub raw_input: Option<serde_json::Value>,
     pub options: Vec<PermissionOption>,
 }
 

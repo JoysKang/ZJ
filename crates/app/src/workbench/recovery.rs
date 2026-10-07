@@ -15,9 +15,8 @@ pub(crate) struct RecoveryQueue {
     /// Held while an operation runs; `true` once the app quits, after which the queue writes
     /// nothing (a removal at quit must not be undone by a write still queued).
     closed: Arc<Mutex<bool>>,
-    /// The first failure since it was last shown (written by the queue, shown by a window).
-    error: Arc<Mutex<Option<String>>>,
     _task: Task<()>,
+    _reporter: Task<()>,
 }
 
 impl Global for RecoveryQueue {}
@@ -40,8 +39,7 @@ pub(crate) fn install(dir: PathBuf, cx: &mut App) {
     }
     cx.set_global(PendingRecovery(records));
     let (ops, incoming) = async_channel::unbounded::<Op>();
-    let error = Arc::new(Mutex::new(None));
-    let failed = error.clone();
+    let (failed, failures) = async_channel::bounded(1);
     let closed = Arc::new(Mutex::new(false));
     let gate = closed.clone();
     let queue_dir = dir.clone();
@@ -51,18 +49,46 @@ pub(crate) fn install(dir: PathBuf, cx: &mut App) {
             if *closed {
                 continue;
             }
-            if let Err(e) = recovery::apply(&queue_dir, &op) {
+            if let Err(error) = recovery::apply(&queue_dir, &op) {
                 eprintln!("event=recovery_write_failed");
-                failed.lock().unwrap().get_or_insert(e.to_string());
+                let _ = failed.try_send(error.to_string());
             }
+        }
+    });
+    // Wait for a failure rather than waiting for the user's next edit to check it.
+    let reporter = cx.spawn(async move |cx| {
+        while let Ok(error) = failures.recv().await {
+            cx.update(|cx| {
+                // A failed removal can arrive after the last document owner is gone.
+                let views: Vec<_> = cx
+                    .windows()
+                    .iter()
+                    .filter_map(|window| {
+                        window
+                            .downcast::<gpui_kit::base::Root>()?
+                            .read(cx)
+                            .ok()?
+                            .view()
+                            .clone()
+                            .downcast::<Workbench>()
+                            .ok()
+                    })
+                    .collect();
+                for view in views {
+                    view.update(cx, |this, cx| {
+                        this.message = format!("恢复记录更新失败：{error}");
+                        cx.notify();
+                    });
+                }
+            });
         }
     });
     cx.set_global(RecoveryQueue {
         ops,
         dir,
         closed,
-        error,
         _task: task,
+        _reporter: reporter,
     });
 }
 
@@ -170,7 +196,6 @@ impl Workbench {
             send(cx, Op::Remove(old));
         }
         send(cx, Op::Write(record));
-        self.show_recovery_error(cx);
     }
 
     /// The buffer was saved, reloaded or discarded: its snapshot (and any pending one) goes.
@@ -183,18 +208,6 @@ impl Workbench {
         doc.recovered = false;
         if let Some(key) = doc.snapshot_on_disk.take() {
             send(cx, Op::Remove(key));
-        }
-        self.show_recovery_error(cx);
-    }
-
-    /// A failed snapshot write is shown in the status bar, not dropped (开发说明 R11).
-    fn show_recovery_error(&mut self, cx: &mut Context<Self>) {
-        let error = cx
-            .try_global::<RecoveryQueue>()
-            .and_then(|queue| queue.error.lock().unwrap().take());
-        if let Some(error) = error {
-            self.message = format!("恢复记录没能写入：{error}");
-            cx.notify();
         }
     }
 

@@ -697,6 +697,7 @@ impl Workbench {
         this.refresh(window, cx);
         if this.agent.visible {
             this.agent_ensure_session();
+            this.agent_sync_quota_timer(cx);
         }
         // Snapshots an abnormal exit left: first each window takes its folder's, then (one
         // round later, once every window has had its turn) the first takes the rest.
@@ -1454,6 +1455,11 @@ impl Workbench {
     ) -> Option<DocumentId> {
         let this = self;
         let id = loaded.id;
+        if documents::target_is_saving(&loaded.path, loaded.id, cx) {
+            this.message = "该文件正在另存为，请完成后再打开".into();
+            cx.notify();
+            return None;
+        }
         // The same file: by path, or (a hard link) by the file the tab now has on disk. Not by
         // the id a tab was opened with: Save As and atomic saves move a tab to another inode.
         let same_file = |doc: &Document| {

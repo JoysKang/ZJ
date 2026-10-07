@@ -9,6 +9,364 @@ use crate::settings::Settings;
 use core::prelude::v1::test;
 use gpui_kit::TestAppContext;
 
+fn second_window(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Workbench>) {
+    cx.update(|cx| {
+        let owners = cx.global::<OpenDocuments>().0.clone();
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1400.), px(900.)));
+        super::test_support::new_window(cx, None, owners, bounds)
+    })
+}
+
+fn edited_untitled(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    this: &Entity<Workbench>,
+) -> DocumentId {
+    let (id, editor) = cx
+        .update_window(window, |_, window, cx| {
+            this.update(cx, |p, cx| {
+                let id = p.new_untitled(window, cx);
+                (id, p.document(id).unwrap().editor.clone())
+            })
+        })
+        .unwrap();
+    cx.update_window(window, |_, window, cx| {
+        editor.update(cx, |state, cx| {
+            state.replace_text_in_range(Some(0..0), "keep", window, cx)
+        });
+    })
+    .unwrap();
+    assert!(this.read_with(cx, |p, _| p.document(id).unwrap().dirty));
+    id
+}
+
+#[gpui_kit::test]
+async fn a_save_result_for_the_previous_path_keeps_the_buffer_dirty(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-save-moved-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let id = edited_untitled(cx, window.into(), &this);
+    let old = root.join("old.txt");
+    let task = cx
+        .update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| p.write_as(id, old.clone(), window, cx))
+        })
+        .unwrap();
+    assert!(task.await);
+    let new = root.join("new.txt");
+    std::fs::write(&new, "keep").unwrap();
+    let disk = this.read_with(cx, |p, _| p.document(id).unwrap().disk);
+    let editor = this.read_with(cx, |p, _| p.document(id).unwrap().editor.clone());
+    let task = cx
+        .update_window(window.into(), |_, window, cx| {
+            editor.update(cx, |state, cx| {
+                state.replace_text_in_range(Some(0..4), "later", window, cx)
+            });
+            this.update(cx, |p, cx| {
+                let task = p.save_document(id, false, window, cx);
+                // The move completion can update the path before a pending save result
+                // reaches the UI. Keep the old file so that write deterministically succeeds.
+                p.document_mut(id).unwrap().path = new.clone();
+                p.owners.borrow_mut().get_mut(&id).unwrap().path = new.clone();
+                task
+            })
+        })
+        .unwrap();
+    assert!(
+        !task.await,
+        "a save of the previous path was treated as current"
+    );
+    this.read_with(cx, |p, _| {
+        let doc = p.document(id).unwrap();
+        assert!(doc.dirty);
+        assert_eq!(doc.disk, disk);
+        assert_eq!(doc.path, new);
+        assert!(p.message.contains("路径已改变"));
+    });
+    assert_eq!(std::fs::read_to_string(old).unwrap(), "later");
+    assert_eq!(std::fs::read_to_string(new).unwrap(), "keep");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn save_as_refuses_a_hard_link_to_another_windows_open_file(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-save-as-hardlink-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let first = edited_untitled(cx, window.into(), &this);
+    let path = root.join("original.txt");
+    let task = cx
+        .update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| p.write_as(first, path.clone(), window, cx))
+        })
+        .unwrap();
+    assert!(task.await);
+    let alias = root.join("alias.txt");
+    std::fs::hard_link(&path, &alias).unwrap();
+    let (other_window, other) = second_window(cx);
+    let second = edited_untitled(cx, other_window, &other);
+    let task = cx
+        .update_window(other_window, |_, window, cx| {
+            other.update(cx, |p, cx| p.write_as(second, alias, window, cx))
+        })
+        .unwrap();
+    assert!(
+        !task.await,
+        "Save As overwrote a hard link owned by another window"
+    );
+    assert!(other.read_with(cx, |p, _| p.document(second).unwrap().untitled));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "keep");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn quit_rechecks_earlier_discard_approvals_and_new_windows(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let first = edited_untitled(cx, window.into(), &this);
+    let approval = cx
+        .update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.confirm_close_approval(vec![first], window, cx)
+            })
+        })
+        .unwrap();
+    cx.simulate_prompt_answer("不保存");
+    let mut approvals =
+        std::collections::HashMap::from([(this.entity_id(), approval.await.unwrap())]);
+    assert!(
+        cx.update(|cx| documents::quit_is_approved(&approvals, cx)),
+        "explicit 不保存 must authorize that version"
+    );
+    let (other_window, other) = second_window(cx);
+    let second = edited_untitled(cx, other_window, &other);
+    assert!(
+        !cx.update(|cx| documents::quit_is_approved(&approvals, cx)),
+        "a new window's edits were never confirmed"
+    );
+    let approval = cx
+        .update_window(other_window, |_, window, cx| {
+            other.update(cx, |p, cx| {
+                p.confirm_close_approval(vec![second], window, cx)
+            })
+        })
+        .unwrap();
+    cx.simulate_prompt_answer("不保存");
+    approvals.insert(other.entity_id(), approval.await.unwrap());
+    assert!(cx.update(|cx| documents::quit_is_approved(&approvals, cx)));
+    let editor = this.read_with(cx, |p, _| p.document(first).unwrap().editor.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        editor.update(cx, |state, cx| {
+            state.replace_text_in_range(Some(0..0), "later", window, cx)
+        });
+    })
+    .unwrap();
+    assert!(
+        !cx.update(|cx| documents::quit_is_approved(&approvals, cx)),
+        "editing a previously confirmed window must cancel quit"
+    );
+}
+
+#[gpui_kit::test]
+async fn closing_tabs_rechecks_files_edited_while_the_prompt_is_open(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (first, second) = cx
+        .update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                (p.new_untitled(window, cx), p.new_untitled(window, cx))
+            })
+        })
+        .unwrap();
+    let edit = |cx: &mut TestAppContext, id| {
+        let editor = this.read_with(cx, |p, _| p.document(id).unwrap().editor.clone());
+        cx.update_window(window.into(), |_, window, cx| {
+            editor.update(cx, |state, cx| {
+                state.replace_text_in_range(Some(0..0), "new", window, cx)
+            });
+        })
+        .unwrap();
+    };
+    edit(cx, first);
+    let close = cx
+        .update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.confirm_close(vec![first, second], true, window, cx)
+            })
+        })
+        .unwrap();
+    edit(cx, second);
+    cx.simulate_prompt_answer("不保存");
+    assert!(
+        !close.await,
+        "the close discarded a file the prompt never asked about"
+    );
+    assert_eq!(this.read_with(cx, |p, _| p.documents.len()), 2);
+}
+
+#[gpui_kit::test]
+async fn closing_a_window_rechecks_new_dirty_tabs(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let add_edited = |cx: &mut TestAppContext| {
+        let editor = cx
+            .update_window(window.into(), |_, window, cx| {
+                this.update(cx, |p, cx| {
+                    let id = p.new_untitled(window, cx);
+                    p.document(id).unwrap().editor.clone()
+                })
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            editor.update(cx, |state, cx| {
+                state.replace_text_in_range(Some(0..0), "keep", window, cx)
+            });
+        })
+        .unwrap();
+    };
+    add_edited(cx);
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.close_window_after_confirm(window, cx));
+    })
+    .unwrap();
+    add_edited(cx);
+    cx.simulate_prompt_answer("不保存");
+    cx.run_until_parked();
+    assert!(
+        cx.update_window(window.into(), |_, _, _| ()).is_ok(),
+        "the new dirty tab was closed without confirmation"
+    );
+    assert!(this.read_with(cx, |p, _| p.documents.iter().all(|doc| doc.dirty)));
+}
+
+#[gpui_kit::test]
+async fn save_as_serializes_the_same_buffer_and_reserves_its_destination(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-save-as-race-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (first, second) = cx
+        .update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                (p.new_untitled(window, cx), p.new_untitled(window, cx))
+            })
+        })
+        .unwrap();
+    let (a, b) = (root.join("a.txt"), root.join("b.txt"));
+    let (one, collision) = cx
+        .update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                let one = p.write_as(first, a.clone(), window, cx);
+                assert!(
+                    p.document(first).unwrap().saving,
+                    "Save As must exclude other writes immediately"
+                );
+                let collision = p.write_as(second, a.clone(), window, cx);
+                (one, collision)
+            })
+        })
+        .unwrap();
+    let (one, collision) = (one.await, collision.await);
+    assert_ne!(
+        one, collision,
+        "exactly one buffer must own the destination"
+    );
+    let winner = if one { first } else { second };
+    let (two, save) = cx
+        .update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                let two = p.write_as(winner, b.clone(), window, cx);
+                let save = p.save_document(winner, false, window, cx);
+                (two, save)
+            })
+        })
+        .unwrap();
+    assert!(two.await);
+    assert!(save.await);
+    assert_eq!(
+        this.read_with(cx, |p, _| p.document(winner).unwrap().path.clone()),
+        b
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[gpui_kit::test]
+async fn saving_before_close_keeps_edits_made_after_an_earlier_file_was_saved(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-close-save-edit-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let mut ids = Vec::new();
+    for name in ["a.txt", "b.txt"] {
+        let (id, task) = cx
+            .update_window(window.into(), |_, window, cx| {
+                this.update(cx, |p, cx| {
+                    let id = p.new_untitled(window, cx);
+                    (id, p.write_as(id, root.join(name), window, cx))
+                })
+            })
+            .unwrap();
+        assert!(task.await);
+        let editor = this.read_with(cx, |p, _| p.document(id).unwrap().editor.clone());
+        cx.update_window(window.into(), |_, window, cx| {
+            editor.update(cx, |state, cx| {
+                state.replace_text_in_range(Some(0..0), "saved", window, cx)
+            });
+        })
+        .unwrap();
+        ids.push(id);
+    }
+    assert!(this.read_with(cx, |p, _| {
+        p.documents.iter().all(|doc| doc.dirty && doc.version > 0)
+    }));
+    let edited = this.read_with(cx, |p, _| p.document(ids[0]).unwrap().editor.clone());
+    let saved_path = root.join("a.txt");
+    cx.update(|cx| {
+        documents::on_buffer_saved(cx, move |path, cx| {
+            if path == saved_path {
+                let edited = edited.clone();
+                cx.defer(move |cx| {
+                    cx.update_window(window.into(), |_, window, cx| {
+                        edited.update(cx, |state, cx| {
+                            state.replace_text_in_range(Some(0..0), "later ", window, cx)
+                        });
+                    })
+                    .unwrap();
+                });
+            }
+        })
+    });
+    let close = cx
+        .update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| p.confirm_close(ids.clone(), true, window, cx))
+        })
+        .unwrap();
+    cx.simulate_prompt_answer("全部保存");
+    assert!(
+        !close.await,
+        "later edits were discarded by the successful earlier save"
+    );
+    this.read_with(cx, |p, cx| {
+        let doc = p.document(ids[0]).unwrap();
+        assert!(doc.dirty);
+        assert_eq!(doc.editor.read(cx).text().to_string(), "later saved");
+    });
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "saved"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[gpui_kit::test]
 async fn focus_change_auto_save_leaves_a_deleted_file_deleted(cx: &mut TestAppContext) {
     cx.executor().allow_parking();

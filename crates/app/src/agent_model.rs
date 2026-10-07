@@ -20,8 +20,6 @@ const DAY_MS: i64 = 86_400_000;
 pub struct ThreadRow {
     pub range: Range<usize>,
     pub process: bool,
-    /// Exposed after the turn ends; expanded process members are never final replies.
-    pub final_reply: bool,
     /// Stable absolute identity, independent of the first process member's position.
     pub turn_start: usize,
 }
@@ -82,7 +80,6 @@ pub fn thread_rows(thread: &Thread) -> Vec<ThreadRow> {
                 rows.push(ThreadRow {
                     range: i..i + 1,
                     process: !visible,
-                    final_reply: Some(i) == final_reply,
                     turn_start: turn[0],
                 });
             }
@@ -443,9 +440,12 @@ pub fn prompt_parts(text: &str, attachments: &[Attachment]) -> Vec<PromptPart> {
     parts
 }
 
-/// The `/command` being typed: the message starts with `/` and the cursor is still in its
-/// first word. Returns what follows the `/`.
+/// The `/command` being typed: after optional leading whitespace, the message starts with
+/// `/` and the cursor is still in its first word. Returns what follows the `/`.
 pub fn slash_at(text: &str, cursor: usize) -> Option<&str> {
+    let trimmed = text.trim_start();
+    let cursor = cursor.checked_sub(text.len() - trimmed.len())?;
+    let text = trimmed;
     text.strip_prefix('/')?;
     let end = text.find(char::is_whitespace).unwrap_or(text.len());
     (1..=end).contains(&cursor).then(|| &text[1..end])
@@ -466,6 +466,7 @@ pub fn slash_matches<'a>(commands: &'a [AgentCommand], query: &str) -> Vec<&'a A
 /// The message with its first word replaced by `/name`, followed by a space for the
 /// arguments.
 pub fn with_command(text: &str, name: &str) -> String {
+    let text = text.trim_start();
     let end = text.find(char::is_whitespace).unwrap_or(text.len());
     format!("/{name} {}", text[end..].trim_start())
 }
@@ -941,6 +942,8 @@ mod tests {
     #[test]
     fn slash_commands_are_completed_and_sent_first() {
         assert_eq!(slash_at("/rev", 4), Some("rev"));
+        assert_eq!(slash_at(" \n/rev task", 6), Some("rev"));
+        assert_eq!(slash_at(" \n/rev task", 1), None);
         assert_eq!(slash_at("/", 1), Some(""));
         assert_eq!(slash_at("/review src", 3), Some("review"));
         assert_eq!(slash_at("/review src", 9), None);
@@ -959,6 +962,10 @@ mod tests {
         assert_eq!(names, ["review", "pr-review"]);
         assert_eq!(slash_matches(&commands, "").len(), 3);
         assert_eq!(with_command("/rev", "review"), "/review ");
+        assert_eq!(
+            with_command(" \n/rev 已输入的任务", "review"),
+            "/review 已输入的任务"
+        );
         assert_eq!(with_command("/rev  src/a.rs", "review"), "/review src/a.rs");
         let file = Attachment::File("/w/a.rs".into());
         assert!(matches!(
@@ -1071,19 +1078,16 @@ mod tests {
                 ThreadRow {
                     range: 0..1,
                     process: false,
-                    final_reply: false,
                     turn_start: 0,
                 },
                 ThreadRow {
                     range: 1..6,
                     process: true,
-                    final_reply: false,
                     turn_start: 0,
                 },
                 ThreadRow {
                     range: 6..7,
                     process: false,
-                    final_reply: true,
                     turn_start: 0,
                 },
             ]
@@ -1141,25 +1145,21 @@ mod tests {
                 ThreadRow {
                     range: 0..1,
                     process: false,
-                    final_reply: false,
                     turn_start: 0,
                 },
                 ThreadRow {
                     range: 1..8,
                     process: true,
-                    final_reply: false,
                     turn_start: 0,
                 },
                 ThreadRow {
                     range: 5..6,
                     process: false,
-                    final_reply: true,
                     turn_start: 0,
                 },
                 ThreadRow {
                     range: 6..7,
                     process: false,
-                    final_reply: false,
                     turn_start: 0,
                 },
             ]

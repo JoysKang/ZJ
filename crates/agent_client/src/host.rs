@@ -48,11 +48,28 @@ pub(crate) struct HostKey {
 #[derive(Default)]
 pub struct AgentPool {
     hosts: Mutex<Vec<(HostKey, Weak<Host>)>>,
+    stopping: AtomicBool,
 }
 
 impl AgentPool {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Permanently closes the pool, stops every process group and waits for cleanup.
+    /// Clients may still be held by background work when the application quits.
+    pub fn shutdown(&self) {
+        let hosts: Vec<_> = {
+            let mut hosts = self.hosts.lock().unwrap();
+            self.stopping.store(true, Ordering::Relaxed);
+            std::mem::take(&mut *hosts)
+                .into_iter()
+                .filter_map(|(_, host)| host.upgrade())
+                .collect()
+        };
+        for host in hosts {
+            host.shutdown();
+        }
     }
 
     pub(crate) fn host(
@@ -61,6 +78,9 @@ impl AgentPool {
         buffers: Option<Arc<dyn BufferProvider>>,
     ) -> io::Result<Arc<Host>> {
         let mut hosts = self.hosts.lock().unwrap();
+        if self.stopping.load(Ordering::Relaxed) {
+            return Err(io::Error::other("agent process pool is closed"));
+        }
         hosts.retain(|(_, host)| host.strong_count() > 0);
         if let Some(host) = hosts
             .iter()
@@ -90,7 +110,7 @@ pub(crate) struct HostInner {
     /// A session left or went idle: the process may be done.
     wake_tx: async_channel::Sender<()>,
     wake_rx: async_channel::Receiver<()>,
-    stopping: async_channel::Receiver<()>,
+    pub(crate) stopping: async_channel::Receiver<()>,
     routes: Mutex<HashMap<String, Arc<SessionState>>>,
     orphans: Mutex<VecDeque<(String, Vec<acp::SessionNotification>)>>,
     /// Sessions running on the current process.
@@ -132,10 +152,7 @@ impl Host {
             thread: Mutex::new(Some(thread)),
         }))
     }
-}
-
-impl Drop for Host {
-    fn drop(&mut self) {
+    fn shutdown(&self) {
         self.stop.close();
         self.inner.attach_tx.close();
         if let Some(handle) = self.thread.lock().unwrap().take()
@@ -145,6 +162,12 @@ impl Drop for Host {
         {
             let _ = handle.join();
         }
+    }
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 

@@ -604,7 +604,6 @@ impl Workbench {
                     agent_model::ThreadRow {
                         range: i..i + 1,
                         process: false,
-                        final_reply: false,
                         turn_start,
                     }
                 }));

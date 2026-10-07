@@ -1326,6 +1326,130 @@ fn pooled(ws: &Workspace, pool: &Arc<AgentPool>, env: &[(&str, &str)]) -> Client
     opts
 }
 
+#[test]
+fn concurrent_reviews_never_apply_two_decisions_to_the_same_shown_patch() {
+    use workspace_editor_agent::review::{STALE_REVIEW, full_context_patch, resolve_hunk};
+    let ws = Workspace::new("review-race");
+    let client = AgentClient::start(options(&ws, &[])).unwrap();
+    let path = ws.0.join("review.txt");
+    let context = "unchanged context\n".repeat(50_000);
+    let before = format!("old first\n{context}old last\n");
+    let current = format!("new first\n{context}new last\n");
+    let shown = full_context_patch(&before, &current).0;
+    std::fs::write(&path, &current).unwrap();
+    client.set_snapshot(&path, Some(Some(before.clone())));
+    let barrier = std::sync::Barrier::new(8);
+    let decisions: Vec<_> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..8)
+            .map(|i| {
+                let (client, path, shown, barrier) = (&client, &path, &shown, &barrier);
+                scope.spawn(move || {
+                    let index = i % 2;
+                    let accept = index == 0;
+                    barrier.wait();
+                    (
+                        index,
+                        accept,
+                        resolve_hunk(client, path, index, accept, shown),
+                    )
+                })
+            })
+            .collect();
+        workers.into_iter().map(|w| w.join().unwrap()).collect()
+    });
+    let succeeded: Vec<_> = decisions
+        .iter()
+        .filter(|(_, _, result)| result.is_ok())
+        .collect();
+    assert_eq!(
+        succeeded.len(),
+        1,
+        "stale decisions were applied: {decisions:?}"
+    );
+    assert!(
+        decisions
+            .iter()
+            .all(|(_, _, result)| result.as_ref().err().is_none_or(|e| e == STALE_REVIEW))
+    );
+    if succeeded[0].1 {
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), current);
+        assert_eq!(
+            client.snapshot(&path).flatten().unwrap(),
+            format!("new first\n{context}old last\n")
+        );
+    } else {
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("new first\n{context}old last\n")
+        );
+        assert_eq!(client.snapshot(&path).flatten().unwrap(), before);
+    }
+}
+
+#[test]
+fn closing_the_last_client_reaps_the_process_without_deadlocking() {
+    for explicit in [false, true] {
+        let ws = Workspace::new("last-client-shutdown");
+        let client = AgentClient::start(options(&ws, &[])).unwrap();
+        let events = Events::of(&client);
+        client.prompt(text("pid")).unwrap();
+        let pid = pid_of(&events.turn());
+        let (done, stopped) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            if explicit {
+                client.shutdown();
+            } else {
+                drop(client);
+            }
+            let _ = done.send(());
+        });
+        assert!(
+            stopped.recv_timeout(Duration::from_secs(3)).is_ok(),
+            "closing the last client must finish: explicit={explicit}"
+        );
+        worker.join().unwrap();
+        assert!(!alive(pid));
+    }
+}
+
+#[test]
+fn shutting_down_the_pool_stops_owned_clients_even_with_unread_output() {
+    let ws = Workspace::new("pool-shutdown");
+    let pool = Arc::new(AgentPool::new());
+    let idle = AgentClient::start(pooled(&ws, &pool, &[])).unwrap();
+    let active = AgentClient::start(pooled(&ws, &pool, &[])).unwrap();
+    let other =
+        AgentClient::start(pooled(&ws, &pool, &[("FAKE_SHUTDOWN_GROUP", "other")])).unwrap();
+    let events = Events::of(&idle);
+    idle.prompt(text("pid")).unwrap();
+    let shared_pid = pid_of(&events.turn());
+    active.prompt(text("flood")).unwrap();
+    let unread = active.events();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !unread.is_full() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        unread.is_full(),
+        "the shutdown regression must reach output backpressure"
+    );
+    let events = Events::of(&other);
+    other.prompt(text("pid")).unwrap();
+    let other_pid = pid_of(&events.turn());
+    assert_ne!(other_pid, shared_pid);
+    pool.shutdown();
+    for client in [&idle, &active, &other] {
+        assert!(client.pid().is_none());
+    }
+    assert!(!alive(shared_pid));
+    assert!(!alive(other_pid));
+    assert!(
+        AgentClient::start(pooled(&ws, &pool, &[])).is_err(),
+        "late work must not reopen a shut-down pool"
+    );
+    pool.shutdown(); // Repeated native termination/cleanup is harmless.
+}
+
 /// `session:<id> cwd:<path>` from the `session` script.
 fn session_of(client: &AgentClient, events: &Events) -> (String, String) {
     client.prompt(text("session")).unwrap();

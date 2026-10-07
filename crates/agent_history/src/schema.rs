@@ -74,6 +74,13 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE sessions ADD COLUMN lines_added INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE sessions ADD COLUMN lines_removed INTEGER NOT NULL DEFAULT 0;
     "#,
+    // 3: reserve non-reusable session identities without rebuilding sessions or its FKs/FTS.
+    // The empty allocator retains its high-water mark in SQLite's sqlite_sequence table.
+    r#"
+    CREATE TABLE session_ids (id INTEGER PRIMARY KEY AUTOINCREMENT);
+    INSERT INTO session_ids(id) SELECT coalesce(max(id), 0) FROM sessions;
+    DELETE FROM session_ids;
+    "#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {

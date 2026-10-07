@@ -1,10 +1,41 @@
-//! Passive quota updates use local logs; opening the anchored card queries the live account.
+//! Passive updates use local logs; hover, click and a ten-minute timer query the live account.
 
 use super::*;
 
 impl Workbench {
     pub(in crate::workbench) fn agent_shows_quota(&self) -> bool {
         self.agent.current().is_some_and(|s| s.preset.id == "codex")
+    }
+
+    /// One sleeping timer while this panel shows Codex; no per-second redraws or polling.
+    pub(in crate::workbench) fn agent_sync_quota_timer(&mut self, cx: &mut Context<Self>) {
+        if !self.agent.visible || self.agent.view != AgentView::Thread || !self.agent_shows_quota()
+        {
+            self.agent.quota_timer = None;
+            self.agent.quota_next_refresh_ms = None;
+            return;
+        }
+        if self.agent.quota_timer.is_some() {
+            return;
+        }
+        self.agent.quota_next_refresh_ms = Some(
+            workspace_editor_agent_history::now_ms()
+                + crate::quota::REFRESH_INTERVAL.as_millis() as i64,
+        );
+        self.agent.quota_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(crate::quota::REFRESH_INTERVAL)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.agent.quota_timer = None;
+                this.agent.quota_next_refresh_ms = None;
+                this.agent_sync_quota_timer(cx);
+                if this.agent.visible && this.agent.view == AgentView::Thread {
+                    this.agent_query_quota(cx);
+                }
+                cx.notify();
+            });
+        }));
     }
 
     pub(in crate::workbench) fn agent_refresh_quota(&mut self, cx: &mut Context<Self>) {
@@ -32,6 +63,7 @@ impl Workbench {
     }
 
     pub(in crate::workbench) fn agent_query_quota(&mut self, cx: &mut Context<Self>) {
+        self.agent_sync_quota_timer(cx);
         if self.agent.quota_loading || !self.agent_shows_quota() {
             return;
         }

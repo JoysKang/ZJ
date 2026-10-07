@@ -728,6 +728,16 @@ impl Workbench {
                         )
                         .children(updated.map(|text| line(text).text_color(colors.muted)))
                 })
+                .when_some(self.agent.quota_next_refresh_ms, |card, at| {
+                    let (_, _, _, _, hour, minute) = agent_model::civil(at, offset);
+                    let minutes = crate::quota::REFRESH_INTERVAL.as_secs() / 60;
+                    card.child(
+                        line(format!(
+                            "每 {minutes} 分钟自动刷新，下次 {hour:02}:{minute:02}"
+                        ))
+                        .text_color(colors.muted),
+                    )
+                })
                 .map(|card| {
                     #[cfg(test)]
                     let card = {

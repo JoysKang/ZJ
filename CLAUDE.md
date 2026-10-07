@@ -45,7 +45,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 - `crates/core`：身份模型与共享常量（`RepoId`、`DocumentId`、`EXCLUDED_DIRS`、按 Git 规则校验 `.git` 的 `git_marker`），**不依赖 GPUI**。
 - `crates/git_service`：调用系统 git，负责有界输出、超时、取消、全局限流，**不依赖 GPUI**。仓库发现最多向下 4 层，跳过 `EXCLUDED_DIRS` 和上层仓库忽略的目录，无效的 `.git` 静默跳过（自动发现找不到的仓库可以手动添加，见 `settings.rs` 的 `extra_repos`）。`lib.rs` 是服务本体（进程、限流、发现、查询），解析放在各自的文件里：`status.rs`（porcelain v2）、`refs.rs`（分支）、`log.rs`（未推送的提交）、`graph.rs`（Git 图的分页和提交详情）、`ls_files.rs`（快速打开的路径）、`stash.rs`（stash 和 blame），写操作在 `write.rs`。
-- `crates/agent_client`：ACP 客户端（Agent 预设、子进程、会话、权限、`fs/*`、改动前快照与审阅、空闲退出），**不依赖 GPUI**，见 docs/adr/0004。`client.rs` 是一个会话（`AgentClient`），其私有子模块 `steering.rs` 处理运行中追加指令、适配器续跑的结束通知和延迟响应的取消；仅在初始化声明支持时使用 `_session/steering`，不改变权限审批。`host.rs` 是 Agent 进程：同一种 Agent、同样的环境变量在整个应用里共用一个进程（`AgentPool`），请求按会话 id 分发，会话空闲时 `session/close`，没有会话时进程退出。
+- `crates/agent_client`：ACP 客户端（Agent 预设、子进程、会话、权限、`fs/*`、改动前快照与审阅、空闲退出），**不依赖 GPUI**，见 docs/adr/0004。`client.rs` 是一个会话（`AgentClient`），其私有子模块 `steering.rs` 处理运行中追加指令、适配器续跑的结束通知和延迟响应的取消；仅在初始化声明支持时使用 `_session/steering`，不改变权限审批。`host.rs` 是 Agent 进程：同一种 Agent、同样的环境变量在整个应用里共用一个进程（`AgentPool`），请求按会话 id 分发，会话空闲时 `session/close`，没有会话时进程退出。应用退出时同步关闭进程池，停止并回收全部 Agent 进程组，拒绝晚到的启动；输出队列已满也不会阻塞退出。
 - `crates/agent_history`：Agent 会话历史（SQLite + FTS5，后台写线程、搜索、钉住、硬删除），**不依赖 GPUI**。
 - `crates/app`：GPUI 界面。
   - `theme.rs`：唯一允许写字面尺寸和颜色的地方。
@@ -77,11 +77,20 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - 合并冲突：`conflicts.rs` 找冲突标记和三种解决方式（纯函数）；`workbench/conflict_bar.rs` 在冲突文件编辑后后台扫描、两侧着色（`theme` 的 `conflict_*`），编辑器上方的冲突条逐处或全部解决、上一处 / 下一处，解决完后保存并按新状态暂存。
   - `workbench/graph_view.rs`：编辑区里的 Git 图（纯函数的车道布局、分页提交列表、提交详情、打开提交 Diff）。
   - `session.rs`：重启时恢复的窗口记录（`session.json`，每个窗口的文件夹、位置大小、文件标签和激活的标签；退出时按系统窗口的前后顺序保存，重启按从后到前的顺序创建；重启时只读入激活的标签，其余标签点开时才读）。
-  - Agent 面板（docs/adr/0004）：`agent_model.rs` 放不依赖 GPUI 的逻辑（会话分组和时间、`@` 引用、附件、从历史恢复）；回复用 Kit 的 `TextView` 渲染（可选中，代码块带复制按钮），`markdown.rs` 只管代码块的语法高亮（编辑器的语法主题），`workbench/agent/highlights.rs` 在后台算好、绘制时只查表；`quota.rs` 读取 Codex 本地记录并解析实时响应；`workbench/agent/quota.rs` 在显示会话和一轮结束时更新本地记录，悬停或点击额度按钮时后台通过 `agent_client` 的短时 app-server 连接查询最新额度（不运行 Agent 回合，不由 ZJ 读凭据）。`agent_images.rs` 在后台校验和缩略图片，输入区显示可删除预览，发送 ACP 图片内容；执行过程折叠后仍按可见行布局；`secrets.rs` 解析 Agent 的环境变量（`$变量名` 或 macOS 钥匙串 `keychain:账户名`，设置里不存明文密钥）。`workbench/agent.rs` 是会话与面板视图的状态，其余逻辑按主题放在 `workbench/agent/`（`turns` 发送与事件泵、`permissions` 审批与模式、`composer` 引用与附件、`changes` 改动文件、`history` 会话历史、`buffers` 给 Agent 的未保存缓冲区、`highlights` 代码块高亮）；`agent_panel.rs`（标题、会话条、切换器；`agent_panel/` 下是对话行、卡片、改动文件、输入框、设置）、`agent_history.rs`（会话列表）、`agent_search.rs`（⌘J 搜索）、`agent_review.rs`（编辑区里逐处接受 / 拒绝）只做渲染和交互。转圈只在面板可见、窗口在前台、有会话运行时才有定时器。
+  - Agent 面板（docs/adr/0004）：`agent_model.rs` 放不依赖 GPUI 的逻辑（会话分组和时间、`@` 引用、附件、从历史恢复）；回复用 Kit 的 `TextView` 渲染（可选中，代码块带复制按钮），`markdown.rs` 只管代码块的语法高亮（编辑器的语法主题），`workbench/agent/highlights.rs` 在后台算好、绘制时只查表；`quota.rs` 读取 Codex 本地记录并解析实时响应；`workbench/agent/quota.rs` 在显示会话和一轮结束时更新本地记录，Codex 对话面板显示时每 10 分钟、悬停或点击额度按钮时后台通过 `agent_client` 的短时 app-server 连接查询最新额度（不运行 Agent 回合，不由 ZJ 读凭据）；关闭面板、进入历史或切换其他 Agent 时停止定时刷新，弹层显示下次刷新时间。`agent_images.rs` 在后台校验和缩略图片，输入区显示可删除预览，发送 ACP 图片内容；执行过程折叠后仍按可见行布局；`secrets.rs` 解析 Agent 的环境变量（`$变量名` 或 macOS 钥匙串 `keychain:账户名`，设置里不存明文密钥）。`workbench/agent.rs` 是会话与面板视图的状态，其余逻辑按主题放在 `workbench/agent/`（`turns` 发送与事件泵、`permissions` 审批与模式、`composer` 引用与附件、`changes` 改动文件、`history` 会话历史、`buffers` 给 Agent 的未保存缓冲区、`highlights` 代码块高亮）；`agent_panel.rs`（标题、会话条、切换器；`agent_panel/` 下是对话行、卡片、改动文件、输入框、设置）、`agent_history.rs`（会话列表）、`agent_search.rs`（⌘J 搜索）、`agent_review.rs`（编辑区里逐处接受 / 拒绝）只做渲染和交互。转圈只在面板可见、窗口在前台、有会话运行时才有定时器。
   - `symbols.rs`：tree-sitter tags / locals 查询做定义、引用和文件大纲（查询在 `crates/app/queries/`）；`symbol_index.rs`：首次跳转时后台建立的工作区符号索引；`workbench/navigation.rs`：转到定义、符号列表、查找引用、转到行（⌃G，命令中心里的 `:行:列`）和前进后退。不跑语言服务器，见 docs/adr/0002。
-- Agent 输出按轮次合并为一个执行过程，运行时默认展开，可手动折叠，运行中追加指令仍属于当前轮；结束时自动收起当前轮过程并单独显示最终回复。修改文件列表独立控制，每个新轮次默认收起，当前轮的更新或追加指令保留手动展开状态。待审批、待登录和会话错误直接显示。展开成员继续使用外层虚拟列表；停留在底部时跟随最新输出，向上阅读时保持位置，返回底部后恢复跟随。输入区不显示上下文占用圆环。
+- Agent 输出按轮次合并为一个执行过程，运行时默认展开，可手动折叠，运行中追加指令仍属于当前轮；结束时自动收起当前轮过程并单独显示最终回复。修改文件列表独立控制，每个新轮次默认收起，当前轮的更新或追加指令保留手动展开状态。待审批、待登录和会话错误直接显示；命令审批优先显示 Agent 提供的原始命令与工作目录，可选中和复制，长命令在卡片内滚动，不把通用工具标题当作命令。展开成员继续使用外层虚拟列表；停留在底部时跟随最新输出，向上阅读时保持位置，返回底部后恢复跟随。输入区不显示上下文占用圆环。
 - `vendor/`：打过补丁的 GPUI macOS 渲染器和窗口层（`gpui-pre-apple` / `gpui-pre-macos`），以及 GPUI Kit 的 `gpui-base`（编辑器光标常亮），都用 `[patch.crates-io]` 指向。改动都标 `ZJ patch`，说明在 `vendor/README.md`，理由和测量方法在 docs/adr/0005；`ZJ_GPU_LOWMEM=0` 恢复上游行为。升级 GPUI 时要先处理这里。
 - UI 的 render 回调里不做 IO、不跑 Git 命令、不做全文解析；这些都通过 `background_spawn` 执行，结果带 generation 校验。
+
+### 异步写入与关闭约束
+
+- 保存完成只确认发起时的文本版本和路径；期间的新编辑保留 dirty，路径变化时不把旧结果写进新路径的磁盘状态。关闭标签、窗口和应用前重新核对当前文档；「不保存」只授权丢弃该次提示对应的版本。
+- 同一文档的保存与另存为串行。另存为在 `workbench/documents.rs` 预留规范路径和现有文件身份，跨窗口查重；预留持续到后台写入与前台结果处理都结束，异步打开也检查占用。
+- 恢复快照的后台失败通过有界事件通知界面，不等待下一次编辑。临时文件只在成功创建后才归当前写入所有，创建失败不能清理别人的临时文件。
+- `git_service` 写操作按 common directory、private git directory 的顺序加锁，使 linked worktree 的共享引用和 stash 校验、变更串行；仍不能约束外部 Git 进程。
+- `agent_client::review` 串行执行 ZJ 的审阅决策及对应读取；逐处操作用同一份内容校验显示补丁和块序号后再应用。此锁不覆盖 Agent 自有工具或外部程序写入。
+- 历史会话 id 使用 SQLite 持久的单调分配器，删除后不复用，避免晚到事件写入新会话。`/` 补全只识别消息开头的命令，允许前导空白；选择命令保留参数并把光标放到末尾。
 
 ## 视觉规则
 

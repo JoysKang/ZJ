@@ -95,6 +95,66 @@ fn opens_lazily_with_private_wal_files() {
 }
 
 #[test]
+fn deleted_session_ids_never_capture_late_writes_after_reopening() {
+    let dir = TempDir::new("deleted-identity");
+    let h = History::new(dir.db());
+    let old = session(&h, "/w/a", "codex", "old session");
+    h.append_message(old, Role::User, "old message");
+    h.flush().unwrap();
+    h.delete_session(old).unwrap();
+    drop(h);
+    let h = History::new(dir.db());
+    let new = session(&h, "/w/a", "codex", "new session");
+    h.append_message(old, Role::Agent, "late old reply");
+    h.rename(old, "late old title");
+    let flushed = h.flush();
+    assert!(
+        h.messages(new).unwrap().is_empty(),
+        "an old reply entered the new session"
+    );
+    assert_eq!(h.session(new).unwrap().unwrap().title, "new session");
+    assert!(new.0 > old.0);
+    assert!(
+        flushed.is_err(),
+        "a late write to a deleted session must be reported"
+    );
+}
+
+#[test]
+fn session_identity_migration_preserves_existing_history_and_search() {
+    let dir = TempDir::new("identity-migration");
+    let h = History::new(dir.db());
+    let first = session(&h, "/w/a", "codex", "retained session");
+    let last = session(&h, "/w/a", "codex", "highest session");
+    h.append_message(first, Role::Agent, "迁移前 old-history-token");
+    h.touch_file(first, "src/retained.rs");
+    h.pin(first);
+    h.flush().unwrap();
+    let expected = h.session(first).unwrap();
+    let messages = h.messages(first).unwrap();
+    drop(h);
+    // The previous schema has the same data tables and FTS, without the ID allocator.
+    let conn = rusqlite::Connection::open(dir.db()).unwrap();
+    conn.execute_batch("DROP TABLE session_ids; PRAGMA user_version = 2;")
+        .unwrap();
+    drop(conn);
+    let h = History::new(dir.db());
+    assert_eq!(h.session(first).unwrap(), expected);
+    assert_eq!(h.messages(first).unwrap(), messages);
+    assert_eq!(h.files(first).unwrap(), ["src/retained.rs"]);
+    assert_eq!(
+        search(&h, "old-history-token", Scope::All)[0].session.id,
+        first
+    );
+    h.delete_session(last).unwrap();
+    let next = session(&h, "/w/a", "codex", "after migration");
+    assert!(
+        next.0 > last.0,
+        "the migration must reserve every existing identity"
+    );
+}
+
+#[test]
 fn chinese_and_english_queries() {
     let dir = TempDir::new("cjk");
     let h = History::new(dir.db());

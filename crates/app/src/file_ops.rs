@@ -45,11 +45,12 @@ pub fn rewrite(path: &Path, expected: &FileStamp, bytes: &[u8]) -> io::Result<Fi
     name.push(path.file_name().unwrap_or_default());
     name.push(format!(".zj-replace-{}", std::process::id()));
     let temporary = dir.join(name);
+    // A pre-existing temporary file belongs to another operation.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
     let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
         file.write_all(bytes)?;
         file.set_permissions(fs::Permissions::from_mode(metadata.permissions().mode()))?;
         file.sync_data()?;
@@ -480,6 +481,24 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_rewrite_does_not_remove_an_existing_temporary_file() {
+        let root = std::env::temp_dir().join(format!("zj-replace-existing-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("a.txt");
+        fs::write(&path, "original").unwrap();
+        let temporary = root.join(format!(".a.txt.zj-replace-{}", std::process::id()));
+        fs::write(&temporary, "another pending write").unwrap();
+        let stamp = FileStamp::read(&path).unwrap();
+        assert!(rewrite(&path, &stamp, b"replacement").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        assert_eq!(
+            fs::read_to_string(&temporary).unwrap(),
+            "another pending write"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn replace_in_files_keeps_line_endings_and_refuses_stale_files() {

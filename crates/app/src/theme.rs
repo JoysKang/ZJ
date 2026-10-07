@@ -216,6 +216,8 @@ pub const AGENT_IMAGE_HEIGHT: Pixels = px(72.);
 pub const AGENT_PLAN_BAR: Pixels = px(3.);
 pub const AGENT_PLAN_BAR_WIDTH: Pixels = px(160.);
 pub const AGENT_LINE: Pixels = px(22.);
+/// Keep approval controls visible while the full command can be scrolled and copied.
+pub const AGENT_PERMISSION_BODY_MAX: Pixels = px(176.);
 /// The widest a user message gets, as a share of the thread: it sits to the right, apart from
 /// the full-width replies.
 pub const AGENT_USER_WIDTH: f32 = 0.85;
@@ -280,7 +282,7 @@ pub struct Palette {
     pub title: u32,
     /// Tab strip and inactive tabs.
     pub tabs: u32,
-    /// Raised input areas and final Agent replies.
+    /// Raised input areas.
     pub input_bg: u32,
     pub border: u32,
     pub hover: u32,
@@ -331,7 +333,7 @@ pub struct Palette {
     pub attention_halo: u32,
     pub unread: u32,
     pub running: u32,
-    /// The user's messages in the agent panel: tinted apart from final replies
+    /// The user's messages in the agent panel: tinted apart from replies (plain on the panel)
     /// and from cards and code blocks.
     pub user_bubble: u32,
     /// Cards inside the agent panel and their borders; `strong_border` frames inputs.
@@ -961,7 +963,7 @@ mod tests {
                 ("panel", p.panel),
                 ("title", p.title),
                 ("tabs", p.tabs),
-                ("input and final reply", p.input_bg),
+                ("input", p.input_bg),
                 ("hover", p.hover),
                 ("active line", p.active_line),
                 ("keycap", p.keycap),

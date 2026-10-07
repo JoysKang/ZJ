@@ -28,6 +28,63 @@ fn until_disk(cx: &mut TestAppContext, what: &str, done: impl Fn() -> bool) {
 }
 
 #[gpui_kit::test]
+async fn a_snapshot_failure_is_visible_without_another_edit(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let base = temp("snapshot-failure");
+    let store = base.join("recovery");
+    cx.update(|cx| super::install(store.clone(), cx));
+    // The destination becomes unusable after startup, before the first snapshot.
+    std::fs::write(&store, "not a directory").unwrap();
+    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    cx.update_window(window.into(), |_, window, cx| {
+        let editor = this.update(cx, |p, cx| {
+            let id = p.new_untitled(window, cx);
+            p.document(id).unwrap().editor.clone()
+        });
+        editor.update(cx, |editor, cx| {
+            editor.replace_text_in_range(Some(0..0), "keep this draft", window, cx)
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(this.read_with(cx, |p, _| p.documents[0].dirty));
+    cx.executor().advance_clock(recovery::SNAPSHOT_DELAY + TICK);
+    wait(
+        cx,
+        None,
+        None,
+        |cx| this.read_with(cx, |p, _| p.message.starts_with("恢复记录更新失败：")),
+        |cx| {
+            this.read_with(cx, |p, _| {
+                format!(
+                    "the failed snapshot was never reported: snapshot={:?}, message={}",
+                    p.documents[0].snapshot_on_disk, p.message
+                )
+            })
+        },
+    );
+    assert!(this.read_with(cx, |p, _| p.documents[0].dirty));
+    // Removing the last tab must still report a failed snapshot deletion in this window.
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            let id = p.documents[0].id;
+            p.message.clear();
+            p.remove_document(id, window, cx);
+            assert!(p.documents.is_empty());
+        });
+    })
+    .unwrap();
+    wait(
+        cx,
+        None,
+        None,
+        |cx| this.read_with(cx, |p, _| p.message.starts_with("恢复记录更新失败：")),
+        |_| "the failed snapshot deletion was lost after closing the last tab".into(),
+    );
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[gpui_kit::test]
 async fn an_edit_is_snapshotted_after_a_pause_and_forgotten_once_saved(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let base = temp("snapshot");

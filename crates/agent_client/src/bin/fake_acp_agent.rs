@@ -186,6 +186,11 @@ async fn run_prompt(
                 ),
             )?;
         }
+        "flood" => {
+            for _ in 0..1024 {
+                say(&cx, &session, "chunk")?;
+            }
+        }
         "links" => {
             let described: Vec<String> = request
                 .prompt
@@ -228,14 +233,22 @@ async fn run_prompt(
             )?;
         }
         "permission" => {
+            let fields = if arg == "raw" {
+                acp::ToolCallUpdateFields::new()
+                    .title("Run command")
+                    .kind(acp::ToolKind::Execute)
+                    .raw_input(serde_json::json!({
+                        "command": "printf '%s\\n' 'a  b'\n# preserve  whitespace",
+                        "cwd": "/tmp/review folder"
+                    }))
+            } else {
+                acp::ToolCallUpdateFields::new()
+                    .title("cargo test")
+                    .kind(acp::ToolKind::Execute)
+            };
             let request = acp::RequestPermissionRequest::new(
                 session.clone(),
-                acp::ToolCallUpdate::new(
-                    "t2",
-                    acp::ToolCallUpdateFields::new()
-                        .title("cargo test")
-                        .kind(acp::ToolKind::Execute),
-                ),
+                acp::ToolCallUpdate::new("t2", fields),
                 vec![
                     acp::PermissionOption::new(
                         "allow",

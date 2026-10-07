@@ -286,10 +286,14 @@ fn create_session(tx: &Transaction<'_>, new: &NewSession) -> Result<SessionId> {
         ),
     };
     let at = new.created_at.unwrap_or_else(now_ms);
+    tx.execute("INSERT INTO session_ids DEFAULT VALUES", [])?;
+    let id = tx.last_insert_rowid();
+    tx.execute("DELETE FROM session_ids", [])?;
     tx.execute(
-        "INSERT INTO sessions(workspace_id, agent_id, acp_session_id, title, title_source, repo, \
-         branch, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+        "INSERT INTO sessions(id, workspace_id, agent_id, acp_session_id, title, title_source, repo, \
+         branch, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
         params![
+            id,
             workspace,
             new.agent_id,
             new.acp_session_id,
@@ -300,7 +304,6 @@ fn create_session(tx: &Transaction<'_>, new: &NewSession) -> Result<SessionId> {
             at
         ],
     )?;
-    let id = tx.last_insert_rowid();
     index_doc(tx, session_doc_rowid(id, DOC_TITLE), &title)?;
     reindex_meta(tx, id)?;
     Ok(SessionId(id))

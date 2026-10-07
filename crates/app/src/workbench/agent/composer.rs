@@ -425,9 +425,11 @@ impl Workbench {
         if let Some(command) = self.agent_slash_matches(cx).get(index.unwrap_or(selected)) {
             let text = self.agent.composer.read(cx).value().to_string();
             let next = agent_model::with_command(&text, &command.name);
-            self.agent
-                .composer
-                .update(cx, |composer, cx| composer.set_value(next, window, cx));
+            let end = next.len();
+            self.agent.composer.update(cx, |composer, cx| {
+                composer.set_value(next, window, cx);
+                composer.set_selected_range(end..end, cx);
+            });
             self.agent.slash = None;
         }
         self.agent_focus_composer(window, cx);

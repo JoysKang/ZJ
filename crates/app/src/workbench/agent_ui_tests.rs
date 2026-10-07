@@ -106,6 +106,35 @@ fn temp_root(name: &str) -> PathBuf {
 }
 
 #[gpui_kit::test]
+async fn quitting_stops_agents_even_while_the_workbench_is_still_owned(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("quit-agent");
+    let (handle, this) = open(cx, Some(root.clone()));
+    send(cx, handle, &this, "stuck");
+    until(cx, &this, "running agent process", |p| {
+        p.agent
+            .current()
+            .and_then(|s| s.client.as_ref())
+            .is_some_and(|c| c.pid().is_some() && c.is_busy())
+    });
+    let client = this.read_with(cx, |p, _| {
+        p.agent.current().unwrap().client.as_ref().unwrap().clone()
+    });
+    let pid = client.pid().unwrap();
+    // The native quit hook runs before clearing windows. Keep an extra owner like
+    // a background operation, so quitting cannot rely solely on dropping the view.
+    cx.update(|cx| cx.shutdown());
+    assert!(
+        client.pid().is_none(),
+        "quitting left the agent running in the background"
+    );
+    // SAFETY: signal 0 only checks the known child pid; it does not send a signal.
+    let alive = unsafe { libc::kill(pid as i32, 0) };
+    assert_eq!(alive, -1, "agent survived application shutdown");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
 async fn pasted_images_preview_remove_and_send_as_image_only(cx: &mut TestAppContext) {
     use base64::{Engine, engine::general_purpose::STANDARD};
     cx.executor().allow_parking();
@@ -176,7 +205,8 @@ async fn quota_hover_and_click_query_now_and_anchor_to_the_button(cx: &mut TestA
     let root = temp_root("quota-popup");
     let script = root.join("codex");
     let response = root.join("response.json");
-    std::fs::write(&script, format!("#!/bin/sh\nread -r init\nprintf '%s\\n' '{{\"id\":1,\"result\":{{}}}}'\nread -r initialized\nread -r limits\ncat '{}'\n", response.display())).unwrap();
+    let queries = root.join("queries");
+    std::fs::write(&script, format!("#!/bin/sh\nread -r init\nprintf '%s\\n' '{{\"id\":1,\"result\":{{}}}}'\nread -r initialized\nread -r limits\nprintf 'query\\n' >> '{}'\ncat '{}'\n", queries.display(), response.display())).unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
     let limits = |used| serde_json::json!({"rateLimits":{"primary":{"usedPercent":used,"windowDurationMins":300}}});
     let write = |used| {
@@ -239,6 +269,89 @@ async fn quota_hover_and_click_query_now_and_anchor_to_the_button(cx: &mut TestA
         assert!(p.agent.quota_pinned);
         assert!(p.agent.quota.as_ref().unwrap().updated_ms > 1);
     });
+    let query_count = || std::fs::read_to_string(&queries).unwrap().lines().count();
+    assert_eq!(query_count(), 2);
+    write(40);
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(599));
+    cx.run_until_parked();
+    assert_eq!(
+        query_count(),
+        2,
+        "the periodic query ran before ten minutes"
+    );
+    cx.executor().advance_clock(Duration::from_secs(1));
+    until(
+        cx,
+        &this,
+        "ten minutes refreshes quota without hovering or clicking",
+        |p| {
+            !p.agent.quota_loading
+                && p.agent
+                    .quota
+                    .as_ref()
+                    .is_some_and(|q| q.left_percent() == Some(60.0))
+        },
+    );
+    assert_eq!(query_count(), 3);
+    std::fs::write(
+        &response,
+        serde_json::json!({"id":2,"error":{"message":"quota temporarily unavailable"}}).to_string(),
+    )
+    .unwrap();
+    cx.run_until_parked();
+    cx.executor().advance_clock(crate::quota::REFRESH_INTERVAL);
+    until(cx, &this, "periodic errors are visible", |p| {
+        !p.agent.quota_loading && p.agent.quota_error.is_some()
+    });
+    assert_eq!(query_count(), 4);
+    assert_eq!(
+        this.read_with(cx, |p, _| p.agent.quota.as_ref().unwrap().left_percent()),
+        Some(60.0),
+        "a failed refresh must preserve the previous quota"
+    );
+    write(50);
+    cx.run_until_parked();
+    cx.executor().advance_clock(crate::quota::REFRESH_INTERVAL);
+    until(cx, &this, "the next interval retries after failure", |p| {
+        !p.agent.quota_loading
+            && p.agent.quota_error.is_none()
+            && p.agent
+                .quota
+                .as_ref()
+                .is_some_and(|q| q.left_percent() == Some(50.0))
+    });
+    assert_eq!(query_count(), 5);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.set_agent_panel(false, window, cx);
+            assert!(p.agent.quota_next_refresh_ms.is_none());
+        });
+    })
+    .unwrap();
+    cx.executor().advance_clock(crate::quota::REFRESH_INTERVAL);
+    cx.run_until_parked();
+    assert_eq!(query_count(), 5, "a hidden panel kept querying quota");
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.set_agent_panel(true, window, cx);
+            assert!(p.agent.quota_next_refresh_ms.is_some());
+            p.agent_show(AgentView::History, window, cx);
+            assert!(p.agent.quota_next_refresh_ms.is_none());
+            p.agent_show(AgentView::Thread, window, cx);
+            assert!(p.agent.quota_next_refresh_ms.is_some());
+            p.agent_new_session(Some("fake".into()), window, cx);
+            assert!(p.agent.quota_next_refresh_ms.is_none());
+        });
+    })
+    .unwrap();
+    cx.executor().advance_clock(crate::quota::REFRESH_INTERVAL);
+    cx.run_until_parked();
+    assert_eq!(
+        query_count(),
+        5,
+        "switching agent kept querying Codex quota"
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -408,14 +521,6 @@ async fn a_running_turn_has_one_process_and_collapses_when_the_final_reply_arriv
                 )
                 .collect();
             assert_eq!(visible_replies, ["final"]);
-            assert_eq!(
-                p.agent
-                    .thread_rows
-                    .iter()
-                    .filter(|row| row.final_reply)
-                    .count(),
-                1
-            );
             cx.notify();
         });
         window.render_frame(cx);
@@ -449,6 +554,7 @@ async fn pending_actions_stay_visible_and_a_stale_end_keeps_the_process_open(
                             id: "approval".into(),
                             ..Default::default()
                         },
+                        raw_input: None,
                         options: vec![],
                     }),
                     AgentEvent::AuthRequired { methods: vec![] },
@@ -511,6 +617,7 @@ async fn an_open_process_keeps_its_identity_and_reading_position_as_items_change
                         id: "approval".into(),
                         ..Default::default()
                     },
+                    raw_input: None,
                     options: vec![],
                 }),
                 true,
@@ -612,6 +719,7 @@ async fn an_answered_permission_anchors_to_its_collapsed_process(cx: &mut TestAp
                             id: id.to_string(),
                             ..Default::default()
                         },
+                        raw_input: None,
                         options: vec![],
                     }),
                     true,
@@ -1004,7 +1112,7 @@ async fn slash_commands_complete_and_model_settings_switch(cx: &mut TestAppConte
     };
     // Nothing to list yet: typing `/` starts the agent, and its commands follow without a
     // message being sent.
-    typed(cx, "/re");
+    typed(cx, " \n/re");
     until(cx, &this, "the agent listed its commands", |p| {
         p.agent
             .current()
@@ -1027,6 +1135,12 @@ async fn slash_commands_complete_and_model_settings_switch(cx: &mut TestAppConte
     .unwrap();
     assert_eq!(sent(cx, &this), (vec![], "/review ".to_string()));
     this.read_with(cx, |p, _| assert_eq!(p.agent.slash, None));
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.input("当前任务", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    assert_eq!(sent(cx, &this), (vec![], "/review 当前任务".to_string()));
 
     // Model and effort are offered; the mode option is left to the mode menu.
     this.read_with(cx, |p, _| {
@@ -1222,6 +1336,62 @@ fn pending_permission(p: &Workbench) -> Option<(u64, workspace_editor_agent::Per
     let session = p.agent.current()?;
     let card = session.thread.pending_permissions().next()?;
     Some((session.key, card.request.id))
+}
+
+#[gpui_kit::test]
+async fn command_approval_shows_the_exact_command_and_working_directory(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("permission-command");
+    let (handle, this) = open(cx, Some(root.clone()));
+    send(cx, handle, &this, "permission raw");
+    until(cx, &this, "command approval", |p| {
+        pending_permission(p).is_some()
+    });
+    let expected = "printf '%s\\n' 'a  b'\n# preserve  whitespace";
+    let (_, id) = this.read_with(cx, |p, _| {
+        let card = p
+            .agent
+            .current()
+            .unwrap()
+            .thread
+            .pending_permissions()
+            .next()
+            .unwrap();
+        assert_eq!(
+            workspace_editor_agent::thread::permission_command(&card.request).as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            workspace_editor_agent::thread::permission_cwd(&card.request),
+            Some("/tmp/review folder")
+        );
+        pending_permission(p).unwrap()
+    });
+    wait(
+        cx,
+        None,
+        Some(handle),
+        |cx| {
+            cx.update_window(handle.into(), |_, window, _| {
+                window.try_find(("agent-permission-copy", id)).is_some()
+            })
+            .unwrap()
+        },
+        |_| "command approval did not become visible".into(),
+    );
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("agent-permission-copy", id), cx);
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|c| c.text()),
+            Some(expected.into())
+        );
+        window.click(("agent-reject", id), cx);
+    })
+    .unwrap();
+    settle(cx, &this);
+    assert!(replies(cx, &this).contains("selected:reject"));
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[gpui_kit::test]

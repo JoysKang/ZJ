@@ -369,12 +369,19 @@ impl SessionState {
     }
 
     pub(crate) async fn emit(&self, event: AgentEvent) {
-        let _ = self.events.send(event).await;
+        if let Some(stopping) = self.host().map(|host| host.inner.stopping.clone()) {
+            // App shutdown must not wait on a full event queue after the UI stops reading.
+            let send = std::pin::pin!(self.events.send(event));
+            let stopped = std::pin::pin!(stopping.recv());
+            let _ = futures::future::select(stopped, send).await;
+        } else {
+            let _ = self.events.send(event).await;
+        }
     }
 
     /// From the process's thread outside of async code (install progress).
     pub(crate) fn emit_blocking(&self, event: AgentEvent) {
-        let _ = self.events.send_blocking(event);
+        async_io::block_on(self.emit(event));
     }
 
     /// Remembers the model settings the agent offers and tells the UI.
@@ -808,7 +815,9 @@ impl AgentClient {
         self.events.close();
         self.stopping.close();
         // The last handle stops the process and joins its thread.
-        drop(self.session.host.lock().unwrap().take());
+        // The worker emits its final events through this lock while we join it.
+        let host = self.session.host.lock().unwrap().take();
+        drop(host);
     }
 }
 
@@ -1756,6 +1765,7 @@ pub(crate) async fn handle_permission(
         .emit(AgentEvent::PermissionRequested(events::PermissionRequest {
             id,
             tool_call: events::tool_patch(&request.tool_call),
+            raw_input: request.tool_call.fields.raw_input.clone(),
             options: events::permission_options(&request.options),
         }))
         .await;

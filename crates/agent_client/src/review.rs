@@ -6,7 +6,11 @@ use crate::{
     AgentClient,
     diff::{Hunk, apply_hunks, diff_hunks},
 };
-use std::path::Path;
+use std::{path::Path, sync::Mutex};
+
+// ponytail: serialize background reviews across sessions; use weak per-path locks only if
+// unrelated large-file reviews contend. UI snapshot reads never take this lock.
+static DECISIONS: Mutex<()> = Mutex::new(());
 
 fn file_name(path: &Path) -> String {
     path.file_name()
@@ -113,6 +117,11 @@ pub fn text_before_hunks(current: &str, hunks: &[(&str, &str)]) -> Option<String
 /// The review base and current text of a changed file: (before, after). `None` when nothing
 /// is pending for it.
 pub fn review_texts(client: &AgentClient, path: &Path) -> Option<(Option<String>, String)> {
+    let _decision = DECISIONS.lock().unwrap();
+    read_review_texts(client, path)
+}
+
+fn read_review_texts(client: &AgentClient, path: &Path) -> Option<(Option<String>, String)> {
     let before = client.snapshot(path)?;
     // Bounded like the agent's own reads: a huge generated file is not read for a review.
     let after = match crate::fs::read_disk(path) {
@@ -126,6 +135,7 @@ pub fn review_texts(client: &AgentClient, path: &Path) -> Option<(Option<String>
 /// Accepts or rejects a whole file: accepting forgets the snapshot, rejecting restores it on
 /// disk (or removes a file the agent created).
 pub fn resolve_file(client: &AgentClient, path: &Path, accept: bool) -> Result<(), String> {
+    let _decision = DECISIONS.lock().unwrap();
     let name = file_name(path);
     let Some(before) = client.snapshot(path) else {
         return Ok(());
@@ -159,16 +169,16 @@ pub fn resolve_hunk(
     accept: bool,
     shown: &str,
 ) -> Result<(), String> {
+    let _decision = DECISIONS.lock().unwrap();
     let name = file_name(path);
-    let current = review_texts(client, path)
-        .map(|(before, after)| full_context_patch(before.as_deref().unwrap_or(""), &after).0);
-    if current.as_deref() != Some(shown) {
+    let Some((before, current)) = read_review_texts(client, path) else {
         return Err(STALE_REVIEW.into());
-    }
-    let Some((before, current)) = review_texts(client, path) else {
-        return Ok(());
     };
     let base = before.clone().unwrap_or_default();
+    let (patch, hunks) = full_context_patch(&base, &current);
+    if patch != shown || index >= hunks.len() {
+        return Err(STALE_REVIEW.into());
+    }
     if accept {
         let next = accept_written_hunk(&base, &current, index);
         client.set_snapshot(path, (next != current).then_some(Some(next)));

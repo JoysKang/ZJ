@@ -58,13 +58,14 @@ def alive(pid):
 
 with tempfile.TemporaryDirectory(prefix="zj-check-deadline-") as temporary:
     root = Path(temporary)
+    # The dist libc uses panic=abort; the standalone harness must use it too.
     subprocess.run([
-        "rustc", "--edition=2024", "--crate-name", "workspace_editor_core",
+        "rustc", "-C", "panic=abort", "--edition=2024", "--crate-name", "workspace_editor_core",
         "--crate-type", "rlib", str(project / "crates/core/src/lib.rs"),
         "-o", str(root / "libworkspace_editor_core.rlib"),
     ], check=True)
     subprocess.run([
-        "rustc", "--edition=2024", "--crate-name", "workspace_editor_git",
+        "rustc", "-C", "panic=abort", "--edition=2024", "--crate-name", "workspace_editor_git",
         "--crate-type", "rlib", str(project / "crates/git_service/src/lib.rs"),
         "--extern", f"workspace_editor_core={root}/libworkspace_editor_core.rlib",
         "--extern", f"libc={libc}", "-L", str(root), "-L", str(dependencies),
@@ -89,7 +90,7 @@ fn main() {
     assert_eq!(kind, if cancelling { std::io::ErrorKind::Interrupted } else { std::io::ErrorKind::TimedOut });
 }''')
     subprocess.run([
-        "rustc", "--edition=2024", str(harness),
+        "rustc", "-C", "panic=abort", "--edition=2024", str(harness),
         "--extern", f"workspace_editor_git={root}/libworkspace_editor_git.rlib",
         "-L", str(root), "-L", str(dependencies), "-o", str(root / "harness"),
     ], check=True)

@@ -440,8 +440,15 @@ impl Workbench {
         let colors = theme::colors(cx);
         let request = &card.request;
         let kind = request.tool_call.kind;
-        let command = workspace_editor_agent::thread::permission_command(request)
-            .unwrap_or_else(|| "（Agent 没有说明要做什么）".into());
+        let actual_command = workspace_editor_agent::thread::permission_command(request);
+        let command = actual_command.clone().unwrap_or_else(|| {
+            if kind == Some(ToolKind::Execute) {
+                "Agent 未提供命令详情".into()
+            } else {
+                "Agent 未提供操作详情".into()
+            }
+        });
+        let cwd = workspace_editor_agent::thread::permission_cwd(request);
         let agent = session.preset.display_name.clone();
         match &card.state {
             PermissionState::Pending => {}
@@ -577,9 +584,42 @@ impl Workbench {
                     .bg(colors.panel)
                     .font_family(fonts.mono.family.clone())
                     .text_size(theme::TEXT_SECTION)
-                    .child(command),
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_start()
+                            .child(
+                                div()
+                                    .id(("agent-permission-command", id))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .max_h(theme::AGENT_PERMISSION_BODY_MAX)
+                                    .overflow_y_scroll()
+                                    .child(
+                                        gpui_kit::base::SelectableText::new(
+                                            ("agent-permission-command-text", id),
+                                            command,
+                                        )
+                                        .selection_color(colors.text_selection),
+                                    ),
+                            )
+                            .when_some(actual_command, |row, command| {
+                                row.child(
+                                    Button::new(("agent-permission-copy", id))
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(IconName::Copy)
+                                        .tooltip("复制命令")
+                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                command.clone(),
+                                            ));
+                                        })),
+                                )
+                            }),
+                    ),
             )
-            .when(!compact, |card| {
+            .when(!compact || cwd.is_some(), |card| {
                 card.child(
                     h_flex()
                         .px_3()
@@ -589,16 +629,30 @@ impl Workbench {
                         .text_color(colors.muted)
                         .child(
                             h_flex()
+                                .id(("agent-permission-cwd", id))
                                 .gap_1()
+                                .flex_1()
+                                .min_w_0()
                                 .child(Icon::new(IconName::Folder).size(theme::SMALL_ICON_SIZE))
-                                .child(self.workspace_name()),
+                                .child(
+                                    div().flex_1().min_w_0().child(
+                                        gpui_kit::base::SelectableText::new(
+                                            ("agent-permission-cwd-text", id),
+                                            cwd.map(|cwd| format!("工作目录：{cwd}"))
+                                                .unwrap_or_else(|| self.workspace_name()),
+                                        )
+                                        .selection_color(colors.text_selection),
+                                    ),
+                                ),
                         )
-                        .child(
-                            h_flex()
-                                .gap_1()
-                                .child(Icon::new(IconName::Shield).size(theme::SMALL_ICON_SIZE))
-                                .child("ZJ 不会自动批准命令和写入"),
-                        ),
+                        .when(!compact, |row| {
+                            row.child(
+                                h_flex()
+                                    .gap_1()
+                                    .child(Icon::new(IconName::Shield).size(theme::SMALL_ICON_SIZE))
+                                    .child("ZJ 不会自动批准命令和写入"),
+                            )
+                        }),
                 )
             })
             .child(

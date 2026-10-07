@@ -7,7 +7,10 @@ use std::{
     fs,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    time::Duration,
 };
+
+pub const REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 /// Logs looked at, newest first, and how much of the end of each is read.
 const LOGS: usize = 3;

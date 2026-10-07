@@ -217,11 +217,12 @@ fn write_atomically(
     let dir = target.parent().unwrap_or(Path::new("."));
     let name = target.file_name().unwrap_or_default().to_string_lossy();
     let temporary = dir.join(format!(".{name}.zj-save-{}", std::process::id()));
+    // Cleanup owns this path only after create_new succeeds.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
     let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
         file.write_all(bytes)?;
         if let Some(metadata) = metadata {
             file.set_permissions(fs::Permissions::from_mode(metadata.permissions().mode()))?;
@@ -450,6 +451,22 @@ mod tests {
 
     fn state(path: &Path) -> DiskState {
         DiskState::of(FileStamp::read(path).unwrap(), &fs::read(path).unwrap())
+    }
+
+    #[test]
+    fn a_failed_save_does_not_remove_an_existing_temporary_file() {
+        let root = temp("existing-temporary");
+        let path = root.join("a.txt");
+        fs::write(&path, "original").unwrap();
+        let temporary = root.join(format!(".a.txt.zj-save-{}", std::process::id()));
+        fs::write(&temporary, "another pending write").unwrap();
+        assert!(write(&path, b"replacement", None).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        assert_eq!(
+            fs::read_to_string(&temporary).unwrap(),
+            "another pending write"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

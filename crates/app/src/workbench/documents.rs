@@ -30,10 +30,13 @@ use gpui_kit::{
     *,
 };
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use workspace_editor_core::DocumentId;
 
@@ -64,6 +67,82 @@ static NEXT_UNTITLED: AtomicU64 = AtomicU64::new(1);
 /// All open documents of all windows, for the agent layer.
 pub struct OpenDocuments(pub DocumentOwners);
 impl Global for OpenDocuments {}
+
+#[derive(Default)]
+struct SaveTargets(Arc<Mutex<HashMap<PathBuf, Option<DocumentId>>>>);
+impl Global for SaveTargets {}
+
+struct SaveTarget {
+    path: PathBuf,
+    targets: Arc<Mutex<HashMap<PathBuf, Option<DocumentId>>>>,
+}
+
+impl Drop for SaveTarget {
+    fn drop(&mut self) {
+        self.targets.lock().unwrap().remove(&self.path);
+    }
+}
+
+pub(super) fn target_is_saving(path: &Path, identity: DocumentId, cx: &App) -> bool {
+    cx.try_global::<SaveTargets>().is_some_and(|targets| {
+        let targets = targets.0.lock().unwrap();
+        targets.contains_key(path) || targets.values().any(|id| *id == Some(identity))
+    })
+}
+
+fn canonical_save_target(path: &Path) -> std::io::Result<(PathBuf, Option<DocumentId>)> {
+    let path = match std::fs::canonicalize(path) {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .ok_or_else(|| std::io::Error::other("保存路径没有父目录"))?;
+            let name = path
+                .file_name()
+                .ok_or_else(|| std::io::Error::other("保存路径没有文件名"))?;
+            Ok(std::fs::canonicalize(parent)?.join(name))
+        }
+        Err(error) => Err(error),
+    }?;
+    let identity = match crate::files::FileStamp::read(&path) {
+        Ok(stamp) => Some(DocumentId {
+            device: stamp.device,
+            inode: stamp.inode,
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    Ok((path, identity))
+}
+
+/// 不保存 only authorizes discarding the versions named by this particular prompt.
+#[derive(Default)]
+pub(super) struct CloseApproval {
+    discarded: HashMap<DocumentId, u64>,
+}
+
+impl CloseApproval {
+    fn allows(&self, doc: &Document) -> bool {
+        !doc.dirty || self.discarded.get(&doc.id) == Some(&doc.version)
+    }
+}
+
+pub(super) fn quit_is_approved(approvals: &HashMap<EntityId, CloseApproval>, cx: &App) -> bool {
+    cx.global::<OpenDocuments>()
+        .0
+        .borrow()
+        .values()
+        .all(|owner| {
+            owner.view.upgrade().is_none_or(|view| {
+                view.read(cx).documents.iter().all(|doc| {
+                    !doc.dirty
+                        || approvals
+                            .get(&view.entity_id())
+                            .is_some_and(|approval| approval.allows(doc))
+                })
+            })
+        })
+}
 
 type SavedHook = Rc<dyn Fn(&Path, &mut App)>;
 /// Callbacks run after any buffer is written to disk.
@@ -135,22 +214,34 @@ pub fn quit(cx: &mut App) {
         .collect();
     cx.spawn(async move |cx| {
         let mut flow = save::QuitFlow::new(windows);
+        let mut approvals = HashMap::new();
         while let Some((handle, view)) = flow.next() {
             let ask = handle.update(cx, |_, window, cx| {
                 window.activate_window();
                 view.update(cx, |this, cx| {
                     let ids = this.documents.iter().map(|doc| doc.id).collect();
-                    this.confirm_close(ids, false, window, cx)
+                    this.confirm_close_approval(ids, window, cx)
                 })
             });
             match ask {
-                Ok(Ok(task)) => flow.answered(task.await),
+                Ok(Ok(task)) => {
+                    let approval = task.await;
+                    flow.answered(approval.is_some());
+                    if let Some(approval) = approval {
+                        approvals.insert(view.entity_id(), approval);
+                    }
+                }
                 // The window is already gone: nothing left to ask.
                 _ => flow.answered(true),
             }
         }
         if flow.should_quit() {
             cx.update(|cx| {
+                // Other windows remain editable while each prompt/save is pending.
+                if !quit_is_approved(&approvals, cx) {
+                    crate::session::cancel_quit(cx);
+                    return;
+                }
                 // Every unsaved buffer was saved or discarded: no snapshot should outlive us.
                 super::recovery::forget_everything(cx);
                 cx.quit();
@@ -404,9 +495,6 @@ impl Workbench {
         let Some(doc) = self.document(id) else {
             return Task::ready(false);
         };
-        if doc.untitled {
-            return self.save_as(id, window, cx);
-        }
         if doc.saving {
             // Another save (often auto-save) is writing: wait for it, then save what is newer.
             // Quitting with 保存 must not fail just because the two met.
@@ -432,6 +520,9 @@ impl Workbench {
                 }
             });
         }
+        if doc.untitled {
+            return self.save_as(id, window, cx);
+        }
         let text = doc.editor.read(cx).text().to_string();
         let bytes = save::encode(&text, doc.crlf, doc.bom);
         let expected = if overwrite || doc.deleted {
@@ -454,18 +545,14 @@ impl Workbench {
                     doc.saving = false;
                 }
                 let next = match result {
-                    Ok(state) => {
-                        this.saved(id, &path, state, version, window, cx);
-                        None
-                    }
-                    Err(error) => Some(this.save_failed(id, error, window, cx)),
+                    Ok(state) => Task::ready(this.saved(id, &path, state, version, window, cx)),
+                    Err(error) => this.save_failed(id, error, window, cx),
                 };
                 this.recheck_after_save(id, window, cx);
                 next
             });
             match next {
-                Ok(None) => true,
-                Ok(Some(task)) => task.await,
+                Ok(task) => task.await,
                 Err(_) => false,
             }
         })
@@ -479,7 +566,16 @@ impl Workbench {
         version: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
+        let Some(doc) = self.document_mut(id) else {
+            return false;
+        };
+        if doc.path != path {
+            doc.dirty = true;
+            self.message = "保存期间文件路径已改变，已保留当前修改，请重新保存".into();
+            cx.notify();
+            return false;
+        }
         let was_deleted = self.document(id).is_some_and(|doc| doc.deleted);
         if let Some(doc) = self.document_mut(id) {
             doc.disk = Some(state);
@@ -513,6 +609,7 @@ impl Workbench {
         self.apply_saved_settings(id, cx);
         notify_saved(path, cx);
         cx.notify();
+        true
     }
 
     fn save_failed(
@@ -635,67 +732,138 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<bool> {
-        if self
-            .documents
-            .iter()
-            .any(|doc| doc.id != id && doc.path == path)
-        {
-            self.message = format!("「{}」已在另一个标签中打开", path.display());
-            cx.notify();
-            return Task::ready(false);
-        }
-        if self
-            .owners
-            .borrow()
-            .iter()
-            .any(|(key, owner)| *key != id && owner.path == path)
-        {
-            self.message = format!("「{}」已在另一个窗口中打开", path.display());
-            cx.notify();
-            return Task::ready(false);
-        }
         let Some(doc) = self.document(id) else {
             return Task::ready(false);
         };
+        if doc.saving {
+            return cx.spawn_in(window, async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(20))
+                        .await;
+                    match this.update(cx, |this, _| this.document(id).map(|doc| doc.saving)) {
+                        Ok(Some(true)) => {}
+                        Ok(Some(false)) => break,
+                        _ => return false,
+                    }
+                }
+                match this.update_in(cx, |this, window, cx| this.write_as(id, path, window, cx)) {
+                    Ok(task) => task.await,
+                    Err(_) => false,
+                }
+            });
+        }
         let text = doc.editor.read(cx).text().to_string();
         let bytes = save::encode(&text, doc.crlf, doc.bom);
         let version = doc.version;
-        let target = path.clone();
-        let work = cx.background_spawn(async move { save::write(&target, &bytes, None) });
+        self.document_mut(id).unwrap().saving = true;
+        let resolve = cx.background_spawn(async move { canonical_save_target(&path) });
         cx.spawn_in(window, async move |this, cx| {
-            let result = work.await;
-            this.update_in(cx, |this, window, cx| match result {
-                Ok(state) => {
-                    let (language, language_name) = language_for(&path);
-                    let mut was_untitled = false;
+            let resolved = resolve.await;
+            let reservation = this.update_in(cx, |this, window, cx| {
+                let attempt = (|| {
+                    this.document(id).ok_or_else(|| "标签已关闭".to_string())?;
+                    let (path, identity) = resolved.map_err(|error| error.to_string())?;
+                    let same_file = |doc: &Document| {
+                        doc.path == path
+                            || identity.is_some_and(|identity| {
+                                doc.disk.is_some_and(|disk| {
+                                    disk.stamp.device == identity.device
+                                        && disk.stamp.inode == identity.inode
+                                })
+                            })
+                    };
+                    let in_this_window = this
+                        .documents
+                        .iter()
+                        .any(|doc| doc.id != id && same_file(doc));
+                    let in_other_window = this
+                        .owners
+                        .borrow()
+                        .iter()
+                        .filter(|(_, owner)| owner.view.entity_id() != cx.entity_id())
+                        .any(|(id, owner)| {
+                            owner.path == path
+                                || owner.view.upgrade().is_some_and(|view| {
+                                    view.read(cx).document(*id).is_some_and(same_file)
+                                })
+                        });
+                    if in_this_window || in_other_window {
+                        return Err(format!("「{}」已在其他标签或窗口中打开", path.display()));
+                    }
+                    let targets = cx.default_global::<SaveTargets>().0.clone();
+                    let mut pending = targets.lock().unwrap();
+                    if pending.contains_key(&path)
+                        || identity
+                            .is_some_and(|id| pending.values().any(|other| *other == Some(id)))
+                    {
+                        return Err(format!("「{}」正在另存为", path.display()));
+                    }
+                    pending.insert(path.clone(), identity);
+                    drop(pending);
+                    Ok(Arc::new(SaveTarget { path, targets }))
+                })();
+                if let Err(error) = &attempt {
                     if let Some(doc) = this.document_mut(id) {
-                        was_untitled = doc.untitled;
-                        doc.path = path.clone();
-                        doc.untitled = false;
-                        doc.language = language_name;
-                        doc.editor
-                            .update(cx, |state, cx| state.set_highlighter(language, cx));
+                        doc.saving = false;
                     }
-                    // An untitled buffer only had the plain-text default; now it has a language.
-                    if was_untitled {
-                        this.set_indent(id, indent::language_default(&path), cx);
-                        this.set_soft_wrap(id, soft_wrap_default(language), window, cx);
-                    }
-                    this.markdown_path_changed(id, language, cx);
-                    if let Some(owner) = this.owners.borrow_mut().get_mut(&id) {
-                        owner.path = path.clone();
-                    }
-                    this.saved(id, &path, state, version, window, cx);
-                    if let Some(parent) = path.parent() {
-                        this.relist_folder(parent.to_path_buf(), window, cx);
-                    }
-                    true
-                }
-                Err(error) => {
                     this.message = format!("另存为失败：{error}");
+                    this.recheck_after_save(id, window, cx);
                     cx.notify();
-                    false
                 }
+                attempt
+            });
+            let Ok(Ok(reservation)) = reservation else {
+                return false;
+            };
+            let path = reservation.path.clone();
+            // Keep the reservation until both the writer and the UI completion are done,
+            // including when the caller or window disappears while filesystem I/O runs.
+            let writer = reservation.clone();
+            let work = cx
+                .background_executor()
+                .spawn(async move { save::write(&writer.path, &bytes, None) });
+            let result = work.await;
+            this.update_in(cx, |this, window, cx| {
+                let Some(doc) = this.document_mut(id) else {
+                    return false;
+                };
+                doc.saving = false;
+                let saved = match result {
+                    Ok(state) => {
+                        let (language, language_name) = language_for(&path);
+                        let mut was_untitled = false;
+                        if let Some(doc) = this.document_mut(id) {
+                            was_untitled = doc.untitled;
+                            doc.path = path.clone();
+                            doc.untitled = false;
+                            doc.language = language_name;
+                            doc.editor
+                                .update(cx, |state, cx| state.set_highlighter(language, cx));
+                        }
+                        // An untitled buffer only had the plain-text default; now it has a language.
+                        if was_untitled {
+                            this.set_indent(id, indent::language_default(&path), cx);
+                            this.set_soft_wrap(id, soft_wrap_default(language), window, cx);
+                        }
+                        this.markdown_path_changed(id, language, cx);
+                        if let Some(owner) = this.owners.borrow_mut().get_mut(&id) {
+                            owner.path = path.clone();
+                        }
+                        this.saved(id, &path, state, version, window, cx);
+                        if let Some(parent) = path.parent() {
+                            this.relist_folder(parent.to_path_buf(), window, cx);
+                        }
+                        true
+                    }
+                    Err(error) => {
+                        this.message = format!("另存为失败：{error}");
+                        cx.notify();
+                        false
+                    }
+                };
+                this.recheck_after_save(id, window, cx);
+                saved
             })
             .unwrap_or(false)
         })
@@ -711,12 +879,10 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<bool> {
-        let dirty: Vec<DocumentId> = ids
+        if ids
             .iter()
-            .copied()
-            .filter(|id| self.document(*id).is_some_and(|doc| doc.dirty))
-            .collect();
-        if dirty.is_empty() {
+            .all(|id| self.document(*id).is_none_or(|doc| !doc.dirty))
+        {
             if remove {
                 for id in ids {
                     self.remove_document(id, window, cx);
@@ -724,6 +890,47 @@ impl Workbench {
             }
             return Task::ready(true);
         }
+        let ask = self.confirm_close_approval(ids.clone(), window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(approval) = ask.await else {
+                return false;
+            };
+            this.update_in(cx, |this, window, cx| {
+                if ids
+                    .iter()
+                    .any(|id| this.document(*id).is_some_and(|doc| !approval.allows(doc)))
+                {
+                    return false;
+                }
+                if remove {
+                    for id in ids {
+                        this.remove_document(id, window, cx);
+                    }
+                }
+                true
+            })
+            .unwrap_or(false)
+        })
+    }
+
+    pub(super) fn confirm_close_approval(
+        &mut self,
+        ids: Vec<DocumentId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Option<CloseApproval>> {
+        let dirty: Vec<DocumentId> = ids
+            .iter()
+            .copied()
+            .filter(|id| self.document(*id).is_some_and(|doc| doc.dirty))
+            .collect();
+        if dirty.is_empty() {
+            return Task::ready(Some(CloseApproval::default()));
+        }
+        let discarded = dirty
+            .iter()
+            .filter_map(|id| self.document(*id).map(|doc| (*id, doc.version)))
+            .collect();
         let names: Vec<String> = dirty
             .iter()
             .filter_map(|id| self.document(*id).map(Document::name))
@@ -753,26 +960,27 @@ impl Workbench {
         );
         cx.spawn_in(window, async move |this, cx| {
             let answer = Answer::from_button(answer.await.ok());
-            let resolved = match answer {
-                Answer::Cancel => false,
-                Answer::DontSave => true,
+            let approval = match answer {
+                Answer::Cancel => return None,
+                Answer::DontSave => CloseApproval { discarded },
                 Answer::Save => {
                     let Ok(task) =
                         this.update_in(cx, |this, window, cx| this.save_each(dirty, window, cx))
                     else {
-                        return false;
+                        return None;
                     };
-                    task.await
+                    if !task.await {
+                        return None;
+                    }
+                    CloseApproval::default()
                 }
             };
-            if resolved && remove {
-                let _ = this.update_in(cx, |this, window, cx| {
-                    for id in ids {
-                        this.remove_document(id, window, cx);
-                    }
-                });
-            }
-            resolved
+            this.update(cx, |this, _| {
+                ids.iter()
+                    .all(|id| this.document(*id).is_none_or(|doc| approval.allows(doc)))
+            })
+            .unwrap_or(false)
+            .then_some(approval)
         })
     }
 
@@ -787,12 +995,14 @@ impl Workbench {
         }
         self.closing = true;
         let ids = self.documents.iter().map(|doc| doc.id).collect();
-        let ask = self.confirm_close(ids, false, window, cx);
+        let ask = self.confirm_close_approval(ids, window, cx);
         cx.spawn_in(window, async move |this, cx| {
             let close = ask.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.closing = false;
-                if close {
+                if close
+                    .is_some_and(|approval| this.documents.iter().all(|doc| approval.allows(doc)))
+                {
                     // Answered: the window closes without asking again, and nothing of it
                     // needs recovering.
                     let ids: Vec<DocumentId> = this.documents.iter().map(|doc| doc.id).collect();

@@ -7,8 +7,8 @@
 //!
 //! Resource rules: nothing runs while the panel is closed and no session is active; the
 //! spinner's timer only ticks while the panel is visible in the focused window and a session
-//! runs; threads keep at most `thread::MAX_ITEMS` items in memory and older messages come
-//! back from the history database.
+//! runs; a visible Codex thread refreshes quota every ten minutes. Threads keep at most
+//! `thread::MAX_ITEMS` items in memory and older messages come back from the history database.
 
 use super::*;
 use crate::agent_model::{self, Attachment};
@@ -105,13 +105,23 @@ fn history(cx: &App) -> Option<Arc<History>> {
 
 /// The agent processes of all windows: sessions of the same agent with the same variables
 /// share one (ADR 0004).
-#[derive(Default)]
 struct AgentProcesses(Arc<AgentPool>);
 
 impl Global for AgentProcesses {}
 
 pub(super) fn agent_pool(cx: &mut App) -> Arc<AgentPool> {
-    cx.default_global::<AgentProcesses>().0.clone()
+    if !cx.has_global::<AgentProcesses>() {
+        let pool = Arc::new(AgentPool::new());
+        let quitting = pool.clone();
+        cx.on_app_quit(move |_| {
+            // Complete process cleanup before native termination can exit the program.
+            quitting.shutdown();
+            async {}
+        })
+        .detach();
+        cx.set_global(AgentProcesses(pool));
+    }
+    cx.global::<AgentProcesses>().0.clone()
 }
 
 pub(super) fn default_workspace(cx: &App) -> Option<PathBuf> {
@@ -304,6 +314,8 @@ pub(super) struct AgentPanel {
     pub quota_loading: bool,
     pub quota_error: Option<String>,
     quota_task: Option<Task<()>>,
+    quota_timer: Option<Task<()>>,
+    pub quota_next_refresh_ms: Option<i64>,
     pub history: HistoryList,
     pub search: Option<super::agent_search::SessionSearch>,
     pub thread_list: ListState,
@@ -381,6 +393,8 @@ impl AgentPanel {
             quota_loading: false,
             quota_error: None,
             quota_task: None,
+            quota_timer: None,
+            quota_next_refresh_ms: None,
             history: HistoryList {
                 rows: Vec::new(),
                 grouped: Vec::new(),
@@ -513,6 +527,7 @@ impl Workbench {
             self.focus_active_editor(window, cx);
         }
         self.agent_update_spin(window, cx);
+        self.agent_sync_quota_timer(cx);
         cx.notify();
     }
 
@@ -576,6 +591,7 @@ impl Workbench {
             self.focus_handle.focus(window, cx);
         }
         self.agent_update_spin(window, cx);
+        self.agent_sync_quota_timer(cx);
         cx.notify();
     }
 

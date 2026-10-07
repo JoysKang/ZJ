@@ -207,12 +207,41 @@ impl ToolCard {
     }
 }
 
-/// The command a permission request is about: its title without decoration (Claude puts
-/// commands in backticks).
+/// Prefer original command parameters. Claude's older requests carry the command in
+/// backticks in the title; generic tool titles do not describe an executable command.
 pub fn permission_command(request: &PermissionRequest) -> Option<String> {
+    if let Some(input) = &request.raw_input {
+        for key in ["command", "cmd"] {
+            if let Some(command) = input.get(key) {
+                if let Some(command) = command.as_str().filter(|c| !c.trim().is_empty()) {
+                    return Some(command.to_owned());
+                }
+                // An argv array is shown as an array; joining it would lose argument boundaries.
+                if let Some(args) = command.as_array()
+                    && !args.is_empty()
+                    && args.iter().all(|arg| arg.is_string())
+                {
+                    return Some(command.to_string());
+                }
+            }
+        }
+    }
     let title = request.tool_call.title.as_deref()?.trim();
     let title = title.trim_matches('`').trim();
-    (!title.is_empty()).then(|| title.to_string())
+    (!title.is_empty()
+        && !title.eq_ignore_ascii_case("Run command")
+        && !title.eq_ignore_ascii_case("Run command?"))
+    .then(|| title.to_string())
+}
+
+/// Only a directory actually supplied by the agent is labelled as the command's cwd.
+pub fn permission_cwd(request: &PermissionRequest) -> Option<&str> {
+    request
+        .raw_input
+        .as_ref()?
+        .get("cwd")?
+        .as_str()
+        .filter(|c| !c.trim().is_empty())
 }
 
 impl Thread {
@@ -696,12 +725,43 @@ mod tests {
                 kind: Some(kind),
                 ..Default::default()
             },
+            raw_input: None,
             options: vec![PermissionOption {
                 id: "allow".into(),
                 name: "Allow".into(),
                 kind: PermissionKind::AllowOnce,
             }],
         }
+    }
+
+    #[test]
+    fn permission_details_preserve_commands_and_support_older_titles() {
+        let mut request = request(1, "Run command", ToolKind::Execute);
+        assert_eq!(permission_command(&request), None);
+        assert_eq!(permission_cwd(&request), None);
+        let command = "printf '%s\\n' 'a  b'\n# preserve  whitespace";
+        request.raw_input = Some(serde_json::json!({
+            "command": command,
+            "cwd": "/tmp/review folder"
+        }));
+        assert_eq!(permission_command(&request).as_deref(), Some(command));
+        assert_eq!(permission_cwd(&request), Some("/tmp/review folder"));
+        request.raw_input = Some(serde_json::json!({"command": ["echo", "a b", ""]}));
+        assert_eq!(
+            permission_command(&request).as_deref(),
+            Some(r#"["echo","a b",""]"#)
+        );
+        request.raw_input = Some(serde_json::json!({"cmd": "cargo test", "cwd": "  "}));
+        assert_eq!(permission_command(&request).as_deref(), Some("cargo test"));
+        assert_eq!(permission_cwd(&request), None);
+        request.raw_input = None;
+        request.tool_call.title = Some("`printf 'a  b'\ncargo test`".into());
+        assert_eq!(
+            permission_command(&request).as_deref(),
+            Some("printf 'a  b'\ncargo test")
+        );
+        request.tool_call.title = Some("Run command?".into());
+        assert_eq!(permission_command(&request), None);
     }
 
     #[test]

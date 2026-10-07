@@ -136,8 +136,16 @@ pub(super) fn worktree_version(repo: &Repository, status: &Status, index: u64) -
 
 impl GitService {
     pub fn write(&self, request: &WriteRequest, cancel: &AtomicBool) -> io::Result<Reply> {
-        let lock = self.repo_lock(&request.repo.id);
-        let _serial = self.lock_repo(&lock, cancel)?;
+        // Linked worktrees share refs and the stash reflog. Lock the canonical common
+        // directory first so validating stash@{n} and mutating it stay one operation.
+        let common = self.repo_lock(&RepoId(request.repo.common_dir.clone()));
+        let _shared_refs = self.lock_repo(&common, cancel)?;
+        let private = (request.repo.id.0 != request.repo.common_dir)
+            .then(|| self.repo_lock(&request.repo.id));
+        let _serial = private
+            .as_ref()
+            .map(|lock| self.lock_repo(lock, cancel))
+            .transpose()?;
         if self.identify(&request.repo.worktree, cancel)? != request.repo {
             return Err(error("仓库身份已变化，请重新打开工作区"));
         }
