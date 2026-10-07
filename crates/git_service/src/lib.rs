@@ -588,6 +588,83 @@ impl GitService {
         self.status_locked(repo, generation, cancel)
     }
 
+    /// A bounded patch for the next commit: staged changes take precedence; otherwise all
+    /// tracked and untracked disk changes, matching the UI's smart commit. Never stages files.
+    pub fn commit_message_diff(
+        &self,
+        repo: &Repository,
+        cancel: &AtomicBool,
+    ) -> io::Result<(Status, String)> {
+        const LIMIT: usize = 128 * 1024;
+        let lock = self.repo_lock(&repo.id);
+        let _serial = self.lock_repo(&lock, cancel)?;
+        if self.identify(&repo.worktree, cancel)? != *repo {
+            return Err(error("仓库已变化，请刷新后重试"));
+        }
+        let status = self.status_locked(repo, 0, cancel)?;
+        if status.changes.is_empty() {
+            return Err(error("没有可用于生成提交信息的更改"));
+        }
+        if status
+            .changes
+            .iter()
+            .any(|c| c.kind == ChangeKind::Conflict)
+        {
+            return Err(error("请先解决合并冲突，再生成提交信息"));
+        }
+        let staged = status.changes.iter().any(Change::staged);
+        let mut args: Vec<OsString> = [
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--unified=3",
+            "-M",
+            SRC_PREFIX,
+            DST_PREFIX,
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        if staged {
+            args.push("--cached".into());
+        }
+        args.push("--".into());
+        let mut patch = self.run(&repo.worktree, &args, cancel)?;
+        let check_size = |bytes: usize| {
+            if bytes > LIMIT {
+                Err(error("改动内容超过 128 KiB，请缩小本次暂存范围后重试"))
+            } else {
+                Ok(())
+            }
+        };
+        check_size(patch.len())?;
+        if !staged {
+            for change in status
+                .changes
+                .iter()
+                .filter(|c| c.kind == ChangeKind::Untracked)
+            {
+                let reply = self.execute_locked(
+                    &Request {
+                        repo: repo.clone(),
+                        generation: 0,
+                        operation: Operation::UntrackedDiff {
+                            path: change.path.clone(),
+                        },
+                    },
+                    cancel,
+                )?;
+                check_size(patch.len().saturating_add(reply.output.len()))?;
+                patch.extend(reply.output);
+            }
+        }
+        if status != self.status_locked(repo, 0, cancel)? {
+            return Err(error("读取期间仓库改动已变化，请重试"));
+        }
+        Ok((status, String::from_utf8_lossy(&patch).into_owned()))
+    }
+
     fn status_locked(
         &self,
         repo: &Repository,

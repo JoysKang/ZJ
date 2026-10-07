@@ -95,7 +95,7 @@ async fn a_clean_repository_with_unpushed_commits_lists_them(cx: &mut TestAppCon
         ]
     );
     this.update(cx, |p, cx| {
-        assert!(p.groups[0].clean() && p.groups[0].expandable());
+        assert!(p.groups[0].clean());
         assert!(p.scm_push(0).is_some());
         p.groups[0].outgoing_collapsed = true;
         p.rebuild_rows();
@@ -106,12 +106,16 @@ async fn a_clean_repository_with_unpushed_commits_lists_them(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
-async fn a_clean_repository_in_sync_does_not_open(cx: &mut TestAppContext) {
+async fn a_clean_repository_keeps_its_commit_controls(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let repo = fixture("synced", 0);
     let (_, this) = open(cx, repo.clone());
+    assert_eq!(rows(cx, &this), ["repo", "message"]);
+    this.update(cx, |p, _| {
+        p.groups[0].expanded = false;
+        p.rebuild_rows();
+    });
     assert_eq!(rows(cx, &this), ["repo"]);
-    this.read_with(cx, |p, _| assert!(!p.groups[0].expandable()));
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }
 
@@ -242,6 +246,122 @@ fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn commit_message_diff_matches_the_next_commit_without_staging() {
+    let repo = fixture("message-diff", 0);
+    let service = GitService::new(1, Duration::from_secs(5)).unwrap();
+    let cancel = AtomicBool::new(false);
+    let identity = service.identify(&repo, &cancel).unwrap();
+    assert!(
+        service
+            .commit_message_diff(&identity, &cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("没有")
+    );
+    std::fs::write(repo.join("a.txt"), "staged-content\n").unwrap();
+    std::fs::write(repo.join("new.txt"), "untracked-content\n").unwrap();
+    let before = service.status(&identity, 0, &cancel).unwrap();
+    let (status, diff) = service.commit_message_diff(&identity, &cancel).unwrap();
+    assert_eq!(before, status);
+    assert!(diff.contains("+staged-content") && diff.contains("+untracked-content"));
+    assert_eq!(before, service.status(&identity, 0, &cancel).unwrap());
+    git(&repo, &["add", "--", "a.txt"]);
+    std::fs::write(repo.join("a.txt"), "unstaged-content\n").unwrap();
+    let (_, diff) = service.commit_message_diff(&identity, &cancel).unwrap();
+    assert!(diff.contains("+staged-content"));
+    assert!(!diff.contains("unstaged-content") && !diff.contains("untracked-content"));
+    std::fs::write(repo.join("a.txt"), "x".repeat(140 * 1024)).unwrap();
+    git(&repo, &["add", "--", "a.txt"]);
+    assert!(
+        service
+            .commit_message_diff(&identity, &cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("128 KiB")
+    );
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+#[gpui_kit::test]
+async fn ai_message_fills_the_repository_input_and_manual_edits_cancel(cx: &mut TestAppContext) {
+    use workspace_editor_agent::registry::{EnvValue, UserAgentConfig};
+    cx.executor().allow_parking();
+    let repo = fixture("ai-message", 0);
+    std::fs::write(repo.join("a.txt"), "edited\n").unwrap();
+    let (window, this) = open(cx, repo.clone());
+    let program = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("zj-fake-acp-agent");
+    assert!(
+        program.exists(),
+        "run cargo test --workspace to build the fake agent"
+    );
+    let mut preset = UserAgentConfig {
+        id: "fake-commit".into(),
+        name: Some("Fake".into()),
+        command: program.display().to_string(),
+        args: Vec::new(),
+        env: Default::default(),
+    }
+    .into_preset();
+    preset.env.push((
+        "FAKE_PROMPT".into(),
+        EnvValue::Literal("echo feat: 生成提交信息".into()),
+    ));
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent.agent_id = preset.id.clone();
+            p.agent.presets = vec![preset];
+            p.sidebar = Sidebar::SourceControl;
+            p.scm_generate_message(p.groups[0].repo.id.clone(), window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.groups[0].commit_generation.is_none())
+    });
+    this.read_with(cx, |p, cx| {
+        assert_eq!(
+            p.groups[0].commit_input.read(cx).value().as_ref(),
+            "feat: 生成提交信息",
+            "{}",
+            p.groups[0].write_message
+        );
+    });
+    assert_eq!(git_out(&repo, &["log", "-1", "--format=%s"]), "pushed");
+    assert_eq!(git_out(&repo, &["diff", "--cached"]), "");
+
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent.presets[0].env =
+                vec![("FAKE_PROMPT".into(), EnvValue::Literal("stuck".into()))];
+            p.groups[0]
+                .commit_input
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            p.scm_generate_message(p.groups[0].repo.id.clone(), window, cx);
+            p.groups[0].commit_input.focus_handle(cx).focus(window, cx);
+        });
+        window.render_frame(cx);
+        window.input("我的消息", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    this.read_with(cx, |p, cx| {
+        assert!(p.groups[0].commit_generation.is_none());
+        assert_eq!(
+            p.groups[0].commit_input.read(cx).value().as_ref(),
+            "我的消息"
+        );
+    });
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }
 
 #[gpui_kit::test]

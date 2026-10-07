@@ -72,6 +72,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `indent.rs`：每个文件的缩进（`.editorconfig` > 按内容猜测 > 语言默认），不依赖 GPUI；`.editorconfig` 在后台打开文件时一起读，状态栏的缩进菜单只改当前文档。
   - `diff_doc.rs`：在后台把全上下文补丁还原成两侧全文，做行对齐、语法高亮和字符级差异；`workbench/diff_view.rs`：只切片现成数据的虚拟化左右 / 内联 Diff 编辑器；`workbench/diff_ops.rs`：行选择、复制、概览标尺和块 / 行级暂存；`partial_patch.rs`：从全上下文补丁生成只含所选行的补丁。
   - `workbench/scm_actions.rs`：Git 写操作确认与结果展示，以及 stash 的选择面板和手动添加 / 移除仓库；`git_service/src/write.rs`：仓库锁内校验及有界执行（stash 的 apply / pop / drop 先确认 `stash@{n}` 仍是选中的提交）；`git_service/src/stash.rs`：stash 列表和单行 blame 的解析。
+  - `workbench/scm_message.rs`：源码管理输入框右侧的 AI 按钮，用当前选择的 Agent 独立生成提交信息；优先使用暂存区，没有暂存内容时使用磁盘改动（含未跟踪文件），diff 上限 128 KiB。复用 Agent 进程池，拒绝本次会话的 ACP 文件访问和工具审批；支持时选只读 / 规划模式。手动输入、再次点击或关闭工作区取消生成，回填前核对仓库状态；不自动暂存、提交或推送。展开的干净仓库也保留输入框和提交按钮。
   - `workbench/blame.rs`：状态栏的当前行 blame（光标停 400 ms 后 `git blame -L`，编辑中的缓冲区用 `--contents -`，新的请求取消旧的）。
   - 合并冲突：`conflicts.rs` 找冲突标记和三种解决方式（纯函数）；`workbench/conflict_bar.rs` 在冲突文件编辑后后台扫描、两侧着色（`theme` 的 `conflict_*`），编辑器上方的冲突条逐处或全部解决、上一处 / 下一处，解决完后保存并按新状态暂存。
   - `workbench/graph_view.rs`：编辑区里的 Git 图（纯函数的车道布局、分页提交列表、提交详情、打开提交 Diff）。

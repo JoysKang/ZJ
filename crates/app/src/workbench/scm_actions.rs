@@ -467,6 +467,9 @@ impl Workbench {
         let Some(group) = self.groups.iter().find(|g| g.repo.id == id) else {
             return;
         };
+        if group.commit_generation.is_some() {
+            return;
+        }
         let Some(Ok(status)) = &group.status else {
             return;
         };

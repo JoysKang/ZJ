@@ -161,6 +161,7 @@ impl Workbench {
         let Some(client) = self.agent.session(key).and_then(|s| s.client.clone()) else {
             return;
         };
+        let file_generation = self.file_generation;
         let job = cx.background_spawn({
             let paths = paths.clone();
             async move {
@@ -181,6 +182,9 @@ impl Workbench {
                 }
                 for path in &paths {
                     this.reload_document_from_disk(path, window, cx);
+                    if accept {
+                        this.agent_finish_accepted_review(key, path, file_generation, window, cx);
+                    }
                 }
                 this.agent_recount(key, Some(paths.clone()), window, cx);
                 this.agent_reload_review(key, window, cx);

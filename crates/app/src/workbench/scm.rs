@@ -1,7 +1,7 @@
 //! Source Control view, VS Code's multi-repository layout: every repository is a section with
 //! its branch and actions in the header, its own message box and 提交 button, then its
 //! "暂存的更改" / "更改" groups, then "未推送的提交". Clean repositories are listed last (or
-//! hidden), as compact headers unless they have commits to push.
+//! hidden). Expanded repositories keep their commit controls even when clean.
 //! File row actions appear on hover; the status letter stays at the right edge.
 
 use super::SINGLE_LINE;
@@ -12,7 +12,7 @@ use crate::{file_icons, theme};
 use gpui_kit::{
     assets::IconName,
     component::{
-        Disableable, Icon, Sizable,
+        ActiveTheme, Disableable, Icon, Sizable,
         button::{Button, ButtonCustomVariant, ButtonVariants, DropdownButton},
         h_flex,
         input::{Enter, Textarea},
@@ -401,8 +401,7 @@ impl Workbench {
         let tooltip = worktree.display().to_string();
         let id = group.repo.id.clone();
         let weak = cx.weak_entity();
-        let expandable = group.expandable();
-        let expanded = group.expanded && expandable;
+        let expanded = group.expanded;
         let left = h_flex()
             .min_w_0()
             .flex_shrink(1.)
@@ -414,8 +413,6 @@ impl Workbench {
                     .flex()
                     .items_center()
                     .flex_shrink_0()
-                    // Nothing to open: keep the column, drop the chevron.
-                    .when(!expandable, |slot| slot.invisible())
                     .child(chevron(expanded, colors.muted)),
             )
             .child(
@@ -446,7 +443,7 @@ impl Workbench {
             .gap_1()
             .child(
                 action(("scm-repo-commit", g), IconName::Check, "提交", cx)
-                    .disabled(pending || !can_commit)
+                    .disabled(pending || group.commit_generation.is_some() || !can_commit)
                     .on_click(cx.listener({
                         let id = id.clone();
                         move |this, _, window, cx| {
@@ -599,9 +596,7 @@ impl Workbench {
                 let Some(group) = this.groups.get_mut(g) else {
                     return;
                 };
-                if group.expandable() {
-                    group.expanded = !group.expanded;
-                }
+                group.expanded = !group.expanded;
                 this.scm_repo = Some(group.repo.id.clone());
                 this.rebuild_rows();
                 cx.notify();
@@ -635,6 +630,8 @@ impl Workbench {
             .unwrap_or("未知分支")
             .to_string();
         let pending = group.write_pending;
+        let generating = group.commit_generation.is_some();
+        let generate_id = id.clone();
         let style = ButtonCustomVariant::new(cx)
             .color(colors.commit)
             .foreground(colors.commit_fg)
@@ -644,7 +641,7 @@ impl Workbench {
         let menu_id = id.clone();
         v_flex()
             .w_full()
-            .pl(theme::ROW_INSET + theme::ICON_SIZE * 2. + theme::SCM_LINE_PAD * 2.)
+            .pl(theme::ROW_INSET + theme::ICON_SIZE)
             .pr_1()
             .pt_1()
             .pb_2()
@@ -652,6 +649,13 @@ impl Workbench {
             .child(
                 // ⌘Enter commits; capture it before the textarea inserts a line break.
                 div()
+                    .flex()
+                    .items_start()
+                    .w_full()
+                    .rounded(theme::RADIUS)
+                    .border_1()
+                    .border_color(colors.border)
+                    .bg(cx.theme().input)
                     .capture_action(cx.listener({
                         let id = id.clone();
                         move |this, action: &Enter, window, cx| {
@@ -664,8 +668,35 @@ impl Workbench {
                     .child(
                         Textarea::new(&group.commit_input)
                             .small()
+                            .flex_1()
+                            .min_w_0()
+                            .appearance(false)
                             .disabled(pending)
                             .aria_label(format!("{name} 的提交消息")),
+                    )
+                    .child(
+                        div().p_1().child(
+                            action(
+                                ("scm-generate-message", g),
+                                if generating {
+                                    IconName::Square
+                                } else {
+                                    IconName::Sparkle
+                                },
+                                if generating {
+                                    "取消生成提交信息"
+                                } else {
+                                    "AI 生成提交信息"
+                                },
+                                cx,
+                            )
+                            .disabled(pending || (!generating && !can_commit))
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.scm_generate_message(generate_id.clone(), window, cx);
+                                },
+                            )),
+                        ),
                     ),
             )
             .child(
@@ -680,14 +711,14 @@ impl Workbench {
                             .small()
                             .w_full()
                             .custom(style)
-                            .disabled(pending)
+                            .disabled(pending || generating)
                             .button(
                                 Button::new(("scm-commit-main", g))
                                     .flex_1()
                                     .icon(IconName::Check)
                                     .label("提交")
                                     .tooltip(format!("提交到“{branch}”（{name}）"))
-                                    .disabled(pending || !can_commit)
+                                    .disabled(pending || generating || !can_commit)
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.scm_commit(id.clone(), CommitMode::Commit, window, cx)
                                     })),

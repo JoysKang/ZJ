@@ -57,6 +57,8 @@ pub struct ClientOptions {
     /// Shares the agent's process with the pool's other sessions of the same agent and
     /// variables; `None` gives this session a process of its own.
     pub pool: Option<Arc<AgentPool>>,
+    /// A text-generation session: refuse ACP file access and tool approval requests.
+    pub text_only: bool,
 }
 
 impl ClientOptions {
@@ -73,6 +75,7 @@ impl ClientOptions {
             install_root: provision::default_root(),
             resume_session: None,
             pool: None,
+            text_only: false,
         }
     }
 }
@@ -156,6 +159,7 @@ pub(crate) struct Init {
 pub(crate) struct SessionState {
     preset: AgentPreset,
     workspace: Workspace,
+    text_only: bool,
     idle_timeout: Duration,
     cancel_grace: Duration,
     handshake_timeout: Duration,
@@ -496,6 +500,7 @@ impl AgentClient {
         let session = Arc::new(SessionState {
             preset: options.preset,
             workspace,
+            text_only: options.text_only,
             idle_timeout: options.idle_timeout,
             cancel_grace: options.cancel_grace,
             handshake_timeout: options.handshake_timeout,
@@ -1003,7 +1008,17 @@ async fn session_body(
         },
     };
     *s.resume.lock().unwrap() = Some(session.clone());
-    enforce_mode(s, cx, &session, started_modes.as_ref()).await;
+    if s.text_only
+        && let Some(modes) = &started_modes
+        && let Some(mode) = ["read-only", "plan"].into_iter().find(|id| {
+            s.preset.modes.allows(id) && modes.available.iter().any(|(offered, _)| offered == id)
+        })
+    {
+        *s.mode.lock().unwrap() = Some(mode.into());
+    }
+    if !enforce_mode(s, cx, &session, started_modes.as_ref()).await && s.text_only {
+        return Ok(SessionEnd::Failed);
+    }
 
     let can_login = !init.auth_methods.is_empty();
     let embedded = init.embedded_context;
@@ -1326,9 +1341,9 @@ async fn enforce_mode(
     cx: &ConnectionTo<Agent>,
     session: &acp::SessionId,
     modes: Option<&Modes>,
-) {
+) -> bool {
     let Some(modes) = modes else {
-        return;
+        return true;
     };
     let policy = &shared.preset.modes;
     let offered = |id: &str| modes.available.iter().any(|(mode, _)| mode == id);
@@ -1369,6 +1384,7 @@ async fn enforce_mode(
                             message: format!("无法把 Agent 切换到询问模式（{target}）"),
                         })
                         .await;
+                    return false;
                 }
             }
         }
@@ -1378,9 +1394,11 @@ async fn enforce_mode(
                     message: "Agent 处于跳过审批的模式，且没有可切换的询问模式".into(),
                 })
                 .await;
+            return false;
         }
         _ => {}
     }
+    true
 }
 
 pub(crate) async fn handle_update(
@@ -1574,6 +1592,11 @@ pub(crate) async fn handle_permission(
     responder: Responder<acp::RequestPermissionResponse>,
     cx: &ConnectionTo<Agent>,
 ) -> Result<(), sdk::Error> {
+    if shared.text_only {
+        return responder.respond(acp::RequestPermissionResponse::new(
+            acp::RequestPermissionOutcome::Cancelled,
+        ));
+    }
     let id = shared.next_permission.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = oneshot::channel();
     shared.permissions.lock().unwrap().insert(id, tx);
@@ -1599,6 +1622,9 @@ pub(crate) async fn handle_read(
     shared: &SessionState,
     request: &acp::ReadTextFileRequest,
 ) -> Result<acp::ReadTextFileResponse, sdk::Error> {
+    if shared.text_only {
+        return Err(sdk::Error::invalid_params().data("此会话仅生成文本，不允许读取文件"));
+    }
     let path = shared.workspace.resolve(&request.path).map_err(fs_error)?;
     let text = match shared.buffer_text(&path).await.map_err(fs_error)? {
         Some(text) => text,
@@ -1615,6 +1641,9 @@ pub(crate) async fn handle_write(
     shared: &SessionState,
     request: acp::WriteTextFileRequest,
 ) -> Result<acp::WriteTextFileResponse, sdk::Error> {
+    if shared.text_only {
+        return Err(sdk::Error::invalid_params().data("此会话仅生成文本，不允许修改文件"));
+    }
     let path = shared.workspace.resolve(&request.path).map_err(fs_error)?;
     shared.snapshot(&path).await;
     write_atomic(&path, &request.content).map_err(fs_error)?;

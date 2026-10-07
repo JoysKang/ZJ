@@ -205,17 +205,28 @@ impl Workbench {
             return;
         };
         let path = diff.path.clone();
+        let file_generation = self.file_generation;
         let job = cx.background_spawn(async move {
             workspace_editor_agent::review::resolve_hunk(&client, &path, index, accept, &shown)
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = job.await;
             let _ = this.update_in(cx, |this, window, cx| {
+                let accepted = accept && result.is_ok();
                 if let Err(error) = result {
                     this.message = error;
                 }
                 eprintln!("event=agent_review_hunk accept={accept}");
                 this.reload_document_from_disk(&diff.path, window, cx);
+                if accepted {
+                    this.agent_finish_accepted_review(
+                        diff.key,
+                        &diff.path,
+                        file_generation,
+                        window,
+                        cx,
+                    );
+                }
                 this.agent_resolved(diff.key, window, cx);
             });
         })
@@ -247,6 +258,105 @@ impl Workbench {
             return;
         };
         self.agent_resolve_files(diff.key, vec![diff.path], accept, window, cx);
+    }
+
+    /// A fully accepted review becomes the source file at the line being reviewed.
+    /// A completion in the background must not replace a newer tab or steal its focus.
+    pub(super) fn agent_finish_accepted_review(
+        &mut self,
+        key: u64,
+        path: &std::path::Path,
+        file_generation: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .diff
+            .tab
+            .as_ref()
+            .and_then(|tab| tab.agent())
+            .is_some_and(|diff| diff.key == key && diff.path == path)
+            || !self
+                .agent
+                .session(key)
+                .and_then(|session| session.client.as_ref())
+                .is_some_and(|client| client.snapshot(path).is_none())
+        {
+            return;
+        }
+        let active = self.active == Pane::Diff && self.file_generation == file_generation;
+        let line = self
+            .diff
+            .doc
+            .as_ref()
+            .and_then(|doc| {
+                let inline = self.diff_is_inline();
+                let visible = {
+                    let scroll = self.diff.scroll.0.borrow();
+                    let height =
+                        theme::diff_metrics(gpui_kit::component::Theme::global(cx).mono_font_size)
+                            .row;
+                    let viewport = scroll.base_handle.bounds().size.height;
+                    (viewport > Pixels::ZERO).then(|| {
+                        let top = -scroll.base_handle.offset().y;
+                        (top / height).floor().max(0.) as usize
+                            ..((top + viewport) / height).ceil().max(0.) as usize
+                    })
+                };
+                let on_screen =
+                    |row: &usize| visible.as_ref().is_none_or(|range| range.contains(row));
+                let row = self
+                    .diff
+                    .selection
+                    .filter(|selection| {
+                        (selection.list == super::diff_view::DiffList::Inline) == inline
+                    })
+                    .map(|selection| selection.head)
+                    .filter(on_screen)
+                    .or_else(|| {
+                        self.diff_change_starts()
+                            .get(self.diff.change.unwrap_or(0))
+                            .copied()
+                            .filter(on_screen)
+                    })
+                    .or_else(|| visible.map(|range| range.start))
+                    .unwrap_or(0);
+                let count = if inline {
+                    doc.inline.len()
+                } else {
+                    doc.rows.len()
+                };
+                // Removed rows have no new line: prefer the following line, then the preceding.
+                (row..count)
+                    .chain((0..row.min(count)).rev())
+                    .find_map(|index| {
+                        let new = if inline {
+                            let row = &doc.inline[index];
+                            match row.kind {
+                                crate::diff_doc::LineKind::Same => row.other,
+                                crate::diff_doc::LineKind::Added => Some(row.line),
+                                crate::diff_doc::LineKind::Removed => None,
+                            }
+                        } else {
+                            doc.rows[index].new
+                        }?;
+                        Some(doc.new.lines[new as usize].number.saturating_sub(1))
+                    })
+            })
+            .unwrap_or(0);
+        self.dismiss_preview(window, cx);
+        if active {
+            self.go(
+                path.to_path_buf(),
+                navigation::Placement::Line {
+                    line,
+                    column: 0,
+                    center: false,
+                },
+                window,
+                cx,
+            );
+        }
     }
 
     fn agent_resolved(&mut self, key: u64, window: &mut Window, cx: &mut Context<Self>) {

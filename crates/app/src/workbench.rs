@@ -93,6 +93,7 @@ pub(crate) mod recovery;
 mod reopen_ui_tests;
 mod scm;
 mod scm_actions;
+mod scm_message;
 mod search_replace;
 mod search_view;
 #[cfg(test)]
@@ -281,6 +282,7 @@ struct Group {
     staged_collapsed: bool,
     changes_collapsed: bool,
     commit_input: Entity<TextareaState>,
+    commit_generation: Option<scm_message::Generation>,
     _commit_subscription: Subscription,
     write_task: Option<Task<()>>,
     write_pending: bool,
@@ -302,11 +304,6 @@ impl Group {
             Some(Ok(status)) if status.upstream.is_some() => status.ahead,
             _ => 0,
         }
-    }
-
-    /// Whether the header opens: there are changes, or commits to push.
-    fn expandable(&self) -> bool {
-        !self.clean() || self.ahead() > 0
     }
 }
 
@@ -1757,7 +1754,20 @@ impl Workbench {
                                         let subscription = cx.subscribe_in(
                                             &commit_input,
                                             window,
-                                            move |_, _, _: &InputEvent, _, cx| cx.notify(),
+                                            move |this, input, event: &InputEvent, _, cx| {
+                                                if matches!(event, InputEvent::Change)
+                                                    && let Some(group) = this
+                                                        .groups
+                                                        .iter_mut()
+                                                        .find(|g| g.commit_input == *input)
+                                                    && group.commit_generation.take().is_some()
+                                                {
+                                                    group.write_message =
+                                                        "已取消生成，保留手动编辑的提交信息".into();
+                                                    this.rebuild_rows();
+                                                }
+                                                cx.notify();
+                                            },
                                         );
                                         if this.scm_repo.is_none() {
                                             this.scm_repo = Some(repo.id.clone());
@@ -1769,6 +1779,7 @@ impl Workbench {
                                             staged_collapsed: false,
                                             changes_collapsed: false,
                                             commit_input,
+                                            commit_generation: None,
                                             _commit_subscription: subscription,
                                             write_task: None,
                                             write_pending: false,
@@ -1886,11 +1897,11 @@ impl Workbench {
         for g in order {
             let group = &self.groups[g];
             self.rows.push(Row::Group(g));
-            if !group.expanded || !group.expandable() {
+            if !group.expanded {
                 continue;
             }
+            self.rows.push(Row::Commit(g));
             if let Some(Ok(status)) = &group.status {
-                self.rows.push(Row::Commit(g));
                 for side in [DiffSide::Staged, DiffSide::Worktree] {
                     let changes: Vec<_> = status
                         .changes
@@ -1981,6 +1992,11 @@ impl Workbench {
     fn close_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.file_generation += 1;
         self.file_task = None;
+        self.dismiss_preview(window, cx);
+    }
+
+    /// Clears a completed preview without cancelling a newer request to open a file.
+    fn dismiss_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.diff.cancel.store(true, Ordering::Relaxed);
         self.diff.generation += 1;
         self.diff.task = None;

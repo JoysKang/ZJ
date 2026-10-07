@@ -18,6 +18,7 @@
 //! content, environment values or the agent's stderr.
 
 mod client;
+mod completion;
 pub mod diff;
 mod events;
 pub mod fs;
@@ -30,6 +31,7 @@ pub mod review;
 pub mod thread;
 
 pub use client::{AgentClient, ClientError, ClientOptions, PromptPart};
+pub use completion::generate_text;
 pub use diff::Hunk;
 pub use events::*;
 pub use fs::BufferProvider;

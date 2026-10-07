@@ -477,6 +477,199 @@ async fn rejecting_a_hunk_in_the_review_restores_the_file_and_the_tab(cx: &mut T
 }
 
 #[gpui_kit::test]
+async fn accepting_a_file_opens_source_instead_of_an_empty_review(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("review-accept-file");
+    let path = root.join("a.md");
+    std::fs::write(&path, "one\ntwo\nthree").unwrap();
+    let (handle, this) = open(cx, Some(root.clone()));
+    send(
+        cx,
+        handle,
+        &this,
+        &format!("write {} one\nTWO\nthree", path.display()),
+    );
+    settle(cx, &this);
+    let key = this.read_with(cx, |p, _| p.agent.current().unwrap().key);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_open_review(key, path.clone(), window, cx)
+        });
+    })
+    .unwrap();
+    until(cx, &this, "the review loads", |p| p.diff.doc.is_some());
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("agent-review-accept-file", cx);
+    })
+    .unwrap();
+    until(cx, &this, "accepting opens the source file", |p| {
+        p.active_document().is_some_and(|(file, _)| file == path)
+    });
+    this.read_with(cx, |p, cx| {
+        assert!(p.diff.tab.is_none(), "the resolved review tab must close");
+        let editor = p.active_editor().unwrap();
+        assert_eq!(editor.read(cx).text().to_string(), "one\nTWO\nthree");
+        assert_eq!(editor.read(cx).cursor(), 4, "keep the reviewed line");
+        assert!(p.active_preview().is_none());
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn accepting_the_last_hunk_keeps_the_selected_line_in_the_existing_editor(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let root = temp_root("review-accept-hunk");
+    let path = root.join("a.txt");
+    std::fs::write(&path, "one\ntwo\nthree\nfour\nfive").unwrap();
+    let (handle, this) = open(cx, Some(root.clone()));
+    send(
+        cx,
+        handle,
+        &this,
+        &format!("write {} ONE\ntwo\nthree\nfour\nFIVE", path.display()),
+    );
+    settle(cx, &this);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(path.clone(), Some(root.clone()), window, cx)
+        });
+    })
+    .unwrap();
+    until(cx, &this, "the source opens", |p| p.documents.len() == 1);
+    let key = this.read_with(cx, |p, _| p.agent.current().unwrap().key);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_open_review(key, path.clone(), window, cx);
+            p.diff.inline = false;
+        });
+    })
+    .unwrap();
+    until(cx, &this, "two changes load", |p| {
+        p.diff_change_starts().len() == 2
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.agent_review_hunk(0, true, window, cx));
+    })
+    .unwrap();
+    until(cx, &this, "one change remains", |p| {
+        p.diff_change_starts().len() == 1
+    });
+    assert_eq!(this.read_with(cx, |p, _| p.active), Pane::Diff);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.diff.selection = Some(diff_ops::DiffSelection {
+                list: diff_view::DiffList::Modified,
+                anchor: 2,
+                head: 2,
+            });
+            p.agent_review_hunk(0, true, window, cx);
+        });
+    })
+    .unwrap();
+    until(cx, &this, "the last acceptance returns to the file", |p| {
+        p.active_document().is_some_and(|(file, _)| file == path)
+    });
+    this.read_with(cx, |p, cx| {
+        assert!(p.diff.tab.is_none());
+        assert_eq!(p.documents.len(), 1);
+        assert_eq!(p.active_editor().unwrap().read(cx).cursor(), 8);
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn accepting_a_scrolled_review_keeps_the_visible_code(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("review-accept-scrolled");
+    let path = root.join("a.txt");
+    let before = (0..180).map(|i| format!("line {i}\n")).collect::<String>();
+    let after = before.replace("line 0\n", "changed 0\n");
+    std::fs::write(&path, &before).unwrap();
+    let (handle, this) = open(cx, Some(root.clone()));
+    send(
+        cx,
+        handle,
+        &this,
+        &format!("write {} {after}", path.display()),
+    );
+    settle(cx, &this);
+    let key = this.read_with(cx, |p, _| p.agent.current().unwrap().key);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_open_review(key, path.clone(), window, cx);
+            p.diff.inline = false;
+        });
+    })
+    .unwrap();
+    until(cx, &this, "the review loads", |p| p.diff.doc.is_some());
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        this.update(cx, |p, cx| {
+            p.diff.selection = Some(diff_ops::DiffSelection {
+                list: diff_view::DiffList::Modified,
+                anchor: 0,
+                head: 0,
+            });
+            p.diff
+                .scroll
+                .scroll_to_item_strict(120, ScrollStrategy::Top);
+            cx.notify();
+        });
+        window.render_frame(cx);
+        window.render_frame(cx);
+        window.click("agent-review-accept-file", cx);
+    })
+    .unwrap();
+    until(cx, &this, "the source opens", |p| {
+        p.active_document().is_some_and(|(file, _)| file == path)
+    });
+    this.read_with(cx, |p, cx| {
+        let editor = p.active_editor().unwrap();
+        assert_eq!(editor.read(cx).cursor_position().line, 120);
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn accepting_all_does_not_cancel_a_newer_file_open(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("review-accept-background");
+    let path = root.join("a.txt");
+    let other = root.join("b.txt");
+    std::fs::write(&path, "one").unwrap();
+    std::fs::write(&other, "other").unwrap();
+    let (handle, this) = open(cx, Some(root.clone()));
+    send(cx, handle, &this, &format!("write {} ONE", path.display()));
+    settle(cx, &this);
+    let key = this.read_with(cx, |p, _| p.agent.current().unwrap().key);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_open_review(key, path.clone(), window, cx)
+        });
+    })
+    .unwrap();
+    until(cx, &this, "the review loads", |p| p.diff.doc.is_some());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_resolve_all(true, window, cx);
+            p.open_file(other.clone(), Some(root.clone()), window, cx);
+        });
+    })
+    .unwrap();
+    until(
+        cx,
+        &this,
+        "the newer file opens and the old review closes",
+        |p| p.diff.tab.is_none() && p.active_document().is_some_and(|(file, _)| file == other),
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "ONE");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
 async fn a_stored_session_reopens_with_its_messages(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let data = temp_root("restore");

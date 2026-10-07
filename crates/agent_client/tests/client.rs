@@ -18,6 +18,36 @@ use workspace_editor_agent::{
 
 const FAKE: &str = env!("CARGO_BIN_EXE_zj-fake-acp-agent");
 
+#[test]
+fn text_generation_collects_only_the_answer_and_denies_file_access() {
+    let ws = Workspace::new("completion");
+    let generate = |text| {
+        async_io::block_on(workspace_editor_agent::generate_text(
+            options(&ws, &[]),
+            text,
+        ))
+    };
+    assert_eq!(
+        generate("echo feat: 添加提交信息生成\n\n保留手动编辑".into()).unwrap(),
+        "feat: 添加提交信息生成\n\n保留手动编辑"
+    );
+    let path = ws.path("src/a.rs");
+    assert!(
+        generate(format!("write {} overwritten", path.display()))
+            .unwrap()
+            .starts_with("error:")
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "fn a() {}\n");
+    assert!(
+        generate(format!("read {}", path.display()))
+            .unwrap()
+            .starts_with("error:")
+    );
+    assert!(generate("permission".into()).is_err());
+    assert!(generate("echo".into()).unwrap_err().contains("没有返回"));
+    assert!(generate("crash".into()).is_err());
+}
+
 struct Workspace(PathBuf);
 
 impl Workspace {

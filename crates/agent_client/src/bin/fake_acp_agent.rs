@@ -108,6 +108,8 @@ async fn run_prompt(
         })
         .collect::<Vec<_>>()
         .join(" ");
+    // UI tests can supply a scripted response to a real application-generated prompt.
+    let prompt = std::env::var("FAKE_PROMPT").unwrap_or(prompt);
     let mut words = prompt.splitn(3, ' ');
     let command = words.next().unwrap_or_default().to_string();
     let arg = words.next().unwrap_or_default().to_string();
