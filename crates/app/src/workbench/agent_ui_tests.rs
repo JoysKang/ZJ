@@ -9,7 +9,9 @@ use super::*;
 use core::prelude::v1::test;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{TestAppContext, base::Root};
-use workspace_editor_agent::registry::UserAgentConfig;
+use workspace_editor_agent::{
+    PermissionRequest, ToolCall, ToolCallPatch, ToolKind, ToolStatus, registry::UserAgentConfig,
+};
 
 fn fake_agent() -> UserAgentConfig {
     let exe = std::env::current_exe().unwrap();
@@ -241,6 +243,348 @@ async fn quota_hover_and_click_query_now_and_anchor_to_the_button(cx: &mut TestA
 }
 
 #[gpui_kit::test]
+async fn a_running_turn_has_one_process_and_collapses_when_the_final_reply_arrives(
+    cx: &mut TestAppContext,
+) {
+    let (handle, this) = open(cx, None);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_ensure_session();
+            let key = p.agent.current.unwrap();
+            let session = p.agent.session_mut(key).unwrap();
+            session.thread.push_user("task".into(), vec![], 1);
+            session.thread.apply(
+                &AgentEvent::ThoughtChunk {
+                    text: "thinking".into(),
+                },
+                true,
+            );
+            session.thread.apply(
+                &AgentEvent::MessageChunk {
+                    text: "progress".into(),
+                },
+                true,
+            );
+            session.thread.apply(
+                &AgentEvent::ToolCall(ToolCall {
+                    id: "failed".into(),
+                    title: "command".into(),
+                    kind: ToolKind::Execute,
+                    status: ToolStatus::Failed,
+                    locations: vec![],
+                    content: vec![],
+                }),
+                true,
+            );
+            session.thread.push_notice("allowed", false);
+            session.thread.push_user("adjust course".into(), vec![], 1);
+            session.thread.apply(
+                &AgentEvent::MessageChunk {
+                    text: "final".into(),
+                },
+                true,
+            );
+            p.agent_sync_replies(key, 0);
+            p.agent_sync_list(true);
+            assert_eq!(
+                p.agent.thread_rows.iter().filter(|row| row.process).count(),
+                1
+            );
+            assert_eq!(
+                p.agent.thread_rows.len(),
+                3,
+                "no intermediate reply or tool escapes the process"
+            );
+            p.agent.expanded_processes.insert((key, 0));
+            p.agent_sync_list(false);
+            assert!(
+                p.agent
+                    .thread_rows
+                    .windows(2)
+                    .all(|rows| rows[0].range.start <= rows[1].range.start),
+                "expanded details keep their order around steering input"
+            );
+            assert_eq!(
+                p.agent
+                    .thread_rows
+                    .iter()
+                    .filter(|row| !row.process && row.range.start == 5)
+                    .count(),
+                1,
+                "steering input is not duplicated in expanded details"
+            );
+            // Actual event path: end streaming, reveal the final answer and collapse
+            // even a process the user had opened while it ran.
+            p.agent_events(
+                key,
+                vec![AgentEvent::TurnEnded {
+                    turn: 1,
+                    outcome: workspace_editor_agent::TurnOutcome::EndTurn,
+                }],
+                window,
+                cx,
+            );
+            assert!(!p.agent.expanded_processes.contains(&(key, 0)));
+            assert_eq!(p.agent.thread_rows.len(), 4);
+            let visible_replies: Vec<_> = p
+                .agent
+                .thread_rows
+                .iter()
+                .filter(|row| !row.process)
+                .filter_map(
+                    |row| match &p.agent.current().unwrap().thread.items[row.range.start] {
+                        Item::Agent { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    },
+                )
+                .collect();
+            assert_eq!(visible_replies, ["final"]);
+            cx.notify();
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn pending_actions_stay_visible_and_a_stale_end_keeps_the_process_open(
+    cx: &mut TestAppContext,
+) {
+    let (handle, this) = open(cx, None);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_ensure_session();
+            let key = p.agent.current.unwrap();
+            p.agent
+                .session_mut(key)
+                .unwrap()
+                .thread
+                .push_user("task".into(), vec![], 2);
+            p.agent_events(
+                key,
+                vec![
+                    AgentEvent::ThoughtChunk {
+                        text: "thinking".into(),
+                    },
+                    AgentEvent::PermissionRequested(PermissionRequest {
+                        id: 1,
+                        tool_call: ToolCallPatch {
+                            id: "approval".into(),
+                            ..Default::default()
+                        },
+                        options: vec![],
+                    }),
+                    AgentEvent::AuthRequired { methods: vec![] },
+                    AgentEvent::Progress {
+                        message: "waiting".into(),
+                    },
+                ],
+                window,
+                cx,
+            );
+            assert_eq!(p.agent.thread_rows.len(), 4);
+            p.agent.expanded_processes.insert((key, 0));
+            p.agent_sync_list(false);
+            for index in [2, 3] {
+                assert_eq!(
+                    p.agent
+                        .thread_rows
+                        .iter()
+                        .filter(|row| !row.process && row.range.start == index)
+                        .count(),
+                    1,
+                    "pending actions stay visible once, outside the process"
+                );
+            }
+            p.agent_events(
+                key,
+                vec![AgentEvent::TurnEnded {
+                    turn: 1,
+                    outcome: workspace_editor_agent::TurnOutcome::EndTurn,
+                }],
+                window,
+                cx,
+            );
+            assert_eq!(p.agent.current().unwrap().thread.turn, Some(2));
+            assert!(p.agent.expanded_processes.contains(&(key, 0)));
+        });
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn an_open_process_keeps_its_identity_and_reading_position_as_items_change(
+    cx: &mut TestAppContext,
+) {
+    use workspace_editor_agent::{
+        PermissionKind,
+        thread::{MAX_ITEMS, PermissionState},
+    };
+    let (handle, this) = open(cx, None);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_ensure_session();
+            let key = p.agent.current.unwrap();
+            let thread = &mut p.agent.session_mut(key).unwrap().thread;
+            thread.push_user("task".into(), vec![], 1);
+            thread.apply(
+                &AgentEvent::PermissionRequested(PermissionRequest {
+                    id: 1,
+                    tool_call: ToolCallPatch {
+                        id: "approval".into(),
+                        ..Default::default()
+                    },
+                    options: vec![],
+                }),
+                true,
+            );
+            for _ in 2..MAX_ITEMS {
+                thread.push_notice("details", false);
+            }
+            p.agent_sync_list(true);
+            cx.notify();
+        });
+        window.render_frame(cx);
+        window.click(("agent-process", 0usize), cx);
+        window.render_frame(cx);
+        let anchor = this
+            .read(cx)
+            .agent
+            .thread_rows
+            .iter()
+            .position(|row| !row.process && row.range.start == 350)
+            .unwrap();
+        this.read(cx).agent.thread_list.scroll_to(ListOffset {
+            item_ix: anchor,
+            offset_in_item: px(12.),
+        });
+        window.render_frame(cx);
+        // Completing the first approval moves it into the process. Subsequent
+        // output then trims its first members at the 400-item memory limit.
+        for step in 0..4 {
+            this.update(cx, |p, cx| {
+                let key = p.agent.current.unwrap();
+                let thread = &mut p.agent.session_mut(key).unwrap().thread;
+                if step == 0 {
+                    assert!(thread.answer_permission(
+                        1,
+                        PermissionState::Answered(PermissionKind::AllowOnce, "allowed".into()),
+                    ));
+                } else {
+                    thread.push_notice("newest", false);
+                }
+                p.agent_sync_list(false);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            this.read_with(cx, |p, _| {
+                let key = p.agent.current.unwrap();
+                assert!(p.agent.expanded_processes.contains(&(key, 0)));
+                assert_eq!(
+                    p.agent.thread_rows.iter().filter(|row| row.process).count(),
+                    1
+                );
+                assert!(p.agent.thread_rows.len() > MAX_ITEMS);
+                let top = p.agent.thread_list.logical_scroll_top();
+                let row = &p.agent.thread_rows[top.item_ix - usize::from(p.agent.older_row())];
+                assert_eq!(
+                    p.agent.current().unwrap().thread.dropped + row.range.start,
+                    350
+                );
+                assert!((top.offset_in_item - px(12.)).abs() <= px(1.));
+                assert!(!p.agent.thread_list.is_following_tail());
+            });
+        }
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn an_answered_permission_anchors_to_its_collapsed_process(cx: &mut TestAppContext) {
+    use workspace_editor_agent::{PermissionKind, TurnOutcome, thread::PermissionState};
+    let (handle, this) = open(cx, None);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_ensure_session();
+            let key = p.agent.current.unwrap();
+            let thread = &mut p.agent.session_mut(key).unwrap().thread;
+            for turn in 1..3 {
+                thread.push_user("earlier task".into(), vec![], turn);
+                thread.push_notice("detail", false);
+                thread.apply(
+                    &AgentEvent::MessageChunk {
+                        text: "earlier reply\n\n".repeat(20),
+                    },
+                    true,
+                );
+                thread.apply(
+                    &AgentEvent::TurnEnded {
+                        turn,
+                        outcome: TurnOutcome::EndTurn,
+                    },
+                    true,
+                );
+            }
+            thread.push_user("current task".into(), vec![], 3);
+            thread.push_notice("detail", false);
+            for id in 1..=12 {
+                thread.apply(
+                    &AgentEvent::PermissionRequested(PermissionRequest {
+                        id,
+                        tool_call: ToolCallPatch {
+                            id: id.to_string(),
+                            ..Default::default()
+                        },
+                        options: vec![],
+                    }),
+                    true,
+                );
+            }
+            p.agent_sync_replies(key, 0);
+            p.agent_sync_list(true);
+            cx.notify();
+        });
+        window.render_frame(cx);
+        // Reading the first pending action with its execution process still folded.
+        let anchor = this
+            .read(cx)
+            .agent
+            .thread_rows
+            .iter()
+            .position(|row| !row.process && row.range.start == 8)
+            .unwrap();
+        this.read(cx).agent.thread_list.scroll_to(ListOffset {
+            item_ix: anchor,
+            offset_in_item: Pixels::ZERO,
+        });
+        window.render_frame(cx);
+        assert!(!this.read(cx).agent.thread_list.is_following_tail());
+        this.update(cx, |p, cx| {
+            let key = p.agent.current.unwrap();
+            assert!(p.agent.expanded_processes.is_empty());
+            assert!(p.agent.session_mut(key).unwrap().thread.answer_permission(
+                1,
+                PermissionState::Answered(PermissionKind::AllowOnce, "allowed".into()),
+            ));
+            p.agent_sync_list(false);
+            cx.notify();
+        });
+        window.render_frame(cx);
+        this.read_with(cx, |p, _| {
+            let top = p.agent.thread_list.logical_scroll_top();
+            let row = &p.agent.thread_rows[top.item_ix];
+            assert!(
+                row.process,
+                "a hidden anchor stays at its own process header"
+            );
+            assert_eq!(row.turn_start, 6);
+            assert!(!p.agent.thread_list.is_following_tail());
+        });
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 async fn process_expansion_can_resume_following_latest_output(cx: &mut TestAppContext) {
     let (handle, this) = open(cx, None);
     cx.update_window(handle.into(), |_, window, cx| {
@@ -264,7 +608,7 @@ async fn process_expansion_can_resume_following_latest_output(cx: &mut TestAppCo
             cx.notify();
         });
         window.render_frame(cx);
-        window.click(("agent-process", 1usize), cx);
+        window.click(("agent-process", 0usize), cx);
         window.render_frame(cx);
         // The user returns to the bottom after inspecting execution details.
         this.read(cx).agent.thread_list.scroll_to_end();
@@ -273,31 +617,60 @@ async fn process_expansion_can_resume_following_latest_output(cx: &mut TestAppCo
             this.read(cx).agent.thread_list.is_following_tail(),
             "returning to the bottom must resume following"
         );
+        for text in ["newest\n\n".repeat(80), "more\n\n".repeat(40)] {
+            this.update(cx, |p, cx| {
+                let key = p.agent.current.unwrap();
+                p.agent
+                    .session_mut(key)
+                    .unwrap()
+                    .thread
+                    .apply(&AgentEvent::MessageChunk { text }, true);
+                p.agent_sync_replies(key, 0);
+                p.agent_sync_list(false);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let list = &this.read(cx).agent.thread_list;
+            assert!(list.is_following_tail());
+            let bottom = list
+                .bounds_for_item(list.item_count() - 1)
+                .unwrap()
+                .bottom();
+            assert!(
+                (bottom - list.viewport_bounds().bottom()).abs() <= px(1.),
+                "latest output must remain at the bottom: item={bottom:?}, viewport={:?}",
+                list.viewport_bounds()
+            );
+        }
+        // Reading earlier details must not be pulled back to a growing last reply.
+        let list = &this.read(cx).agent.thread_list;
+        list.scroll_to(ListOffset {
+            item_ix: 2,
+            offset_in_item: px(12.),
+        });
+        window.render_frame(cx);
+        let before = this.read(cx).agent.thread_list.logical_scroll_top();
+        assert!(!this.read(cx).agent.thread_list.is_following_tail());
         this.update(cx, |p, cx| {
             let key = p.agent.current.unwrap();
-            p.agent
-                .session_mut(key)
-                .unwrap()
-                .thread
-                .items
-                .push_back(Item::Agent {
-                    text: "newest\n\n".repeat(80),
-                    streaming: true,
-                });
+            p.agent.session_mut(key).unwrap().thread.apply(
+                &AgentEvent::MessageChunk {
+                    text: "more output\n\n".repeat(80),
+                },
+                true,
+            );
             p.agent_sync_replies(key, 0);
             p.agent_sync_list(false);
             cx.notify();
         });
         window.render_frame(cx);
         let list = &this.read(cx).agent.thread_list;
-        assert!(list.is_following_tail());
-        let bottom = list
-            .bounds_for_item(list.item_count() - 1)
-            .unwrap()
-            .bottom();
+        let after = list.logical_scroll_top();
+        assert!(!list.is_following_tail());
+        assert_eq!(before.item_ix, after.item_ix);
         assert!(
-            (bottom - list.viewport_bounds().bottom()).abs() <= px(1.),
-            "latest output must remain at the bottom: item={bottom:?}, viewport={:?}", list.viewport_bounds()
+            (before.offset_in_item - after.offset_in_item).abs() <= px(1.),
+            "reading position changed: before={before:?}, after={after:?}"
         );
     })
     .unwrap();
@@ -326,7 +699,7 @@ async fn expanded_process_details_stay_individual_virtual_rows(cx: &mut TestAppC
                 text: "final".into(),
                 streaming: false,
             });
-            group = (key, 1);
+            group = (key, 0);
             p.agent_sync_replies(key, 0);
             p.agent_sync_list(false);
             cx.notify();
@@ -1277,6 +1650,83 @@ async fn a_stored_session_reopens_with_its_messages(cx: &mut TestAppContext) {
             )
         },
     );
+    let _ = std::fs::remove_dir_all(data);
+}
+
+#[gpui_kit::test]
+async fn a_long_stored_session_keeps_turns_consistent_across_history_pages(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let data = temp_root("history-pages");
+    let history = Arc::new(History::new(data.join("history.sqlite")));
+    let id = history
+        .create_session(workspace_editor_agent_history::NewSession {
+            workspace_root: data.clone(),
+            workspace_name: None,
+            agent_id: "fake".into(),
+            acp_session_id: None,
+            title: None,
+            first_prompt: None,
+            repo: None,
+            branch: None,
+            created_at: None,
+        })
+        .unwrap();
+    for n in 0..3 * HISTORY_PAGE {
+        let role = [HistoryRole::User, HistoryRole::Thought, HistoryRole::Agent][n % 3];
+        history.append_message(id, role, n.to_string());
+    }
+    history.flush().unwrap();
+    let (handle, this) = open_with(
+        cx,
+        Some(data.clone()),
+        AgentStore {
+            history: Some(history),
+            default_workspace: None,
+        },
+    );
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.agent_open_stored(id, window, cx));
+    })
+    .unwrap();
+    until(cx, &this, "the last history page opens", |p| {
+        p.agent.current().is_some_and(|s| s.db == Some(id))
+    });
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.agent.current().unwrap().thread.dropped, 2 * HISTORY_PAGE);
+        assert!(p.agent.older_row());
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.agent_load_older(window, cx));
+    })
+    .unwrap();
+    until(
+        cx,
+        &this,
+        "the previous history page joins the thread",
+        |p| {
+            p.agent
+                .current()
+                .is_some_and(|s| s.thread.items.len() == 2 * HISTORY_PAGE)
+        },
+    );
+    this.read_with(cx, |p, _| {
+        let thread = &p.agent.current().unwrap().thread;
+        assert_eq!(thread.dropped, HISTORY_PAGE);
+        assert!(p.agent.older_row());
+        assert_eq!(
+            p.agent.thread_rows.iter().filter(|row| row.process).count(),
+            2 * HISTORY_PAGE / 3,
+            "a turn cut by pagination rejoins as one process"
+        );
+        assert!(
+            p.agent
+                .thread_rows
+                .iter()
+                .all(|row| row.range.end <= thread.items.len())
+        );
+    });
     let _ = std::fs::remove_dir_all(data);
 }
 

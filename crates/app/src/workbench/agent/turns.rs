@@ -394,6 +394,8 @@ impl Workbench {
         let mut acp_id = None;
         let mut learned = false;
         for event in &batch {
+            let ends_current_turn = matches!(event, AgentEvent::TurnEnded { turn, .. }
+                if session.thread.turn == Some(*turn));
             session.thread.apply(event, visible);
             match event {
                 AgentEvent::PermissionRequested(_) => {
@@ -415,17 +417,15 @@ impl Workbench {
                     acp_id = Some(session_id.clone());
                     session.resume = Some(session_id.clone());
                 }
-                AgentEvent::TurnEnded { .. } => {
+                AgentEvent::TurnEnded { .. } if ends_current_turn => {
                     turn_ended = true;
                     recount = true;
                     // Shown under the turn's last row (the reply, or the notice it ended with).
                     if session.thread.status != agent_thread::Status::Running
                         && let Some(last) = session.thread.items.len().checked_sub(1)
                     {
-                        completed_from = Some(
-                            session.thread.dropped
-                                + session.thread.turn_starts.last().copied().unwrap_or(0),
-                        );
+                        completed_from =
+                            Some(session.thread.turn_starts.last().copied().unwrap_or(0));
                         let took = session.turn_started.elapsed();
                         session
                             .turn_times
@@ -558,6 +558,19 @@ impl Workbench {
         };
         let older = self.agent.older_row();
         let following = self.agent.thread_list.is_following_tail();
+        let top = self.agent.thread_list.logical_scroll_top();
+        let anchor = top
+            .item_ix
+            .checked_sub(usize::from(self.agent.list_shape.3))
+            .and_then(|i| self.agent.thread_rows.get(i))
+            .map(|row| {
+                (
+                    row.process,
+                    row.turn_start,
+                    self.agent.list_shape.1 + row.range.start,
+                    top.offset_in_item,
+                )
+            });
         let groups = agent_model::thread_rows(&session.thread);
         let visible: HashSet<usize> = groups
             .iter()
@@ -570,18 +583,49 @@ impl Workbench {
                 && self
                     .agent
                     .expanded_processes
-                    .contains(&(session.key, session.thread.dropped + row.range.start));
+                    .contains(&(session.key, row.turn_start));
             let range = row.range.clone();
+            let turn_start = row.turn_start;
             rows.push(row);
             if expanded {
                 rows.extend(range.filter(|i| !visible.contains(i)).map(|i| {
                     agent_model::ThreadRow {
                         range: i..i + 1,
                         process: false,
+                        turn_start,
                     }
                 }));
             }
         }
+        // A process can span steering prompts and pending actions. Keep expanded
+        // members in their original order around those always-visible rows.
+        rows.sort_by_key(|row| (row.range.start, !row.process));
+        let restore = anchor.filter(|_| !following && !switched).map(
+            |(process, turn_start, item, offset)| {
+                let position = rows.iter().position(|row| {
+                    row.process == process
+                        && if process {
+                            row.turn_start == turn_start
+                        } else {
+                            session.thread.dropped + row.range.start == item
+                        }
+                });
+                // A completed approval/login may become hidden inside its process.
+                // Stay at that turn's header rather than jumping to the thread start.
+                let item_ix = position.or_else(|| {
+                    rows.iter()
+                        .position(|row| row.process && row.turn_start == turn_start)
+                });
+                ListOffset {
+                    item_ix: item_ix.unwrap_or(0) + usize::from(older),
+                    offset_in_item: if position.is_some() {
+                        offset
+                    } else {
+                        Pixels::ZERO
+                    },
+                }
+            },
+        );
         let shape = (session.key, session.thread.dropped, rows.len(), older);
         let count = shape.2 + usize::from(older);
         let prefix = self
@@ -589,7 +633,11 @@ impl Workbench {
             .thread_rows
             .iter()
             .zip(&rows)
-            .take_while(|(a, b)| a.process == b.process && a.range.start == b.range.start)
+            .take_while(|(a, b)| {
+                a.process == b.process
+                    && a.range.start == b.range.start
+                    && a.turn_start == b.turn_start
+            })
             .count();
         self.agent.thread_rows = rows;
         let old = self.agent.list_shape;
@@ -611,6 +659,8 @@ impl Workbench {
             // Splicing and remeasuring can leave an obsolete scroll anchor. Clear it
             // only when already following; reading earlier output keeps its position.
             self.agent.thread_list.scroll_to_end();
+        } else if let Some(restore) = restore {
+            self.agent.thread_list.scroll_to(restore);
         }
         self.agent.list_shape = shape;
     }

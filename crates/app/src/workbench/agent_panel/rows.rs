@@ -45,10 +45,10 @@ impl Workbench {
             return self.render_agent_item(row.range.start, window, cx);
         }
         let key = session.key;
-        let start = row.range.start + session.thread.dropped;
+        let start = row.turn_start;
         let expanded = self.agent.expanded_processes.contains(&(key, start));
-        let active = session.busy()
-            && row.range.start >= session.thread.turn_starts.last().copied().unwrap_or(0);
+        let active =
+            session.busy() && start == session.thread.turn_starts.last().copied().unwrap_or(0);
         v_flex()
             .w_full()
             .px_3()

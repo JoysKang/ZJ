@@ -20,6 +20,8 @@ const DAY_MS: i64 = 86_400_000;
 pub struct ThreadRow {
     pub range: Range<usize>,
     pub process: bool,
+    /// Stable absolute identity, independent of the first process member's position.
+    pub turn_start: usize,
 }
 
 /// One process per turn, including failed tools and intermediate replies. The final reply
@@ -29,19 +31,18 @@ pub fn thread_rows(thread: &Thread) -> Vec<ThreadRow> {
     let items = &thread.items;
     let mut starts = thread.turn_starts.clone();
     if starts.is_empty() {
-        starts.extend(
-            items
-                .iter()
-                .enumerate()
-                .filter_map(|(i, item)| matches!(item, Item::User { .. }).then_some(i)),
-        );
+        starts.extend(items.iter().enumerate().filter_map(|(i, item)| {
+            matches!(item, Item::User { .. }).then_some(thread.dropped + i)
+        }));
     }
-    starts.insert(0);
-    starts.insert(items.len());
+    if starts.first().is_none_or(|start| *start > thread.dropped) {
+        starts.insert(thread.dropped);
+    }
+    starts.insert(thread.dropped + items.len());
     let starts: Vec<_> = starts.into_iter().collect();
     let mut rows: Vec<ThreadRow> = Vec::new();
     for turn in starts.windows(2) {
-        let range = turn[0]..turn[1];
+        let range = turn[0].saturating_sub(thread.dropped)..turn[1] - thread.dropped;
         let running =
             range.end == items.len() && matches!(thread.status, Status::Running | Status::Awaiting);
         let final_reply = (!running)
@@ -79,6 +80,7 @@ pub fn thread_rows(thread: &Thread) -> Vec<ThreadRow> {
                 rows.push(ThreadRow {
                     range: i..i + 1,
                     process: !visible,
+                    turn_start: turn[0],
                 });
             }
         }
@@ -1065,15 +1067,18 @@ mod tests {
             [
                 ThreadRow {
                     range: 0..1,
-                    process: false
+                    process: false,
+                    turn_start: 0,
                 },
                 ThreadRow {
                     range: 1..6,
-                    process: true
+                    process: true,
+                    turn_start: 0,
                 },
                 ThreadRow {
                     range: 6..7,
-                    process: false
+                    process: false,
+                    turn_start: 0,
                 },
             ]
         );
@@ -1129,19 +1134,23 @@ mod tests {
             [
                 ThreadRow {
                     range: 0..1,
-                    process: false
+                    process: false,
+                    turn_start: 0,
                 },
                 ThreadRow {
                     range: 1..8,
-                    process: true
+                    process: true,
+                    turn_start: 0,
                 },
                 ThreadRow {
                     range: 5..6,
-                    process: false
+                    process: false,
+                    turn_start: 0,
                 },
                 ThreadRow {
                     range: 6..7,
-                    process: false
+                    process: false,
+                    turn_start: 0,
                 },
             ]
         );

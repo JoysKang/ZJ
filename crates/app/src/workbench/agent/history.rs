@@ -221,8 +221,6 @@ impl Workbench {
         session.stored_status = Some(summary.status);
         let items = agent_model::items_from_messages(&page);
         session.thread.load(items, count.saturating_sub(page.len()));
-        // `load` counts older rows as dropped; the history row says how to get them.
-        session.thread.dropped = 0;
         self.agent.sessions.push(session);
         self.agent.current = Some(key);
         self.agent_sync_replies(key, 0);
@@ -288,7 +286,6 @@ impl Workbench {
                     session
                         .thread
                         .prepend(agent_model::items_from_messages(&page));
-                    session.thread.dropped = 0;
                     session.md.clear();
                 }
                 this.agent_sync_replies(key, 0);

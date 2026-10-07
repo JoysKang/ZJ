@@ -109,7 +109,8 @@ pub enum Record {
 #[derive(Default)]
 pub struct Thread {
     pub items: VecDeque<Item>,
-    /// Turn starts within `items`. A steering prompt stays in the current turn.
+    /// Absolute turn starts, including the start of a turn truncated at the front.
+    /// A steering prompt stays in the current turn.
     pub turn_starts: BTreeSet<usize>,
     /// Older items not held in memory.
     pub dropped: usize,
@@ -225,12 +226,9 @@ impl Thread {
         while self.items.len() > MAX_ITEMS {
             self.items.pop_front();
             self.dropped += 1;
-            self.turn_starts = self
-                .turn_starts
-                .iter()
-                .filter_map(|i| i.checked_sub(1))
-                .collect();
-            self.turn_starts.insert(0);
+            let first = self.turn_starts.range(..=self.dropped).next_back().copied();
+            self.turn_starts
+                .retain(|start| *start >= self.dropped || Some(*start) == first);
         }
     }
 
@@ -269,7 +267,7 @@ impl Thread {
         self.end_streaming();
         self.push(Item::User { text, attachments });
         if self.turn != Some(turn) {
-            self.turn_starts.insert(self.items.len() - 1);
+            self.turn_starts.insert(self.dropped + self.items.len() - 1);
             self.turn = Some(turn);
             self.status = Status::Running;
         }
@@ -286,47 +284,39 @@ impl Thread {
     }
 
     /// Restores items from the history database (oldest first), replacing what is shown.
+    /// Stored messages have no turn ids, so historical user prompts define turn boundaries.
     pub fn load(&mut self, items: Vec<Item>, older: usize) {
         self.items.clear();
         self.turn_starts.clear();
         self.dropped = older;
         for item in items {
+            if matches!(item, Item::User { .. }) {
+                self.turn_starts.insert(self.dropped + self.items.len());
+            }
             self.push(item);
         }
-        self.turn_starts = self
-            .items
-            .iter()
-            .enumerate()
-            .filter_map(|(i, item)| matches!(item, Item::User { .. }).then_some(i))
-            .collect();
         self.version += 1;
     }
 
     /// Older items fetched from history go in front.
     pub fn prepend(&mut self, items: Vec<Item>) {
         let n = items.len();
-        // A synthetic start at zero may be the middle of a truncated turn. Join it
-        // to the older prefix instead of inventing a second turn at that boundary.
-        self.turn_starts = self
-            .turn_starts
-            .iter()
-            .filter(|i| matches!(self.items.get(**i), Some(Item::User { .. })))
-            .map(|i| i + n)
-            .chain(
-                items
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, item)| matches!(item, Item::User { .. }).then_some(i)),
-            )
-            .collect();
+        let from = self.dropped.saturating_sub(n);
+        self.turn_starts.extend(
+            items
+                .iter()
+                .enumerate()
+                .filter_map(|(i, item)| matches!(item, Item::User { .. }).then_some(from + i)),
+        );
         for item in items.into_iter().rev() {
             self.items.push_front(item);
         }
-        self.dropped = self.dropped.saturating_sub(n);
+        self.dropped = from;
         while self.items.len() > MAX_ITEMS {
             self.items.pop_back();
         }
-        self.turn_starts.retain(|i| *i < self.items.len());
+        self.turn_starts
+            .retain(|i| *i < self.dropped + self.items.len());
         self.version += 1;
     }
 
@@ -712,6 +702,50 @@ mod tests {
                 kind: PermissionKind::AllowOnce,
             }],
         }
+    }
+
+    #[test]
+    fn turn_starts_keep_steering_in_one_turn_and_remain_bounded() {
+        let mut thread = Thread::new();
+        thread.push_user("task".into(), vec![], 1);
+        thread.push_notice("detail", false);
+        thread.push_user("steering".into(), vec![], 1);
+        assert_eq!(thread.turn_starts.iter().copied().collect::<Vec<_>>(), [0]);
+        thread.push_user("next task".into(), vec![], 2);
+        assert_eq!(
+            thread.turn_starts.iter().copied().collect::<Vec<_>>(),
+            [0, 3]
+        );
+        for _ in 0..MAX_ITEMS {
+            thread.push_notice("detail", false);
+        }
+        assert_eq!(thread.items.len(), MAX_ITEMS);
+        assert_eq!(thread.turn_starts.iter().copied().collect::<Vec<_>>(), [3]);
+        thread.push_user("another task".into(), vec![], 3);
+        assert_eq!(
+            thread.turn_starts.iter().copied().collect::<Vec<_>>(),
+            [3, thread.dropped + MAX_ITEMS - 1]
+        );
+    }
+
+    #[test]
+    fn prepending_history_joins_a_turn_cut_at_the_page_boundary() {
+        let user = |text: &str| Item::User {
+            text: text.into(),
+            attachments: vec![],
+        };
+        let reply = |text: &str| Item::Agent {
+            text: text.into(),
+            streaming: false,
+        };
+        let mut thread = Thread::new();
+        thread.load(vec![reply("tail"), user("next"), reply("final")], 3);
+        thread.prepend(vec![user("first"), reply("progress"), reply("progress 2")]);
+        assert_eq!(
+            thread.turn_starts.iter().copied().collect::<Vec<_>>(),
+            [0, 4]
+        );
+        assert_eq!(thread.dropped, 0);
     }
 
     #[test]
