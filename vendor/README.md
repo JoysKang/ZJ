@@ -6,14 +6,20 @@ fmt / clippy settings don't apply to them.
 
 | Directory | Upstream | Source |
 | --- | --- | --- |
-| `gpui-pre-apple/` | `gpui-pre-apple 0.3.7` (Zed's `gpui_apple`, zed@1a28cff) | Metal renderer and sprite atlas |
-| `gpui-pre-macos/` | `gpui-pre-macos 0.3.7` (Zed's `gpui_macos`, zed@1a28cff) | NSWindow / NSView, frame pacing |
-| `gpui-base/` | `gpui-base 0.7.0` (GPUI Kit) | Input / editor engine (steady cursor) |
+| `gpui-pre-apple/` | `gpui-pre-apple 0.3.8` (GPUI Kit 0.7.1) | Metal renderer and sprite atlas |
+| `gpui-pre-macos/` | `gpui-pre-macos 0.3.8` (GPUI Kit 0.7.1) | NSWindow / NSView, frame pacing |
+| `gpui-base/` | `gpui-base 0.7.1` (GPUI Kit) | Input / editor engine (steady cursor) |
 
 The first commit, "build(gpui): 原样引入 …", copies the crates.io sources as they are (without
 `Cargo.lock` and `.cargo_vcs_info.json`). Every later change is marked with a `ZJ patch` comment;
 `git diff <that commit> -- vendor` shows all of them. Why we patch, what it saves and how to
 measure it are in [docs/adr/0005-gpu-memory.md](../docs/adr/0005-gpu-memory.md).
+
+The 0.7.1 upgrade rebases the ZJ changes onto the published crates.io sources. Input
+viewport intents coexist with upstream's horizontal alignment and textarea scroll clamps;
+the macOS frame callback keeps upstream's signal timing and source while honoring surface
+restoration and idle frame suspension. The renderer keeps upstream's shared-storage policy
+and its debug-only screenshot configuration alongside ZJ's shared atlas and drawable limit.
 
 ## Our diff
 
@@ -51,7 +57,7 @@ measure it are in [docs/adr/0005-gpu-memory.md](../docs/adr/0005-gpu-memory.md).
 - `Cargo.toml`: `[lints.rust] warnings = "allow"`. Path dependencies don't get `--cap-lints`, and
   upstream prints about 1200 deprecation warnings.
 
-`gpui-base` (GPUI Kit 0.7.0, the input and editor engine):
+`gpui-base` (GPUI Kit 0.7.1, the input and editor engine):
 
 - `src/input/editor/mod.rs`, `src/input/base/kind.rs`, `src/input/base/element.rs`,
   `src/input/mod.rs`: one optional application-owned line-end annotation. It is

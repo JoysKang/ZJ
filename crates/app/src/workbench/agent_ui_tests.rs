@@ -356,6 +356,59 @@ async fn quota_hover_and_click_query_now_and_anchor_to_the_button(cx: &mut TestA
 }
 
 #[gpui_kit::test]
+async fn composer_controls_stay_inside_the_panel_with_quota_and_model_options(
+    cx: &mut TestAppContext,
+) {
+    use workspace_editor_agent::{ConfigOption, Modes};
+    let (handle, this) = open(cx, None);
+    for width in [420., 360., 300., 900.] {
+        for busy in [true, false] {
+            cx.update_window(handle.into(), |_, window, cx| {
+                this.update(cx, |p, cx| {
+                    p.agent.width = px(width);
+                    if let Some(preset) = p.agent.presets.iter_mut().find(|preset| preset.id == "codex") {
+                        preset.display_name = "Codex with a very long display name".into();
+                    }
+                    p.agent_ensure_session();
+                    let key = p.agent.current.unwrap();
+                    let session = p.agent.session_mut(key).unwrap();
+                    session.preset.id = "codex".into();
+                    session.thread.status = if busy { agent_thread::Status::Running } else { agent_thread::Status::Idle };
+                    session.thread.modes = Some(Modes {
+                        current: "agent".into(),
+                        available: vec![("agent".into(), "Agent with very long workspace access mode".into())],
+                    });
+                    session.thread.configs = vec![ConfigOption {
+                        id: "model".into(), name: "Model".into(), current: "gpt-6.1-codex".into(),
+                        values: vec![("gpt-6.1-codex".into(), "GPT-6.1 Codex · Extra High".into())],
+                    }];
+                    p.agent.quota = Some(crate::quota::from_live(&serde_json::json!({
+                        "rateLimits": {"primary": {"usedPercent": 4, "windowDurationMins": 300}}
+                    }), 1).unwrap());
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                let composer = window.find("agent-composer").bounds();
+                for id in ["agent-add-image", "agent-attach", "agent-mention", "agent-mode", "agent-config", "agent-quota", "agent-send"] {
+                    let control = window.find(id).bounds();
+                    assert!(control.left() >= composer.left() && control.right() <= composer.right(),
+                        "{id} escapes composer at width={width}, busy={busy}: control={control:?}, composer={composer:?}");
+                    assert!(control.top() >= composer.top() && control.bottom() <= composer.bottom());
+                }
+                let quota = window.find("agent-quota").bounds();
+                let send = window.find("agent-send").bounds();
+                assert!(quota.right() <= send.left(), "quota overlaps send at width={width}");
+                if busy {
+                    let stop = window.find("agent-stop").bounds();
+                    assert!(stop.right() <= composer.right(), "stop={stop:?} escapes composer={composer:?} at width={width}");
+                    assert!(send.right() <= stop.left(), "send overlaps stop at width={width}");
+                }
+            }).unwrap();
+        }
+    }
+}
+
+#[gpui_kit::test]
 async fn the_agent_composer_uses_its_added_height_for_editing(cx: &mut TestAppContext) {
     let (handle, this) = open(cx, None);
     let mut minimum = None;
@@ -2235,6 +2288,71 @@ async fn files_written_one_after_another_all_get_their_line_counts(cx: &mut Test
             })
         })
     });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn folder_mentions_attach_deduplicate_remove_and_send_as_links(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("mention-folder");
+    std::fs::create_dir_all(root.join("资料.png/empty")).unwrap();
+    std::fs::write(root.join("资料.png/main.rs"), "fn main() {}\n").unwrap();
+    let (handle, this) = open(cx, Some(root.clone()));
+    until(cx, &this, "index", |p| p.index.is_some());
+    let pick = |cx: &mut TestAppContext, text: &str| {
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.agent_focus_composer(window, cx);
+                p.agent
+                    .composer
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+            });
+            window.render_frame(cx);
+            window.input(text, cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        until(cx, &this, "folder candidate", |p| {
+            p.agent.mention.as_ref().is_some_and(|m| {
+                m.results
+                    .first()
+                    .is_some_and(|entry| entry.directory && entry.path == root.join("资料.png"))
+            })
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.press("enter", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    pick(cx, "links @资料");
+    pick(cx, "links @资料.png/");
+    assert_eq!(sent(cx, &this), (vec![], "links ".into()));
+    this.read_with(cx, |p, _| {
+        assert_eq!(
+            p.agent.attachments,
+            [Attachment::Directory(root.join("资料.png"))]
+        );
+        assert_eq!(p.agent.attachments[0].label(), "资料.png/");
+        assert_eq!(p.agent.attachments[0].path(), Some(&root.join("资料.png")));
+        assert!(matches!(
+            agent_model::prompt_parts("links ", &p.agent.attachments)[0],
+            workspace_editor_agent::PromptPart::Directory(_)
+        ));
+    });
+    this.update(cx, |p, cx| p.agent_remove_attachment(0, cx));
+    this.read_with(cx, |p, _| assert!(p.agent.attachments.is_empty()));
+    pick(cx, "links @资料");
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press("enter", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    settle(cx, &this);
+    assert_eq!(sent(cx, &this), (vec!["links".into()], String::new()));
+    assert!(replies(cx, &this).contains("/%E8%B5%84%E6%96%99.png/"));
+    this.read_with(cx, |p, _| assert!(p.agent.attachments.is_empty()));
     let _ = std::fs::remove_dir_all(root);
 }
 

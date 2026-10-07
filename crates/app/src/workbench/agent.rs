@@ -254,11 +254,11 @@ impl LiveSession {
     }
 }
 
-/// The `@` file picker under the composer.
+/// The `@` file and folder picker under the composer.
 pub(super) struct Mention {
     pub range: std::ops::Range<usize>,
     pub query: String,
-    pub results: Vec<PathBuf>,
+    pub results: Vec<files::Entry>,
     pub selected: usize,
     generation: u64,
     _task: Option<Task<()>>,
@@ -346,7 +346,7 @@ impl AgentPanel {
             TextareaState::new(window, cx)
                 .auto_grow(4, 8)
                 .submit_on_enter(true)
-                .placeholder("继续追问，@ 引用文件")
+                .placeholder("继续追问，@ 引用文件或文件夹")
         });
         let events = cx.subscribe_in(
             &composer,

@@ -14,7 +14,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 | 指标 | 目标 | 上限 |
 | --- | --- | --- |
-| 二进制体积（aarch64，stripped）| ≤ 30 MB | 32 MB（CI 会检查，2026-10-06 实测 28.5 MB；语法占用见 docs/adr/0001，Agent 面板见 docs/adr/0004）|
+| 二进制体积（aarch64，stripped）| ≤ 30 MB | 32 MB（CI 会检查，2026-10-07 实测 29.4 MB；语法占用见 docs/adr/0001，Agent 面板见 docs/adr/0004）|
 | 冷启动到首帧 | ≤ 250 ms | 400 ms |
 | 空闲 footprint，1 个窗口 | ≤ 70 MB | 100 MB |
 | 3 个窗口 + 20 个文档 | ≤ 220 MB | 300 MB |
@@ -61,7 +61,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `file_ops.rs`：资源管理器的新建、重命名、复制、移动和移到废纸篓；`workbench/explorer_ops.rs`：右键菜单、快捷键和行内改名；`workbench/tab_menu.rs`：编辑器标签页的右键菜单、对应快捷键和 ⇧⌘T 重开已关闭标签的栈。
   - Markdown 预览：`markdown_blocks.rs` 把文件切成顶层块（纯函数）；`md_images.rs` 解析图片地址（本地图片按文件头尺寸检查解码预算，远程 / data: 不加载，纯函数），预览在后台和分块一起解析，渲染时只查表（用 Kit 基础 `TextView` 的 `image_source`）；相对链接在 ZJ 里打开；`workbench/markdown_preview.rs` 按块用 Kit `TextView` 渲染，点击的块换成源码文本框并直接写回缓冲区，⇧⌘V 切换源码。源码视图下不切分。
   - 终端（docs/adr/0006）：`terminal.rs` 是 `alacritty_terminal` 的衔接层（起 shell、事件、按键编码、ANSI 颜色映射），不依赖界面状态；`workbench/terminal_view.rs` 画网格并处理键鼠和输入法；`workbench/terminal_panel.rs` 是底部面板的分组、拆分和关闭。终端没有定时器，只在 shell 有输出时重画。
-  - `text_search.rs`：全文搜索（glob 包含 / 排除、默认排除、二进制与大文件跳过、结果上限）；`workbench/search_view.rs`：搜索视图；`workbench/search_replace.rs`：搜索视图里的替换（行内预览、替换前 Diff、原子写入、跳过搜索后改过的文件、撤销）。
+  - `text_search.rs`：全文搜索（glob 包含 / 排除、默认排除、二进制与大文件跳过、结果上限）；`workbench/search_view.rs`：搜索视图，打开匹配时用现有布局意图将选中文字放到顶部留白下方（`theme::SEARCH_RESULT_TOP`），保留上下文和正常滚动边界；`workbench/search_replace.rs`：搜索视图里的替换（行内预览、替换前 Diff、原子写入、跳过搜索后改过的文件、撤销）。
   - `replace.rs`：查找替换的共同规则（Aa / ab / .*、`$1` 与大小写转义、保留大小写、CRLF、不跨行）；`workbench/find_widget.rs`：编辑器右上角的查找替换浮层（⌘F / ⌥⌘F）。
   - `watch.rs`：共用原生文件监听、路径引用回收和有界事件信号（带变更路径，超出上限退化为全量刷新）；不持有界面实体。
   - `refresh_plan.rs`：把一批变更路径算成最小刷新（只刷受影响仓库的状态、只重列变化的目录、增量更新索引）；被 Git 忽略的路径（target/、node_modules）按目录缓存判定后丢弃，构建期间不刷新。
@@ -79,6 +79,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `session.rs`：重启时恢复的窗口记录（`session.json`，每个窗口的文件夹、位置大小、文件标签和激活的标签；退出时按系统窗口的前后顺序保存，重启按从后到前的顺序创建；重启时只读入激活的标签，其余标签点开时才读）。
   - Agent 面板（docs/adr/0004）：`agent_model.rs` 放不依赖 GPUI 的逻辑（会话分组和时间、`@` 引用、附件、从历史恢复）；回复用 Kit 的 `TextView` 渲染（可选中，代码块带复制按钮），`markdown.rs` 只管代码块的语法高亮（编辑器的语法主题），`workbench/agent/highlights.rs` 在后台算好、绘制时只查表；`quota.rs` 读取 Codex 本地记录并解析实时响应；`workbench/agent/quota.rs` 在显示会话和一轮结束时更新本地记录，Codex 对话面板显示时每 10 分钟、悬停或点击额度按钮时后台通过 `agent_client` 的短时 app-server 连接查询最新额度（不运行 Agent 回合，不由 ZJ 读凭据）；关闭面板、进入历史或切换其他 Agent 时停止定时刷新，弹层显示下次刷新时间。`agent_images.rs` 在后台校验和缩略图片，输入区显示可删除预览，发送 ACP 图片内容；执行过程折叠后仍按可见行布局；`secrets.rs` 解析 Agent 的环境变量（`$变量名` 或 macOS 钥匙串 `keychain:账户名`，设置里不存明文密钥）。`workbench/agent.rs` 是会话与面板视图的状态，其余逻辑按主题放在 `workbench/agent/`（`turns` 发送与事件泵、`permissions` 审批与模式、`composer` 引用与附件、`changes` 改动文件、`history` 会话历史、`buffers` 给 Agent 的未保存缓冲区、`highlights` 代码块高亮）；`agent_panel.rs`（标题、会话条、切换器；`agent_panel/` 下是对话行、卡片、改动文件、输入框、设置）、`agent_history.rs`（会话列表）、`agent_search.rs`（⌘J 搜索）、`agent_review.rs`（编辑区里逐处接受 / 拒绝）只做渲染和交互。转圈只在面板可见、窗口在前台、有会话运行时才有定时器。
   - `symbols.rs`：tree-sitter tags / locals 查询做定义、引用和文件大纲（查询在 `crates/app/queries/`）；`symbol_index.rs`：首次跳转时后台建立的工作区符号索引；`workbench/navigation.rs`：转到定义、符号列表、查找引用、转到行（⌃G，命令中心里的 `:行:列`）和前进后退。不跑语言服务器，见 docs/adr/0002。
+- Agent 的 `@` 同时引用文件和文件夹：复用路径索引匹配文件及其祖先目录，后台按查询的父路径列一层目录以补充空文件夹；沿用隐藏与排除规则，禁止路径逃出工作区。文件夹附件显示图标和 `/` 后缀，发送 ACP `resource_link`，由 Agent 自己读取内容。
 - Agent 输出按轮次合并为一个执行过程，运行时默认展开，可手动折叠，运行中追加指令仍属于当前轮；结束时自动收起当前轮过程并单独显示最终回复。修改文件列表独立控制，每个新轮次默认收起，当前轮的更新或追加指令保留手动展开状态。待审批、待登录和会话错误直接显示；命令审批优先显示 Agent 提供的原始命令与工作目录，可选中和复制，长命令在卡片内滚动，不把通用工具标题当作命令。展开成员继续使用外层虚拟列表；停留在底部时跟随最新输出，向上阅读时保持位置，返回底部后恢复跟随。输入区不显示上下文占用圆环。
 - `vendor/`：打过补丁的 GPUI macOS 渲染器和窗口层（`gpui-pre-apple` / `gpui-pre-macos`），以及 GPUI Kit 的 `gpui-base`（编辑器光标常亮），都用 `[patch.crates-io]` 指向。改动都标 `ZJ patch`，说明在 `vendor/README.md`，理由和测量方法在 docs/adr/0005；`ZJ_GPU_LOWMEM=0` 恢复上游行为。升级 GPUI 时要先处理这里。
 - UI 的 render 回调里不做 IO、不跑 Git 命令、不做全文解析；这些都通过 `background_spawn` 执行，结果带 generation 校验。

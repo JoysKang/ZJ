@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "gpui-base"
-version = "0.7.0"
+version = "0.7.1"
 build = false
 exclude = ["examples/"]
 publish = true
@@ -78,11 +78,11 @@ version = "0.3"
 version = "0.3"
 
 [dependencies.gpui]
-version = "=0.3.7"
+version = "=0.3.8"
 package = "gpui-pre"
 
 [dependencies.gpui_macros]
-version = "=0.3.7"
+version = "=0.3.8"
 package = "gpui-pre-macros"
 
 [dependencies.html5ever]
@@ -138,11 +138,14 @@ version = "1"
 version = "1"
 
 [dependencies.sum-tree]
-version = "=0.3.7"
+version = "=0.3.8"
 package = "gpui-pre-sum-tree"
 
 [dependencies.tracing]
 version = "0.1.41"
+
+[dependencies.unicode-linebreak]
+version = "0.1.5"
 
 [dependencies.unicode-segmentation]
 version = "1.12.0"
@@ -154,7 +157,7 @@ version = "1"
 version = "0.5"
 
 [dev-dependencies.gpui]
-version = "=0.3.7"
+version = "=0.3.8"
 features = [
     "test-support",
     "bench-support",
@@ -162,7 +165,7 @@ features = [
 package = "gpui-pre"
 
 [dev-dependencies.gpui_platform]
-version = "=0.3.7"
+version = "=0.3.8"
 features = [
     "font-kit",
     "x11",
@@ -176,7 +179,7 @@ package = "gpui-pre-platform"
 version = "2"
 
 [dev-dependencies.reqwest_client]
-version = "=0.3.7"
+version = "=0.3.8"
 package = "gpui-pre-reqwest-client"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies.smol]

@@ -1,0 +1,24 @@
+[
+  {
+    "binary": "after",
+    "pid": 21908,
+    "footprint_first_mb": 55.411768,
+    "footprint_last_mb": 55.395384,
+    "cpu_percent_if_nanoseconds": 4.2501793326802565e-05,
+    "cpu_percent_using_current_tool": 0.0017709080552834402,
+    "process_time_raw_delta": 6720,
+    "elapsed_seconds": 15.811097542,
+    "sample": "/private/tmp/zj-gpui-idle-1mj3b9_o/after-sample.txt"
+  },
+  {
+    "binary": "before",
+    "pid": 22002,
+    "footprint_first_mb": 55.575608,
+    "footprint_last_mb": 68.879416,
+    "cpu_percent_if_nanoseconds": 0.010773292995889501,
+    "cpu_percent_using_current_tool": 0.44888720816206257,
+    "process_time_raw_delta": 1712937,
+    "elapsed_seconds": 15.899846042,
+    "sample": "/private/tmp/zj-gpui-idle-1mj3b9_o/before-sample.txt"
+  }
+]

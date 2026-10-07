@@ -359,6 +359,7 @@ pub fn mark_ranges(text: &str, query: &str) -> Vec<Range<usize>> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Attachment {
     File(PathBuf),
+    Directory(PathBuf),
     Image {
         id: u64,
         name: String,
@@ -379,6 +380,7 @@ impl Attachment {
     pub fn label(&self) -> String {
         match self {
             Attachment::File(path) => file_name(path),
+            Attachment::Directory(path) => format!("{}/", file_name(path)),
             Attachment::Image { name, .. } => name.clone(),
             Attachment::Selection {
                 path, start, end, ..
@@ -394,7 +396,9 @@ impl Attachment {
 
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Attachment::File(path) | Attachment::Selection { path, .. } => Some(path),
+            Attachment::File(path)
+            | Attachment::Directory(path)
+            | Attachment::Selection { path, .. } => Some(path),
             Attachment::Image { path, .. } => path.as_ref(),
         }
     }
@@ -412,6 +416,7 @@ pub fn prompt_parts(text: &str, attachments: &[Attachment]) -> Vec<PromptPart> {
         .iter()
         .map(|a| match a {
             Attachment::File(path) => PromptPart::File(path.clone()),
+            Attachment::Directory(path) => PromptPart::Directory(path.clone()),
             Attachment::Image {
                 data, mime_type, ..
             } => PromptPart::Image {

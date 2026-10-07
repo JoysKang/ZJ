@@ -570,6 +570,7 @@ impl Workbench {
             line: target.line,
             column: target.column,
             len: target.len,
+            viewport_y: None,
         };
         self.go(target.path, place, window, cx);
     }
@@ -735,6 +736,8 @@ pub enum Placement {
         line: u32,
         column: u32,
         len: u32,
+        /// Optional vertical placement for the selected match, consumed by layout.
+        viewport_y: Option<Pixels>,
     },
     Offset(usize),
     /// `column` in characters; `center` scrolls the line to the middle of the editor.
@@ -785,7 +788,9 @@ impl Placement {
             let rope = state.text().clone();
             let (start, end) = match *self {
                 Placement::Line { .. } | Placement::Review { .. } => return,
-                Placement::Point { line, column, len } => {
+                Placement::Point {
+                    line, column, len, ..
+                } => {
                     // A column past the line (the file changed since the search) stays on it.
                     let column = (column as usize).min(rope.line_len(line as usize));
                     let start = rope.point_to_offset(gpui_kit::component::input::Point::new(
@@ -799,7 +804,17 @@ impl Placement {
                     (offset, offset)
                 }
             };
-            state.set_cursor_position(rope.offset_to_position(start), window, cx);
+            if let Placement::Point {
+                viewport_y: Some(y),
+                ..
+            } = *self
+            {
+                // A non-empty selection ends at `end`; anchor that caret so selecting the
+                // match below keeps the one-shot viewport request valid.
+                state.set_cursor_position_in_viewport(rope.offset_to_position(end), y, window, cx);
+            } else {
+                state.set_cursor_position(rope.offset_to_position(start), window, cx);
+            }
             if end > start {
                 state.set_selected_range(start..end, cx);
             }

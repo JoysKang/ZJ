@@ -1,4 +1,4 @@
-//! The composer: attachments, the input, the toolbar and the @ file and / command pickers.
+//! The composer: attachments, the input, the toolbar and the @ path and / command pickers.
 
 use super::*;
 
@@ -21,6 +21,7 @@ impl Workbench {
             .map(|(i, a)| {
                 let icon = match a {
                     Attachment::File(_) => None,
+                    Attachment::Directory(_) => Some(IconName::Folder),
                     Attachment::Image { .. } => Some(IconName::Image),
                     Attachment::Selection { .. } => Some(IconName::SquareDashedText),
                 };
@@ -89,6 +90,7 @@ impl Workbench {
             Button::new("agent-picker")
                 .ghost()
                 .xsmall()
+                .max_w(theme::AGENT_SELECTOR_MAX)
                 .label(label)
                 .dropdown_caret(true)
                 .tooltip("选择 Agent（换 Agent 会开新会话）")
@@ -121,6 +123,7 @@ impl Workbench {
             Button::new("agent-mode")
                 .ghost()
                 .xsmall()
+                .max_w(theme::AGENT_SELECTOR_MAX)
                 .icon(IconName::ShieldCheck)
                 .label(label)
                 .dropdown_caret(true)
@@ -150,6 +153,7 @@ impl Workbench {
                 Button::new("agent-config")
                     .ghost()
                     .xsmall()
+                    .w_full()
                     .label(agent_model::config_label(&configs))
                     .dropdown_caret(true)
                     .tooltip("模型与思考强度")
@@ -179,6 +183,7 @@ impl Workbench {
                         menu
                     })
             });
+        let show_settings = !compact || mode_picker.is_some() || config_picker.is_some();
         let quota = self.agent_shows_quota().then(|| {
             let label = self
                 .agent
@@ -230,6 +235,14 @@ impl Workbench {
             .on_click(cx.listener(|this, _, window, cx| this.agent_submit(window, cx)));
         let composer = v_flex()
             .id("agent-composer")
+            .map(|composer| {
+                #[cfg(test)]
+                let composer = {
+                    use gpui_kit::test::TestSupportExt;
+                    composer.test_support()
+                };
+                composer
+            })
             .mx_3()
             .mt_3()
             .mb_3()
@@ -364,6 +377,18 @@ impl Workbench {
                         .child("正在载入图片…"),
                 )
             })
+            .when(show_settings, |composer| {
+                composer.child(
+                    h_flex()
+                        .min_w_0()
+                        .h(theme::AGENT_COMPOSER_BAR)
+                        .px_1()
+                        .gap_1()
+                        .when(!compact, |bar| bar.child(agent_picker))
+                        .children(mode_picker)
+                        .child(div().min_w_0().flex_1().children(config_picker)),
+                )
+            })
             .child(
                 h_flex()
                     .h(theme::AGENT_COMPOSER_BAR)
@@ -392,7 +417,7 @@ impl Workbench {
                             .ghost()
                             .xsmall()
                             .icon(IconName::AtSign)
-                            .tooltip("引用文件（@）")
+                            .tooltip("引用文件或文件夹（@）")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 let text = this.agent.composer.read(cx).value().to_string();
                                 let next = if text.is_empty() || text.ends_with(' ') {
@@ -407,9 +432,6 @@ impl Workbench {
                                 this.agent_composer_changed(window, cx);
                             })),
                     )
-                    .children(mode_picker)
-                    .children(config_picker)
-                    .when(!compact, |bar| bar.child(agent_picker))
                     .child(div().flex_1())
                     .children(quota)
                     .child(send)
@@ -429,7 +451,7 @@ impl Workbench {
         composer.into_any_element()
     }
 
-    /// What the `@` picker says when it has no files to show.
+    /// What the `@` picker says when it has no paths to show.
     pub(in crate::workbench) fn agent_mention_hint(&self) -> &'static str {
         let query = self.agent.mention.as_ref().map_or("", |m| m.query.as_str());
         if self.root.is_none() {
@@ -442,9 +464,9 @@ impl Workbench {
         } else if self.index.is_none() {
             "正在建立文件索引…"
         } else if query.is_empty() {
-            "输入文件名的一部分"
+            "输入文件或文件夹名的一部分"
         } else {
-            "没有匹配的文件"
+            "没有匹配的文件或文件夹"
         }
     }
 
@@ -469,9 +491,13 @@ impl Workbench {
                 .iter()
                 .take(theme::AGENT_MENTION_ROWS)
                 .enumerate()
-                .map(|(i, path)| {
-                    let name = agent_model::file_name(path);
-                    let dir = path
+                .map(|(i, entry)| {
+                    let mut name = agent_model::file_name(&entry.path);
+                    if entry.directory {
+                        name.push('/');
+                    }
+                    let dir = entry
+                        .path
                         .parent()
                         .map(|p| self.relative(p).display().to_string())
                         .unwrap_or_default();
@@ -491,7 +517,11 @@ impl Workbench {
                                 row.hover(|row| row.bg(colors.hover))
                             }
                         })
-                        .child(file_icons::icon(file_icons::for_file(&name)))
+                        .child(file_icons::icon(if entry.directory {
+                            file_icons::FOLDER
+                        } else {
+                            file_icons::for_file(&name)
+                        }))
                         .child(div().flex_shrink_0().child(name))
                         .child(
                             div()

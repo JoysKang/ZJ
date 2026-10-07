@@ -1,0 +1,13 @@
+{
+  "binary_bytes": 29330448,
+  "cold_start_ms": 1021.258875,
+  "cold_start_reported_ms": 186.0,
+  "cold_start_worst_ms": 1021.258875,
+  "idle_footprint_mb": 62.407712,
+  "idle_cpu_p95_percent": 0.0,
+  "idle_welcome_footprint_mb": 53.363744,
+  "idle_welcome_cpu_p95_percent": 0.0,
+  "three_windows_20_docs_mb": 140.4448,
+  "three_windows_no_docs_mb": 111.24844,
+  "one_window_20_docs_mb": 72.303648
+}

@@ -15,7 +15,7 @@ workspace-editor-core = { path = "crates/core" }
 workspace-editor-git = { path = "crates/git_service" }
 workspace-editor-agent = { path = "crates/agent_client" }
 workspace-editor-agent-history = { path = "crates/agent_history" }
-gpui-kit = { version = "=0.7.0", features = ["tree-sitter-rust", "tree-sitter-diff", "tree-sitter-markdown", "tree-sitter-python", "tree-sitter-toml", "tree-sitter-yaml", "tree-sitter-bash", "tree-sitter-javascript", "tree-sitter-typescript", "tree-sitter-tsx", "tree-sitter-go", "tree-sitter-html", "tree-sitter-css", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-java", "tree-sitter-sql"] }
+gpui-kit = { version = "=0.7.1", features = ["tree-sitter-rust", "tree-sitter-diff", "tree-sitter-markdown", "tree-sitter-python", "tree-sitter-toml", "tree-sitter-yaml", "tree-sitter-bash", "tree-sitter-javascript", "tree-sitter-typescript", "tree-sitter-tsx", "tree-sitter-go", "tree-sitter-html", "tree-sitter-css", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-java", "tree-sitter-sql"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
@@ -47,7 +47,7 @@ strip = true
 [profile.dev]
 debug = 1
 
-# GPUI 的 macOS 渲染器和窗口层：为降低每个窗口的显存（IOSurface）打了小补丁，
+# GPUI 0.3.8 的 macOS 渲染器 / 窗口层与 gpui-base 0.7.1：保留 ZJ 的本地补丁，
 # 原版本、改动和测量方法见 vendor/README.md 与 docs/adr/0005-gpu-memory.md。
 [patch.crates-io]
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }

@@ -1,4 +1,4 @@
-//! The composer's context: selections, attachments, the @ file picker and the / command
+//! The composer's context: selections, attachments, the @ path picker and the / command
 //! picker.
 
 use super::*;
@@ -250,25 +250,49 @@ impl Workbench {
             .collect();
         let shown_query = query.clone();
         let task = cx.spawn_in(window, async move |this, cx| {
-            let results = match index {
-                Some(index) if !query.is_empty() => {
-                    cx.background_spawn(async move { index.search(&query, show_hidden).paths })
-                        .await
+            let results: std::io::Result<Vec<files::Entry>> = match index {
+                Some(index) => {
+                    cx.background_spawn(async move {
+                        let mut results = index.mention_entries(&query, show_hidden)?;
+                        if query.is_empty() {
+                            results.splice(
+                                0..0,
+                                recent.into_iter().map(|path| files::Entry {
+                                    path,
+                                    directory: false,
+                                    symlink: false,
+                                }),
+                            );
+                        }
+                        Ok(results)
+                    })
+                    .await
                 }
                 // No index (no folder, or still building): filter the open files by name.
                 _ => {
                     let query = query.to_lowercase();
-                    recent
+                    Ok(recent
                         .into_iter()
                         .filter(|path| agent_model::file_name(path).to_lowercase().contains(&query))
-                        .collect()
+                        .map(|path| files::Entry {
+                            path,
+                            directory: false,
+                            symlink: false,
+                        })
+                        .collect())
                 }
             };
             let _ = this.update(cx, |this, cx| {
                 if let Some(mention) = this.agent.mention.as_mut()
                     && mention.generation == generation
                 {
-                    mention.results = results;
+                    match results {
+                        Ok(results) => mention.results = results,
+                        Err(error) => {
+                            mention.results.clear();
+                            this.message = format!("读取引用目录失败：{error}");
+                        }
+                    }
                     mention.results.truncate(50);
                     mention.selected = 0;
                     cx.notify();
@@ -306,7 +330,7 @@ impl Workbench {
         }
     }
 
-    /// Replaces `@query` with a file chip.
+    /// Replaces `@query` with a file or folder chip.
     pub(in crate::workbench) fn agent_pick_mention(
         &mut self,
         index: Option<usize>,
@@ -316,7 +340,7 @@ impl Workbench {
         let Some(mention) = self.agent.mention.take() else {
             return;
         };
-        let Some(path) = mention
+        let Some(entry) = mention
             .results
             .get(index.unwrap_or(mention.selected))
             .cloned()
@@ -333,10 +357,14 @@ impl Workbench {
                 .composer
                 .update(cx, |composer, cx| composer.set_value(next, window, cx));
         }
-        if crate::agent_images::is_image(&path) {
-            self.agent_attach_images(vec![path], cx);
+        if !entry.directory && crate::agent_images::is_image(&entry.path) {
+            self.agent_attach_images(vec![entry.path], cx);
         } else {
-            let attachment = Attachment::File(path);
+            let attachment = if entry.directory {
+                Attachment::Directory(entry.path)
+            } else {
+                Attachment::File(entry.path)
+            };
             if !self.agent.attachments.contains(&attachment) {
                 self.agent.attachments.push(attachment);
             }

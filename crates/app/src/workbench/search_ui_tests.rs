@@ -8,6 +8,92 @@ use core::prelude::v1::test;
 use gpui_kit::{TestAppContext, test::TestWindowExt};
 
 #[gpui_kit::test]
+async fn search_results_open_near_the_top_with_the_match_selected(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-search-placement-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let source: String = (0..800)
+        .map(|line| match line {
+            0 | 420 => "// needle\n".to_string(),
+            425 => format!("{}needle\n", "长行上下文 ".repeat(50)),
+            20 => format!("// {}\n", "wrapped context ".repeat(80)),
+            _ => format!("// line {line}\n"),
+        })
+        .collect();
+    for name in ["code.rs", "prose.txt"] {
+        std::fs::write(root.join(name), &source).unwrap();
+    }
+    let (handle, this) = open(cx, root.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.find_in_files(window, cx);
+            p.search
+                .query
+                .update(cx, |input, cx| input.set_value("needle", window, cx));
+            p.schedule_search(Duration::ZERO, window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| p.search.matches == 6)
+    });
+    for name in ["code.rs", "prose.txt"] {
+        let path = root.join(name);
+        let file = this.read_with(cx, |p, _| {
+            p.search
+                .results
+                .iter()
+                .position(|f| f.path == path)
+                .unwrap()
+        });
+        // A new file, another result in its existing editor, then the first line.
+        for (hit, line) in [(1, 420), (2, 425), (0, 0)] {
+            cx.update_window(handle.into(), |_, window, cx| {
+                this.update(cx, |p, cx| p.open_match(file, hit, window, cx));
+            })
+            .unwrap();
+            settle(cx, None, |cx| {
+                this.read_with(cx, |p, cx| {
+                    p.active_document().is_some_and(|(active, editor)| {
+                        active == path && editor.read(cx).cursor_position().line == line
+                    })
+                })
+            });
+            cx.update_window(handle.into(), |_, window, cx| {
+                let editor = this.read(cx).active_editor().unwrap().clone();
+                for _ in 0..2 {
+                    window.simulate_next_frame(cx);
+                    window.render_frame(cx);
+                    let state = editor.read(cx);
+                    assert_eq!(state.selected_text().to_string(), "needle");
+                    let (caret, height) = state.cursor_layout().unwrap();
+                    let y = caret.origin.y
+                        - state.input_bounds().origin.y
+                        - (height - caret.size.height) / 2.
+                        + state.scroll_offset().y;
+                    assert!(
+                        y >= -px(1.) && y < state.input_bounds().size.height / 3.,
+                        "{name}, line {line}: search result is too low: {y:?}"
+                    );
+                    if line != 0 {
+                        assert!((y - theme::SEARCH_RESULT_TOP).abs() < state.line_height().unwrap() / 2.,
+                            "{name}, line {line}: match did not reach the requested top position: {y:?}");
+                        let below = ((state.input_bounds().size.height - y)
+                            / state.line_height().unwrap()) as usize - 2;
+                        assert!(state.visible_row_range().unwrap().contains(&(line as usize + below)),
+                            "the first source frame must paint the lower visible rows: {name}, line {line}, range={:?}",
+                            state.visible_row_range());
+                    }
+                }
+            })
+            .unwrap();
+        }
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
 async fn replacing_in_an_edited_buffer_follows_the_results(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = std::env::temp_dir().join(format!("zj-search-replace-{}", std::process::id()));

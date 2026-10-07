@@ -94,6 +94,8 @@ pub enum PromptPart {
     },
     /// A file reference (`resource_link`); the agent reads it itself.
     File(PathBuf),
+    /// A directory reference; contents are discovered by the agent, not embedded here.
+    Directory(PathBuf),
     /// Lines `start_line..=end_line` (1-based). With `text` and an agent that accepts embedded
     /// context, the selection is sent inline; otherwise as a link with a line fragment.
     Selection {
@@ -1894,6 +1896,16 @@ pub(crate) fn prompt_blocks(parts: &[PromptPart], embedded: bool) -> Vec<acp::Co
                 file_name(path),
                 file_uri(path),
             )),
+            PromptPart::Directory(path) => {
+                let mut uri = file_uri(path);
+                if !uri.ends_with('/') {
+                    uri.push('/');
+                }
+                acp::ContentBlock::ResourceLink(acp::ResourceLink::new(
+                    format!("{}/", file_name(path)),
+                    uri,
+                ))
+            }
             PromptPart::Selection {
                 path,
                 start_line,
@@ -1966,6 +1978,7 @@ mod tests {
                 end_line: 9,
                 text: Some("fn main() {}".into()),
             },
+            PromptPart::Directory("/w/参考 资料".into()),
         ];
         let linked = prompt_blocks(&parts, false);
         match &linked[1] {
@@ -1983,5 +1996,21 @@ mod tests {
         }
         let embedded = prompt_blocks(&parts, true);
         assert!(matches!(embedded[2], acp::ContentBlock::Resource(_)));
+        for blocks in [linked, embedded] {
+            match &blocks[3] {
+                acp::ContentBlock::ResourceLink(link) => {
+                    assert_eq!(
+                        link.uri,
+                        "file:///w/%E5%8F%82%E8%80%83%20%E8%B5%84%E6%96%99/"
+                    );
+                    assert_eq!(link.name, "参考 资料/");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        match &prompt_blocks(&[PromptPart::Directory("/".into())], false)[0] {
+            acp::ContentBlock::ResourceLink(link) => assert_eq!(link.uri, "file:///"),
+            other => panic!("{other:?}"),
+        }
     }
 }

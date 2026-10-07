@@ -323,6 +323,115 @@ impl PathIndex {
             .collect();
         result
     }
+
+    /// Agent context: indexed files and their folders. Also list the query's parent so
+    /// empty folders can be referenced by path, without walking the workspace again.
+    pub fn mention_entries(&self, query: &str, show_hidden: bool) -> io::Result<Vec<Entry>> {
+        let query = query.strip_prefix("./").unwrap_or(query);
+        let query = if query == "." { "" } else { query };
+        let chars = fuzzy::query_chars(query);
+        let mut scored = Vec::new();
+        let mut add = |relative: &Path, directory: bool| {
+            if (!show_hidden && path_hidden_by_default(relative))
+                || relative
+                    .components()
+                    .any(|c| is_excluded_dir(c.as_os_str()))
+            {
+                return;
+            }
+            let mut key = if relative.as_os_str().is_empty() {
+                self.root
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_lowercase()
+            } else {
+                relative.to_string_lossy().to_lowercase()
+            };
+            let name_start = key.rfind('/').map_or(0, |i| i + 1);
+            if directory {
+                key.push('/');
+            }
+            if let Some(score) = fuzzy::score(&chars, &key, name_start) {
+                scored.push((
+                    score,
+                    key,
+                    Entry {
+                        path: self.root.join(relative),
+                        directory,
+                        symlink: false,
+                    },
+                ));
+            }
+        };
+        for path in self.search(query, show_hidden).paths {
+            if let Ok(relative) = path.strip_prefix(&self.root) {
+                add(relative, false);
+            }
+        }
+        add(Path::new(""), true);
+        if !query.is_empty() {
+            // Component-sorted files keep every folder's descendants contiguous. Once
+            // the previous file shares a parent, all its ancestors were already added.
+            let mut previous = Path::new("");
+            for relative in self.relatives() {
+                for parent in relative
+                    .ancestors()
+                    .skip(1)
+                    .take_while(|p| !p.as_os_str().is_empty())
+                {
+                    if previous.starts_with(parent) {
+                        break;
+                    }
+                    add(parent, true);
+                }
+                previous = relative;
+            }
+        }
+        let parent = if query.ends_with('/') {
+            Path::new(query)
+        } else {
+            Path::new(query).parent().unwrap_or(Path::new(""))
+        };
+        if parent.components().all(|c| {
+            matches!(c, std::path::Component::Normal(_)) && !is_excluded_dir(c.as_os_str())
+        }) {
+            match fs::canonicalize(self.root.join(parent)) {
+                Ok(path) if path.starts_with(fs::canonicalize(&self.root)?) && path.is_dir() => {
+                    add(parent, true);
+                    for entry in directory(&self.root.join(parent), show_hidden)?.0 {
+                        if entry.directory
+                            && !is_excluded_dir(entry.path.file_name().unwrap_or_default())
+                            && let Ok(relative) = entry.path.strip_prefix(&self.root)
+                        {
+                            add(relative, true);
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        scored.sort_unstable_by(|a, b| a.2.path.cmp(&b.2.path));
+        scored.dedup_by(|a, b| a.2.path == b.2.path);
+        let order = |a: &(i32, String, Entry), b: &(i32, String, Entry)| {
+            b.0.cmp(&a.0)
+                .then(b.2.directory.cmp(&a.2.directory))
+                .then(a.1.len().cmp(&b.1.len()))
+                .then(a.1.cmp(&b.1))
+        };
+        if scored.len() > MAX_RESULTS {
+            scored.select_nth_unstable_by(MAX_RESULTS, order);
+            scored.truncate(MAX_RESULTS);
+        }
+        scored.sort_unstable_by(order);
+        Ok(scored.into_iter().map(|(_, _, entry)| entry).collect())
+    }
 }
 
 struct Builder<'a> {
@@ -770,6 +879,66 @@ mod tests {
             vec![root.join("src/site.py")]
         );
         assert_eq!(index.search("site", true).paths.len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mentions_match_folders_and_browse_empty_ones_without_following_outside_links() {
+        let root = std::env::temp_dir().join(format!("zj-mention-paths-{}", std::process::id()));
+        for dir in [
+            "src/deep",
+            "src/empty",
+            "assets.png",
+            ".hidden",
+            "node_modules/pkg",
+            ".github/workflows",
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::os::unix::fs::symlink(root.parent().unwrap(), root.join("outside")).unwrap();
+        let index = PathIndex::pack(
+            root.clone(),
+            vec![
+                "src/deep/main.rs".into(),
+                "src/deep/other.rs".into(),
+                ".github/workflows/ci.yml".into(),
+                ".hidden/settings.json".into(),
+            ],
+            false,
+            0,
+        );
+        let folders = |query: &str, show_hidden| {
+            index
+                .mention_entries(query, show_hidden)
+                .unwrap()
+                .into_iter()
+                .filter(|entry| entry.directory)
+                .map(|entry| entry.path)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(folders("DEEP", false), [root.join("src/deep")]);
+        assert_eq!(folders("src/emp", false), [root.join("src/empty")]);
+        assert_eq!(folders("src/empty/", false), [root.join("src/empty")]);
+        assert_eq!(folders("assets", false), [root.join("assets.png")]);
+        assert_eq!(
+            folders(".github", false),
+            [root.join(".github"), root.join(".github/workflows")]
+        );
+        assert!(folders("hidden", false).is_empty());
+        assert_eq!(folders("hidden", true), [root.join(".hidden")]);
+        assert!(folders("node_modules", true).is_empty());
+        assert!(folders("node_modules/", true).is_empty());
+        assert!(folders("outside/", true).is_empty());
+        assert!(folders("../", true).is_empty());
+        assert_eq!(folders("./src/empty", false), [root.join("src/empty")]);
+        assert!(folders("", false).contains(&root));
+        assert_eq!(
+            index.search("deep", false).paths.len(),
+            2,
+            "quick open stays file-only"
+        );
+        let next = index.with_changes(&[], &[root.join("src/deep")]);
+        assert!(next.mention_entries("deep", false).unwrap().is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 

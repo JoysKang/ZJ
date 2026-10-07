@@ -53,6 +53,8 @@ pub const SEARCH_SWITCH_GUTTER: Pixels = px(44.);
 /// The Search view's glob lists are textareas: this line height makes one line as high as
 /// the single-line query above them (24 px), whose text gets the same 18 px.
 pub const SEARCH_GLOB_LINE: Pixels = px(18.);
+/// Search jumps leave a few lines of context above the selected match.
+pub const SEARCH_RESULT_TOP: Pixels = px(64.);
 pub const TREE_STEP: Pixels = px(8.);
 pub const ROW_INSET: Pixels = px(4.);
 pub const GUIDE_WIDTH: Pixels = px(1.);
@@ -208,6 +210,7 @@ pub const AGENT_FILE_ROW: Pixels = px(26.);
 pub const AGENT_FILE_INDENT: Pixels = px(24.);
 pub const AGENT_CHIP: Pixels = px(20.);
 pub const AGENT_COMPOSER_BAR: Pixels = px(34.);
+pub const AGENT_SELECTOR_MAX: Pixels = px(120.);
 /// Four editable lines plus the textarea padding; the composer grows through eight lines.
 pub const AGENT_COMPOSER_MIN: Pixels = px(96.);
 pub const AGENT_QUOTA_WIDTH: Pixels = px(320.);
