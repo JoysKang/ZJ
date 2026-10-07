@@ -2180,6 +2180,8 @@ struct CursorRenderInfo {
 }
 
 pub(super) struct PrepaintState {
+    // ZJ patch: laid out against this frame's shaped text, including wrapping/scroll.
+    line_end_annotation: Option<AnyElement>,
     /// The lines of entire lines.
     last_layout: LastLayout,
     token_elements: Vec<AnyElement>,
@@ -2852,7 +2854,49 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let hitbox = window.insert_hitbox(input_bounds, HitboxBehavior::Normal);
 
         let token_elements = self.prepaint_tokens(&last_layout, bounds, token_elements, window, cx);
+        // ZJ patch: place the annotation after the final visual segment of the logical
+        // line. Hidden/folded/offscreen lines have no annotation or hitbox.
+        let annotation = self
+            .state
+            .read(cx)
+            .extras
+            .line_end_annotation()
+            .and_then(|annotation| {
+                let index = last_layout
+                    .visible_buffer_lines
+                    .binary_search(&annotation.line)
+                    .ok()?;
+                let line = last_layout.lines.get(index)?;
+                let offset = text
+                    .line_end_offset(annotation.line)
+                    .saturating_sub(last_layout.visible_line_byte_offsets[index]);
+                let position = line.position_for_index(offset, &last_layout, false)?;
+                let top = last_layout.visible_top
+                    + last_layout.lines[..index]
+                        .iter()
+                        .map(|line| line.size(line_height).height)
+                        .sum::<Pixels>();
+                let origin = bounds.origin
+                    + point(last_layout.line_number_width + annotation.gap, top)
+                    + position;
+                let right = input_bounds.right() - RIGHT_MARGIN;
+                let left = input_bounds.left() + last_layout.line_number_width;
+                if origin.x < left
+                    || origin.x >= right
+                    || origin.y < input_bounds.top()
+                    || origin.y + line_height > input_bounds.bottom()
+                {
+                    return None;
+                }
+                Some((annotation.render.clone(), origin, right - origin.x))
+            });
+        let line_end_annotation = annotation.and_then(|(render, origin, width)| {
+            let mut element = render(window, cx)?;
+            element.prepaint_as_root(origin, size(width.into(), line_height.into()), window, cx);
+            Some(element)
+        });
         PrepaintState {
+            line_end_annotation,
             token_elements,
             hitbox,
             bounds,
@@ -3229,6 +3273,10 @@ impl<M: InputModeKind> Element for TextElement<M> {
         }
 
         self.paint_mouse_listeners(&prepaint.hitbox, window, cx);
+        // ZJ patch: paint above the editor, with the enclosing editor's content mask.
+        if let Some(annotation) = prepaint.line_end_annotation.as_mut() {
+            annotation.paint(window, cx);
+        }
     }
 }
 

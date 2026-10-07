@@ -10,6 +10,31 @@ use super::{EditorMode, InputBaseState, InputModeKind};
 /// exposes them.
 pub type EditorState = InputBaseState<EditorMode>;
 
+// ZJ patch: an application-owned annotation after a logical line. It participates
+// only in painting/hit testing, never in text, selection, wrapping or scroll size.
+pub struct LineEndAnnotation {
+    pub(crate) line: usize,
+    pub(crate) gap: gpui::Pixels,
+    pub(crate) render: std::rc::Rc<dyn Fn(&mut Window, &mut App) -> Option<gpui::AnyElement>>,
+}
+
+impl EditorState {
+    pub fn set_line_end_annotation(
+        &mut self,
+        line: usize,
+        gap: gpui::Pixels,
+        render: impl Fn(&mut Window, &mut App) -> Option<gpui::AnyElement> + 'static,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.extras.line_end_annotation = Some(LineEndAnnotation {
+            line,
+            gap,
+            render: std::rc::Rc::new(render),
+        });
+        cx.notify();
+    }
+}
+
 impl InputModeKind for EditorMode {
     const MULTI_LINE: bool = true;
     const CODE_EDITOR: bool = true;
@@ -233,6 +258,11 @@ impl RenderOnce for Editor {
 
 /// What a code editor exposes to the renderer. See [`crate::input::InputExtras`].
 impl crate::input::InputExtras for super::EditorExtras {
+    // ZJ patch: ordinary inputs/textarea retain the trait's empty default.
+    fn line_end_annotation(&self) -> Option<&LineEndAnnotation> {
+        self.line_end_annotation.as_ref()
+    }
+
     fn decoration_layers(&self) -> Vec<&[super::TextDecoration]> {
         self.decorations.iter().collect()
     }

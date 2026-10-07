@@ -241,6 +241,69 @@ async fn quota_hover_and_click_query_now_and_anchor_to_the_button(cx: &mut TestA
 }
 
 #[gpui_kit::test]
+async fn process_expansion_can_resume_following_latest_output(cx: &mut TestAppContext) {
+    let (handle, this) = open(cx, None);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_ensure_session();
+            let key = p.agent.current.unwrap();
+            let session = p.agent.session_mut(key).unwrap();
+            session.thread.push_user("task".into(), vec![], 1);
+            session.thread.items.extend([
+                Item::Thought {
+                    text: "detail\n".repeat(80),
+                    streaming: false,
+                },
+                Item::Agent {
+                    text: "latest".into(),
+                    streaming: false,
+                },
+            ]);
+            p.agent_sync_replies(key, 0);
+            p.agent_sync_list(true);
+            cx.notify();
+        });
+        window.render_frame(cx);
+        window.click(("agent-process", 1usize), cx);
+        window.render_frame(cx);
+        // The user returns to the bottom after inspecting execution details.
+        this.read(cx).agent.thread_list.scroll_to_end();
+        window.render_frame(cx);
+        assert!(
+            this.read(cx).agent.thread_list.is_following_tail(),
+            "returning to the bottom must resume following"
+        );
+        this.update(cx, |p, cx| {
+            let key = p.agent.current.unwrap();
+            p.agent
+                .session_mut(key)
+                .unwrap()
+                .thread
+                .items
+                .push_back(Item::Agent {
+                    text: "newest\n\n".repeat(80),
+                    streaming: true,
+                });
+            p.agent_sync_replies(key, 0);
+            p.agent_sync_list(false);
+            cx.notify();
+        });
+        window.render_frame(cx);
+        let list = &this.read(cx).agent.thread_list;
+        assert!(list.is_following_tail());
+        let bottom = list
+            .bounds_for_item(list.item_count() - 1)
+            .unwrap()
+            .bottom();
+        assert!(
+            (bottom - list.viewport_bounds().bottom()).abs() <= px(1.),
+            "latest output must remain at the bottom: item={bottom:?}, viewport={:?}", list.viewport_bounds()
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
 async fn expanded_process_details_stay_individual_virtual_rows(cx: &mut TestAppContext) {
     let (handle, this) = open(cx, None);
     let mut group = (0, 0);

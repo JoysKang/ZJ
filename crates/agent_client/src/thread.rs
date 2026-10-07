@@ -10,7 +10,7 @@ use crate::events::{
     ToolStatus, TurnId, TurnOutcome,
 };
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::PathBuf,
 };
 
@@ -109,6 +109,8 @@ pub enum Record {
 #[derive(Default)]
 pub struct Thread {
     pub items: VecDeque<Item>,
+    /// Turn starts within `items`. A steering prompt stays in the current turn.
+    pub turn_starts: BTreeSet<usize>,
     /// Older items not held in memory.
     pub dropped: usize,
     pub status: Status,
@@ -223,6 +225,12 @@ impl Thread {
         while self.items.len() > MAX_ITEMS {
             self.items.pop_front();
             self.dropped += 1;
+            self.turn_starts = self
+                .turn_starts
+                .iter()
+                .filter_map(|i| i.checked_sub(1))
+                .collect();
+            self.turn_starts.insert(0);
         }
     }
 
@@ -261,6 +269,7 @@ impl Thread {
         self.end_streaming();
         self.push(Item::User { text, attachments });
         if self.turn != Some(turn) {
+            self.turn_starts.insert(self.items.len() - 1);
             self.turn = Some(turn);
             self.status = Status::Running;
         }
@@ -279,16 +288,37 @@ impl Thread {
     /// Restores items from the history database (oldest first), replacing what is shown.
     pub fn load(&mut self, items: Vec<Item>, older: usize) {
         self.items.clear();
+        self.turn_starts.clear();
         self.dropped = older;
         for item in items {
             self.push(item);
         }
+        self.turn_starts = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| matches!(item, Item::User { .. }).then_some(i))
+            .collect();
         self.version += 1;
     }
 
     /// Older items fetched from history go in front.
     pub fn prepend(&mut self, items: Vec<Item>) {
         let n = items.len();
+        // A synthetic start at zero may be the middle of a truncated turn. Join it
+        // to the older prefix instead of inventing a second turn at that boundary.
+        self.turn_starts = self
+            .turn_starts
+            .iter()
+            .filter(|i| matches!(self.items.get(**i), Some(Item::User { .. })))
+            .map(|i| i + n)
+            .chain(
+                items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, item)| matches!(item, Item::User { .. }).then_some(i)),
+            )
+            .collect();
         for item in items.into_iter().rev() {
             self.items.push_front(item);
         }
@@ -296,6 +326,7 @@ impl Thread {
         while self.items.len() > MAX_ITEMS {
             self.items.pop_back();
         }
+        self.turn_starts.retain(|i| *i < self.items.len());
         self.version += 1;
     }
 

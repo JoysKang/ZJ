@@ -47,7 +47,8 @@ impl Workbench {
         let key = session.key;
         let start = row.range.start + session.thread.dropped;
         let expanded = self.agent.expanded_processes.contains(&(key, start));
-        let active = session.busy() && row.range.end == session.thread.items.len();
+        let active = session.busy()
+            && row.range.start >= session.thread.turn_starts.last().copied().unwrap_or(0);
         v_flex()
             .w_full()
             .px_3()
@@ -69,16 +70,12 @@ impl Workbench {
                     } else {
                         IconName::ChevronRight
                     })
-                    .label(format!(
-                        "{} · {} 项",
-                        if active { "执行中" } else { "执行过程" },
-                        row.range.len()
-                    ))
+                    .label(if active { "执行中" } else { "执行过程" })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.agent.expanded_processes.remove(&(key, start)) {
                             this.agent.expanded_processes.insert((key, start));
                         }
-                        this.agent.thread_list.set_follow_mode(FollowMode::Normal);
+                        this.agent.thread_list.pause_following_tail();
                         this.agent_sync_list(false);
                         cx.notify();
                     })),

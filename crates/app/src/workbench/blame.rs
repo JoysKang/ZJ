@@ -1,4 +1,4 @@
-//! Who last changed the cursor's line, in the status bar (`git blame -L n,n`). Asked once the
+//! Who last changed the cursor's line, after its text (`git blame -L n,n`). Asked once the
 //! cursor has rested on a line for `BLAME_DELAY`; an edited buffer is blamed as typed, so its
 //! own edits show as not committed. Clicking the item copies the commit hash.
 //!
@@ -6,6 +6,7 @@
 
 use super::*;
 use gpui_kit::{
+    base::TestSupportExt,
     component::{h_flex, input::RopeExt},
     prelude::FluentBuilder,
 };
@@ -49,6 +50,25 @@ impl Workbench {
         let Some(key) = key else {
             return;
         };
+        let weak = cx.weak_entity();
+        if let Some(doc) = self.document(key.0) {
+            doc.editor.update(cx, |editor, cx| {
+                editor.set_line_end_annotation(
+                    key.1 as usize,
+                    theme::BLAME_GAP,
+                    move |_, cx| {
+                        weak.update(cx, |this, cx| {
+                            (this.blame.key == Some(key))
+                                .then(|| this.render_blame(cx))
+                                .flatten()
+                        })
+                        .ok()
+                        .flatten()
+                    },
+                    cx,
+                );
+            });
+        }
         self.blame.task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(BLAME_DELAY).await;
             let _ = this.update(cx, |this, cx| this.run_blame(key, cx));
@@ -148,7 +168,7 @@ impl Workbench {
         }));
     }
 
-    /// The status bar item: author and age, the commit in the tooltip.
+    /// The line-end annotation: author, age and summary, with commit details on hover.
     pub(super) fn render_blame(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let colors = theme::colors(cx);
         let (label, tooltip, commit) = match self.blame.shown.as_ref()? {
@@ -163,7 +183,8 @@ impl Workbench {
                 let age = crate::agent_model::relative_time(blame.time * 1000, now, offset);
                 let short: String = blame.commit.chars().take(7).collect();
                 (
-                    format!("{}，{age}", blame.author),
+                    format!("{}，{age} · {}", blame.author, blame.summary)
+                        .replace(SINGLE_LINE, " "),
                     format!(
                         "{}\n{short} · {} · {age}\n点击复制提交哈希",
                         blame.summary, blame.author
@@ -175,15 +196,16 @@ impl Workbench {
         };
         Some(
             h_flex()
-                .id("status-blame")
+                .id("line-blame")
+                .max_w_full()
                 .h_full()
-                .px_2()
                 .gap_1()
                 .flex_shrink_1()
                 .min_w_0()
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_color(colors.muted)
+                .text_size(theme::TEXT_SECTION)
                 .when(commit.is_some(), |item| {
                     item.cursor_pointer().hover(|item| item.bg(colors.hover))
                 })
@@ -191,7 +213,7 @@ impl Workbench {
                     gpui_kit::component::Icon::new(gpui_kit::assets::IconName::GitCommitHorizontal)
                         .size(theme::SMALL_ICON_SIZE),
                 )
-                .child(label)
+                .child(div().min_w_0().text_ellipsis().child(label))
                 .tooltip(move |window, cx| {
                     gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
                 })
@@ -202,6 +224,7 @@ impl Workbench {
                         cx.notify();
                     }))
                 })
+                .test_support()
                 .into_any_element(),
         )
     }

@@ -293,7 +293,7 @@ impl Workbench {
                 }
                 this.agent_sync_replies(key, 0);
                 this.agent_sync_list(true);
-                this.agent.thread_list.set_follow_mode(FollowMode::Normal);
+                this.agent.thread_list.pause_following_tail();
                 this.agent.thread_list.scroll_to(ListOffset {
                     item_ix: this
                         .agent

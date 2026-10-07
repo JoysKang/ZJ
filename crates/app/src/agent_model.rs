@@ -22,27 +22,65 @@ pub struct ThreadRow {
     pub process: bool,
 }
 
-/// Merge execution details and intermediate replies; the trailing reply stays visible.
-/// Approval, login, notices and failed tools always form their own visible rows.
-pub fn thread_rows(items: &std::collections::VecDeque<Item>) -> Vec<ThreadRow> {
-    let detail = |i: usize| match &items[i] {
-        Item::Thought { .. } | Item::Plan(_) => true,
-        Item::Tool(card) => card.call.status != ToolStatus::Failed,
-        Item::Agent { .. } => items.get(i + 1).is_some_and(|next| {
-            matches!(next, Item::Thought { .. } | Item::Plan(_) | Item::Tool(_))
-        }),
-        _ => false,
-    };
+/// One process per turn, including failed tools and intermediate replies. The final reply
+/// is exposed only once the turn ends. User prompts, pending approvals/logins and errors
+/// stay visible; process ranges can span those rows, which expansion excludes.
+pub fn thread_rows(thread: &Thread) -> Vec<ThreadRow> {
+    let items = &thread.items;
+    let mut starts = thread.turn_starts.clone();
+    if starts.is_empty() {
+        starts.extend(
+            items
+                .iter()
+                .enumerate()
+                .filter_map(|(i, item)| matches!(item, Item::User { .. }).then_some(i)),
+        );
+    }
+    starts.insert(0);
+    starts.insert(items.len());
+    let starts: Vec<_> = starts.into_iter().collect();
     let mut rows: Vec<ThreadRow> = Vec::new();
-    for i in 0..items.len() {
-        let process = detail(i);
-        if process && let Some(last) = rows.last_mut().filter(|row| row.process) {
-            last.range.end = i + 1;
-        } else {
-            rows.push(ThreadRow {
-                range: i..i + 1,
-                process,
-            });
+    for turn in starts.windows(2) {
+        let range = turn[0]..turn[1];
+        let running =
+            range.end == items.len() && matches!(thread.status, Status::Running | Status::Awaiting);
+        let final_reply = (!running)
+            .then(|| {
+                range.clone().rev().find(|&i| {
+                    matches!(
+                        items[i],
+                        Item::Agent {
+                            streaming: false,
+                            ..
+                        }
+                    )
+                })
+            })
+            .flatten();
+        let mut process: Option<usize> = None;
+        for i in range {
+            let visible = Some(i) == final_reply
+                || match &items[i] {
+                    Item::User { .. } | Item::Notice { error: true, .. } => true,
+                    Item::Permission(card) => {
+                        card.state == workspace_editor_agent::thread::PermissionState::Pending
+                    }
+                    Item::Login(card) => {
+                        card.state == workspace_editor_agent::thread::LoginState::Pending
+                    }
+                    _ => false,
+                };
+            if !visible && let Some(index) = process {
+                rows[index].range.end = i + 1;
+            } else {
+                if !visible {
+                    process = Some(rows.len());
+                }
+                rows.push(ThreadRow {
+                    range: i..i + 1,
+                    process: !visible,
+                });
+            }
         }
     }
     rows
@@ -622,16 +660,6 @@ pub fn tool_output(call: &ToolCall) -> String {
     out
 }
 
-/// (fraction used, percent label) for the context ring.
-pub fn usage_ring(usage: Option<(u64, u64)>) -> Option<(f32, String)> {
-    let (used, size) = usage?;
-    if size == 0 {
-        return None;
-    }
-    let fraction = (used as f64 / size as f64).clamp(0.0, 1.0) as f32;
-    Some((fraction, format!("{}%", (fraction * 100.0).round() as u32)))
-}
-
 /// Direction B: the live strip appears once two or more sessions need attention or run.
 pub fn show_live_strip(active_sessions: usize) -> bool {
     active_sessions >= 2
@@ -989,6 +1017,69 @@ mod tests {
     }
 
     #[test]
+    fn one_process_contains_intermediate_output_failed_tools_and_notices() {
+        let items = [
+            Item::User {
+                text: "task".into(),
+                attachments: vec![],
+            },
+            Item::Thought {
+                text: "thinking".into(),
+                streaming: false,
+            },
+            Item::Agent {
+                text: "progress".into(),
+                streaming: false,
+            },
+            Item::Tool(ToolCard {
+                call: ToolCall {
+                    id: "failed".into(),
+                    title: "command".into(),
+                    kind: ToolKind::Execute,
+                    status: ToolStatus::Failed,
+                    locations: vec![],
+                    content: vec![],
+                },
+                added: 0,
+                removed: 0,
+            }),
+            Item::Notice {
+                text: "allowed".into(),
+                error: false,
+            },
+            Item::Thought {
+                text: "more thinking".into(),
+                streaming: false,
+            },
+            Item::Agent {
+                text: "final".into(),
+                streaming: false,
+            },
+        ]
+        .into_iter()
+        .collect();
+        let mut thread = Thread::new();
+        thread.items = items;
+        assert_eq!(
+            thread_rows(&thread),
+            [
+                ThreadRow {
+                    range: 0..1,
+                    process: false
+                },
+                ThreadRow {
+                    range: 1..6,
+                    process: true
+                },
+                ThreadRow {
+                    range: 6..7,
+                    process: false
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn process_groups_keep_final_replies_and_errors_visible() {
         let tool = |status| {
             Item::Tool(ToolCard {
@@ -1031,15 +1122,17 @@ mod tests {
         ]
         .into_iter()
         .collect();
+        let mut thread = Thread::new();
+        thread.items = items;
         assert_eq!(
-            thread_rows(&items),
+            thread_rows(&thread),
             [
                 ThreadRow {
                     range: 0..1,
                     process: false
                 },
                 ThreadRow {
-                    range: 1..5,
+                    range: 1..8,
                     process: true
                 },
                 ThreadRow {
@@ -1050,10 +1143,6 @@ mod tests {
                     range: 6..7,
                     process: false
                 },
-                ThreadRow {
-                    range: 7..8,
-                    process: false
-                }
             ]
         );
     }
@@ -1078,8 +1167,6 @@ mod tests {
             tool_summary(&call),
             ("读取", "a.rs, b.rs, c.rs 等 4 个文件".to_string())
         );
-        assert_eq!(usage_ring(Some((38, 100))).unwrap().1, "38%");
-        assert_eq!(usage_ring(Some((1, 0))), None);
         assert_eq!(RowStatus::of_thread(Status::Idle, true), RowStatus::Unread);
         assert_eq!(
             RowStatus::of_stored(SessionStatus::Running),

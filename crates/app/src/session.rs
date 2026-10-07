@@ -231,12 +231,27 @@ impl Frame {
 struct Tracker {
     /// `None`: no place to keep the file; windows are still tracked for closing.
     path: Option<PathBuf>,
+    /// Back to front: opening in this order restores the native window stack.
     windows: Vec<(WindowId, SavedWindow)>,
+    /// The stack before save prompts bring other windows to the front.
+    quit_order: Option<Vec<WindowId>>,
 }
 
 impl Global for Tracker {}
 
 impl Tracker {
+    fn order(&mut self, front_to_back: &[WindowId]) {
+        // AppKit can leave minimized windows out of orderedWindows. Keep those too,
+        // behind the visible windows, in their previous relative order.
+        self.windows.sort_by_key(|(id, _)| {
+            front_to_back
+                .iter()
+                .position(|window| window == id)
+                .map(|index| front_to_back.len() - index)
+                .unwrap_or(0)
+        });
+    }
+
     fn save(&self) {
         let Some(path) = &self.path else {
             return;
@@ -261,16 +276,40 @@ pub fn track_at(path: Option<PathBuf>, cx: &mut App) {
     cx.set_global(Tracker {
         path,
         windows: Vec::new(),
+        quit_order: None,
     });
     cx.on_app_quit(|cx| {
-        if let Some(tracker) = cx.try_global::<Tracker>()
-            && !tracker.windows.is_empty()
-        {
-            tracker.save();
+        let stack = cx.window_stack();
+        if cx.has_global::<Tracker>() {
+            let tracker = cx.global_mut::<Tracker>();
+            if let Some(order) = tracker.quit_order.take().or_else(|| {
+                stack.map(|stack| stack.iter().map(|window| window.window_id()).collect())
+            }) {
+                tracker.order(&order);
+            }
+            if !tracker.windows.is_empty() {
+                tracker.save();
+            }
         }
         async {}
     })
     .detach();
+}
+
+/// Save prompts activate their windows; capture the order before any of them opens.
+pub fn begin_quit(cx: &mut App) {
+    let order = cx
+        .window_stack()
+        .map(|stack| stack.iter().map(|window| window.window_id()).collect());
+    if cx.has_global::<Tracker>() {
+        cx.global_mut::<Tracker>().quit_order = order;
+    }
+}
+
+pub fn cancel_quit(cx: &mut App) {
+    if cx.has_global::<Tracker>() {
+        cx.global_mut::<Tracker>().quit_order = None;
+    }
 }
 
 /// Forgets a closed window and returns what it showed. A last window without a folder stays
@@ -382,6 +421,117 @@ mod tests {
             width: 1100.,
             height: 720.,
         }
+    }
+
+    #[test]
+    fn quitting_saves_the_native_stack_in_reopening_order() {
+        let dir = temp("order");
+        let path = dir.join("session.json");
+        let mut tracker = Tracker {
+            path: Some(path.clone()),
+            quit_order: None,
+            windows: ["a", "b", "c"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, root)| {
+                    (
+                        WindowId::from(index as u64 + 1),
+                        SavedWindow {
+                            root: Some(dir.join(root)),
+                            frame: Some(frame(FrameState::Windowed)),
+                            tabs: vec![dir.join(root).join("file.rs")],
+                            active: Some(dir.join(root).join("file.rs")),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let [a, b, c] = std::array::from_fn::<_, 3, _>(|index| tracker.windows[index].0);
+        // Created A,B,C; the actual back-to-front order is now B,A,C.
+        tracker.order(&[c, a, b]);
+        tracker.save();
+        let saved = load_from(&path);
+        assert_eq!(
+            saved
+                .iter()
+                .map(|window| window.root.as_ref().unwrap().file_name().unwrap())
+                .collect::<Vec<_>>(),
+            ["b", "a", "c"]
+        );
+        for window in saved {
+            let root = window.root.unwrap();
+            assert_eq!(window.tabs, [root.join("file.rs")]);
+            assert_eq!(window.active, Some(root.join("file.rs")));
+            assert_eq!(window.frame, Some(frame(FrameState::Windowed)));
+        }
+        // Repeated quits don't reverse the order, omitted/minimized windows are retained.
+        tracker.order(&[c, a, b]);
+        assert_eq!(
+            tracker
+                .windows
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            [b, a, c]
+        );
+        tracker.order(&[a, c]);
+        assert_eq!(
+            tracker
+                .windows
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            [b, c, a]
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[gpui_kit::test]
+    fn save_prompts_use_the_original_quit_order_and_cancel_clears_it(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        let dir = temp("quit-prompts");
+        let path = dir.join("session.json");
+        cx.update(|cx| {
+            track_at(Some(path.clone()), cx);
+            let tracker = cx.global_mut::<Tracker>();
+            tracker.windows = ["a", "b", "c"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, root)| {
+                    (
+                        WindowId::from(index as u64 + 1),
+                        SavedWindow {
+                            root: Some(dir.join(root)),
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect();
+            tracker.quit_order = Some(vec![
+                WindowId::from(3),
+                WindowId::from(1),
+                WindowId::from(2),
+            ]);
+            cancel_quit(cx);
+            assert!(cx.global::<Tracker>().quit_order.is_none());
+            // A later quit uses a fresh stack snapshot. Prompts can change the live
+            // stack, but the quit callback must honor the captured C,A,B order.
+            cx.global_mut::<Tracker>().quit_order = Some(vec![
+                WindowId::from(3),
+                WindowId::from(1),
+                WindowId::from(2),
+            ]);
+        });
+        cx.quit();
+        assert_eq!(
+            load_from(&path)
+                .into_iter()
+                .map(|window| window.root.unwrap())
+                .collect::<Vec<_>>(),
+            [dir.join("b"), dir.join("a"), dir.join("c")]
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

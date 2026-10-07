@@ -118,6 +118,7 @@ pub(super) enum Banner {
 /// ⌘Q and the menu's 退出: every window with unsaved changes asks in turn, then the app
 /// quits. (A quit that the system starts, such as logging out, cannot be held up yet.)
 pub fn quit(cx: &mut App) {
+    crate::session::begin_quit(cx);
     let owners = cx.global::<OpenDocuments>().0.clone();
     let mut seen = HashSet::new();
     let windows: Vec<(AnyWindowHandle, WeakEntity<Workbench>)> = owners
@@ -154,6 +155,8 @@ pub fn quit(cx: &mut App) {
                 super::recovery::forget_everything(cx);
                 cx.quit();
             });
+        } else {
+            cx.update(crate::session::cancel_quit);
         }
     })
     .detach();

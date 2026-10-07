@@ -18,6 +18,8 @@ use serde_json::{Value, json};
 // Heights: every list row shares one height; every bar shares another. The owner asked for
 // text one step larger than VS Code's 13 px, so rows grow from 22 to 24 on the same grid.
 pub const ROW_HEIGHT: Pixels = px(24.);
+/// Separation between code and the current-line Git annotation.
+pub const BLAME_GAP: Pixels = px(24.);
 /// How far beyond the viewport the Source Control list lays out rows (smooth scrolling).
 pub const SCM_LIST_OVERDRAW: Pixels = px(200.);
 pub const TAB_HEIGHT: Pixels = px(36.);
@@ -209,8 +211,6 @@ pub const AGENT_COMPOSER_MIN: Pixels = px(44.);
 pub const AGENT_QUOTA_WIDTH: Pixels = px(320.);
 pub const AGENT_IMAGE_WIDTH: Pixels = px(104.);
 pub const AGENT_IMAGE_HEIGHT: Pixels = px(72.);
-pub const AGENT_RING: Pixels = px(16.);
-pub const AGENT_RING_STROKE: Pixels = px(2.5);
 pub const AGENT_PLAN_BAR: Pixels = px(3.);
 pub const AGENT_PLAN_BAR_WIDTH: Pixels = px(160.);
 pub const AGENT_LINE: Pixels = px(22.);

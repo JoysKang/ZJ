@@ -53,6 +53,12 @@ measure it are in [docs/adr/0005-gpu-memory.md](../docs/adr/0005-gpu-memory.md).
 
 `gpui-base` (GPUI Kit 0.7.0, the input and editor engine):
 
+- `src/input/editor/mod.rs`, `src/input/base/kind.rs`, `src/input/base/element.rs`,
+  `src/input/mod.rs`: one optional application-owned line-end annotation. It is
+  positioned in prepaint using that frame's shaped logical line, after its last
+  wrapped segment, and is omitted when the endpoint is outside the viewport or
+  folded away. It does not enter the text, wrapping, selections or scroll extent.
+  ZJ uses it for current-line blame; the application supplies the gap and style.
 - `src/input/base/blink_cursor.rs`: the cursor is steady. `start` shows it without a timer and
   `pause` (every keystroke) only repaints when it was hidden; `stop` (blur) hides it as before.
   Upstream blinks every 500 ms, and each blink repaints the whole window: an idle focused

@@ -212,7 +212,6 @@ impl Workbench {
                 popup.content(card)
             })
         });
-        let ring = session.and_then(|s| agent_model::usage_ring(s.thread.usage));
         let can_steer = session
             .and_then(|s| s.client.as_ref())
             .is_some_and(|c| c.supports_steering());
@@ -411,17 +410,6 @@ impl Workbench {
                     .when(!compact, |bar| bar.child(agent_picker))
                     .child(div().flex_1())
                     .children(quota)
-                    .when_some(ring, |bar, (fraction, label)| {
-                        bar.child(
-                            h_flex()
-                                .gap_1()
-                                .px_1()
-                                .text_size(theme::TEXT_BADGE)
-                                .text_color(colors.muted)
-                                .child(usage_ring(fraction, colors))
-                                .child(label),
-                        )
-                    })
                     .child(send)
                     .when(busy, |bar| {
                         bar.child(

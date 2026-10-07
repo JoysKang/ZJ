@@ -382,6 +382,7 @@ impl Workbench {
         let mut written = Vec::new();
         let mut recount = false;
         let mut turn_ended = false;
+        let mut completed_from = None;
         let mut review_changed = false;
         let Some(session) = self.agent.session_mut(key) else {
             return;
@@ -421,6 +422,10 @@ impl Workbench {
                     if session.thread.status != agent_thread::Status::Running
                         && let Some(last) = session.thread.items.len().checked_sub(1)
                     {
+                        completed_from = Some(
+                            session.thread.dropped
+                                + session.thread.turn_starts.last().copied().unwrap_or(0),
+                        );
                         let took = session.turn_started.elapsed();
                         session
                             .turn_times
@@ -508,6 +513,11 @@ impl Workbench {
         if turn_ended {
             self.agent_reclaim_idle(cx);
         }
+        if let Some(from) = completed_from {
+            self.agent
+                .expanded_processes
+                .retain(|&(session, start)| session != key || start < from);
+        }
         self.agent_sync_list(false);
         self.agent_update_spin(window, cx);
         cx.notify();
@@ -547,7 +557,13 @@ impl Workbench {
             return;
         };
         let older = self.agent.older_row();
-        let groups = agent_model::thread_rows(&session.thread.items);
+        let following = self.agent.thread_list.is_following_tail();
+        let groups = agent_model::thread_rows(&session.thread);
+        let visible: HashSet<usize> = groups
+            .iter()
+            .filter(|row| !row.process)
+            .map(|row| row.range.start)
+            .collect();
         let mut rows = Vec::new();
         for row in groups {
             let expanded = row.process
@@ -558,9 +574,11 @@ impl Workbench {
             let range = row.range.clone();
             rows.push(row);
             if expanded {
-                rows.extend(range.map(|i| agent_model::ThreadRow {
-                    range: i..i + 1,
-                    process: false,
+                rows.extend(range.filter(|i| !visible.contains(i)).map(|i| {
+                    agent_model::ThreadRow {
+                        range: i..i + 1,
+                        process: false,
+                    }
                 }));
             }
         }
@@ -587,7 +605,12 @@ impl Workbench {
                     .thread_list
                     .splice(prefix + offset..old.2 + offset, shape.2 - prefix);
             }
-            self.agent.thread_list.remeasure();
+            self.agent.thread_list.remeasure_items(0..count);
+        }
+        if following || switched {
+            // Splicing and remeasuring can leave an obsolete scroll anchor. Clear it
+            // only when already following; reading earlier output keeps its position.
+            self.agent.thread_list.scroll_to_end();
         }
         self.agent.list_shape = shape;
     }

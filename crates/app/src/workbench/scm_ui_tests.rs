@@ -429,7 +429,7 @@ async fn stash_with_a_message_then_pop_it(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-async fn the_status_bar_blames_the_cursor_line(cx: &mut TestAppContext) {
+async fn the_line_end_blames_the_cursor_line(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let repo = fixture("blame", 0);
     let (window, this) = open(cx, repo.clone());
@@ -450,6 +450,57 @@ async fn the_status_bar_blames_the_cursor_line(cx: &mut TestAppContext) {
     };
     settle(cx, Some(window), |cx| shown(cx).is_some());
     assert_eq!(shown(cx), Some(Ok(("Fixture".to_string(), false))));
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let annotation = window
+            .try_find("line-blame")
+            .expect("initial line annotation")
+            .bounds();
+        let end = this.read(cx).documents[0]
+            .editor
+            .read(cx)
+            .range_to_bounds(&(1..1))
+            .unwrap();
+        assert!((annotation.origin.x - end.origin.x - theme::BLAME_GAP).abs() <= px(1.));
+        assert!((annotation.origin.y - end.origin.y).abs() <= px(1.));
+        // Only the annotation is clickable; the remaining blank space still belongs
+        // to the editor, so clicking past a short line can place the caret there.
+        assert!(
+            annotation.right() + px(100.)
+                < this.read(cx).documents[0]
+                    .editor
+                    .read(cx)
+                    .input_bounds()
+                    .right()
+        );
+        assert!(window.try_find("status-blame").is_none());
+        let before = this.read(cx).documents[0]
+            .editor
+            .read(cx)
+            .text()
+            .to_string();
+        window.click("line-blame", cx);
+        let expected = this
+            .read(cx)
+            .blame
+            .shown
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .commit
+            .clone();
+        assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), expected);
+        assert_eq!(
+            this.read(cx).documents[0]
+                .editor
+                .read(cx)
+                .text()
+                .to_string(),
+            before
+        );
+    })
+    .unwrap();
 
     // The empty line after the last line break: no blame, and no error either.
     let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
@@ -464,6 +515,11 @@ async fn the_status_bar_blames_the_cursor_line(cx: &mut TestAppContext) {
         .advance_clock(std::time::Duration::from_secs(1));
     cx.run_until_parked();
     assert_eq!(shown(cx), None);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("line-blame").is_none());
+    })
+    .unwrap();
     cx.update_window(window.into(), |_, window, cx| {
         editor.update(cx, |state, cx| {
             state.set_cursor_position(lsp_types::Position::new(0, 0), window, cx)
@@ -484,6 +540,83 @@ async fn the_status_bar_blames_the_cursor_line(cx: &mut TestAppContext) {
     settle(cx, Some(window), |cx| {
         matches!(shown(cx), Some(Ok((_, true))))
     });
+
+    // The annotation follows the last visual segment of a wrapped Unicode line.
+    let long = "世界🙂 ".repeat(36);
+    let contents = format!("{long}\n{}\n{}", "wide ".repeat(100), "short\n".repeat(80));
+    cx.update_window(window.into(), |_, window, cx| {
+        editor.update(cx, |state, cx| {
+            state.replace_all(contents, window, cx);
+            state.set_soft_wrap(true, window, cx);
+            state.set_cursor_position(lsp_types::Position::new(0, 0), window, cx);
+        });
+    })
+    .unwrap();
+    // Wait for the edit event and its new blame query, not the old shown result.
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    settle(cx, Some(window), |cx| {
+        matches!(shown(cx), Some(Ok((_, true))))
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let annotation = window
+            .try_find("line-blame")
+            .expect("wrapped line annotation")
+            .bounds();
+        let end = editor
+            .read(cx)
+            .range_to_bounds(&(long.len()..long.len()))
+            .unwrap();
+        assert!((annotation.origin.x - end.origin.x - theme::BLAME_GAP).abs() <= px(1.));
+        assert!((annotation.origin.y - end.origin.y).abs() <= px(1.));
+        assert!(annotation.top() > editor.read(cx).input_bounds().top());
+
+        // A manual vertical scroll must immediately hide the offscreen annotation.
+        editor.update(cx, |state, cx| {
+            state.set_scroll_offset(point(px(0.), px(-600.)), cx)
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("line-blame").is_none());
+
+        // With wrapping off, a long line's end outside the viewport stays hidden.
+        editor.update(cx, |state, cx| {
+            state.set_soft_wrap(false, window, cx);
+            state.set_scroll_offset(point(px(0.), px(0.)), cx);
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("line-blame").is_none());
+        // Scroll horizontally until its end has space for an annotation. The wider
+        // second line lets us scroll past the first line's end without extending layout.
+        editor.update(cx, |state, cx| {
+            state.set_cursor_position(
+                lsp_types::Position::new(0, long.encode_utf16().count() as u32),
+                window,
+                cx,
+            );
+        });
+        window.render_frame(cx);
+        editor.update(cx, |state, cx| {
+            let offset = state.scroll_offset();
+            state.set_scroll_offset(point(offset.x - px(100.), px(0.)), cx);
+        });
+        window.render_frame(cx);
+        let annotation = window
+            .try_find("line-blame")
+            .expect("horizontally scrolled line annotation")
+            .bounds();
+        let end = editor
+            .read(cx)
+            .range_to_bounds(&(long.len()..long.len()))
+            .unwrap();
+        assert!((annotation.origin.x - end.origin.x - theme::BLAME_GAP).abs() <= px(1.));
+        assert!((annotation.origin.y - end.origin.y).abs() <= px(1.));
+        assert_eq!(
+            editor.read(cx).text().to_string().lines().next(),
+            Some(long.as_str())
+        );
+    })
+    .unwrap();
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }
 
