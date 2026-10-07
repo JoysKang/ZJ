@@ -207,7 +207,8 @@ pub const AGENT_FILE_ROW: Pixels = px(26.);
 pub const AGENT_FILE_INDENT: Pixels = px(24.);
 pub const AGENT_CHIP: Pixels = px(20.);
 pub const AGENT_COMPOSER_BAR: Pixels = px(34.);
-pub const AGENT_COMPOSER_MIN: Pixels = px(44.);
+/// With the textarea padding, toolbar and borders: 156 px, up from 120 px (+30%).
+pub const AGENT_COMPOSER_MIN: Pixels = px(92.);
 pub const AGENT_QUOTA_WIDTH: Pixels = px(320.);
 pub const AGENT_IMAGE_WIDTH: Pixels = px(104.);
 pub const AGENT_IMAGE_HEIGHT: Pixels = px(72.);

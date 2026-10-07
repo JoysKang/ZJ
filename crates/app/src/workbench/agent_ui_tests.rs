@@ -743,6 +743,16 @@ async fn steering_works_from_enter_and_send_with_context_and_a_separate_stop_but
             .current()
             .is_some_and(|s| s.client.as_ref().is_some_and(|c| c.supports_steering()))
     });
+    until(cx, &this, "the running process opens by default", |p| {
+        let key = p.agent.current.unwrap();
+        p.agent.expanded_processes.contains(&(key, 0))
+            && p.agent.thread_rows.iter().any(|row| row.process)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("agent-process", 0usize), cx);
+    })
+    .unwrap();
     this.update(cx, |p, _| {
         p.agent.attachments.push(Attachment::File(path.clone()))
     });
@@ -758,6 +768,8 @@ async fn steering_works_from_enter_and_send_with_context_and_a_separate_stop_but
         let session = p.agent.current().unwrap();
         assert_eq!(session.turns, 1);
         assert!(session.busy());
+        assert!(!p.agent.expanded_processes.contains(&(session.key, 0)),
+            "steering preserves a manually folded process");
         assert!(session.thread.items.iter().any(|item| matches!(item, Item::User { text, attachments } if text == "先修复测试" && attachments == &["a.txt".to_string()])));
     });
     assert!(sent(cx, &this).1.is_empty());
@@ -777,10 +789,18 @@ async fn steering_works_from_enter_and_send_with_context_and_a_separate_stop_but
         |_| "clicking send did not steer".into(),
     );
     cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("agent-process", 0usize), cx);
         window.click("agent-stop", cx);
     })
     .unwrap();
     settle(cx, &this);
+    this.read_with(cx, |p, _| {
+        assert!(
+            p.agent.expanded_processes.is_empty(),
+            "ending the turn folds its process"
+        );
+    });
     assert_eq!(sent(cx, &this).0, ["steerable", "先修复测试", "再检查边界"]);
     let _ = std::fs::remove_dir_all(root);
 }

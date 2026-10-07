@@ -231,6 +231,7 @@ impl Workbench {
         let composer = v_flex()
             .id("agent-composer")
             .mx_3()
+            .mt_3()
             .mb_3()
             .flex_shrink_0()
             .relative()
@@ -346,8 +347,9 @@ impl Workbench {
                 )
             })
             .child(
-                div().px_1().min_h(theme::AGENT_COMPOSER_MIN).child(
+                div().px_1().child(
                     Textarea::new(&self.agent.composer)
+                        .min_h(theme::AGENT_COMPOSER_MIN)
                         .appearance(false)
                         .bordered(false)
                         .aria_label("给 Agent 的消息"),

@@ -300,6 +300,15 @@ impl Workbench {
                 }
             }
         }
+        if submitted
+            && !steering
+            && let Some(start) = self
+                .agent
+                .session(key)
+                .and_then(|session| session.thread.turn_starts.last().copied())
+        {
+            self.agent.expanded_processes.insert((key, start));
+        }
         self.agent_sync_list(false);
         self.agent_update_spin(window, cx);
         cx.notify();
