@@ -33,6 +33,9 @@ use std::{
     time::Duration,
 };
 
+#[path = "steering.rs"]
+mod steering;
+
 pub struct ClientOptions {
     pub preset: AgentPreset,
     /// The agent's `cwd`; every `fs/*` path must stay inside it.
@@ -100,6 +103,8 @@ pub enum PromptPart {
 pub enum ClientError {
     /// A turn is already running; queue it in the UI or cancel first.
     Busy,
+    /// This adapter did not advertise the steering extension.
+    SteeringUnavailable,
     Stopped,
 }
 
@@ -107,6 +112,9 @@ impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             ClientError::Busy => "Agent 正在回复，请等这一轮结束或先中断",
+            ClientError::SteeringUnavailable => {
+                "当前 Agent 尚不能接收运行中的补充指令，可等待完成或先停止"
+            }
             ClientError::Stopped => "Agent 客户端已关闭",
         })
     }
@@ -134,6 +142,10 @@ pub(crate) enum Command {
         turn: TurnId,
         parts: Vec<PromptPart>,
     },
+    Steer {
+        turn: TurnId,
+        parts: Vec<PromptPart>,
+    },
     Cancel,
     SetMode(String),
     SetConfig {
@@ -151,6 +163,7 @@ pub(crate) struct Init {
     pub load_session: bool,
     pub close_session: bool,
     pub embedded_context: bool,
+    pub steering: bool,
     pub auth_methods: Vec<acp::AuthMethod>,
 }
 
@@ -181,6 +194,8 @@ pub(crate) struct SessionState {
     permissions: Mutex<HashMap<PermissionId, oneshot::Sender<Option<String>>>>,
     next_permission: AtomicU64,
     turn: Mutex<Option<TurnId>>,
+    steering: Mutex<steering::Steering>,
+    steering_supported: AtomicBool,
     next_turn: AtomicU64,
     /// `session/load` replays history as updates; the UI already has it.
     replaying: AtomicBool,
@@ -363,10 +378,33 @@ impl SessionState {
 
     /// Ends the current turn exactly once (from the prompt task or the process).
     pub(crate) async fn finish_turn(&self, only: Option<TurnId>, outcome: TurnOutcome) {
+        self.end_turn(only, outcome, only.is_none()).await;
+    }
+
+    async fn end_turn(&self, only: Option<TurnId>, outcome: TurnOutcome, force: bool) {
         let turn = {
             let mut current = self.turn.lock().unwrap();
+            let mut steering = self.steering.lock().unwrap();
+            if only.is_none() {
+                *steering = Default::default();
+            }
             match *current {
-                Some(t) if only.is_none_or(|o| o == t) => current.take(),
+                Some(t) if only.is_none_or(|o| o == t) => {
+                    if (!force || (steering.pending.is_some() && !steering.cancelled))
+                        && steering.hold_end(outcome.clone())
+                    {
+                        return;
+                    }
+                    // A cancelled steering request may still start a detached turn after
+                    // the cancel watchdog ends this turn. Keep its ownership until its
+                    // response can be cancelled; process exit (only == None) releases it.
+                    if only.is_some() {
+                        steering.retire();
+                    } else {
+                        *steering = Default::default();
+                    }
+                    current.take()
+                }
                 _ => None,
             }
         };
@@ -399,6 +437,9 @@ impl SessionState {
 
     pub(crate) fn set_running(&self, running: bool) {
         self.running.store(running, Ordering::SeqCst);
+        if !running {
+            self.steering_supported.store(false, Ordering::Relaxed);
+        }
     }
 
     /// Starts running on the process.
@@ -440,6 +481,8 @@ impl SessionState {
 
     /// The process this session ran on stopped (idle, crashed, shut down or failed to start).
     pub(crate) async fn process_gone(self: &Arc<Self>, reason: &ExitReason, name: &str) {
+        self.steering_supported.store(false, Ordering::Relaxed);
+        *self.steering.lock().unwrap() = Default::default();
         self.cancel_permissions();
         if self.exit_told.swap(true, Ordering::SeqCst) {
             return;
@@ -515,6 +558,8 @@ impl AgentClient {
             permissions: Mutex::new(HashMap::new()),
             next_permission: AtomicU64::new(1),
             turn: Mutex::new(None),
+            steering: Mutex::new(Default::default()),
+            steering_supported: AtomicBool::new(false),
             next_turn: AtomicU64::new(1),
             replaying: AtomicBool::new(false),
             snapshots: Mutex::new(BTreeMap::new()),
@@ -556,8 +601,13 @@ impl AgentClient {
             if current.is_some() {
                 return Err(ClientError::Busy);
             }
+            let mut steering = session.steering.lock().unwrap();
+            if steering.pending.is_some() {
+                return Err(ClientError::Busy);
+            }
             let turn = session.next_turn.fetch_add(1, Ordering::Relaxed);
             *current = Some(turn);
+            *steering = Default::default();
             turn
         };
         // A new turn clears an earlier stop. Not when the install starts: a stop pressed
@@ -577,9 +627,40 @@ impl AgentClient {
         Ok(turn)
     }
 
+    /// Adds instructions to the running turn without cancelling it or its permissions.
+    /// Only one steering request is in flight; a rejected submission stays with the caller.
+    pub fn steer(&self, parts: Vec<PromptPart>) -> Result<TurnId, ClientError> {
+        let current = self.session.turn.lock().unwrap();
+        let Some(turn) = *current else {
+            return Err(ClientError::Busy);
+        };
+        if !self.supports_steering() || self.session.parked.lock().unwrap().is_some() {
+            return Err(ClientError::SteeringUnavailable);
+        }
+        let mut steering = self.session.steering.lock().unwrap();
+        if steering.pending.is_some() || steering.followup.is_some() || steering.cancelled {
+            return Err(ClientError::Busy);
+        }
+        steering.pending = Some(turn);
+        if let Err(error) = self.commands.try_send(Command::Steer { turn, parts }) {
+            steering.pending = None;
+            return Err(if error.is_full() {
+                ClientError::Busy
+            } else {
+                ClientError::Stopped
+            });
+        }
+        Ok(turn)
+    }
+
+    pub fn supports_steering(&self) -> bool {
+        self.session.steering_supported.load(Ordering::Relaxed)
+    }
+
     /// `session/cancel`; pending permission requests are answered `cancelled`. The turn ends
     /// with [`TurnOutcome::Cancelled`] once the agent stops.
     pub fn cancel(&self) {
+        self.session.steering.lock().unwrap().cancelled = true;
         if let Some(host) = self.session.host() {
             host.inner.install_cancel.store(true, Ordering::Relaxed);
         }
@@ -837,10 +918,12 @@ async fn close_session(
         return;
     }
     let request = cx.send_request(acp::CloseSessionRequest::new(id.clone()));
-    if with_timeout(request.block_task(), CLOSE_TIMEOUT)
-        .await
-        .is_none_or(|answer| answer.is_err())
-    {
+    if matches!(
+        with_timeout(request.block_task(), CLOSE_TIMEOUT).await,
+        Some(Ok(_))
+    ) {
+        *session.steering.lock().unwrap() = Default::default();
+    } else {
         eprintln!(
             "event=agent_session_close_failed agent={}",
             session.preset.id
@@ -885,7 +968,12 @@ async fn session_body(
                     return Ok(SessionEnd::Move(env));
                 }
                 Ok(Command::RetryLogin(_)) => break,
-                Ok(Command::Cancel | Command::SetMode(_) | Command::SetConfig { .. }) => {}
+                Ok(
+                    Command::Cancel
+                    | Command::SetMode(_)
+                    | Command::SetConfig { .. }
+                    | Command::Steer { .. },
+                ) => {}
                 Ok(Command::Shutdown) | Err(async_channel::TryRecvError::Closed) => {
                     return Ok(SessionEnd::Shutdown);
                 }
@@ -1022,6 +1110,8 @@ async fn session_body(
 
     let can_login = !init.auth_methods.is_empty();
     let embedded = init.embedded_context;
+    s.steering_supported
+        .store(init.steering && !s.text_only, Ordering::Relaxed);
     if let Some((turn, parts)) = first {
         start_prompt(s, cx, &session, turn, parts, can_login, embedded)?;
     }
@@ -1059,7 +1149,18 @@ async fn session_body(
                     Ok(Command::Prompt { turn, parts }) => {
                         start_prompt(s, cx, &session, turn, parts, can_login, embedded)?
                     }
+                    Ok(Command::Steer { turn, parts }) => {
+                        steering::start(s, cx, &session, turn, parts, embedded)?;
+                    }
                     Ok(Command::Cancel) => {
+                        let waiting = {
+                            let mut steering = s.steering.lock().unwrap();
+                            steering.cancel_followup()
+                        };
+                        if waiting {
+                            let turn = *s.turn.lock().unwrap();
+                            s.end_turn(turn, TurnOutcome::Cancelled, true).await;
+                        }
                         s.cancel_permissions();
                         cx.send_notification(acp::CancelNotification::new(session.clone()))?;
                         // An agent that never answers the prompt would keep the turn (and the
@@ -1072,9 +1173,10 @@ async fn session_body(
                                 if *shared.turn.lock().unwrap() == Some(turn) {
                                     eprintln!("event=agent_cancel_unanswered agent={}", shared.preset.id);
                                     shared
-                                        .finish_turn(
+                                        .end_turn(
                                             Some(turn),
                                             TurnOutcome::Failed("Agent 没有响应取消，已结束这一轮".into()),
+                                            true,
                                         )
                                         .await;
                                     let _ = shared.turn_done.send(()).await;
@@ -1114,6 +1216,16 @@ async fn session_body(
                 }
             },
             _ = done => {
+                let continuation = {
+                    let mut steering = s.steering.lock().unwrap();
+                    steering.continuation()
+                };
+                if let Some(parts) = continuation {
+                    let turn = *s.turn.lock().unwrap();
+                    if let Some(turn) = turn {
+                        start_prompt(s, cx, &session, turn, parts, can_login, embedded)?;
+                    }
+                }
                 let parked = s.parked.lock().unwrap().take();
                 if let Some(prompt) = parked {
                     let mut pending = Some(prompt);
@@ -1196,6 +1308,9 @@ impl Login<'_> {
             match command {
                 Err(_) | Ok(Command::Shutdown) => return Some(SessionEnd::Shutdown),
                 Ok(Command::Connect | Command::SetMode(_) | Command::SetConfig { .. }) => {}
+                Ok(Command::Steer { turn, .. }) => {
+                    steering::failed(shared, turn, "正在等待登录，补充指令未发送".into()).await;
+                }
                 Ok(Command::Prompt { turn, parts }) => {
                     first.get_or_insert((turn, parts));
                 }
@@ -1406,6 +1521,7 @@ pub(crate) async fn handle_update(
     notification: acp::SessionNotification,
     cx: &ConnectionTo<Agent>,
 ) {
+    steering::status(shared, &notification.update).await;
     let Some(mut event) = events::from_update(&notification.update) else {
         return;
     };

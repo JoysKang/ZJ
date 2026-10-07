@@ -152,22 +152,22 @@ impl Workbench {
                     .on_click(cx.listener(|this, _, _, cx| this.agent_toggle_quota(cx)))
             });
         let ring = session.and_then(|s| agent_model::usage_ring(s.thread.usage));
-        let send = if busy {
-            Button::new("agent-stop")
-                .ghost()
-                .small()
-                .icon(IconName::Square)
-                .tooltip("停止")
-                .on_click(cx.listener(|this, _, _, cx| this.agent_cancel(cx)))
-        } else {
-            Button::new("agent-send")
-                .primary()
-                .small()
-                .icon(IconName::ArrowUp)
-                .tooltip("发送（⏎）")
-                .disabled(empty)
-                .on_click(cx.listener(|this, _, window, cx| this.agent_submit(window, cx)))
-        };
+        let can_steer = session
+            .and_then(|s| s.client.as_ref())
+            .is_some_and(|c| c.supports_steering());
+        let send = Button::new("agent-send")
+            .primary()
+            .small()
+            .icon(IconName::ArrowUp)
+            .tooltip(if busy && !can_steer {
+                "当前 Agent 尚不能接收运行中的补充指令"
+            } else if busy {
+                "追加指令（⏎）"
+            } else {
+                "发送（⏎）"
+            })
+            .disabled(empty || (busy && !can_steer))
+            .on_click(cx.listener(|this, _, window, cx| this.agent_submit(window, cx)));
         let composer = v_flex()
             .id("agent-composer")
             .mx_3()
@@ -333,7 +333,17 @@ impl Workbench {
                                 .child(label),
                         )
                     })
-                    .child(send),
+                    .child(send)
+                    .when(busy, |bar| {
+                        bar.child(
+                            Button::new("agent-stop")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Square)
+                                .tooltip("停止")
+                                .on_click(cx.listener(|this, _, _, cx| this.agent_cancel(cx))),
+                        )
+                    }),
             )
             .children(self.render_mention_picker(cx))
             .children(self.render_slash_picker(cx))

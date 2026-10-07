@@ -743,10 +743,41 @@ pub enum Placement {
         column: u32,
         center: bool,
     },
+    /// Keep the reviewed line at its previous vertical position in the viewport.
+    Review {
+        line: u32,
+        y: Pixels,
+    },
 }
 
 impl Placement {
     fn apply(&self, editor: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
+        if let Placement::Review { line, y } = *self {
+            let cursor = editor.update(cx, |state, cx| {
+                state.set_cursor_position(lsp_types::Position::new(line, 0), window, cx);
+                state.cursor()
+            });
+            let editor = editor.downgrade();
+            // First lay out the newly opened editor and let Kit reveal the cursor. Its
+            // actual caret geometry also accounts for soft wrapping and folded lines.
+            window.on_next_frame(move |window, cx| {
+                let _ = editor.update(cx, |state, cx| {
+                    if state.cursor() != cursor || !state.focus_handle(cx).is_focused(window) {
+                        return;
+                    }
+                    if let Some((caret, height)) = state.cursor_layout() {
+                        // Kit's caret bounds precede vertical scrolling and include its
+                        // inset within the row. Recover the row's content-space top.
+                        let top = caret.origin.y
+                            - state.input_bounds().origin.y
+                            - (height - caret.size.height) / 2.;
+                        let offset = state.scroll_offset();
+                        state.set_scroll_offset(point(offset.x, y - top), cx);
+                    }
+                });
+            });
+            return;
+        }
         editor.update(cx, |state, cx| {
             if let Placement::Line {
                 line,
@@ -768,7 +799,7 @@ impl Placement {
             }
             let rope = state.text().clone();
             let (start, end) = match *self {
-                Placement::Line { .. } => return,
+                Placement::Line { .. } | Placement::Review { .. } => return,
                 Placement::Point { line, column, len } => {
                     // A column past the line (the file changed since the search) stays on it.
                     let column = (column as usize).min(rope.line_len(line as usize));

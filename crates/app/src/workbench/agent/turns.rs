@@ -57,24 +57,26 @@ impl Workbench {
         };
         let attachments = std::mem::take(&mut self.agent.attachments);
         let busy = self.agent.session(key).is_some_and(LiveSession::busy);
-        if busy {
-            self.message = "Agent 正在回复：等这一轮结束，或先点停止".into();
+        let has_client = self.agent.session(key).is_some_and(|s| s.client.is_some());
+        if busy && !has_client {
+            self.message = "Agent 正在启动，补充说明已保留，请稍后发送".into();
             self.agent.attachments = attachments;
             cx.notify();
             return;
         }
-        self.agent
-            .composer
-            .update(cx, |composer, cx| composer.set_value("", window, cx));
-        let has_client = self.agent.session(key).is_some_and(|s| s.client.is_some());
         if has_client {
-            self.agent_prompt(key, text, attachments, window, cx);
+            if !self.agent_prompt(key, text, attachments, window, cx) {
+                return;
+            }
         } else {
             if let Some(session) = self.agent.session_mut(key) {
                 session.queued = Some((text, attachments));
             }
             self.agent_start_client(key, root, window, cx);
         }
+        self.agent
+            .composer
+            .update(cx, |composer, cx| composer.set_value("", window, cx));
         cx.notify();
     }
 
@@ -189,24 +191,30 @@ impl Workbench {
         attachments: Vec<Attachment>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let branch = self.active_branch();
         let store = history(cx);
         let Some(root) = self.agent.session(key).and_then(|s| s.root.clone()) else {
-            return;
+            return false;
         };
         let workspace_name = workspace_label(&root, cx);
         let in_default = default_workspace(cx).as_ref() == Some(&root);
         let Some(session) = self.agent.session_mut(key) else {
-            return;
+            return false;
         };
         session.last_active = std::time::Instant::now();
-        session.turn_started = session.last_active;
         let Some(client) = session.client.clone() else {
-            return;
+            return false;
         };
         let parts = agent_model::prompt_parts(&text, &attachments);
-        match client.prompt(parts) {
+        let steering = client.is_busy();
+        let result = if steering {
+            client.steer(parts)
+        } else {
+            client.prompt(parts)
+        };
+        let submitted = result.is_ok();
+        match result {
             Ok(turn) => {
                 let labels: Vec<String> = attachments.iter().map(Attachment::label).collect();
                 let stored = if labels.is_empty() {
@@ -222,12 +230,15 @@ impl Workbench {
                     )
                 };
                 session.thread.push_user(text.clone(), labels, turn);
-                session.turns += 1;
+                if !steering {
+                    session.turns += 1;
+                    session.turn_started = session.last_active;
+                }
                 if session.branch.is_none() {
                     session.branch = branch.clone();
                 }
                 eprintln!(
-                    "event=agent_prompt agent={} turn={turn} attachments={}",
+                    "event=agent_prompt agent={} turn={turn} steering={steering} attachments={}",
                     session.preset.id,
                     attachments.len()
                 );
@@ -278,11 +289,15 @@ impl Workbench {
             }
             Err(error) => {
                 self.message = error.to_string();
+                if self.agent.current == Some(key) {
+                    self.agent.attachments = attachments;
+                }
             }
         }
         self.agent_sync_list(false);
         self.agent_update_spin(window, cx);
         cx.notify();
+        submitted
     }
 
     pub(super) fn agent_session_created(

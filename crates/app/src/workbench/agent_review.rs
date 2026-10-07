@@ -4,6 +4,7 @@
 
 use super::agent::AgentView;
 use super::agent_panel::glyph_tile;
+use super::diff_view::DiffList;
 use super::*;
 use crate::agent_model;
 use gpui_kit::{
@@ -95,7 +96,12 @@ impl Workbench {
         }
     }
 
-    pub(super) fn load_agent_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn load_agent_diff(
+        &mut self,
+        next_change: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(diff) = self.diff.tab.as_ref().and_then(|tab| tab.agent()).cloned() else {
             return;
         };
@@ -154,6 +160,16 @@ impl Workbench {
                             let keep = this.diff.change;
                             if fresh {
                                 this.reveal_first_change();
+                            } else if let Some(index) = next_change {
+                                let starts = this.diff_change_starts();
+                                if !starts.is_empty() {
+                                    let next = index % starts.len();
+                                    let row = starts[next];
+                                    this.diff.change = Some(next);
+                                    this.diff
+                                        .scroll
+                                        .scroll_to_item_strict(row, ScrollStrategy::Center);
+                                }
                             } else if let Some(index) = keep {
                                 let count = this.diff_change_starts().len();
                                 this.diff.change = (count > 0).then(|| index.min(count - 1));
@@ -207,27 +223,44 @@ impl Workbench {
         let path = diff.path.clone();
         let file_generation = self.file_generation;
         let job = cx.background_spawn(async move {
+            let source = if accept {
+                Some(DiffList::Modified)
+            } else {
+                client.snapshot(&path).flatten().map(|_| DiffList::Original)
+            };
             workspace_editor_agent::review::resolve_hunk(&client, &path, index, accept, &shown)
+                .map(|_| source)
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = job.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                let accepted = accept && result.is_ok();
-                if let Err(error) = result {
-                    this.message = error;
-                }
+                let resolved = result.is_ok();
                 eprintln!("event=agent_review_hunk accept={accept}");
                 this.reload_document_from_disk(&diff.path, window, cx);
-                if accepted {
-                    this.agent_finish_accepted_review(
+                match result {
+                    Ok(source) => this.agent_finish_resolved_review(
                         diff.key,
                         &diff.path,
                         file_generation,
+                        source,
                         window,
                         cx,
-                    );
+                    ),
+                    Err(error) => this.message = error,
                 }
-                this.agent_resolved(diff.key, window, cx);
+                if this
+                    .diff
+                    .tab
+                    .as_ref()
+                    .and_then(|tab| tab.agent())
+                    .is_some_and(|current| current.key == diff.key && current.path == diff.path)
+                {
+                    let next =
+                        (resolved && this.file_generation == file_generation).then_some(index);
+                    this.load_agent_diff(next, window, cx);
+                }
+                this.agent_recount(diff.key, None, window, cx);
+                cx.notify();
             });
         })
         .detach();
@@ -260,13 +293,15 @@ impl Workbench {
         self.agent_resolve_files(diff.key, vec![diff.path], accept, window, cx);
     }
 
-    /// A fully accepted review becomes the source file at the line being reviewed.
+    /// A resolved review becomes the remaining source at the same viewport position.
+    /// `source` is absent when rejecting a newly created file removed it.
     /// A completion in the background must not replace a newer tab or steal its focus.
-    pub(super) fn agent_finish_accepted_review(
+    pub(super) fn agent_finish_resolved_review(
         &mut self,
         key: u64,
         path: &std::path::Path,
         file_generation: u64,
+        source: Option<DiffList>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -285,7 +320,7 @@ impl Workbench {
             return;
         }
         let active = self.active == Pane::Diff && self.file_generation == file_generation;
-        let line = self
+        let (line, y) = self
             .diff
             .doc
             .as_ref()
@@ -326,43 +361,54 @@ impl Workbench {
                 } else {
                     doc.rows.len()
                 };
-                // Removed rows have no new line: prefer the following line, then the preceding.
+                // If this row is absent from the returned side, prefer the following line,
+                // then the preceding one, while retaining the row's viewport position.
                 (row..count)
                     .chain((0..row.min(count)).rev())
                     .find_map(|index| {
-                        let new = if inline {
+                        let modified = source == Some(DiffList::Modified);
+                        let line = if inline {
                             let row = &doc.inline[index];
                             match row.kind {
-                                crate::diff_doc::LineKind::Same => row.other,
-                                crate::diff_doc::LineKind::Added => Some(row.line),
-                                crate::diff_doc::LineKind::Removed => None,
+                                crate::diff_doc::LineKind::Same if modified => row.other,
+                                crate::diff_doc::LineKind::Same => Some(row.line),
+                                crate::diff_doc::LineKind::Added if modified => Some(row.line),
+                                crate::diff_doc::LineKind::Removed if !modified => Some(row.line),
+                                _ => None,
                             }
                         } else {
-                            doc.rows[index].new
+                            if modified {
+                                doc.rows[index].new
+                            } else {
+                                doc.rows[index].old
+                            }
                         }?;
-                        Some(doc.new.lines[new as usize].number.saturating_sub(1))
+                        let lines = if modified {
+                            &doc.new.lines
+                        } else {
+                            &doc.old.lines
+                        };
+                        let scroll = self.diff.scroll.0.borrow();
+                        let height = theme::diff_metrics(
+                            gpui_kit::component::Theme::global(cx).mono_font_size,
+                        )
+                        .row;
+                        Some((
+                            lines[line as usize].number.saturating_sub(1),
+                            scroll.base_handle.offset().y + height * row as f32,
+                        ))
                     })
             })
-            .unwrap_or(0);
+            .unwrap_or((0, Pixels::ZERO));
         self.dismiss_preview(window, cx);
-        if active {
+        if active && source.is_some() {
             self.go(
                 path.to_path_buf(),
-                navigation::Placement::Line {
-                    line,
-                    column: 0,
-                    center: false,
-                },
+                navigation::Placement::Review { line, y },
                 window,
                 cx,
             );
         }
-    }
-
-    fn agent_resolved(&mut self, key: u64, window: &mut Window, cx: &mut Context<Self>) {
-        self.agent_reload_review(key, window, cx);
-        self.agent_recount(key, None, window, cx);
-        cx.notify();
     }
 
     /// The toolbar above an agent review (design 01-A: "Claude Code 建议的修改 … 接受此文件").

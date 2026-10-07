@@ -454,6 +454,13 @@ fn init_from(response: &acp::InitializeResponse) -> Init {
         load_session: caps.load_session,
         close_session: caps.session_capabilities.close.is_some(),
         embedded_context: caps.prompt_capabilities.embedded_context,
+        steering: response
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("steering"))
+            .and_then(|steering| steering.get("supported"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true),
         auth_methods: response.auth_methods.clone(),
     }
 }

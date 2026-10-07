@@ -2084,7 +2084,7 @@ impl Workbench {
             return;
         };
         if diff.agent().is_some() {
-            self.load_agent_diff(window, cx);
+            self.load_agent_diff(None, window, cx);
             return;
         }
         let mut source = diff.source.clone();

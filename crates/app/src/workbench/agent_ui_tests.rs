@@ -104,6 +104,126 @@ fn temp_root(name: &str) -> PathBuf {
 }
 
 #[gpui_kit::test]
+async fn steering_works_from_enter_and_send_with_context_and_a_separate_stop_button(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let root = temp_root("steering");
+    let path = root.join("a.txt");
+    std::fs::write(&path, "context").unwrap();
+    let (handle, this) = open(cx, Some(root.clone()));
+    send(cx, handle, &this, "steerable");
+    until(cx, &this, "the original turn starts", |p| {
+        p.agent
+            .current()
+            .is_some_and(|s| s.client.as_ref().is_some_and(|c| c.supports_steering()))
+    });
+    this.update(cx, |p, _| {
+        p.agent.attachments.push(Attachment::File(path.clone()))
+    });
+    send(cx, handle, &this, "先修复测试");
+    wait(
+        cx,
+        None,
+        Some(handle),
+        |cx| replies(cx, &this).contains("steered:先修复测试"),
+        |_| "the runtime instruction never arrived".into(),
+    );
+    this.read_with(cx, |p, _| {
+        let session = p.agent.current().unwrap();
+        assert_eq!(session.turns, 1);
+        assert!(session.busy());
+        assert!(session.thread.items.iter().any(|item| matches!(item, Item::User { text, attachments } if text == "先修复测试" && attachments == &["a.txt".to_string()])));
+    });
+    assert!(sent(cx, &this).1.is_empty());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.agent_focus_composer(window, cx));
+        window.input("再检查边界", cx);
+        window.render_frame(cx);
+        window.click("agent-send", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    wait(
+        cx,
+        None,
+        Some(handle),
+        |cx| replies(cx, &this).contains("steered:再检查边界"),
+        |_| "clicking send did not steer".into(),
+    );
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("agent-stop", cx);
+    })
+    .unwrap();
+    settle(cx, &this);
+    assert_eq!(sent(cx, &this).0, ["steerable", "先修复测试", "再检查边界"]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn steering_keeps_a_permission_request_pending(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("steering-awaiting");
+    let (handle, this) = open(cx, Some(root.clone()));
+    send(cx, handle, &this, "permission");
+    until(cx, &this, "permission is pending", |p| {
+        pending_permission(p).is_some()
+    });
+    let (key, id) = this.read_with(cx, |p, _| pending_permission(p).unwrap());
+    send(cx, handle, &this, "先不要扩大修改范围");
+    this.read_with(cx, |p, _| {
+        assert_eq!(
+            p.agent.current().unwrap().thread.status,
+            agent_thread::Status::Awaiting
+        );
+        assert_eq!(pending_permission(p), Some((key, id)));
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_answer(key, id, PermissionChoice::Reject, window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, &this);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn steering_unavailable_keeps_the_typed_message_and_context(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("steering-unavailable");
+    let mut settings = crate::settings::Settings::default();
+    let mut preset = fake_agent();
+    preset.env.insert("FAKE_NO_STEERING".into(), "1".into());
+    settings.agent.custom = vec![preset];
+    settings.agent.default_agent = "fake".into();
+    settings.agent.panel_visible = true;
+    let (handle, this) = open_window(cx, Some(root.clone()), settings, empty_store());
+    send(cx, handle, &this, "steerable");
+    wait(
+        cx,
+        None,
+        Some(handle),
+        |cx| replies(cx, &this).contains("started"),
+        |_| "the original turn never starts".into(),
+    );
+    let attachment = Attachment::File(root.join("a.txt"));
+    this.update(cx, |p, _| p.agent.attachments.push(attachment.clone()));
+    send(cx, handle, &this, "保留这条补充说明");
+    assert_eq!(
+        sent(cx, &this),
+        (vec!["steerable".into()], "保留这条补充说明".into())
+    );
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.agent.attachments, [attachment]);
+        assert!(p.message.contains("不能接收"));
+    });
+    this.update(cx, |p, cx| p.agent_cancel(cx));
+    settle(cx, &this);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
 async fn mention_without_a_folder_says_so(cx: &mut TestAppContext) {
     let (handle, this) = open(cx, None);
     cx.update_window(handle.into(), |_, window, cx| {
@@ -605,6 +725,7 @@ async fn accepting_a_scrolled_review_keeps_the_visible_code(cx: &mut TestAppCont
     })
     .unwrap();
     until(cx, &this, "the review loads", |p| p.diff.doc.is_some());
+    let mut reviewed_y = Pixels::ZERO;
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
         this.update(cx, |p, cx| {
@@ -620,17 +741,208 @@ async fn accepting_a_scrolled_review_keeps_the_visible_code(cx: &mut TestAppCont
         });
         window.render_frame(cx);
         window.render_frame(cx);
+        reviewed_y = this.read_with(cx, |p, cx| {
+            let height =
+                theme::diff_metrics(gpui_kit::component::Theme::global(cx).mono_font_size).row;
+            p.diff.scroll.0.borrow().base_handle.offset().y + height * 120.
+        });
         window.click("agent-review-accept-file", cx);
     })
     .unwrap();
     until(cx, &this, "the source opens", |p| {
         p.active_document().is_some_and(|(file, _)| file == path)
     });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.simulate_next_frame(cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
     this.read_with(cx, |p, cx| {
         let editor = p.active_editor().unwrap();
-        assert_eq!(editor.read(cx).cursor_position().line, 120);
+        let state = editor.read(cx);
+        assert_eq!(state.cursor_position().line, 120);
+        let height = state.line_height().unwrap();
+        let source_y = state.scroll_offset().y + height * 120.;
+        assert!(
+            (source_y - reviewed_y).abs() < height / 2.,
+            "accepted line moved on screen: before={reviewed_y:?}, after={source_y:?}"
+        );
     });
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn resolving_a_centered_review_preserves_wrapped_source_position(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    for (inline, accept, whole_file) in [
+        (true, true, true),
+        (false, true, false),
+        (true, false, false),
+        (false, false, true),
+    ] {
+        let root = temp_root("review-centered");
+        let path = root.join("a.md");
+        let before = (0..180)
+            .map(|i| {
+                if i == 30 {
+                    format!("{}\n", "long text ".repeat(100))
+                } else {
+                    format!("line {i}\n")
+                }
+            })
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        let after = before.replace("line 80\n", "changed 80\n");
+        std::fs::write(&path, &before).unwrap();
+        let (handle, this) = open(cx, Some(root.clone()));
+        send(
+            cx,
+            handle,
+            &this,
+            &format!("write {} {after}", path.display()),
+        );
+        settle(cx, &this);
+        let key = this.read_with(cx, |p, _| p.agent.current().unwrap().key);
+        if !whole_file {
+            cx.update_window(handle.into(), |_, window, cx| {
+                this.update(cx, |p, cx| {
+                    p.open_file(path.clone(), Some(root.clone()), window, cx)
+                });
+            })
+            .unwrap();
+            until(cx, &this, "existing source opens", |p| {
+                p.documents.len() == 1
+            });
+        }
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.agent_open_review(key, path.clone(), window, cx);
+                p.diff.inline = inline;
+            });
+        })
+        .unwrap();
+        until(cx, &this, "one centered change loads", |p| {
+            p.diff.doc.is_some()
+        });
+        this.read_with(cx, |p, _| assert_eq!(p.diff_change_starts().len(), 1));
+        let mut reviewed_y = Pixels::ZERO;
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            reviewed_y = this.read_with(cx, |p, cx| {
+                let scroll = p.diff.scroll.0.borrow();
+                let height =
+                    theme::diff_metrics(gpui_kit::component::Theme::global(cx).mono_font_size).row;
+                scroll.base_handle.offset().y + height * p.diff_change_starts()[0] as f32
+            });
+            this.update(cx, |p, cx| {
+                if whole_file {
+                    p.agent_review_file(accept, window, cx);
+                } else {
+                    p.agent_review_hunk(0, accept, window, cx);
+                }
+            });
+        })
+        .unwrap();
+        until(cx, &this, "completed review returns to source", |p| {
+            p.active_document().is_some_and(|(file, _)| file == path)
+        });
+        wait(
+            cx,
+            None,
+            None,
+            |cx| {
+                this.read_with(cx, |p, cx| {
+                    p.active_editor().is_some_and(|editor| {
+                        editor.read(cx).text() == if accept { &after } else { &before }.as_str()
+                    })
+                })
+            },
+            |_| "returned source did not finish reloading".into(),
+        );
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.simulate_next_frame(cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        this.read_with(cx, |p, cx| {
+            assert!(p.documents[0].soft_wrap);
+            let state = p.active_editor().unwrap().read(cx);
+            assert_eq!(state.cursor_position().line, 80);
+            assert_eq!(state.text().to_string(), if accept { after.clone() } else { before.clone() });
+            let (caret, height) = state.cursor_layout().unwrap();
+            let source_y = caret.origin.y - state.input_bounds().origin.y
+                - (height - caret.size.height) / 2. + state.scroll_offset().y;
+            assert!((source_y - reviewed_y).abs() < height / 2., "inline={inline}, accept={accept}, whole_file={whole_file}: before={reviewed_y:?}, after={source_y:?}");
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[gpui_kit::test]
+async fn resolving_one_of_multiple_changes_moves_to_the_next_change(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    for accept in [true, false] {
+        let root = temp_root("review-next-change");
+        let path = root.join("a.txt");
+        let before = (0..200)
+            .map(|i| format!("line {i}\n"))
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        let after = before
+            .replace("line 20\n", "changed 20\n")
+            .replace("line 120\n", "changed 120\n");
+        std::fs::write(&path, &before).unwrap();
+        let (handle, this) = open(cx, Some(root.clone()));
+        send(
+            cx,
+            handle,
+            &this,
+            &format!("write {} {after}", path.display()),
+        );
+        settle(cx, &this);
+        let key = this.read_with(cx, |p, _| p.agent.current().unwrap().key);
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.agent_open_review(key, path.clone(), window, cx);
+                p.diff.inline = false;
+            });
+        })
+        .unwrap();
+        until(cx, &this, "two changes load", |p| p.diff.doc.is_some());
+        this.read_with(cx, |p, _| assert_eq!(p.diff_change_starts().len(), 2));
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            this.update(cx, |p, cx| p.agent_review_hunk(0, accept, window, cx));
+        })
+        .unwrap();
+        until(cx, &this, "one change remains", |p| {
+            p.diff_change_starts().len() == 1
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        this.read_with(cx, |p, cx| {
+            assert_eq!(p.active, Pane::Diff);
+            let scroll = p.diff.scroll.0.borrow();
+            let height =
+                theme::diff_metrics(gpui_kit::component::Theme::global(cx).mono_font_size).row;
+            let y = scroll.base_handle.offset().y + height * p.diff_change_starts()[0] as f32;
+            let middle = (scroll.base_handle.bounds().size.height - height) / 2.;
+            assert!(
+                (y - middle).abs() < height,
+                "accept={accept}: next={y:?}, middle={middle:?}"
+            );
+        });
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[gpui_kit::test]

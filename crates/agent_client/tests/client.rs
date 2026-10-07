@@ -19,6 +19,189 @@ use workspace_editor_agent::{
 const FAKE: &str = env!("CARGO_BIN_EXE_zj-fake-acp-agent");
 
 #[test]
+fn steering_changes_the_running_turn_without_starting_another_prompt() {
+    let ws = Workspace::new("steering");
+    let client = AgentClient::start(options(&ws, &[])).unwrap();
+    let events = Events::of(&client);
+    let turn = client.prompt(text("steerable")).unwrap();
+    events.until(|e| matches!(e, AgentEvent::MessageChunk { .. }));
+    assert!(client.supports_steering());
+    assert_eq!(client.steer(text("先修复测试")), Ok(turn));
+    let seen = events
+        .until(|e| matches!(e, AgentEvent::MessageChunk { text } if text.contains("先修复测试")));
+    assert!(message(&seen).contains("steered:先修复测试"));
+    assert!(client.is_busy());
+    assert_eq!(client.steer(text("finish")), Ok(turn));
+    let seen = events.turn();
+    assert_eq!(outcome(&seen), TurnOutcome::EndTurn);
+    assert!(matches!(seen.last(), Some(AgentEvent::TurnEnded { turn: id, .. }) if *id == turn));
+    assert!(!client.is_busy());
+}
+
+#[test]
+fn steering_handles_both_adapters_when_the_original_turn_finishes() {
+    for response in ["promptRequired", "startedNewTurn"] {
+        let ws = Workspace::new(response);
+        let client = AgentClient::start(options(&ws, &[("FAKE_STEER_OUTCOME", response)])).unwrap();
+        let events = Events::of(&client);
+        let turn = client.prompt(text("steerable")).unwrap();
+        events.until(|e| matches!(e, AgentEvent::MessageChunk { .. }));
+        assert_eq!(client.steer(text("echo continuation")), Ok(turn));
+        let seen = events.turn();
+        assert_eq!(outcome(&seen), TurnOutcome::EndTurn);
+        assert!(
+            message(&seen).contains("continuation"),
+            "{response}: {seen:?}"
+        );
+        if response == "startedNewTurn" {
+            assert!(
+                message(&seen).contains("detached-ended"),
+                "ended on the old idle notification"
+            );
+        }
+        assert!(!client.is_busy());
+        client.prompt(text("echo next")).unwrap();
+        assert_eq!(message(&events.turn()), "next");
+    }
+}
+
+#[test]
+fn steering_stop_prevents_an_idle_fallback_from_continuing() {
+    for response in ["promptRequired", "startedNewTurn"] {
+        let ws = Workspace::new("steering-stop");
+        let client = AgentClient::start(options(&ws, &[("FAKE_STEER_OUTCOME", response)])).unwrap();
+        let events = Events::of(&client);
+        client.prompt(text("steerable")).unwrap();
+        events.until(|e| matches!(e, AgentEvent::MessageChunk { .. }));
+        client.steer(text("echo must-not-continue")).unwrap();
+        client.cancel();
+        let seen = events.turn();
+        assert_eq!(
+            outcome(&seen),
+            TurnOutcome::Cancelled,
+            "{response}: {seen:?}"
+        );
+        if response == "promptRequired" {
+            assert!(!message(&seen).contains("must-not-continue"));
+        }
+        assert!(!client.is_busy());
+    }
+}
+
+#[test]
+fn steering_stop_cancels_a_detached_start_after_the_cancel_deadline() {
+    let ws = Workspace::new("steering-late-stop");
+    let mut opts = options(
+        &ws,
+        &[
+            ("FAKE_STEER_OUTCOME", "startedNewTurn"),
+            ("FAKE_STEER_DELAY_MS", "300"),
+        ],
+    );
+    opts.cancel_grace = Duration::from_millis(50);
+    let client = AgentClient::start(opts).unwrap();
+    let events = Events::of(&client);
+    client.prompt(text("steerable")).unwrap();
+    events.until(|e| matches!(e, AgentEvent::MessageChunk { .. }));
+    client.steer(text("echo must-stop")).unwrap();
+    client.cancel();
+    assert!(matches!(outcome(&events.turn()), TurnOutcome::Failed(_)));
+    assert!(!client.is_busy());
+    // A late recancel must not target a newer prompt in the same ACP session.
+    assert_eq!(
+        client.prompt(text("echo too-early")),
+        Err(ClientError::Busy)
+    );
+    events.until(
+        |e| matches!(e, AgentEvent::MessageChunk { text } if text.contains("detached-cancelled")),
+    );
+    client.prompt(text("echo next")).unwrap();
+    assert_eq!(message(&events.turn()), "next");
+}
+
+#[test]
+fn steering_retired_requests_are_released_on_process_exit_or_session_close() {
+    for exit in ["process", "session"] {
+        let ws = Workspace::new("steering-recovery");
+        let pool = Arc::new(AgentPool::new());
+        let env = [
+            ("FAKE_STEER_OUTCOME", "startedNewTurn"),
+            ("FAKE_STEER_DELAY_MS", "500"),
+        ];
+        let mut opts = pooled(&ws, &pool, &env);
+        opts.cancel_grace = Duration::from_millis(50);
+        if exit == "session" {
+            opts.idle_timeout = Duration::from_millis(50);
+        }
+        let client = AgentClient::start(opts).unwrap();
+        let peer = AgentClient::start(pooled(&ws, &pool, &env)).unwrap();
+        let (events, peer_events) = (Events::of(&client), Events::of(&peer));
+        client.prompt(text("steerable")).unwrap();
+        events.until(|e| matches!(e, AgentEvent::MessageChunk { .. }));
+        peer.prompt(text("pid")).unwrap();
+        peer_events.turn();
+        client.steer(text("echo old")).unwrap();
+        client.cancel();
+        assert!(matches!(outcome(&events.turn()), TurnOutcome::Failed(_)));
+        if exit == "process" {
+            peer.prompt(text("crash")).unwrap();
+        }
+        events.until(|e| matches!(e, AgentEvent::Exited { .. }));
+        client.prompt(text("steerable")).unwrap();
+        events.until(|e| matches!(e, AgentEvent::MessageChunk { .. }));
+        client.steer(text("echo next")).unwrap();
+        if exit == "session" {
+            // The old response arrives before the new one. It must not release the new
+            // request and allow a second, overlapping submission.
+            std::thread::sleep(Duration::from_millis(470));
+            assert_eq!(client.steer(text("too-early")), Err(ClientError::Busy));
+        }
+        assert_eq!(outcome(&events.turn()), TurnOutcome::EndTurn);
+    }
+}
+
+#[test]
+fn steering_preserves_permissions_and_refuses_unavailable_or_failed_requests() {
+    let ws = Workspace::new("steering-permission");
+    let client = AgentClient::start(options(&ws, &[])).unwrap();
+    let events = Events::of(&client);
+    let turn = client.prompt(text("permission")).unwrap();
+    let seen = events.until(|e| matches!(e, AgentEvent::PermissionRequested(_)));
+    let Some(AgentEvent::PermissionRequested(request)) = seen.last() else {
+        unreachable!()
+    };
+    assert_eq!(client.steer(text("补充说明")), Ok(turn));
+    assert!(client.respond_permission(request.id, Some("reject".into())));
+    assert_eq!(outcome(&events.turn()), TurnOutcome::EndTurn);
+
+    for env in ["FAKE_NO_STEERING", "FAKE_STEER_OUTCOME"] {
+        let value = if env == "FAKE_NO_STEERING" {
+            "1"
+        } else {
+            "failed"
+        };
+        let client = AgentClient::start(options(&ws, &[(env, value)])).unwrap();
+        let events = Events::of(&client);
+        client.prompt(text("steerable")).unwrap();
+        events.until(|e| matches!(e, AgentEvent::MessageChunk { .. }));
+        if env == "FAKE_NO_STEERING" {
+            assert_eq!(
+                client.steer(text("followup")),
+                Err(ClientError::SteeringUnavailable)
+            );
+        } else {
+            client.steer(text("followup")).unwrap();
+            events.until(
+                |e| matches!(e, AgentEvent::Error { message } if message.contains("补充指令")),
+            );
+        }
+        assert!(client.is_busy());
+        client.cancel();
+        assert_eq!(outcome(&events.turn()), TurnOutcome::Cancelled);
+    }
+}
+
+#[test]
 fn text_generation_collects_only_the_answer_and_denies_file_access() {
     let ws = Workspace::new("completion");
     let generate = |text| {

@@ -1,6 +1,7 @@
 //! Files an agent changed: line counts against the snapshot, saves, and accepting or reverting them.
 
 use super::*;
+use crate::workbench::diff_view::DiffList;
 
 impl Workbench {
     // ----- changed files ------------------------------------------------------------------
@@ -166,25 +167,40 @@ impl Workbench {
             let paths = paths.clone();
             async move {
                 let mut errors = Vec::new();
+                let mut resolved = Vec::new();
                 for path in &paths {
+                    let source = if accept {
+                        Some(DiffList::Modified)
+                    } else {
+                        client.snapshot(path).flatten().map(|_| DiffList::Original)
+                    };
                     if let Err(e) = resolve_file(&client, path, accept) {
                         errors.push(e);
+                    } else {
+                        resolved.push((path.clone(), source));
                     }
                 }
-                errors
+                (errors, resolved)
             }
         });
         cx.spawn_in(window, async move |this, cx| {
-            let errors = job.await;
+            let (errors, resolved) = job.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 if let Some(first) = errors.first() {
                     this.message = first.clone();
                 }
                 for path in &paths {
                     this.reload_document_from_disk(path, window, cx);
-                    if accept {
-                        this.agent_finish_accepted_review(key, path, file_generation, window, cx);
-                    }
+                }
+                for (path, source) in resolved {
+                    this.agent_finish_resolved_review(
+                        key,
+                        &path,
+                        file_generation,
+                        source,
+                        window,
+                        cx,
+                    );
                 }
                 this.agent_recount(key, Some(paths.clone()), window, cx);
                 this.agent_reload_review(key, window, cx);

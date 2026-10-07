@@ -260,8 +260,10 @@ impl Thread {
     pub fn push_user(&mut self, text: String, attachments: Vec<String>, turn: TurnId) {
         self.end_streaming();
         self.push(Item::User { text, attachments });
-        self.turn = Some(turn);
-        self.status = Status::Running;
+        if self.turn != Some(turn) {
+            self.turn = Some(turn);
+            self.status = Status::Running;
+        }
         self.last_error = None;
         self.version += 1;
     }

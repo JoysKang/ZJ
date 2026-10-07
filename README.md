@@ -57,6 +57,8 @@ python3 tools/fixtures.py /tmp/zj-fixture-f
 - 编辑器复用 Kit 的真实 Editor，带行号、Rust、Python、JavaScript / JSX、TypeScript / TSX、JSON、TOML、YAML、Go、Shell、HTML、CSS、C、C++、Java、SQL、Markdown、Diff 高亮（映射见 `crates/app/src/languages.rs`）、选择、复制粘贴、撤销重做及组件内置查找替换。JSONC 使用已有 JSON grammar 的注释与容错高亮，不作为语法校验器；其他语言是纯文本。中文组合输入仍需要实机专项验收。
 - 代码跳转（不跑语言服务器，基于 tree-sitter）：⌘ 悬停显示下划线，⌘ 单击或 F12 转到定义（同文件局部变量按作用域解析，跨文件用后台建立的符号索引；多个候选时弹出列表），⌘⇧O 转到文件中的符号，⇧F12 查找引用，⌃- / ⌃⇧- 后退 / 前进。支持 Rust、Python、JS、TS / TSX、Go、C、C++、Java、Bash。打开文件夹的快捷键改为 ⌘K ⌘O（⌘⇧O 让给符号列表，与 VS Code 一致）。
 - Markdown 预览（原型样例已移除）将在 P6 接入。
+- Codex、Claude 运行时可在 Agent 输入框继续补充指令，按 Enter 或点击发送即可；停止按钮独立保留。追加指令沿用当前会话和文件引用，待审批的操作仍需审批；不支持此能力或尚未启动完成的 Agent 会保留输入，供稍后发送。
+- 审阅 Agent 改动时，处理最后一处或整个文件后返回源文件，并保留当前行的显示位置；逐处处理时，只在同一文件仍有待处理修改时跳到下一处。
 
 后台 Git 采用独立 argv、porcelain v2 NUL 格式、全局最多两个命令和每仓库串行；状态和 diff 结果带 generation，旧任务不能覆盖新刷新。Git 命令清除继承的 `GIT_*` 定位与配置变量，避免命令被导向其他仓库。查询禁用 optional locks 和 fsmonitor。写操作在同一仓库锁内核对身份及状态版本；刷新不取消已开始的写操作，操作期间禁止关闭对应窗口，失败会刷新状态并显示错误。
 

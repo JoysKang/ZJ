@@ -42,6 +42,9 @@ struct State {
     /// Each session's `cwd`, and the sessions the client closed.
     cwds: std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>>,
     closed: std::sync::Mutex<Vec<String>>,
+    steered: std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+    finish: std::sync::Mutex<std::collections::HashSet<String>>,
+    ended: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 /// A model and an effort picker, plus a mode picker the client must not show.
@@ -98,6 +101,8 @@ async fn run_prompt(
     cx: ConnectionTo<Client>,
 ) -> sdk::Result<()> {
     let session = request.session_id.clone();
+    state.ended.lock().unwrap().remove(&session.to_string());
+    state.finish.lock().unwrap().remove(&session.to_string());
     state.cancelled.lock().unwrap().remove(&session.to_string());
     let prompt: String = request
         .prompt
@@ -299,6 +304,36 @@ async fn run_prompt(
                 say(&cx, &session, format!("readback:{}", back.content))?;
             }
         }
+        "steerable" => {
+            say(&cx, &session, "started|")?;
+            for _ in 0..500 {
+                if state
+                    .cancelled
+                    .lock()
+                    .unwrap()
+                    .contains(&session.to_string())
+                {
+                    stop = acp::StopReason::Cancelled;
+                    break;
+                }
+                if state.finish.lock().unwrap().contains(&session.to_string()) {
+                    break;
+                }
+                let messages = state
+                    .steered
+                    .lock()
+                    .unwrap()
+                    .remove(&session.to_string())
+                    .unwrap_or_default();
+                for message in messages {
+                    say(&cx, &session, format!("steered:{message}|"))?;
+                    if message == "finish" {
+                        state.finish.lock().unwrap().insert(session.to_string());
+                    }
+                }
+                async_io::Timer::after(Duration::from_millis(20)).await;
+            }
+        }
         "slow" => {
             for i in 0..500 {
                 if state
@@ -402,7 +437,9 @@ async fn run_prompt(
         )?,
         other => say(&cx, &session, format!("unknown:{other}"))?,
     }
-    responder.respond(acp::PromptResponse::new(stop))
+    let result = responder.respond(acp::PromptResponse::new(stop));
+    state.ended.lock().unwrap().insert(session.to_string());
+    result
 }
 
 fn tool(
@@ -596,6 +633,8 @@ fn main() -> sdk::Result<()> {
     let on_mode = state.clone();
     let on_config = state.clone();
     let on_close = state.clone();
+    let on_steer = state.clone();
+    let steering = std::env::var_os("FAKE_NO_STEERING").is_none();
     // FAKE_QUIET_MODES=1: `session/set_mode` sends no `current_mode_update`.
     let quiet_modes = std::env::var_os("FAKE_QUIET_MODES").is_some();
     // FAKE_NO_CLOSE=1: an agent without `session/close`.
@@ -647,7 +686,8 @@ fn main() -> sdk::Result<()> {
                                         acp::PromptCapabilities::new().embedded_context(true),
                                     ),
                             )
-                            .agent_info(acp::Implementation::new("fake-agent", "1.0.0")),
+                            .agent_info(acp::Implementation::new("fake-agent", "1.0.0"))
+                            .meta(Some(serde_json::from_value(serde_json::json!({"steering":{"supported":steering}})).unwrap())),
                     )
                 },
                 sdk::on_receive_request!(),
@@ -830,6 +870,52 @@ fn main() -> sdk::Result<()> {
                     let state = on_prompt.clone();
                     let task_cx = cx.clone();
                     cx.spawn(run_prompt(state, request, responder, task_cx))
+                },
+                sdk::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: sdk::UntypedMessage, responder: Responder<serde_json::Value>, cx: ConnectionTo<Client>| {
+                    if request.method != "_session/steering" {
+                        return responder.respond_with_error(sdk::Error::method_not_found());
+                    }
+                    let state = on_steer.clone();
+                    let session = acp::SessionId::new(request.params["sessionId"].as_str().unwrap());
+                    let parts: Vec<acp::ContentBlock> = serde_json::from_value(request.params["prompt"].clone()).unwrap();
+                    let message = parts.iter().filter_map(|p| match p { acp::ContentBlock::Text(t) => Some(t.text.as_str()), _ => None }).collect::<Vec<_>>().join(" ");
+                    let outcome = std::env::var("FAKE_STEER_OUTCOME").unwrap_or_else(|_| "injected".into());
+                    if outcome == "failed" { return responder.respond(serde_json::json!({"outcome":"failed"})); }
+                    if outcome == "promptRequired" || outcome == "startedNewTurn" {
+                        state.finish.lock().unwrap().insert(session.to_string());
+                        let task_cx = cx.clone();
+                        return cx.spawn(async move {
+                            while !state.ended.lock().unwrap().contains(&session.to_string()) {
+                                async_io::Timer::after(Duration::from_millis(5)).await;
+                            }
+                            // The idle from the old turn is not the detached turn's end.
+                            let status = |kind: &str| acp::SessionUpdate::SessionInfoUpdate(acp::SessionInfoUpdate::new().meta(Some(serde_json::from_value(serde_json::json!({"codex":{"threadStatus":{"type":kind}}})).unwrap())));
+                            notify(&task_cx, &session, status("idle"))?;
+                            if outcome == "startedNewTurn" {
+                                let delay = std::env::var("FAKE_STEER_DELAY_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+                                async_io::Timer::after(Duration::from_millis(delay)).await;
+                                if state.closed.lock().unwrap().contains(&session.to_string()) {
+                                    return responder.respond_with_error(sdk::Error::invalid_params());
+                                }
+                                state.cancelled.lock().unwrap().remove(&session.to_string());
+                                notify(&task_cx, &session, status("active"))?;
+                                say(&task_cx, &session, format!("detached:{message}|"))?;
+                            }
+                            responder.respond(serde_json::json!({"outcome":outcome}))?;
+                            if outcome == "startedNewTurn" {
+                                async_io::Timer::after(Duration::from_millis(30)).await;
+                                let cancelled = state.cancelled.lock().unwrap().contains(&session.to_string());
+                                say(&task_cx, &session, if cancelled { "detached-cancelled|" } else { "detached-ended|" })?;
+                                notify(&task_cx, &session, status("idle"))?;
+                            }
+                            Ok(())
+                        });
+                    }
+                    state.steered.lock().unwrap().entry(session.to_string()).or_default().push(message);
+                    responder.respond(serde_json::json!({"outcome":"injected"}))
                 },
                 sdk::on_receive_request!(),
             )
