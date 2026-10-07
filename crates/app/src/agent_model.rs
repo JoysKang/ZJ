@@ -20,6 +20,8 @@ const DAY_MS: i64 = 86_400_000;
 pub struct ThreadRow {
     pub range: Range<usize>,
     pub process: bool,
+    /// Exposed after the turn ends; expanded process members are never final replies.
+    pub final_reply: bool,
     /// Stable absolute identity, independent of the first process member's position.
     pub turn_start: usize,
 }
@@ -80,6 +82,7 @@ pub fn thread_rows(thread: &Thread) -> Vec<ThreadRow> {
                 rows.push(ThreadRow {
                     range: i..i + 1,
                     process: !visible,
+                    final_reply: Some(i) == final_reply,
                     turn_start: turn[0],
                 });
             }
@@ -1068,16 +1071,19 @@ mod tests {
                 ThreadRow {
                     range: 0..1,
                     process: false,
+                    final_reply: false,
                     turn_start: 0,
                 },
                 ThreadRow {
                     range: 1..6,
                     process: true,
+                    final_reply: false,
                     turn_start: 0,
                 },
                 ThreadRow {
                     range: 6..7,
                     process: false,
+                    final_reply: true,
                     turn_start: 0,
                 },
             ]
@@ -1135,21 +1141,25 @@ mod tests {
                 ThreadRow {
                     range: 0..1,
                     process: false,
+                    final_reply: false,
                     turn_start: 0,
                 },
                 ThreadRow {
                     range: 1..8,
                     process: true,
+                    final_reply: false,
                     turn_start: 0,
                 },
                 ThreadRow {
                     range: 5..6,
                     process: false,
+                    final_reply: true,
                     turn_start: 0,
                 },
                 ThreadRow {
                     range: 6..7,
                     process: false,
+                    final_reply: false,
                     turn_start: 0,
                 },
             ]

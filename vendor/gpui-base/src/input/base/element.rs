@@ -257,7 +257,10 @@ impl<M: InputModeKind> Element for EditorScrollbar<M> {
             scroll_handle.set_offset(snapshot.cursor_scroll_offset);
         }
 
-        let mut scrollbar = if !snapshot.soft_wrap {
+        // ZJ patch: wrapped text can still overflow horizontally through its line-end annotation.
+        let mut scrollbar = if !snapshot.soft_wrap
+            || snapshot.layout.scroll_size.width > snapshot.layout.bounds.size.width
+        {
             Scrollbar::new(&scroll_handle)
         } else {
             Scrollbar::vertical(&scroll_handle)
@@ -514,7 +517,7 @@ impl<M: InputModeKind> TextElement<M> {
         last_layout: &LastLayout,
         bounds: &mut Bounds<Pixels>,
         scroll_size: Size<Pixels>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut App,
     ) -> (Vec<CursorRenderInfo>, Point<Pixels>, Option<usize>) {
         let state = self.state.read(cx);
@@ -528,6 +531,8 @@ impl<M: InputModeKind> TextElement<M> {
         let mut scroll_offset = state.scroll_handle.offset();
         let mut current_row = None;
         let mut cursor_infos: Vec<CursorRenderInfo> = Vec::with_capacity(state.selections.len());
+        // ZJ patch: resolve the one-shot viewport intent against freshly shaped text.
+        let mut cursor_scroll_y = None;
 
         // Padding kept between the cursor and the viewport's top/bottom
         // edges, used by the auto-scroll-into-view computation below.
@@ -592,6 +597,9 @@ impl<M: InputModeKind> TextElement<M> {
 
             let affinity = is_active && state.cursor_line_end_affinity;
             let cursor_pos = caret_for(cursor_row, cursor, affinity);
+            if is_active && let Some(y) = state.cursor_viewport_y(window) {
+                cursor_scroll_y = Some(y - cursor_pos.y);
+            }
             let cursor_start = caret_for(sel_start_row, selected_range.start, false);
             let cursor_end = caret_for(sel_end_row, selected_range.end, false);
 
@@ -696,6 +704,14 @@ impl<M: InputModeKind> TextElement<M> {
 
         if let Some(deferred_scroll_offset) = state.deferred_scroll_offset {
             scroll_offset = deferred_scroll_offset;
+        }
+        if let Some(y) = cursor_scroll_y {
+            // ZJ patch: paint at the same legal offset that persistence uses,
+            // including reviewed lines near a file boundary or in a short file.
+            scroll_offset.y = y.clamp(
+                (bounds.size.height - scroll_size.height).min(px(0.)),
+                px(0.),
+            );
         }
         scroll_offset.y = clamp_auto_grow_vertical_scroll_offset(
             &state.mode,
@@ -2181,7 +2197,7 @@ struct CursorRenderInfo {
 
 pub(super) struct PrepaintState {
     // ZJ patch: laid out against this frame's shaped text, including wrapping/scroll.
-    line_end_annotation: Option<AnyElement>,
+    line_end_annotation: Option<(AnyElement, gpui::ContentMask<Pixels>)>,
     /// The lines of entire lines.
     last_layout: LastLayout,
     token_elements: Vec<AnyElement>,
@@ -2500,6 +2516,28 @@ impl<M: InputModeKind> Element for TextElement<M> {
             window,
             cx,
         );
+        // ZJ patch: choose the reviewed viewport before slicing visible lines, so the
+        // first source frame paints the requested code rather than an empty old slice.
+        self.state.update(cx, |state, _| {
+            if let Some(y) = state.cursor_viewport_y(window) {
+                let row = state
+                    .display_map
+                    .buffer_line_to_display_row(state.cursor_position().line as usize);
+                let top = row as f32 * line_height;
+                let content_height = state.display_map.wrap_row_count() as f32 * line_height
+                    + empty_bottom_height(
+                        state.is_code_editor(),
+                        state.scroll_beyond_last_line,
+                        bounds.size.height,
+                        line_height,
+                    );
+                let minimum = (bounds.size.height - content_height).min(px(0.));
+                let offset = state.scroll_handle.offset();
+                state
+                    .scroll_handle
+                    .set_offset(point(offset.x, (y - top).clamp(minimum, px(0.))));
+            }
+        });
         let state = self.state.read(cx);
 
         let (visible_range, visible_buffer_lines, visible_top) =
@@ -2704,6 +2742,39 @@ impl<M: InputModeKind> Element for TextElement<M> {
             line_height,
         );
 
+        // ZJ patch: measure the visible logical line's annotation even when its end is
+        // horizontally offscreen. Its width extends scrolling, without changing wrapping.
+        let annotation = state.extras.line_end_annotation().and_then(|annotation| {
+            let index = last_layout
+                .visible_buffer_lines
+                .binary_search(&annotation.line)
+                .ok()?;
+            let line = last_layout.lines.get(index)?;
+            let offset = text
+                .line_end_offset(annotation.line)
+                .saturating_sub(last_layout.visible_line_byte_offsets[index]);
+            let position = line.position_for_index(offset, &last_layout, false)?;
+            let top = last_layout.visible_top
+                + last_layout.lines[..index]
+                    .iter()
+                    .map(|line| line.size(line_height).height)
+                    .sum::<Pixels>();
+            let position = point(last_layout.line_number_width + annotation.gap, top) + position;
+            let y = position.y + state.scroll_handle.offset().y;
+            if y < px(0.) || y + line_height > bounds.size.height {
+                return None;
+            }
+            Some((annotation.render.clone(), position))
+        });
+        let line_end_annotation = annotation.and_then(|(render, position)| {
+            let mut element = render(window, cx)?;
+            let measured = element.layout_as_root(
+                size(gpui::AvailableSpace::MaxContent, line_height.into()),
+                window,
+                cx,
+            );
+            Some((element, position, measured.width))
+        });
         // Empty bottom and ghost lines both describe extra height past the
         // last content row, so take the max rather than summing — summing
         // left a band of empty space the cursor could never reach.
@@ -2722,6 +2793,9 @@ impl<M: InputModeKind> Element for TextElement<M> {
         if last_layout.text_align == TextAlign::Right || last_layout.text_align == TextAlign::Center
         {
             scroll_size.width = longest_line_width + line_number_width;
+        }
+        if let Some((_, position, width)) = &line_end_annotation {
+            scroll_size.width = scroll_size.width.max(position.x + *width + RIGHT_MARGIN);
         }
 
         // `position_for_index` for example
@@ -2854,46 +2928,33 @@ impl<M: InputModeKind> Element for TextElement<M> {
         let hitbox = window.insert_hitbox(input_bounds, HitboxBehavior::Normal);
 
         let token_elements = self.prepaint_tokens(&last_layout, bounds, token_elements, window, cx);
-        // ZJ patch: place the annotation after the final visual segment of the logical
-        // line. Hidden/folded/offscreen lines have no annotation or hitbox.
-        let annotation = self
-            .state
-            .read(cx)
-            .extras
-            .line_end_annotation()
-            .and_then(|annotation| {
-                let index = last_layout
-                    .visible_buffer_lines
-                    .binary_search(&annotation.line)
-                    .ok()?;
-                let line = last_layout.lines.get(index)?;
-                let offset = text
-                    .line_end_offset(annotation.line)
-                    .saturating_sub(last_layout.visible_line_byte_offsets[index]);
-                let position = line.position_for_index(offset, &last_layout, false)?;
-                let top = last_layout.visible_top
-                    + last_layout.lines[..index]
-                        .iter()
-                        .map(|line| line.size(line_height).height)
-                        .sum::<Pixels>();
-                let origin = bounds.origin
-                    + point(last_layout.line_number_width + annotation.gap, top)
-                    + position;
-                let right = input_bounds.right() - RIGHT_MARGIN;
-                let left = input_bounds.left() + last_layout.line_number_width;
-                if origin.x < left
-                    || origin.x >= right
-                    || origin.y < input_bounds.top()
-                    || origin.y + line_height > input_bounds.bottom()
-                {
-                    return None;
-                }
-                Some((annotation.render.clone(), origin, right - origin.x))
+        // ZJ patch: prepaint only the portion intersecting the editor's content mask.
+        let line_end_annotation = line_end_annotation.and_then(|(mut element, position, width)| {
+            let origin = bounds.origin + position;
+            let right = input_bounds.right() - RIGHT_MARGIN;
+            let left = input_bounds.left() + last_layout.line_number_width;
+            if origin.x + width <= left
+                || origin.x >= right
+                || origin.y < input_bounds.top()
+                || origin.y + line_height > input_bounds.bottom()
+            {
+                return None;
+            }
+            let mask = gpui::ContentMask {
+                bounds: Bounds::new(
+                    point(left, input_bounds.top()),
+                    size((right - left).max(px(0.)), input_bounds.size.height),
+                ),
+            };
+            window.with_content_mask(Some(mask), |window| {
+                element.prepaint_as_root(
+                    origin,
+                    size(width.into(), line_height.into()),
+                    window,
+                    cx,
+                );
             });
-        let line_end_annotation = annotation.and_then(|(render, origin, width)| {
-            let mut element = render(window, cx)?;
-            element.prepaint_as_root(origin, size(width.into(), line_height.into()), window, cx);
-            Some(element)
+            Some((element, mask))
         });
         PrepaintState {
             line_end_annotation,
@@ -3236,6 +3297,8 @@ impl<M: InputModeKind> Element for TextElement<M> {
             state.scroll_size = prepaint.scroll_size;
             state.update_scroll_offset(Some(prepaint.cursor_scroll_offset), cx);
             state.deferred_scroll_offset = None;
+            // ZJ patch: consume the placement once, including invalidated requests.
+            state.deferred_cursor_y = None;
 
             // Layout consumers need changed geometry, not another notification
             // for every paint of an unchanged input.
@@ -3274,8 +3337,8 @@ impl<M: InputModeKind> Element for TextElement<M> {
 
         self.paint_mouse_listeners(&prepaint.hitbox, window, cx);
         // ZJ patch: paint above the editor, with the enclosing editor's content mask.
-        if let Some(annotation) = prepaint.line_end_annotation.as_mut() {
-            annotation.paint(window, cx);
+        if let Some((annotation, mask)) = prepaint.line_end_annotation.as_mut() {
+            window.with_content_mask(Some(*mask), |window| annotation.paint(window, cx));
         }
     }
 }

@@ -332,7 +332,7 @@ impl AgentPanel {
         let settings = cx.global::<crate::settings::Settings>().agent.clone();
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .auto_grow(2, 8)
+                .auto_grow(4, 8)
                 .submit_on_enter(true)
                 .placeholder("继续追问，@ 引用文件")
         });

@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 pub const ROW_HEIGHT: Pixels = px(24.);
 /// Separation between code and the current-line Git annotation.
 pub const BLAME_GAP: Pixels = px(24.);
+pub const BLAME_MAX_WIDTH: Pixels = px(640.);
 /// How far beyond the viewport the Source Control list lays out rows (smooth scrolling).
 pub const SCM_LIST_OVERDRAW: Pixels = px(200.);
 pub const TAB_HEIGHT: Pixels = px(36.);
@@ -207,8 +208,8 @@ pub const AGENT_FILE_ROW: Pixels = px(26.);
 pub const AGENT_FILE_INDENT: Pixels = px(24.);
 pub const AGENT_CHIP: Pixels = px(20.);
 pub const AGENT_COMPOSER_BAR: Pixels = px(34.);
-/// With the textarea padding, toolbar and borders: 156 px, up from 120 px (+30%).
-pub const AGENT_COMPOSER_MIN: Pixels = px(92.);
+/// Four editable lines plus the textarea padding; the composer grows through eight lines.
+pub const AGENT_COMPOSER_MIN: Pixels = px(96.);
 pub const AGENT_QUOTA_WIDTH: Pixels = px(320.);
 pub const AGENT_IMAGE_WIDTH: Pixels = px(104.);
 pub const AGENT_IMAGE_HEIGHT: Pixels = px(72.);
@@ -279,6 +280,8 @@ pub struct Palette {
     pub title: u32,
     /// Tab strip and inactive tabs.
     pub tabs: u32,
+    /// Raised input areas and final Agent replies.
+    pub input_bg: u32,
     pub border: u32,
     pub hover: u32,
     /// Selected row; distinct from hover, drawn with `selected_fg`.
@@ -328,7 +331,7 @@ pub struct Palette {
     pub attention_halo: u32,
     pub unread: u32,
     pub running: u32,
-    /// The user's messages in the agent panel: tinted apart from replies (plain on the panel)
+    /// The user's messages in the agent panel: tinted apart from final replies
     /// and from cards and code blocks.
     pub user_bubble: u32,
     /// Cards inside the agent panel and their borders; `strong_border` frames inputs.
@@ -349,15 +352,15 @@ pub struct Palette {
     pub terminal: [u32; 16],
 }
 
-/// Solarized Dark, mapped like VS Code's built-in theme (sidebar #00212B, editor #002B36,
-/// title #002C39, list selection #005A6F, git decorations from VS Code's defaults). Confirmed
-/// against the owner's screenshot allowing for its Display P3 shift. `deleted` is lightened
-/// from #C74E39 and inactive tabs use #003847 instead of #004052 so text keeps 4.5:1.
+/// Solarized Dark: deep chrome, recessed panels, the base03 editor and base02 input areas.
+/// List selection and Git decorations follow VS Code's built-in theme; `deleted` is
+/// lightened from #C74E39 to keep 4.5:1.
 pub const DARK: Palette = Palette {
     editor: 0x002b36,
     panel: 0x00212b,
-    title: 0x002c39,
-    tabs: 0x003847,
+    title: 0x001820,
+    tabs: 0x002630,
+    input_bg: 0x073642,
     border: 0x073642,
     hover: 0x003846,
     selected: 0x005a6f,
@@ -419,10 +422,11 @@ pub const DARK: Palette = Palette {
 /// Nord Light: snow storm backgrounds, polar night text, frost accents. Aurora colors are
 /// darkened for git decorations so they keep 4.5:1 on the light surfaces.
 pub const LIGHT: Palette = Palette {
-    editor: 0xeceff4,
+    editor: 0xf2f4f8,
     panel: 0xe5e9f0,
-    title: 0xe5e9f0,
-    tabs: 0xe5e9f0,
+    title: 0xd8dee9,
+    tabs: 0xdde3ec,
+    input_bg: 0xf9fbfe,
     border: 0xd8dee9,
     hover: 0xdce2eb,
     selected: 0xcbd8e8,
@@ -593,6 +597,7 @@ pub struct Colors {
     pub panel: Hsla,
     pub title: Hsla,
     pub tabs: Hsla,
+    pub input_bg: Hsla,
     pub border: Hsla,
     pub hover: Hsla,
     pub selected: Hsla,
@@ -686,6 +691,7 @@ impl Palette {
             panel: hsla(self.panel),
             title: hsla(self.title),
             tabs: hsla(self.tabs),
+            input_bg: hsla(self.input_bg),
             border: hsla(self.border),
             hover: hsla(self.hover),
             selected: hsla(self.selected),
@@ -955,6 +961,7 @@ mod tests {
                 ("panel", p.panel),
                 ("title", p.title),
                 ("tabs", p.tabs),
+                ("input and final reply", p.input_bg),
                 ("hover", p.hover),
                 ("active line", p.active_line),
                 ("keycap", p.keycap),

@@ -308,6 +308,9 @@ impl Workbench {
                 .and_then(|session| session.thread.turn_starts.last().copied())
         {
             self.agent.expanded_processes.insert((key, start));
+            if let Some(session) = self.agent.session_mut(key) {
+                session.changes_collapsed = true;
+            }
         }
         self.agent_sync_list(false);
         self.agent_update_spin(window, cx);
@@ -601,6 +604,7 @@ impl Workbench {
                     agent_model::ThreadRow {
                         range: i..i + 1,
                         process: false,
+                        final_reply: false,
                         turn_start,
                     }
                 }));

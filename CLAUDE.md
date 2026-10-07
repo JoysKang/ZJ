@@ -73,13 +73,13 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `diff_doc.rs`：在后台把全上下文补丁还原成两侧全文，做行对齐、语法高亮和字符级差异；`workbench/diff_view.rs`：只切片现成数据的虚拟化左右 / 内联 Diff 编辑器；`workbench/diff_ops.rs`：行选择、复制、概览标尺和块 / 行级暂存；`partial_patch.rs`：从全上下文补丁生成只含所选行的补丁。
   - `workbench/scm_actions.rs`：Git 写操作确认与结果展示，以及 stash 的选择面板和手动添加 / 移除仓库；`git_service/src/write.rs`：仓库锁内校验及有界执行（stash 的 apply / pop / drop 先确认 `stash@{n}` 仍是选中的提交）；`git_service/src/stash.rs`：stash 列表和单行 blame 的解析。
   - `workbench/scm_message.rs`：源码管理输入框右侧的 AI 按钮，用当前选择的 Agent 独立生成提交信息；优先使用暂存区，没有暂存内容时使用磁盘改动（含未跟踪文件），diff 上限 128 KiB。复用 Agent 进程池，拒绝本次会话的 ACP 文件访问和工具审批；支持时选只读 / 规划模式。手动输入、再次点击或关闭工作区取消生成，回填前核对仓库状态；不自动暂存、提交或推送。展开的干净仓库也保留输入框和提交按钮。
-  - `workbench/blame.rs`：当前行末尾的 blame（作者、时间、提交摘要，悬停看详情、点击复制哈希；光标停 400 ms 后 `git blame -L`，编辑中的缓冲区用 `--contents -`，新的请求取消旧的）。Kit 的行尾注释只参与绘制与鼠标命中，不改变文本、换行和滚动范围；空间不足时截断，行尾不在视口内时隐藏。
+  - `workbench/blame.rs`：当前行末尾的 blame（作者、时间、提交摘要，悬停看详情、点击复制哈希；光标停 400 ms 后 `git blame -L`，编辑中的缓冲区用 `--contents -`，新的请求取消旧的）。Kit 的行尾注释参与绘制、鼠标命中和横向滚动范围，不改变文本、选区或换行；长行可横向滚动查看，超长摘要限宽截断后悬停看详情，折叠或纵向不可见的行隐藏。
   - 合并冲突：`conflicts.rs` 找冲突标记和三种解决方式（纯函数）；`workbench/conflict_bar.rs` 在冲突文件编辑后后台扫描、两侧着色（`theme` 的 `conflict_*`），编辑器上方的冲突条逐处或全部解决、上一处 / 下一处，解决完后保存并按新状态暂存。
   - `workbench/graph_view.rs`：编辑区里的 Git 图（纯函数的车道布局、分页提交列表、提交详情、打开提交 Diff）。
   - `session.rs`：重启时恢复的窗口记录（`session.json`，每个窗口的文件夹、位置大小、文件标签和激活的标签；退出时按系统窗口的前后顺序保存，重启按从后到前的顺序创建；重启时只读入激活的标签，其余标签点开时才读）。
   - Agent 面板（docs/adr/0004）：`agent_model.rs` 放不依赖 GPUI 的逻辑（会话分组和时间、`@` 引用、附件、从历史恢复）；回复用 Kit 的 `TextView` 渲染（可选中，代码块带复制按钮），`markdown.rs` 只管代码块的语法高亮（编辑器的语法主题），`workbench/agent/highlights.rs` 在后台算好、绘制时只查表；`quota.rs` 读取 Codex 本地记录并解析实时响应；`workbench/agent/quota.rs` 在显示会话和一轮结束时更新本地记录，悬停或点击额度按钮时后台通过 `agent_client` 的短时 app-server 连接查询最新额度（不运行 Agent 回合，不由 ZJ 读凭据）。`agent_images.rs` 在后台校验和缩略图片，输入区显示可删除预览，发送 ACP 图片内容；执行过程折叠后仍按可见行布局；`secrets.rs` 解析 Agent 的环境变量（`$变量名` 或 macOS 钥匙串 `keychain:账户名`，设置里不存明文密钥）。`workbench/agent.rs` 是会话与面板视图的状态，其余逻辑按主题放在 `workbench/agent/`（`turns` 发送与事件泵、`permissions` 审批与模式、`composer` 引用与附件、`changes` 改动文件、`history` 会话历史、`buffers` 给 Agent 的未保存缓冲区、`highlights` 代码块高亮）；`agent_panel.rs`（标题、会话条、切换器；`agent_panel/` 下是对话行、卡片、改动文件、输入框、设置）、`agent_history.rs`（会话列表）、`agent_search.rs`（⌘J 搜索）、`agent_review.rs`（编辑区里逐处接受 / 拒绝）只做渲染和交互。转圈只在面板可见、窗口在前台、有会话运行时才有定时器。
   - `symbols.rs`：tree-sitter tags / locals 查询做定义、引用和文件大纲（查询在 `crates/app/queries/`）；`symbol_index.rs`：首次跳转时后台建立的工作区符号索引；`workbench/navigation.rs`：转到定义、符号列表、查找引用、转到行（⌃G，命令中心里的 `:行:列`）和前进后退。不跑语言服务器，见 docs/adr/0002。
-- Agent 输出按轮次合并为一个执行过程，运行时默认展开，可手动折叠，运行中追加指令仍属于当前轮；结束时自动收起当前轮过程并单独显示最终回复。待审批、待登录和会话错误直接显示。展开成员继续使用外层虚拟列表；停留在底部时跟随最新输出，向上阅读时保持位置，返回底部后恢复跟随。输入区不显示上下文占用圆环。
+- Agent 输出按轮次合并为一个执行过程，运行时默认展开，可手动折叠，运行中追加指令仍属于当前轮；结束时自动收起当前轮过程并单独显示最终回复。修改文件列表独立控制，每个新轮次默认收起，当前轮的更新或追加指令保留手动展开状态。待审批、待登录和会话错误直接显示。展开成员继续使用外层虚拟列表；停留在底部时跟随最新输出，向上阅读时保持位置，返回底部后恢复跟随。输入区不显示上下文占用圆环。
 - `vendor/`：打过补丁的 GPUI macOS 渲染器和窗口层（`gpui-pre-apple` / `gpui-pre-macos`），以及 GPUI Kit 的 `gpui-base`（编辑器光标常亮），都用 `[patch.crates-io]` 指向。改动都标 `ZJ patch`，说明在 `vendor/README.md`，理由和测量方法在 docs/adr/0005；`ZJ_GPU_LOWMEM=0` 恢复上游行为。升级 GPUI 时要先处理这里。
 - UI 的 render 回调里不做 IO、不跑 Git 命令、不做全文解析；这些都通过 `background_spawn` 执行，结果带 generation 校验。
 

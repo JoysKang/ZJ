@@ -42,7 +42,7 @@ impl Workbench {
             return div().into_any_element();
         };
         if !row.process {
-            return self.render_agent_item(row.range.start, window, cx);
+            return self.render_agent_item(row.range.start, row.final_reply, window, cx);
         }
         let key = session.key;
         let start = row.turn_start;
@@ -86,6 +86,7 @@ impl Workbench {
     fn render_agent_item(
         &self,
         i: usize,
+        final_reply: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -122,6 +123,14 @@ impl Workbench {
                 };
                 div()
                     .w_full()
+                    .when(final_reply, |reply| {
+                        reply
+                            .p_3()
+                            .rounded(theme::RADIUS_LARGE)
+                            .bg(colors.input_bg)
+                            .border_1()
+                            .border_color(colors.card_border)
+                    })
                     .line_height(theme::AGENT_LINE)
                     .child(view)
                     .into_any_element()

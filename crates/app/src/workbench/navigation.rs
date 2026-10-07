@@ -753,28 +753,13 @@ pub enum Placement {
 impl Placement {
     fn apply(&self, editor: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
         if let Placement::Review { line, y } = *self {
-            let cursor = editor.update(cx, |state, cx| {
-                state.set_cursor_position(lsp_types::Position::new(line, 0), window, cx);
-                state.cursor()
-            });
-            let editor = editor.downgrade();
-            // First lay out the newly opened editor and let Kit reveal the cursor. Its
-            // actual caret geometry also accounts for soft wrapping and folded lines.
-            window.on_next_frame(move |window, cx| {
-                let _ = editor.update(cx, |state, cx| {
-                    if state.cursor() != cursor || !state.focus_handle(cx).is_focused(window) {
-                        return;
-                    }
-                    if let Some((caret, height)) = state.cursor_layout() {
-                        // Kit's caret bounds precede vertical scrolling and include its
-                        // inset within the row. Recover the row's content-space top.
-                        let top = caret.origin.y
-                            - state.input_bounds().origin.y
-                            - (height - caret.size.height) / 2.;
-                        let offset = state.scroll_offset();
-                        state.set_scroll_offset(point(offset.x, y - top), cx);
-                    }
-                });
+            editor.update(cx, |state, cx| {
+                state.set_cursor_position_in_viewport(
+                    lsp_types::Position::new(line, 0),
+                    y,
+                    window,
+                    cx,
+                );
             });
             return;
         }
@@ -859,6 +844,118 @@ fn same_family(a: &str, b: &str) -> bool {
 mod tests {
     use super::{AtomicBool, Path, SymbolIndex, parse_line_query, references, resolve};
     use std::fs;
+
+    #[gpui_kit::test]
+    async fn review_placement_preserves_position_before_the_first_source_frame(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use super::super::test_support::{empty_store, open_window};
+        use super::Placement;
+        use gpui_kit::{AppContext as _, px, test::TestWindowExt};
+        for (wrapped, reused) in [(false, false), (false, true), (true, false), (true, true)] {
+            let (handle, this) = open_window(
+                cx,
+                None,
+                crate::settings::Settings::default(),
+                empty_store(),
+            );
+            cx.update_window(handle.into(), |_, window, cx| {
+                let editor = this.update(cx, |p, cx| {
+                    p.new_untitled(window, cx);
+                    p.active_editor().unwrap().clone()
+                });
+                editor.update(cx, |state, cx| {
+                    let source = (0..800)
+                        .map(|i| {
+                            if i == 30 {
+                                format!("{}\n", "long text ".repeat(80))
+                            } else {
+                                format!("line {i}\n")
+                            }
+                        })
+                        .collect::<String>();
+                    state.replace_all(source, window, cx);
+                    state.set_soft_wrap(wrapped, window, cx);
+                    state.set_cursor_position(lsp_types::Position::new(10, 0), window, cx);
+                });
+                if reused {
+                    window.render_frame(cx);
+                }
+                let y = px(200.);
+                Placement::Review { line: 604, y }.apply(&editor, window, cx);
+                // Match native delivery: callbacks precede the next frame's layout.
+                window.simulate_next_frame(cx);
+                window.render_frame(cx);
+                assert!(
+                    editor.read(cx).visible_row_range().unwrap().contains(&604),
+                    "the reviewed code must be painted in the first source frame"
+                );
+                assert!(
+                    editor.read(cx).visible_row_range().unwrap().contains(&624),
+                    "the first source frame must also paint below the reviewed line"
+                );
+                let source_y = |state: &gpui_kit::component::input::EditorState| {
+                    let (caret, height) = state.cursor_layout().unwrap();
+                    caret.origin.y
+                        - state.input_bounds().origin.y
+                        - (height - caret.size.height) / 2.
+                        + state.scroll_offset().y
+                };
+                assert!(
+                    (source_y(editor.read(cx)) - y).abs()
+                        < editor.read(cx).line_height().unwrap() / 2.,
+                    "the first frame must already keep the reviewed position"
+                );
+                window.simulate_next_frame(cx);
+                window.render_frame(cx);
+                let state = editor.read(cx);
+                let actual = source_y(state);
+                assert!(
+                    (actual - y).abs() < state.line_height().unwrap() / 2.,
+                    "wrapped={wrapped}, reused={reused}: expected={y:?}, actual={actual:?}"
+                );
+                Placement::Review { line: 605, y }.apply(&editor, window, cx);
+                editor.update(cx, |state, cx| {
+                    state.set_cursor_position(lsp_types::Position::new(0, 0), window, cx)
+                });
+                window.simulate_next_frame(cx);
+                window.render_frame(cx);
+                assert!(
+                    source_y(editor.read(cx)).abs() < editor.read(cx).line_height().unwrap(),
+                    "a later cursor move cancels the pending review placement"
+                );
+                for (line_count, target) in [(800, 0), (800, 799), (3, 0), (3, 2)] {
+                    editor.update(cx, |state, cx| {
+                        state.replace_all(
+                            (0..line_count).map(|i| format!("line {i}\n")).collect::<String>(),
+                            window,
+                            cx,
+                        );
+                        state.set_scroll_beyond_last_line(Some(0), window, cx);
+                    });
+                    Placement::Review { line: target, y }.apply(&editor, window, cx);
+                    window.simulate_next_frame(cx);
+                    window.render_frame(cx);
+                    let state = editor.read(cx);
+                    let painted_y = state.text_bounds().unwrap().origin.y - state.input_bounds().origin.y;
+                    assert_eq!(
+                        painted_y,
+                        state.scroll_offset().y,
+                        "file boundary must paint with the persisted legal offset: line_count={line_count}, target={target}"
+                    );
+                    let first_y = source_y(state);
+                    window.simulate_next_frame(cx);
+                    window.render_frame(cx);
+                    assert_eq!(
+                        source_y(editor.read(cx)),
+                        first_y,
+                        "file boundary must not jump on the next frame"
+                    );
+                }
+            })
+            .unwrap();
+        }
+    }
 
     #[test]
     fn line_queries_parse_line_and_column() {

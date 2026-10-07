@@ -78,7 +78,7 @@ impl MultiLineMode for EditorMode {}
 /// during an edit. Adding a field an editor renders belongs here and leaves
 /// the engine's callbacks alone.
 pub trait InputExtras: Default + 'static {
-    // ZJ patch: a paint-only application annotation.
+    // ZJ patch: a line-end application annotation, including its horizontal scroll extent.
     fn line_end_annotation(&self) -> Option<&super::editor::LineEndAnnotation> {
         None
     }

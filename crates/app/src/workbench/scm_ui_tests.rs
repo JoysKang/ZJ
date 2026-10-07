@@ -5,7 +5,7 @@ use super::super::*;
 // `gpui_kit::*` also exports a `test` macro; `#[gpui_kit::test]` expands to the built-in one.
 #[allow(unused_imports)]
 use core::prelude::v1::test;
-use gpui_kit::{TestAppContext, test::TestWindowExt};
+use gpui_kit::{InputEvent as _, TestAppContext, test::TestWindowExt};
 
 fn git(dir: &std::path::Path, args: &[&str]) {
     let output = std::process::Command::new("git")
@@ -543,7 +543,7 @@ async fn the_line_end_blames_the_cursor_line(cx: &mut TestAppContext) {
 
     // The annotation follows the last visual segment of a wrapped Unicode line.
     let long = "世界🙂 ".repeat(36);
-    let contents = format!("{long}\n{}\n{}", "wide ".repeat(100), "short\n".repeat(80));
+    let contents = format!("{long}\n{}", "short\n".repeat(80));
     cx.update_window(window.into(), |_, window, cx| {
         editor.update(cx, |state, cx| {
             state.replace_all(contents, window, cx);
@@ -586,8 +586,8 @@ async fn the_line_end_blames_the_cursor_line(cx: &mut TestAppContext) {
         });
         window.render_frame(cx);
         assert!(window.try_find("line-blame").is_none());
-        // Scroll horizontally until its end has space for an annotation. The wider
-        // second line lets us scroll past the first line's end without extending layout.
+        // The longest line must make room for its own annotation, without another
+        // wider line granting extra horizontal scroll space.
         editor.update(cx, |state, cx| {
             state.set_cursor_position(
                 lsp_types::Position::new(0, long.encode_utf16().count() as u32),
@@ -596,10 +596,16 @@ async fn the_line_end_blames_the_cursor_line(cx: &mut TestAppContext) {
             );
         });
         window.render_frame(cx);
-        editor.update(cx, |state, cx| {
-            let offset = state.scroll_offset();
-            state.set_scroll_offset(point(offset.x - px(100.), px(0.)), cx);
-        });
+        window.dispatch_event(
+            ScrollWheelEvent {
+                position: editor.read(cx).input_bounds().center(),
+                delta: ScrollDelta::Pixels(point(px(-10000.), px(0.))),
+                modifiers: Modifiers::default(),
+                touch_phase: TouchPhase::Moved,
+            }
+            .to_platform_input(),
+            cx,
+        );
         window.render_frame(cx);
         let annotation = window
             .try_find("line-blame")
@@ -611,6 +617,11 @@ async fn the_line_end_blames_the_cursor_line(cx: &mut TestAppContext) {
             .unwrap();
         assert!((annotation.origin.x - end.origin.x - theme::BLAME_GAP).abs() <= px(1.));
         assert!((annotation.origin.y - end.origin.y).abs() <= px(1.));
+        assert!(annotation.right() <= editor.read(cx).input_bounds().right());
+        assert!(
+            annotation.size.width > theme::BLAME_GAP,
+            "the full annotation is scrollable"
+        );
         assert_eq!(
             editor.read(cx).text().to_string().lines().next(),
             Some(long.as_str())

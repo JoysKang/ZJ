@@ -415,6 +415,8 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(crate) scroll_handle: ScrollHandle,
     /// The deferred scroll offset to apply on next layout.
     pub(crate) deferred_scroll_offset: Option<Point<Pixels>>,
+    // ZJ patch: place this cursor/revision at a viewport y using the next frame's geometry.
+    pub(crate) deferred_cursor_y: Option<(usize, u64, Pixels)>,
     /// The size of the scrollable content.
     pub(crate) scroll_size: gpui::Size<Pixels>,
     pub(super) editor_scrollbar_snapshot: Cell<Option<EditorScrollbarSnapshot>>,
@@ -753,6 +755,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             longest_line_width: Cell::new(None),
             editor_paddings: Edges::default(),
             deferred_scroll_offset: None,
+            deferred_cursor_y: None,
             placeholder: SharedString::default(),
             mask_pattern: MaskPattern::default(),
             mask_pattern_set: false,
@@ -2973,8 +2976,21 @@ impl<M: InputModeKind> InputBaseState<M> {
     ///
     /// The offset will be clamped to the valid range, and applied after the next layout.
     pub fn set_scroll_offset(&mut self, offset: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        // ZJ patch: explicit scrolling supersedes the pending review placement.
+        self.deferred_cursor_y = None;
         self.deferred_scroll_offset = Some(offset);
         cx.notify();
+    }
+
+    // ZJ patch: validate the one-shot viewport intent before using fresh layout geometry.
+    pub(super) fn cursor_viewport_y(&self, window: &Window) -> Option<Pixels> {
+        self.deferred_cursor_y
+            .filter(|(cursor, revision, _)| {
+                *cursor == self.cursor()
+                    && *revision == self.document_revision
+                    && self.focus_handle.is_focused(window)
+            })
+            .map(|(_, _, y)| y)
     }
 
     /// Laid-out line height; `None` before first layout.
@@ -3366,6 +3382,8 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     fn on_blur(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // ZJ patch: leaving the source cancels a review placement that has not painted yet.
+        self.deferred_cursor_y = None;
         if M::is_context_menu_open(self, cx) {
             return;
         }

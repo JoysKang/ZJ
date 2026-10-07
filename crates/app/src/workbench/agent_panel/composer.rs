@@ -241,7 +241,7 @@ impl Workbench {
             } else {
                 colors.strong_border
             })
-            .bg(colors.card)
+            .bg(colors.input_bg)
             .map(|c| {
                 if attached {
                     c.rounded_b(theme::RADIUS_LARGE)

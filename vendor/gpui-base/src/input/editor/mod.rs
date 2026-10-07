@@ -11,7 +11,7 @@ use super::{EditorMode, InputBaseState, InputModeKind};
 pub type EditorState = InputBaseState<EditorMode>;
 
 // ZJ patch: an application-owned annotation after a logical line. It participates
-// only in painting/hit testing, never in text, selection, wrapping or scroll size.
+// in painting/hit testing and horizontal scroll size, never in text, selection or wrapping.
 pub struct LineEndAnnotation {
     pub(crate) line: usize,
     pub(crate) gap: gpui::Pixels,
@@ -19,6 +19,22 @@ pub struct LineEndAnnotation {
 }
 
 impl EditorState {
+    /// ZJ patch: preserve a reviewed line's viewport position on its first source frame,
+    /// including soft wrapping. The intent is consumed by layout, not a frame callback.
+    pub fn set_cursor_position_in_viewport(
+        &mut self,
+        position: impl Into<super::Position>,
+        y: gpui::Pixels,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        self.set_cursor_position(position, window, cx);
+        // ZJ patch: replace the ordinary reveal target before the first visible-line slice.
+        self.deferred_scroll_offset = None;
+        self.deferred_cursor_y = Some((self.cursor(), self.document_revision, y));
+        cx.notify();
+    }
+
     pub fn set_line_end_annotation(
         &mut self,
         line: usize,

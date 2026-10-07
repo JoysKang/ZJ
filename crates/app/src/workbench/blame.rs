@@ -197,10 +197,10 @@ impl Workbench {
         Some(
             h_flex()
                 .id("line-blame")
-                .max_w_full()
+                .max_w(theme::BLAME_MAX_WIDTH)
                 .h_full()
                 .gap_1()
-                .flex_shrink_1()
+                .flex_shrink_0()
                 .min_w_0()
                 .overflow_hidden()
                 .whitespace_nowrap()

@@ -243,6 +243,75 @@ async fn quota_hover_and_click_query_now_and_anchor_to_the_button(cx: &mut TestA
 }
 
 #[gpui_kit::test]
+async fn the_agent_composer_uses_its_added_height_for_editing(cx: &mut TestAppContext) {
+    let (handle, this) = open(cx, None);
+    let mut minimum = None;
+    for text in [
+        "",
+        "1\n2\n3\n4",
+        "1\n2\n3\n4\n5\n6\n7\n8",
+        &"长行自动换行 ".repeat(100),
+        &"一行\n".repeat(20),
+        "",
+    ] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.agent_focus_composer(window, cx);
+                p.agent
+                    .composer
+                    .update(cx, |input, cx| input.set_value(text, window, cx));
+            });
+            window.render_frame(cx);
+            window.press("cmd-down", cx);
+            window.render_frame(cx);
+            this.read_with(cx, |p, cx| {
+                let input = p.agent.composer.read(cx);
+                let bounds = input.input_bounds();
+                let padding = gpui_kit::component::Size::Medium.input_py() * 2.;
+                assert!(bounds.size.height >= theme::AGENT_COMPOSER_MIN - padding);
+                assert!(bounds.size.height <= input.line_height().unwrap() * 8.);
+                if text.is_empty() {
+                    assert_eq!(
+                        *minimum.get_or_insert(bounds.size.height),
+                        bounds.size.height
+                    );
+                } else if text.lines().count() >= 8 {
+                    assert!(bounds.size.height > minimum.unwrap());
+                }
+                let send = window.find("agent-send").bounds();
+                assert!(
+                    bounds.bottom() <= send.top(),
+                    "text={bounds:?} overlaps toolbar={send:?}"
+                );
+                let (cursor, _) = input.cursor_layout().unwrap();
+                let scroll = input.scroll_offset().y;
+                assert!(
+                    cursor.top() + scroll >= bounds.top()
+                        && cursor.bottom() + scroll <= bounds.bottom(),
+                    "text={bounds:?}, caret={cursor:?}, scroll={scroll:?}"
+                );
+            });
+        })
+        .unwrap();
+    }
+    let bounds = this.read_with(cx, |p, cx| p.agent.composer.read(cx).text_bounds().unwrap());
+    // Click in the lower half that used to be dead space, then type through native dispatch.
+    let mut visual = gpui_kit::VisualTestContext::from_window(handle.into(), cx);
+    visual.update(|window, cx| window.blur(cx));
+    visual.simulate_click(
+        bounds.origin + point(bounds.size.width / 2., bounds.size.height * 0.75),
+        Modifiers::default(),
+    );
+    visual.update(|window, cx| window.input("新增区域也可输入", cx));
+    this.read_with(&visual, |p, cx| {
+        assert_eq!(
+            p.agent.composer.read(cx).value().as_ref(),
+            "新增区域也可输入"
+        )
+    });
+}
+
+#[gpui_kit::test]
 async fn a_running_turn_has_one_process_and_collapses_when_the_final_reply_arrives(
     cx: &mut TestAppContext,
 ) {
@@ -339,6 +408,14 @@ async fn a_running_turn_has_one_process_and_collapses_when_the_final_reply_arriv
                 )
                 .collect();
             assert_eq!(visible_replies, ["final"]);
+            assert_eq!(
+                p.agent
+                    .thread_rows
+                    .iter()
+                    .filter(|row| row.final_reply)
+                    .count(),
+                1
+            );
             cx.notify();
         });
         window.render_frame(cx);
@@ -737,6 +814,13 @@ async fn steering_works_from_enter_and_send_with_context_and_a_separate_stop_but
     let path = root.join("a.txt");
     std::fs::write(&path, "context").unwrap();
     let (handle, this) = open(cx, Some(root.clone()));
+    this.update(cx, |p, _| {
+        p.agent_ensure_session();
+        p.agent
+            .session_mut(p.agent.current.unwrap())
+            .unwrap()
+            .changes_collapsed = false;
+    });
     send(cx, handle, &this, "steerable");
     until(cx, &this, "the original turn starts", |p| {
         p.agent
@@ -748,13 +832,23 @@ async fn steering_works_from_enter_and_send_with_context_and_a_separate_stop_but
         p.agent.expanded_processes.contains(&(key, 0))
             && p.agent.thread_rows.iter().any(|row| row.process)
     });
+    this.read_with(cx, |p, _| {
+        assert!(
+            p.agent.current().unwrap().changes_collapsed,
+            "new turns keep changed files folded independently of the running process"
+        )
+    });
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
         window.click(("agent-process", 0usize), cx);
     })
     .unwrap();
     this.update(cx, |p, _| {
-        p.agent.attachments.push(Attachment::File(path.clone()))
+        p.agent.attachments.push(Attachment::File(path.clone()));
+        p.agent
+            .session_mut(p.agent.current.unwrap())
+            .unwrap()
+            .changes_collapsed = false;
     });
     send(cx, handle, &this, "先修复测试");
     wait(
@@ -768,6 +862,7 @@ async fn steering_works_from_enter_and_send_with_context_and_a_separate_stop_but
         let session = p.agent.current().unwrap();
         assert_eq!(session.turns, 1);
         assert!(session.busy());
+        assert!(!session.changes_collapsed, "steering preserves manually opened changed files");
         assert!(!p.agent.expanded_processes.contains(&(session.key, 0)),
             "steering preserves a manually folded process");
         assert!(session.thread.items.iter().any(|item| matches!(item, Item::User { text, attachments } if text == "先修复测试" && attachments == &["a.txt".to_string()])));
@@ -1508,7 +1603,7 @@ async fn resolving_a_centered_review_preserves_wrapped_source_position(cx: &mut 
             |_| "returned source did not finish reloading".into(),
         );
         cx.update_window(handle.into(), |_, window, cx| {
-            window.render_frame(cx);
+            // Native frame callbacks run before layout of the returned source editor.
             window.simulate_next_frame(cx);
             window.render_frame(cx);
         })

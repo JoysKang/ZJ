@@ -56,9 +56,17 @@ measure it are in [docs/adr/0005-gpu-memory.md](../docs/adr/0005-gpu-memory.md).
 - `src/input/editor/mod.rs`, `src/input/base/kind.rs`, `src/input/base/element.rs`,
   `src/input/mod.rs`: one optional application-owned line-end annotation. It is
   positioned in prepaint using that frame's shaped logical line, after its last
-  wrapped segment, and is omitted when the endpoint is outside the viewport or
-  folded away. It does not enter the text, wrapping, selections or scroll extent.
-  ZJ uses it for current-line blame; the application supplies the gap and style.
+  wrapped segment. Its measured width extends horizontal scrolling even when the
+  endpoint is to the right of the viewport; vertically offscreen or folded lines
+  are omitted. It does not enter the text, wrapping or selections. ZJ uses it for
+  current-line blame; the application supplies the gap, style and width cap.
+- `src/input/editor/mod.rs`, `src/input/base/state.rs`, `src/input/base/element.rs`:
+  reviewed source positions use a one-shot cursor/viewport intent consumed by the
+  first layout, with fresh wrapped-line geometry. Native frame callbacks run before
+  drawing and cannot safely read the returned source's previous caret geometry.
+  It replaces the ordinary deferred reveal before choosing the visible slice and
+  clamps the painted offset to the current frame's scroll range at file boundaries.
+  Later cursor movement, text revision, blur or explicit scrolling cancels the intent.
 - `src/input/base/blink_cursor.rs`: the cursor is steady. `start` shows it without a timer and
   `pause` (every keystroke) only repaints when it was hidden; `stop` (blur) hides it as before.
   Upstream blinks every 500 ms, and each blink repaints the whole window: an idle focused

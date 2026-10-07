@@ -90,7 +90,7 @@ pub use diagnostics::{
     DiagnosticSummary, DiagnosticTag, RelatedInformation,
 };
 pub use display_map::{BufferPoint, DisplayMap, DisplayPoint, FoldRange, WrappingIndent};
-// ZJ patch: expose the paint-only annotation type alongside the editor.
+// ZJ patch: expose the line-end annotation type alongside the editor.
 pub use editor::{Editor, EditorState, LineEndAnnotation};
 pub use highlighting::{
     DiagnosticColors, FoldIconRenderer, HighlightStyleResolver, InputEditorStyle, InputHighlighter,

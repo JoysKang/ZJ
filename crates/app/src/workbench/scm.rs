@@ -12,7 +12,7 @@ use crate::{file_icons, theme};
 use gpui_kit::{
     assets::IconName,
     component::{
-        ActiveTheme, Disableable, Icon, Sizable,
+        Disableable, Icon, Sizable,
         button::{Button, ButtonCustomVariant, ButtonVariants, DropdownButton},
         h_flex,
         input::{Enter, Textarea},
@@ -655,7 +655,7 @@ impl Workbench {
                     .rounded(theme::RADIUS)
                     .border_1()
                     .border_color(colors.border)
-                    .bg(cx.theme().input)
+                    .bg(colors.input_bg)
                     .capture_action(cx.listener({
                         let id = id.clone();
                         move |this, action: &Enter, window, cx| {
