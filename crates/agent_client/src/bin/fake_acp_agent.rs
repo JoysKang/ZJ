@@ -16,6 +16,9 @@
 //! options the client set. One process serves many sessions: `session` says which one and its
 //! `cwd`, `closes` lists the sessions closed with `session/close` (`FAKE_NO_CLOSE=1` leaves
 //! that capability out).
+//! `FAKE_STEER_GATE=<directory>` holds detached steering responses until the test creates
+//! `<sessionId>.release`; `<sessionId>.waiting` marks arrival and `.responded` marks a
+//! response rejected after the session closed.
 
 use agent_client_protocol::{
     self as sdk, Agent, Client, ConnectionTo, Responder, Stdio, schema::v1 as acp,
@@ -924,10 +927,22 @@ fn main() -> sdk::Result<()> {
                             let status = |kind: &str| acp::SessionUpdate::SessionInfoUpdate(acp::SessionInfoUpdate::new().meta(Some(serde_json::from_value(serde_json::json!({"codex":{"threadStatus":{"type":kind}}})).unwrap())));
                             notify(&task_cx, &session, status("idle"))?;
                             if outcome == "startedNewTurn" {
-                                let delay = std::env::var("FAKE_STEER_DELAY_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
-                                async_io::Timer::after(Duration::from_millis(delay)).await;
+                                let gate = std::env::var_os("FAKE_STEER_GATE").map(|root| std::path::PathBuf::from(root).join(session.to_string()));
+                                if let Some(gate) = &gate {
+                                    std::fs::write(gate.with_extension("waiting"), "").unwrap();
+                                    while !gate.with_extension("release").exists() {
+                                        async_io::Timer::after(Duration::from_millis(5)).await;
+                                    }
+                                } else {
+                                    let delay = std::env::var("FAKE_STEER_DELAY_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(20);
+                                    async_io::Timer::after(Duration::from_millis(delay)).await;
+                                }
                                 if state.closed.lock().unwrap().contains(&session.to_string()) {
-                                    return responder.respond_with_error(sdk::Error::invalid_params());
+                                    responder.respond_with_error(sdk::Error::invalid_params())?;
+                                    if let Some(gate) = &gate {
+                                        std::fs::write(gate.with_extension("responded"), "").unwrap();
+                                    }
+                                    return Ok(());
                                 }
                                 state.cancelled.lock().unwrap().remove(&session.to_string());
                                 notify(&task_cx, &session, status("active"))?;

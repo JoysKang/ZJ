@@ -1968,6 +1968,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_retired_steering_error_does_not_release_the_new_request() {
+        let preset = crate::registry::builtin_presets().remove(0);
+        let client = AgentClient::start(ClientOptions::new(preset, std::env::temp_dir())).unwrap();
+        *client.session.turn.lock().unwrap() = Some(2);
+        client.session.steering.lock().unwrap().pending = Some(2);
+        client
+            .session
+            .steering_supported
+            .store(true, Ordering::Relaxed);
+
+        async_io::block_on(steering::failed(
+            &client.session,
+            1,
+            "retired response".into(),
+        ));
+
+        assert_eq!(*client.session.turn.lock().unwrap(), Some(2));
+        assert_eq!(client.session.steering.lock().unwrap().pending, Some(2));
+        assert_eq!(
+            client.steer(vec![PromptPart::Text("too-early".into())]),
+            Err(ClientError::Busy)
+        );
+        assert!(client.events.try_recv().is_err());
+    }
+
+    #[test]
     fn prompt_blocks_link_or_embed() {
         let parts = vec![
             PromptPart::Text("看看".into()),

@@ -121,12 +121,34 @@ fn steering_stop_cancels_a_detached_start_after_the_cancel_deadline() {
 
 #[test]
 fn steering_retired_requests_are_released_on_process_exit_or_session_close() {
+    let session_id = |seen: &[AgentEvent]| {
+        seen.iter()
+            .find_map(|event| match event {
+                AgentEvent::SessionStarted { session_id, .. } => Some(session_id.clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let wait_for_file = |path: &Path| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !path.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "no steering marker at {}",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
     for exit in ["process", "session"] {
         let ws = Workspace::new("steering-recovery");
         let pool = Arc::new(AgentPool::new());
+        let gates = ws.path("steering-gates");
+        std::fs::create_dir(&gates).unwrap();
+        let gates_text = gates.to_str().unwrap();
         let env = [
             ("FAKE_STEER_OUTCOME", "startedNewTurn"),
-            ("FAKE_STEER_DELAY_MS", "500"),
+            ("FAKE_STEER_GATE", gates_text),
         ];
         let mut opts = pooled(&ws, &pool, &env);
         opts.cancel_grace = Duration::from_millis(50);
@@ -137,10 +159,12 @@ fn steering_retired_requests_are_released_on_process_exit_or_session_close() {
         let peer = AgentClient::start(pooled(&ws, &pool, &env)).unwrap();
         let (events, peer_events) = (Events::of(&client), Events::of(&peer));
         client.prompt(text("steerable")).unwrap();
-        events.until(|e| matches!(e, AgentEvent::MessageChunk { .. }));
+        let old_session =
+            session_id(&events.until(|e| matches!(e, AgentEvent::MessageChunk { .. })));
         peer.prompt(text("pid")).unwrap();
         peer_events.turn();
         client.steer(text("echo old")).unwrap();
+        wait_for_file(&gates.join(format!("{old_session}.waiting")));
         client.cancel();
         assert!(matches!(outcome(&events.turn()), TurnOutcome::Failed(_)));
         if exit == "process" {
@@ -148,15 +172,22 @@ fn steering_retired_requests_are_released_on_process_exit_or_session_close() {
         }
         events.until(|e| matches!(e, AgentEvent::Exited { .. }));
         client.prompt(text("steerable")).unwrap();
-        events.until(|e| matches!(e, AgentEvent::MessageChunk { .. }));
+        let new_session =
+            session_id(&events.until(|e| matches!(e, AgentEvent::MessageChunk { .. })));
+        assert_ne!(old_session, new_session);
         client.steer(text("echo next")).unwrap();
+        wait_for_file(&gates.join(format!("{new_session}.waiting")));
         if exit == "session" {
             // The old response arrives before the new one. It must not release the new
             // request and allow a second, overlapping submission.
-            std::thread::sleep(Duration::from_millis(470));
+            std::fs::write(gates.join(format!("{old_session}.release")), "").unwrap();
+            wait_for_file(&gates.join(format!("{old_session}.responded")));
             assert_eq!(client.steer(text("too-early")), Err(ClientError::Busy));
         }
-        assert_eq!(outcome(&events.turn()), TurnOutcome::EndTurn);
+        std::fs::write(gates.join(format!("{new_session}.release")), "").unwrap();
+        let seen = events.turn();
+        assert_eq!(outcome(&seen), TurnOutcome::EndTurn);
+        assert!(message(&seen).contains("detached:echo next|"));
     }
 }
 
