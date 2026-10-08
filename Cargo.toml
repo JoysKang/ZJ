@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/app", "crates/core", "crates/git_service", "crates/agent_client", "crates/agent_history"]
+members = ["crates/app", "crates/core", "crates/git_service", "crates/agent_client", "crates/agent_bridge", "crates/agent_history"]
 default-members = ["crates/app"]
 # 打过补丁的 GPUI macOS 渲染 / 窗口 crate，不作为工作区成员（不跑本项目的 fmt / clippy）。
 exclude = ["vendor"]
@@ -15,6 +15,7 @@ workspace-editor-core = { path = "crates/core" }
 workspace-editor-git = { path = "crates/git_service" }
 workspace-editor-agent = { path = "crates/agent_client" }
 workspace-editor-agent-history = { path = "crates/agent_history" }
+workspace-editor-agent-bridge = { path = "crates/agent_bridge" }
 gpui-kit = { version = "=0.7.1", features = ["tree-sitter-rust", "tree-sitter-diff", "tree-sitter-markdown", "tree-sitter-python", "tree-sitter-toml", "tree-sitter-yaml", "tree-sitter-bash", "tree-sitter-javascript", "tree-sitter-typescript", "tree-sitter-tsx", "tree-sitter-go", "tree-sitter-html", "tree-sitter-css", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-java", "tree-sitter-sql"] }
 
 [workspace.lints.rust]

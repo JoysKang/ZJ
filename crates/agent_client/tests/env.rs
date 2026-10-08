@@ -21,15 +21,14 @@ fn inherited_git_and_claude_variables_are_removed() {
         id: "fake".into(),
         display_name: "Fake".into(),
         glyph: Glyph::Generic,
-        launch: vec![Launch::Binary {
+        launch: Launch::Binary {
             program: env!("CARGO_BIN_EXE_zj-fake-acp-agent").into(),
             args: vec![],
-        }],
+        },
         env: vec![("PRESET_VALUE".into(), EnvValue::Literal("p".into()))],
         install_hint: String::new(),
         modes: Default::default(),
         session_meta: None,
-        local_cli: None,
     };
     let mut options = ClientOptions::new(preset, &root);
     options.search_path = Some(SearchPath::new(vec![]));

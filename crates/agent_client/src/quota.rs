@@ -13,11 +13,9 @@ pub fn read_codex_quota(env: BTreeMap<String, String>) -> Result<Value, String> 
     let search = env.get("PATH").map_or_else(SearchPath::from_env, |path| {
         SearchPath::new(std::env::split_paths(path).collect())
     });
-    let root = crate::provision::default_root();
     let inherited = std::env::var_os("CODEX_PATH");
-    let launch =
-        crate::registry::codex_app_server(&search, &env, root.as_deref(), inherited.as_deref())
-            .ok_or("找不到可用的 Codex CLI，无法刷新额度")?;
+    let launch = crate::registry::codex_app_server(&search, &env, inherited.as_deref())
+        .ok_or("找不到可用的 Codex CLI，无法刷新额度")?;
     query(launch, Duration::from_secs(20))
 }
 

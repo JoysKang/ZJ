@@ -18,14 +18,12 @@ fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
-/// A `.command` script for Terminal.app. Only `PATH` and the variables named in `keep` are
-/// copied from the launch environment: the rest may hold API keys, which must not end up in
-/// a file.
+/// A `.command` script for Terminal.app. Only `PATH` is copied from the launch environment:
+/// the rest may hold API keys, which must not end up in a file.
 pub(crate) fn script(
     launch: &ResolvedLaunch,
     args: &[String],
     env: &HashMap<String, String>,
-    keep: &[&str],
     cwd: &Path,
 ) -> String {
     let mut lines = vec![
@@ -34,7 +32,7 @@ pub(crate) fn script(
         format!("cd {} || exit 1", quote(&cwd.to_string_lossy())),
     ];
     for (key, value) in &launch.env {
-        if key == "PATH" || keep.contains(&key.as_str()) {
+        if key == "PATH" {
             lines.push(format!("export {key}={}", quote(&value.to_string_lossy())));
         }
     }
@@ -92,11 +90,14 @@ mod tests {
     #[test]
     fn scripts_quote_and_leave_secrets_out() {
         let launch = ResolvedLaunch {
-            program: "/opt/node/bin/node".into(),
-            args: vec!["/data/it's/index.js".into()],
+            program: "/Applications/ZJ.app/Contents/MacOS/workspace-editor".into(),
+            args: vec![
+                "--agent-bridge".into(),
+                "claude".into(),
+                "/b/it's/claude".into(),
+            ],
             env: vec![
-                ("PATH".into(), OsString::from("/opt/node/bin:/usr/bin")),
-                ("CLAUDE_CODE_EXECUTABLE".into(), OsString::from("/b/claude")),
+                ("PATH".into(), OsString::from("/opt/homebrew/bin:/usr/bin")),
                 ("ANTHROPIC_AUTH_TOKEN".into(), OsString::from("sk-secret")),
             ],
         };
@@ -106,20 +107,20 @@ mod tests {
         ]);
         let text = script(
             &launch,
-            &["--cli".into(), "auth".into()],
+            &["--login".into(), "--claudeai".into()],
             &env,
-            &["CLAUDE_CODE_EXECUTABLE"],
             Path::new("/w"),
         );
         assert!(
-            text.contains("export PATH='/opt/node/bin:/usr/bin'"),
+            text.contains("export PATH='/opt/homebrew/bin:/usr/bin'"),
             "{text}"
         );
-        assert!(text.contains("export CLAUDE_CODE_EXECUTABLE='/b/claude'"));
         assert!(text.contains("export MODE='x'"));
         assert!(!text.contains("sk-secret"));
         assert!(!text.contains("BAD"));
-        assert!(text.contains(r"'/opt/node/bin/node' '/data/it'\''s/index.js' '--cli' 'auth'"));
+        assert!(text.contains(
+            r"'/Applications/ZJ.app/Contents/MacOS/workspace-editor' '--agent-bridge' 'claude' '/b/it'\''s/claude' '--login' '--claudeai'"
+        ));
         let output = Command::new("sh")
             .arg("-n")
             .arg("-c")

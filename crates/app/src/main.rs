@@ -143,6 +143,15 @@ fn window_closed(id: WindowId, service: GitService, cx: &mut App) {
 
 #[allow(clippy::print_stdout)] // --help output belongs on stdout.
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    // The Claude Code / Codex bridge runs as this executable, before anything GPUI (ADR 0009).
+    let mut raw = std::env::args_os().skip(1);
+    if raw
+        .next()
+        .is_some_and(|a| a == workspace_editor_agent_bridge::FLAG)
+    {
+        let args: Vec<String> = raw.map(|a| a.to_string_lossy().into_owned()).collect();
+        std::process::exit(workspace_editor_agent_bridge::run(&args));
+    }
     perf::mark_start();
     let mut roots = Vec::new();
     let mut files = Vec::new();

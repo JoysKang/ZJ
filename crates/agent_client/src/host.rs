@@ -9,8 +9,7 @@ use crate::{
     fs::BufferProvider,
     login,
     process::{AgentProcess, describe},
-    provision::InstallError,
-    registry::{AgentPreset, LaunchPlan, ResolvedLaunch, SearchPath},
+    registry::{AgentPreset, ResolvedLaunch, SearchPath},
 };
 use agent_client_protocol::{
     self as sdk, Agent, Client, ConnectionTo, Responder,
@@ -40,7 +39,6 @@ pub(crate) struct HostKey {
     pub preset: AgentPreset,
     pub env: BTreeMap<String, String>,
     pub search: SearchPath,
-    pub install_root: Option<PathBuf>,
 }
 
 /// The agent processes of a whole app (all windows): sessions of the same agent with the same
@@ -118,8 +116,6 @@ pub(crate) struct HostInner {
     /// Every session that ran on the current process: told when it stops.
     ran: Mutex<Vec<Arc<SessionState>>>,
     pub pid: Mutex<Option<u32>>,
-    /// Set by a session's cancel: a running first-use install stops.
-    pub install_cancel: AtomicBool,
 }
 
 impl Host {
@@ -140,7 +136,6 @@ impl Host {
             members: Mutex::new(Vec::new()),
             ran: Mutex::new(Vec::new()),
             pid: Mutex::new(None),
-            install_cancel: AtomicBool::new(false),
         });
         let main = inner.clone();
         let thread = thread::Builder::new()
@@ -250,12 +245,6 @@ impl HostInner {
             .iter()
             .all(|member| member.is_idle())
     }
-
-    fn broadcast(&self, sessions: &[Arc<SessionState>], event: AgentEvent) {
-        for session in sessions {
-            session.emit_blocking(event.clone());
-        }
-    }
 }
 
 enum End {
@@ -291,7 +280,6 @@ async fn host_main(inner: Arc<HostInner>) {
         if queue.is_empty() {
             continue;
         }
-        inner.install_cancel.store(false, Ordering::Relaxed);
         if let End::Shutdown = run_process(&inner, queue).await {
             return;
         }
@@ -317,39 +305,8 @@ async fn fail_all(queue: &[Arc<SessionState>], message: String) {
 async fn run_process(inner: &Arc<HostInner>, queue: Vec<Arc<SessionState>>) -> End {
     let key = &inner.key;
     let name = key.preset.display_name.clone();
-    let launch = match key
-        .preset
-        .resolve(&key.search, &key.env, key.install_root.as_deref())
-    {
-        Ok(LaunchPlan::Ready(launch)) => launch,
-        Ok(LaunchPlan::Install(install)) => match run_install(inner, &queue, install) {
-            Ok(launch) => launch,
-            Err(InstallError::Aborted) => {
-                eprintln!("event=agent_install_aborted agent={}", key.preset.id);
-                for session in &queue {
-                    session.abandon();
-                    session.finish_turn(None, TurnOutcome::Cancelled).await;
-                    session.set_running(false);
-                }
-                return if inner.stopping.is_closed() {
-                    End::Shutdown
-                } else {
-                    End::Failed
-                };
-            }
-            Err(InstallError::Failed(detail)) => {
-                eprintln!("event=agent_install_failed agent={}", key.preset.id);
-                fail_all(
-                    &queue,
-                    format!(
-                        "安装「{name}」失败：{detail}。{}。",
-                        key.preset.install_hint
-                    ),
-                )
-                .await;
-                return End::Failed;
-            }
-        },
+    let launch = match key.preset.resolve(&key.search, &key.env) {
+        Ok(launch) => launch,
         Err(e) => {
             eprintln!("event=agent_launch_unavailable agent={}", key.preset.id);
             fail_all(&queue, e.to_string()).await;
@@ -440,21 +397,6 @@ async fn run_process(inner: &Arc<HostInner>, queue: Vec<Arc<SessionState>>) -> E
         session.process_gone(&reason, &name).await;
     }
     end
-}
-
-/// Blocks the process's thread (nothing else runs on it before the process exists); stops
-/// when the last client goes or a waiting session cancels.
-fn run_install(
-    inner: &HostInner,
-    queue: &[Arc<SessionState>],
-    install: crate::registry::PackageInstall,
-) -> Result<ResolvedLaunch, InstallError> {
-    eprintln!("event=agent_install_start agent={}", inner.key.preset.id);
-    let progress = |message: String| inner.broadcast(queue, AgentEvent::Progress { message });
-    let abort = || inner.stopping.is_closed() || inner.install_cancel.load(Ordering::Relaxed);
-    let launch = install.run(&progress, &abort)?;
-    eprintln!("event=agent_install_done agent={}", inner.key.preset.id);
-    Ok(launch)
 }
 
 /// What the agent said about itself, shared by the sessions on this process.

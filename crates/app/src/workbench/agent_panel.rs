@@ -516,6 +516,11 @@ impl Workbench {
             .map_or((Glyph::Generic, "Agent".to_string()), |s| {
                 (s.preset.glyph, s.preset.display_name.clone())
             });
+        let unavailable = self
+            .agent
+            .current()
+            .and_then(|s| self.agent.unavailable.get(&s.preset.id))
+            .cloned();
         let hint = |keys: &'static str, text: &'static str| {
             h_flex()
                 .gap_2()
@@ -545,6 +550,18 @@ impl Workbench {
                     .text_color(colors.foreground)
                     .child(format!("向 {name} 提问")),
             )
+            .when_some(unavailable, |view, message| {
+                view.child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .items_start()
+                        .text_size(theme::TEXT_CAPTION)
+                        .text_color(colors.deleted)
+                        .child(Icon::new(IconName::TriangleAlert).size(theme::SMALL_ICON_SIZE))
+                        .child(div().flex_1().min_w_0().child(message)),
+                )
+            })
             .when(self.root.is_none(), |view| {
                 view.child(
                     div()

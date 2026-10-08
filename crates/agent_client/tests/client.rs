@@ -293,10 +293,10 @@ fn preset(env: &[(&str, &str)]) -> AgentPreset {
         id: "fake".into(),
         display_name: "Fake".into(),
         glyph: Glyph::Generic,
-        launch: vec![Launch::Binary {
+        launch: Launch::Binary {
             program: FAKE.into(),
             args: vec![],
-        }],
+        },
         env: env
             .iter()
             .map(|(k, v)| (k.to_string(), EnvValue::Literal(v.to_string())))
@@ -304,7 +304,6 @@ fn preset(env: &[(&str, &str)]) -> AgentPreset {
         install_hint: "test".into(),
         modes: Default::default(),
         session_meta: None,
-        local_cli: None,
     }
 }
 
@@ -796,24 +795,33 @@ fn launch_errors_are_friendly() {
     let ws = Workspace::new("launch");
     let mut opts = ClientOptions::new(AgentPreset::find_builtin("claude-code").unwrap(), &ws.0);
     opts.search_path = Some(SearchPath::new(vec![]));
-    // No install directory: nothing may be downloaded.
-    opts.install_root = None;
+    // No Claude Code here: ZJ installs nothing and says how to.
+    opts.env_overrides.insert(
+        "CLAUDE_CODE_EXECUTABLE".into(),
+        "/nonexistent/claude".into(),
+    );
     let client = AgentClient::start(opts).unwrap();
     let events = Events::of(&client);
     client.prompt(text("hi")).unwrap();
     let seen = events.turn();
     match &seen[0] {
-        AgentEvent::Error { message } => assert!(message.contains("Node.js"), "{message}"),
+        AgentEvent::Error { message } => {
+            assert!(message.contains("本机没有安装「Claude Code」"), "{message}");
+            assert!(
+                message.contains("brew install --cask claude-code"),
+                "{message}"
+            );
+        }
         other => panic!("{other:?}"),
     }
-    assert!(matches!(outcome(&seen), TurnOutcome::Failed(m) if m.contains("Node.js")));
+    assert!(matches!(outcome(&seen), TurnOutcome::Failed(m) if m.contains("claude")));
     assert!(!client.is_busy());
 
     let mut opts = options(&ws, &[]);
-    opts.preset.launch = vec![Launch::Binary {
+    opts.preset.launch = Launch::Binary {
         program: "/nonexistent/agent".into(),
         args: vec![],
-    }];
+    };
     let client = AgentClient::start(opts).unwrap();
     let events = Events::of(&client);
     client.prompt(text("hi")).unwrap();
@@ -938,67 +946,6 @@ fn prompts_refused_for_a_login_are_sent_again() {
     client.shutdown();
 }
 
-fn write_script(path: &Path, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-}
-
-#[test]
-fn npm_adapters_are_installed_on_first_use() {
-    let ws = Workspace::new("install");
-    let bin = ws.path("node-bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let log = ws.path("npm.log");
-    // `node <entry>` starts the fake agent; `npm install --prefix DIR` lays out a package.
-    write_script(
-        &bin.join("node"),
-        &format!("[ \"$1\" = --version ] && echo v24.0.0 && exit 0\nexec '{FAKE}'"),
-    );
-    write_script(
-        &bin.join("npm"),
-        &format!(
-            "echo \"$*\" >> '{}'\nwhile [ $# -gt 0 ]; do [ \"$1\" = --prefix ] && p=\"$2\"; shift; done\n\
-             d=\"$p/node_modules/@zj/fake\"; mkdir -p \"$d/dist\"\n\
-             echo '{{\"bin\":{{\"fake\":\"dist/index.js\"}}}}' > \"$d/package.json\"\n: > \"$d/dist/index.js\"",
-            log.display()
-        ),
-    );
-    let start = || {
-        let mut opts = options(&ws, &[]);
-        opts.preset.launch = vec![Launch::Package {
-            package: "@zj/fake@1.0.0".into(),
-            bin: "fake".into(),
-            args: vec![],
-        }];
-        opts.search_path = Some(SearchPath::new(vec![bin.clone()]));
-        opts.install_root = Some(ws.path("data"));
-        AgentClient::start(opts).unwrap()
-    };
-    let client = start();
-    let events = Events::of(&client);
-    client.prompt(text("echo hi")).unwrap();
-    let seen = events.turn();
-    assert!(
-        matches!(&seen[0], AgentEvent::Progress { message } if message.contains("首次使用")),
-        "{seen:?}"
-    );
-    assert_eq!(outcome(&seen), TurnOutcome::EndTurn);
-    assert_eq!(message(&seen), "hi");
-    let installs = std::fs::read_to_string(&log).unwrap();
-    assert_eq!(installs.lines().count(), 1);
-    assert!(installs.contains("@zj/fake@1.0.0"), "{installs}");
-    client.shutdown();
-
-    // Installed: the next client starts it directly.
-    let client = start();
-    let events = Events::of(&client);
-    client.prompt(text("echo again")).unwrap();
-    let seen = events.turn();
-    assert!(matches!(&seen[0], AgentEvent::Starting { .. }), "{seen:?}");
-    assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
-}
-
 #[test]
 fn overrides_fill_preset_env() {
     let ws = Workspace::new("env");
@@ -1098,7 +1045,6 @@ fn sessions_start_in_ask_mode_and_never_request_bypass() {
     let mut opts = options(&ws, &[("FAKE_BYPASS_DEFAULT", "1")]);
     let claude = AgentPreset::find_builtin("claude-code").unwrap();
     opts.preset.modes = claude.modes.clone();
-    opts.preset.session_meta = claude.session_meta.clone();
     let client = AgentClient::start(opts).unwrap();
     let events = Events::of(&client);
     client.prompt(text("modes")).unwrap();
@@ -1123,10 +1069,6 @@ fn sessions_start_in_ask_mode_and_never_request_bypass() {
             .any(|e| matches!(e, AgentEvent::ModeChanged { mode_id } if mode_id == "default"))
     );
     let reply = message(&seen);
-    assert!(
-        reply.contains(r#""allowDangerouslySkipPermissions":false"#),
-        "{reply}"
-    );
     assert!(reply.ends_with("modes:default"), "{reply}");
     // The UI cannot ask for it either.
     assert!(!client.set_mode("bypassPermissions"));

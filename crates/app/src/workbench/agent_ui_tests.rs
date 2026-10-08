@@ -369,7 +369,7 @@ async fn composer_controls_stay_inside_the_panel_with_quota_and_model_options(
                     if let Some(preset) = p.agent.presets.iter_mut().find(|preset| preset.id == "codex") {
                         preset.display_name = "Codex with a very long display name".into();
                     }
-                    p.agent_ensure_session();
+                    p.agent_ensure_session(cx);
                     let key = p.agent.current.unwrap();
                     let session = p.agent.session_mut(key).unwrap();
                     session.preset.id = "codex".into();
@@ -484,7 +484,7 @@ async fn a_running_turn_has_one_process_and_collapses_when_the_final_reply_arriv
     let (handle, this) = open(cx, None);
     cx.update_window(handle.into(), |_, window, cx| {
         this.update(cx, |p, cx| {
-            p.agent_ensure_session();
+            p.agent_ensure_session(cx);
             let key = p.agent.current.unwrap();
             let session = p.agent.session_mut(key).unwrap();
             session.thread.push_user("task".into(), vec![], 1);
@@ -588,7 +588,7 @@ async fn pending_actions_stay_visible_and_a_stale_end_keeps_the_process_open(
     let (handle, this) = open(cx, None);
     cx.update_window(handle.into(), |_, window, cx| {
         this.update(cx, |p, cx| {
-            p.agent_ensure_session();
+            p.agent_ensure_session(cx);
             let key = p.agent.current.unwrap();
             p.agent
                 .session_mut(key)
@@ -659,7 +659,7 @@ async fn an_open_process_keeps_its_identity_and_reading_position_as_items_change
     let (handle, this) = open(cx, None);
     cx.update_window(handle.into(), |_, window, cx| {
         this.update(cx, |p, cx| {
-            p.agent_ensure_session();
+            p.agent_ensure_session(cx);
             let key = p.agent.current.unwrap();
             let thread = &mut p.agent.session_mut(key).unwrap().thread;
             thread.push_user("task".into(), vec![], 1);
@@ -742,7 +742,7 @@ async fn an_answered_permission_anchors_to_its_collapsed_process(cx: &mut TestAp
     let (handle, this) = open(cx, None);
     cx.update_window(handle.into(), |_, window, cx| {
         this.update(cx, |p, cx| {
-            p.agent_ensure_session();
+            p.agent_ensure_session(cx);
             let key = p.agent.current.unwrap();
             let thread = &mut p.agent.session_mut(key).unwrap().thread;
             for turn in 1..3 {
@@ -827,7 +827,7 @@ async fn process_expansion_can_resume_following_latest_output(cx: &mut TestAppCo
     let (handle, this) = open(cx, None);
     cx.update_window(handle.into(), |_, window, cx| {
         this.update(cx, |p, cx| {
-            p.agent_ensure_session();
+            p.agent_ensure_session(cx);
             let key = p.agent.current.unwrap();
             let session = p.agent.session_mut(key).unwrap();
             session.thread.push_user("task".into(), vec![], 1);
@@ -920,7 +920,7 @@ async fn expanded_process_details_stay_individual_virtual_rows(cx: &mut TestAppC
     let mut group = (0, 0);
     cx.update_window(handle.into(), |_, window, cx| {
         this.update(cx, |p, cx| {
-            p.agent_ensure_session();
+            p.agent_ensure_session(cx);
             let key = p.agent.current.unwrap();
             let session = p.agent.session_mut(key).unwrap();
             session.thread.items.push_back(Item::User {
@@ -975,8 +975,8 @@ async fn steering_works_from_enter_and_send_with_context_and_a_separate_stop_but
     let path = root.join("a.txt");
     std::fs::write(&path, "context").unwrap();
     let (handle, this) = open(cx, Some(root.clone()));
-    this.update(cx, |p, _| {
-        p.agent_ensure_session();
+    this.update(cx, |p, cx| {
+        p.agent_ensure_session(cx);
         p.agent
             .session_mut(p.agent.current.unwrap())
             .unwrap()
@@ -2430,5 +2430,55 @@ async fn a_file_link_in_a_reply_opens_in_zj(cx: &mut TestAppContext) {
     })
     .unwrap();
     this.read_with(cx, |p, _| assert!(p.message.contains("找不到链接的文件")));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn picking_an_agent_that_is_not_installed_says_so_before_any_prompt(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("missing-agent");
+    let mut settings = crate::settings::Settings::default();
+    settings.agent.panel_visible = true;
+    let missing = UserAgentConfig {
+        id: "missing".into(),
+        name: Some("Missing".into()),
+        command: "/nonexistent/zj-missing-agent".into(),
+        args: Vec::new(),
+        env: Default::default(),
+    };
+    settings.agent.custom = vec![fake_agent(), missing];
+    settings.agent.default_agent = "fake".into();
+    let (handle, this) = open_window(cx, Some(root.clone()), settings, empty_store());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_new_session(Some("missing".into()), window, cx)
+        });
+    })
+    .unwrap();
+    until(cx, &this, "the missing agent is reported", |p| {
+        p.agent.unavailable.contains_key("missing")
+    });
+    this.read_with(cx, |p, _| {
+        let message = &p.agent.unavailable["missing"];
+        assert!(message.contains("本机没有安装「Missing」"), "{message}");
+        assert!(
+            message.contains("/nonexistent/zj-missing-agent"),
+            "{message}"
+        );
+        // Nothing was started for it.
+        assert!(p.agent.current().unwrap().client.is_none());
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        this.update(cx, |p, cx| {
+            p.agent_new_session(Some("fake".into()), window, cx)
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.agent.current().unwrap().preset.id, "fake");
+        assert!(!p.agent.unavailable.contains_key("fake"));
+    });
     let _ = std::fs::remove_dir_all(root);
 }

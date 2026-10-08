@@ -11,7 +11,6 @@ use crate::{
     host::{AgentPool, Host, HostInner, HostKey},
     login,
     process::AgentProcess,
-    provision,
     registry::{AgentPreset, ResolvedLaunch, SearchPath},
 };
 use agent_client_protocol::{
@@ -51,9 +50,6 @@ pub struct ClientOptions {
     pub buffers: Option<Arc<dyn BufferProvider>>,
     /// Defaults to [`SearchPath::from_env`].
     pub search_path: Option<SearchPath>,
-    /// Where npm adapters and ZJ's Node.js are installed on first use; `None` only uses
-    /// commands already on this machine. Defaults to [`provision::default_root`].
-    pub install_root: Option<PathBuf>,
     /// An ACP session id from an earlier run (history); restored with `session/load` when the
     /// agent supports it, otherwise a new session starts.
     pub resume_session: Option<String>,
@@ -75,7 +71,6 @@ impl ClientOptions {
             env_overrides: BTreeMap::new(),
             buffers: None,
             search_path: None,
-            install_root: provision::default_root(),
             resume_session: None,
             pool: None,
             text_only: false,
@@ -381,11 +376,6 @@ impl SessionState {
         }
     }
 
-    /// From the process's thread outside of async code (install progress).
-    pub(crate) fn emit_blocking(&self, event: AgentEvent) {
-        async_io::block_on(self.emit(event));
-    }
-
     /// Remembers the model settings the agent offers and tells the UI.
     async fn offer_configs(&self, options: &[acp::SessionConfigOption]) {
         let configs = events::config_options(options);
@@ -547,7 +537,6 @@ impl AgentClient {
             preset: options.preset.clone(),
             env: options.env_overrides,
             search: options.search_path.unwrap_or_else(SearchPath::from_env),
-            install_root: options.install_root,
         };
         let host = match &options.pool {
             Some(pool) => pool.host(key, options.buffers.clone())?,
@@ -633,11 +622,6 @@ impl AgentClient {
             *steering = Default::default();
             turn
         };
-        // A new turn clears an earlier stop. Not when the install starts: a stop pressed
-        // while the agent was still being resolved would be lost.
-        if let Some(host) = session.host() {
-            host.inner.install_cancel.store(false, Ordering::Relaxed);
-        }
         if let Err(e) = self.commands.try_send(Command::Prompt { turn, parts }) {
             *session.turn.lock().unwrap() = None;
             return Err(if e.is_full() {
@@ -689,9 +673,6 @@ impl AgentClient {
     /// with [`TurnOutcome::Cancelled`] once the agent stops.
     pub fn cancel(&self) {
         self.session.steering.lock().unwrap().cancelled = true;
-        if let Some(host) = self.session.host() {
-            host.inner.install_cancel.store(true, Ordering::Relaxed);
-        }
         self.session.cancel_permissions();
         let _ = self.commands.try_send(Command::Cancel);
     }
@@ -1379,17 +1360,10 @@ impl Login<'_> {
         };
         eprintln!("event=agent_login agent={} method={id}", shared.preset.id);
         if let acp::AuthMethod::Terminal(terminal) = method {
-            let keep: Vec<&str> = shared
-                .preset
-                .local_cli
-                .iter()
-                .map(|cli| cli.env.as_str())
-                .collect();
             let script = login::script(
                 self.launch,
                 &terminal.args,
                 &terminal.env,
-                &keep,
                 shared.workspace.root(),
             );
             match login::open_in_terminal(&script) {

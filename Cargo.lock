@@ -9182,6 +9182,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-diff",
  "workspace-editor-agent",
+ "workspace-editor-agent-bridge",
  "workspace-editor-agent-history",
  "workspace-editor-core",
  "workspace-editor-git",
@@ -9197,6 +9198,13 @@ dependencies = [
  "futures",
  "libc",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "workspace-editor-agent-bridge"
+version = "0.1.0"
+dependencies = [
  "serde_json",
 ]
 

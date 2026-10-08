@@ -18,15 +18,14 @@ fn client(tag: &str) -> (AgentClient, PathBuf) {
         id: "fake".into(),
         display_name: "Fake".into(),
         glyph: Glyph::Generic,
-        launch: vec![Launch::Binary {
+        launch: Launch::Binary {
             program: env!("CARGO_BIN_EXE_zj-fake-acp-agent").into(),
             args: vec![],
-        }],
+        },
         env: vec![],
         install_hint: String::new(),
         modes: Default::default(),
         session_meta: None,
-        local_cli: None,
     };
     let mut options = ClientOptions::new(preset, &root);
     options.search_path = Some(SearchPath::new(vec![]));
@@ -158,10 +157,10 @@ fn a_full_turn_reviews_hunk_by_hunk() {
         id: "fake".into(),
         display_name: "Fake".into(),
         glyph: Glyph::Generic,
-        launch: vec![Launch::Binary {
+        launch: Launch::Binary {
             program: env!("CARGO_BIN_EXE_zj-fake-acp-agent").into(),
             args: vec![],
-        }],
+        },
         env: vec![(
             "FAKE_DEMO".into(),
             workspace_editor_agent::registry::EnvValue::Literal(
@@ -171,7 +170,6 @@ fn a_full_turn_reviews_hunk_by_hunk() {
         install_hint: String::new(),
         modes: Default::default(),
         session_meta: None,
-        local_cli: None,
     };
     let mut options = ClientOptions::new(preset, &root);
     options.search_path = Some(SearchPath::new(vec![]));

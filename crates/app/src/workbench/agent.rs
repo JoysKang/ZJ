@@ -307,6 +307,11 @@ pub(super) struct AgentPanel {
     /// The last commands each agent listed, by (preset id, workspace): a new or reopened
     /// session offers them before its agent has started.
     pub known_commands: HashMap<(String, PathBuf), Vec<AgentCommand>>,
+    /// Why an agent can't start here (CLI not installed or too old, key missing), by preset
+    /// id: checked whenever it is picked, shown in its empty session. ZJ installs nothing.
+    pub unavailable: HashMap<String, String>,
+    /// The latest of those checks: an older answer arriving later is dropped.
+    check_generation: u64,
     /// The Codex account quota (see `crate::quota`) and whether its card is open.
     pub quota: Option<crate::quota::Quota>,
     pub quota_open: bool,
@@ -387,6 +392,8 @@ impl AgentPanel {
             mention_generation: 0,
             slash: None,
             known_commands: HashMap::new(),
+            unavailable: HashMap::new(),
+            check_generation: 0,
             quota: None,
             quota_open: false,
             quota_pinned: false,
@@ -627,7 +634,7 @@ impl Workbench {
 
     /// The panel opened with the window: an empty session for the default agent, without
     /// taking the focus from the editor.
-    pub(super) fn agent_ensure_session(&mut self) {
+    pub(super) fn agent_ensure_session(&mut self, cx: &mut Context<Self>) {
         if self.agent.current.is_some() {
             return;
         }
@@ -635,6 +642,7 @@ impl Workbench {
         let Some(preset) = self.agent.preset_or_first(&id).cloned() else {
             return;
         };
+        self.agent_check_available(preset.clone(), cx);
         let key = self.agent.next_key;
         self.agent.next_key += 1;
         let mut session = LiveSession::new(key, preset);
@@ -657,6 +665,7 @@ impl Workbench {
             return;
         };
         self.agent.agent_id = preset.id.clone();
+        self.agent_check_available(preset.clone(), cx);
         if let Some(key) = self.agent.current
             && let Some(session) = self.agent.session_mut(key)
             && session.thread.items.is_empty()
@@ -680,6 +689,45 @@ impl Workbench {
         self.agent_reclaim_idle(cx);
         self.agent_sync_list(true);
         self.agent_show(AgentView::Thread, window, cx);
+    }
+
+    /// Checks off the UI thread that `preset` can start here (its CLI runs `--version`, a
+    /// keychain key is looked up). Runs each time the agent is picked, so an install done
+    /// meanwhile is noticed.
+    fn agent_check_available(&mut self, preset: AgentPreset, cx: &mut Context<Self>) {
+        let overrides = cx
+            .global::<crate::settings::Settings>()
+            .agent
+            .env_for(&preset.id);
+        let id = preset.id.clone();
+        self.agent.check_generation += 1;
+        let generation = self.agent.check_generation;
+        let check = cx.background_spawn(async move {
+            let env = crate::secrets::resolve(&overrides, |name| std::env::var(name).ok())?;
+            preset
+                .resolve(&workspace_editor_agent::SearchPath::from_env(), &env)
+                .map(drop)
+                .map_err(|e| e.to_string())
+        });
+        cx.spawn(async move |this, cx| {
+            let result = check.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.agent.check_generation != generation {
+                    return;
+                }
+                let changed = match result {
+                    Ok(()) => this.agent.unavailable.remove(&id).is_some(),
+                    Err(message) => {
+                        eprintln!("event=agent_unavailable agent={id}");
+                        this.agent.unavailable.insert(id, message.clone()) != Some(message)
+                    }
+                };
+                if changed {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Puts away sessions left idle longer than the agent idle setting (their process has

@@ -1,0 +1,18 @@
+[package]
+name = "workspace-editor-agent-bridge"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+# ACP in front of the Claude Code and Codex CLIs, run as ZJ's own executable in a helper mode
+# (docs/adr/0009). No GPUI, no Node.js.
+[dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "zj-agent-bridge"
+test = false
+doc = false

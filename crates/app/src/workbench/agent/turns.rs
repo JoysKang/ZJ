@@ -39,7 +39,7 @@ impl Workbench {
             return;
         }
         if self.agent.current.is_none() {
-            self.agent_ensure_session();
+            self.agent_ensure_session(cx);
         }
         let Some(key) = self.agent.current else {
             return;

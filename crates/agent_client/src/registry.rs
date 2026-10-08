@@ -1,20 +1,22 @@
 //! Built-in agent presets, user-defined agents and launch resolution.
 //!
-//! Every agent speaks ACP over stdio. Presets prefer an adapter command already installed on
-//! this machine. Otherwise the adapter's npm package (pinned to the versions in the ACP
-//! registry, 2026-10-01) is installed once into ZJ's data directory — with this machine's
-//! Node.js, or with one ZJ downloads ([`crate::provision`]) — and run as `node <entry>`.
-//! The adapter is pointed at the agent's own CLI on this machine ([`LocalCli`]) so the user's
-//! version and login are used; without one, the CLI bundled in the npm package is installed.
+//! Every agent speaks ACP over stdio. Claude Code and Codex run behind ZJ's own bridge
+//! (`--agent-bridge`, the `agent_bridge` crate, docs/adr/0009) in front of their CLI on this
+//! machine; ZJ never installs a CLI, Node.js or an adapter. A missing or outdated CLI is a
+//! [`LaunchError`] with an install hint, which the panel shows as soon as the agent is picked.
 
-use crate::provision;
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
     env,
     ffi::OsString,
     fmt,
+    io::Read,
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 /// Monochrome Lucide glyph shown for the agent (the UI maps it to an icon).
@@ -53,44 +55,44 @@ pub enum EnvValue {
     FromEnv(String),
 }
 
-/// One way to start an agent; presets list several and the first available one is used.
+/// How to start an agent.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Launch {
-    /// An executable found on the search path (or an absolute path).
+    /// An ACP agent: an executable found on the search path (or an absolute path).
     Binary { program: String, args: Vec<String> },
-    /// An npm package (`name@version`) run as `node <entry of bin> <args>` from ZJ's install
-    /// directory; installed on first use. Never through npx: `npm exec` would stay resident
-    /// (~120 MB) next to the agent.
-    Package {
-        package: String,
-        bin: String,
-        args: Vec<String>,
-    },
+    /// ZJ's bridge (`kind`: `claude` or `codex`) in front of the agent's CLI on this machine.
+    Bridge { kind: String, cli: Cli },
 }
 
-/// The agent's CLI on this machine, handed to its adapter through `env` instead of the copy
-/// bundled in the adapter's npm package. Older versions than `min_version` are not used.
+/// An agent CLI the bridge drives.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LocalCli {
+pub struct Cli {
     pub program: String,
+    /// Names another executable to use instead (settings or ZJ's environment), as the
+    /// adapters did: `CLAUDE_CODE_EXECUTABLE`, `CODEX_PATH`.
     pub env: String,
+    /// Older releases lack parts of the protocol the bridge uses.
     pub min_version: (u64, u64, u64),
 }
+
+/// The argument that turns ZJ's executable into the bridge (`agent_bridge::FLAG`).
+pub const BRIDGE_FLAG: &str = "--agent-bridge";
+/// Points the bridge launch at another executable than ZJ's own (tests, development).
+pub const BRIDGE_ENV: &str = "ZJ_AGENT_BRIDGE";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentPreset {
     pub id: String,
     pub display_name: String,
     pub glyph: Glyph,
-    pub launch: Vec<Launch>,
+    pub launch: Launch,
     pub env: Vec<(String, EnvValue)>,
-    /// Shown when no launch option is available.
+    /// Shown when the agent can't start here (not installed, too old).
     pub install_hint: String,
     /// Which session modes ZJ starts in and never selects.
     pub modes: ModePolicy,
     /// `_meta` sent with `session/new` and `session/load` (agent-specific switches).
     pub session_meta: Option<serde_json::Value>,
-    pub local_cli: Option<LocalCli>,
 }
 
 /// ZJ starts every session in an asking mode and never requests one that skips approvals,
@@ -116,58 +118,39 @@ impl ModePolicy {
     }
 }
 
-/// claude-agent-acp: with this the adapter leaves `bypassPermissions` out of the mode list
-/// and ignores it as `permissions.defaultMode` from the user's Claude settings.
-fn claude_meta() -> Option<serde_json::Value> {
-    Some(serde_json::json!({
-        "claudeCode": { "options": { "allowDangerouslySkipPermissions": false } }
-    }))
-}
-
 fn claude_modes() -> ModePolicy {
     ModePolicy::new("default", &["bypassPermissions"])
 }
 
-pub const CLAUDE_ACP_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp@0.85.0";
-pub const CODEX_ACP_PACKAGE: &str = "@agentclientprotocol/codex-acp@2.1.1";
-
-const CLAUDE_HINT: &str = "可以运行 npm i -g @agentclientprotocol/claude-agent-acp 装成本机命令，或检查网络后重试（ZJ 会自动安装）";
+const CLAUDE_HINT: &str = "安装 Claude Code 后重新选择：brew install --cask claude-code，或 curl -fsSL https://claude.ai/install.sh | bash";
+const CODEX_HINT: &str =
+    "安装 Codex 后重新选择：brew install --cask codex，或 npm i -g @openai/codex";
 
 fn s(v: &str) -> String {
     v.to_string()
 }
 
-/// The adapters bundle Claude Code 2.1.x and Codex 0.159.x; an older minor release on this
-/// machine may not understand them.
-fn claude_cli() -> Option<LocalCli> {
-    Some(LocalCli {
-        program: s("claude"),
-        env: s("CLAUDE_CODE_EXECUTABLE"),
-        min_version: (2, 1, 0),
-    })
+fn claude_launch() -> Launch {
+    Launch::Bridge {
+        kind: s("claude"),
+        cli: Cli {
+            program: s("claude"),
+            env: s("CLAUDE_CODE_EXECUTABLE"),
+            min_version: (2, 1, 0),
+        },
+    }
 }
 
-fn codex_cli() -> Option<LocalCli> {
-    Some(LocalCli {
+fn codex_cli() -> Cli {
+    Cli {
         program: s("codex"),
         env: s("CODEX_PATH"),
         min_version: (0, 159, 0),
-    })
+    }
 }
 
 /// Claude Code, Codex and "Claude Code · DeepSeek".
 pub fn builtin_presets() -> Vec<AgentPreset> {
-    let claude_launch = vec![
-        Launch::Binary {
-            program: s("claude-agent-acp"),
-            args: vec![],
-        },
-        Launch::Package {
-            package: s(CLAUDE_ACP_PACKAGE),
-            bin: s("claude-agent-acp"),
-            args: vec![],
-        },
-    ];
     let deepseek_model = "deepseek-v4-pro[1m]";
     let deepseek_fast = "deepseek-v4-flash[1m]";
     vec![
@@ -175,46 +158,32 @@ pub fn builtin_presets() -> Vec<AgentPreset> {
             id: s("claude-code"),
             display_name: s("Claude Code"),
             glyph: Glyph::Claude,
-            launch: claude_launch.clone(),
+            launch: claude_launch(),
             env: vec![],
             install_hint: s(CLAUDE_HINT),
             modes: claude_modes(),
-            session_meta: claude_meta(),
-            local_cli: claude_cli(),
+            session_meta: None,
         },
         AgentPreset {
             id: s("codex"),
             display_name: s("Codex"),
             glyph: Glyph::Codex,
-            launch: vec![
-                Launch::Binary {
-                    program: s("codex-acp"),
-                    args: vec![],
-                },
-                Launch::Package {
-                    package: s(CODEX_ACP_PACKAGE),
-                    bin: s("codex-acp"),
-                    args: vec![],
-                },
-            ],
-            // codex-acp otherwise starts in "agent" (auto review). "Workspace access": edits in
-            // the workspace, asks before writing outside it or using the network.
-            env: vec![(
-                s("INITIAL_AGENT_MODE"),
-                EnvValue::Literal(s("workspace-write")),
-            )],
-            install_hint: s(
-                "可以运行 npm i -g @agentclientprotocol/codex-acp 装成本机命令，或检查网络后重试（ZJ 会自动安装）",
-            ),
+            launch: Launch::Bridge {
+                kind: s("codex"),
+                cli: codex_cli(),
+            },
+            env: vec![],
+            install_hint: s(CODEX_HINT),
+            // "Workspace access": edits in the workspace, asks before writing outside it or
+            // using the network.
             modes: ModePolicy::new("workspace-write", &["agent-full-access"]),
             session_meta: None,
-            local_cli: codex_cli(),
         },
         AgentPreset {
             id: s("claude-code-deepseek"),
             display_name: s("Claude Code · DeepSeek"),
             glyph: Glyph::DeepSeek,
-            launch: claude_launch,
+            launch: claude_launch(),
             env: vec![
                 (
                     s("ANTHROPIC_BASE_URL"),
@@ -244,8 +213,7 @@ pub fn builtin_presets() -> Vec<AgentPreset> {
             ],
             install_hint: s(CLAUDE_HINT),
             modes: claude_modes(),
-            session_meta: claude_meta(),
-            local_cli: claude_cli(),
+            session_meta: None,
         },
     ]
 }
@@ -280,10 +248,10 @@ impl UserAgentConfig {
             display_name: self.name.unwrap_or_else(|| self.id.clone()),
             id: self.id,
             glyph: Glyph::Generic,
-            launch: vec![Launch::Binary {
+            launch: Launch::Binary {
                 program: self.command,
                 args: self.args,
-            }],
+            },
             env,
             install_hint: "检查设置里的 command 是否正确".to_string(),
             // Unknown agents: never pick a mode for them, but refuse the usual bypass names.
@@ -299,7 +267,6 @@ impl UserAgentConfig {
                 .to_vec(),
             },
             session_meta: None,
-            local_cli: None,
         }
     }
 }
@@ -313,97 +280,20 @@ pub struct ResolvedLaunch {
     pub env: Vec<(String, OsString)>,
 }
 
-/// What [`AgentPreset::resolve`] found: a command to start now, or an npm adapter (and
-/// possibly Node.js) to install first.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LaunchPlan {
-    Ready(ResolvedLaunch),
-    Install(PackageInstall),
-}
-
-/// A first-use install, run on the client's thread with progress messages.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PackageInstall {
-    agent: String,
-    root: PathBuf,
-    package: String,
-    bin: String,
-    args: Vec<String>,
-    full: bool,
-    /// This machine's Node.js `bin` directory; `None` downloads ZJ's own.
-    node_bin: Option<PathBuf>,
-    /// Without `PATH`, which depends on the Node.js used.
-    env: Vec<(String, OsString)>,
-    search: SearchPath,
-}
-
-impl PackageInstall {
-    pub(crate) fn run(
-        self,
-        progress: &dyn Fn(String),
-        abort: &dyn Fn() -> bool,
-    ) -> Result<ResolvedLaunch, provision::InstallError> {
-        let node_bin = match &self.node_bin {
-            Some(bin) => bin.clone(),
-            None => provision::install_node(&self.root, progress, abort)?,
-        };
-        if provision::installed_entry(&self.root, &self.package, &self.bin, self.full).is_none() {
-            let size = if self.full {
-                "，包含 CLI，约 280 MB"
-            } else {
-                ""
-            };
-            progress(format!(
-                "首次使用：正在安装「{}」的 ACP 适配器（{}{size}）",
-                self.agent,
-                provision::split_spec(&self.package).1
-            ));
-        }
-        let entry = provision::install_package(
-            &self.root,
-            &self.package,
-            &self.bin,
-            self.full,
-            &node_bin,
-            abort,
-        )?;
-        Ok(node_launch(
-            &node_bin,
-            &entry,
-            &self.args,
-            self.env,
-            &self.search,
-        ))
-    }
-}
-
-fn node_launch(
-    node_bin: &Path,
-    entry: &Path,
-    args: &[String],
-    mut env: Vec<(String, OsString)>,
-    search: &SearchPath,
-) -> ResolvedLaunch {
-    env.push(("PATH".into(), search.path_env(Some(node_bin))));
-    let mut all_args = vec![entry.to_string_lossy().into_owned()];
-    all_args.extend(args.iter().cloned());
-    ResolvedLaunch {
-        program: node_bin.join("node"),
-        args: all_args,
-        env,
-    }
-}
-
-/// claude-agent-acp needs Node.js 22; an older one on this machine is passed over.
-pub(crate) const MIN_NODE: (u64, u64, u64) = (22, 0, 0);
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LaunchError {
-    /// An npm adapter is needed, there is no usable Node.js and ZJ cannot download one here.
-    NodeMissing { agent: String },
     NotFound {
         agent: String,
         program: String,
+        hint: String,
+    },
+    /// The CLI is older than the bridge needs (or didn't say its version). Versions as
+    /// `x.y.z`; `found` is empty when unknown.
+    Outdated {
+        agent: String,
+        program: String,
+        found: String,
+        needed: String,
         hint: String,
     },
     MissingEnv {
@@ -411,21 +301,42 @@ pub enum LaunchError {
         variable: String,
         source: String,
     },
+    /// ZJ's own executable (the bridge) couldn't be located.
+    NoBridge { agent: String, reason: String },
+}
+
+fn version_text((major, minor, patch): (u64, u64, u64)) -> String {
+    format!("{major}.{minor}.{patch}")
 }
 
 impl fmt::Display for LaunchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LaunchError::NodeMissing { agent } => write!(
-                f,
-                "启动「{agent}」需要 Node.js {} 或更新版本，但没有找到，这个平台也不能自动下载。请先安装 Node.js。",
-                MIN_NODE.0
-            ),
             LaunchError::NotFound {
                 agent,
                 program,
                 hint,
-            } => write!(f, "没有找到「{agent}」的启动命令 {program}。{hint}。"),
+            } => write!(
+                f,
+                "本机没有安装「{agent}」（找不到 {program} 命令）。{hint}。"
+            ),
+            LaunchError::Outdated {
+                agent,
+                program,
+                found,
+                needed,
+                hint,
+            } => {
+                let found = if found.is_empty() {
+                    "未知版本"
+                } else {
+                    found
+                };
+                write!(
+                    f,
+                    "本机的「{agent}」（{program} {found}）太旧，需要 {needed} 或更新的版本。{hint}。"
+                )
+            }
             LaunchError::MissingEnv {
                 agent,
                 variable,
@@ -434,6 +345,12 @@ impl fmt::Display for LaunchError {
                 f,
                 "「{agent}」需要 {variable}：请在设置里填写，或设置环境变量 {source}。"
             ),
+            LaunchError::NoBridge { agent, reason } => {
+                write!(
+                    f,
+                    "无法启动「{agent}」：找不到 ZJ 自己的可执行文件（{reason}）。"
+                )
+            }
         }
     }
 }
@@ -558,17 +475,15 @@ impl AgentPreset {
         builtin_presets().into_iter().find(|p| p.id == id)
     }
 
-    /// Picks the first available launch option and fills in the environment. `overrides`
-    /// (from the settings file) win over [`EnvValue::FromEnv`] lookups; ones the preset does
-    /// not declare (e.g. `ANTHROPIC_API_KEY` for Claude Code) are passed on as they are. `root` is where npm
-    /// adapters are installed ([`provision::default_root`]); without it only installed
-    /// commands are used.
+    /// The command to start, with the environment filled in. `overrides` (from the settings
+    /// file) win over [`EnvValue::FromEnv`] lookups; ones the preset does not declare (e.g.
+    /// `ANTHROPIC_API_KEY` for Claude Code) are passed on as they are. Checking a bridged
+    /// CLI's version runs it (`--version`): not on the UI thread.
     pub fn resolve(
         &self,
         search: &SearchPath,
         overrides: &BTreeMap<String, String>,
-        root: Option<&Path>,
-    ) -> Result<LaunchPlan, LaunchError> {
+    ) -> Result<ResolvedLaunch, LaunchError> {
         let mut env_vars: Vec<(String, OsString)> = Vec::new();
         for (key, value) in &self.env {
             let resolved = match (overrides.get(key), value) {
@@ -587,210 +502,162 @@ impl AgentPreset {
             };
             env_vars.push((key.clone(), resolved));
         }
-        let (has_cli, cli_env) = self.local_cli(search, overrides);
-        env_vars.extend(cli_env);
         env_vars.extend(
             overrides
                 .iter()
                 .filter(|(key, _)| !self.env.iter().any(|(declared, _)| declared == *key))
                 .map(|(key, value)| (key.clone(), OsString::from(value))),
         );
-        let mut missing_program = None;
-        let mut wanted_node = false;
-        for launch in &self.launch {
-            match launch {
-                Launch::Binary { program, args } => {
-                    if let Some(path) = search.find(program) {
-                        env_vars.push(("PATH".into(), search.path_env(path.parent())));
-                        return Ok(LaunchPlan::Ready(ResolvedLaunch {
-                            program: path,
-                            args: args.clone(),
-                            env: env_vars,
-                        }));
-                    }
-                    missing_program.get_or_insert_with(|| program.clone());
-                }
-                Launch::Package { package, bin, args } => {
-                    wanted_node = true;
-                    let Some(root) = root else {
-                        continue;
-                    };
-                    let node_bin = local_node(search);
-                    let managed = provision::managed_node_bin(root);
-                    let full = !has_cli;
-                    if let (Some(entry), Some(node)) = (
-                        provision::installed_entry(root, package, bin, full),
-                        node_bin.as_ref().or(managed.as_ref()),
-                    ) {
-                        return Ok(LaunchPlan::Ready(node_launch(
-                            node, &entry, args, env_vars, search,
-                        )));
-                    }
-                    if node_bin.is_none() && managed.is_none() && !provision::can_download_node() {
-                        continue;
-                    }
-                    return Ok(LaunchPlan::Install(PackageInstall {
-                        agent: self.display_name.clone(),
-                        root: root.to_path_buf(),
-                        package: package.clone(),
-                        bin: bin.clone(),
-                        args: args.clone(),
-                        full,
-                        node_bin: node_bin.or(managed),
-                        env: env_vars,
-                        search: search.clone(),
-                    }));
-                }
-            }
-        }
-        if wanted_node {
-            return Err(LaunchError::NodeMissing {
-                agent: self.display_name.clone(),
-            });
-        }
-        Err(LaunchError::NotFound {
+        let not_found = |program: &str| LaunchError::NotFound {
             agent: self.display_name.clone(),
-            program: missing_program.unwrap_or_default(),
+            program: program.to_string(),
             hint: self.install_hint.clone(),
-        })
-    }
-
-    /// Whether the agent's CLI is usable, and the variable that points the adapter at it.
-    /// A variable the user already set (settings or ZJ's environment) is left alone.
-    fn local_cli(
-        &self,
-        search: &SearchPath,
-        overrides: &BTreeMap<String, String>,
-    ) -> (bool, Option<(String, OsString)>) {
-        let Some(cli) = &self.local_cli else {
-            return (false, None);
         };
-        if overrides.contains_key(&cli.env) || env::var_os(&cli.env).is_some_and(|v| !v.is_empty())
-        {
-            return (true, None);
-        }
-        match search.find(&cli.program) {
-            Some(path) if provision::cli_version(&path).is_some_and(|v| v >= cli.min_version) => {
-                (true, Some((cli.env.clone(), path.into_os_string())))
+        match &self.launch {
+            Launch::Binary { program, args } => {
+                let path = search.find(program).ok_or_else(|| not_found(program))?;
+                env_vars.push(("PATH".into(), search.path_env(path.parent())));
+                Ok(ResolvedLaunch {
+                    program: path,
+                    args: args.clone(),
+                    env: env_vars,
+                })
             }
-            _ => (false, None),
+            Launch::Bridge { kind, cli } => {
+                let configured = overrides
+                    .get(&cli.env)
+                    .map(OsString::from)
+                    .or_else(|| env::var_os(&cli.env))
+                    .filter(|p| !p.is_empty());
+                let program = configured
+                    .as_ref()
+                    .map_or(cli.program.clone(), |p| p.to_string_lossy().into_owned());
+                let path = search.find(&program).ok_or_else(|| not_found(&program))?;
+                let found = cli_version(&path);
+                if found.is_none_or(|v| v < cli.min_version) {
+                    return Err(LaunchError::Outdated {
+                        agent: self.display_name.clone(),
+                        program,
+                        found: found.map(version_text).unwrap_or_default(),
+                        needed: version_text(cli.min_version),
+                        hint: self.install_hint.clone(),
+                    });
+                }
+                let bridge = bridge_program().map_err(|reason| LaunchError::NoBridge {
+                    agent: self.display_name.clone(),
+                    reason,
+                })?;
+                env_vars.push(("PATH".into(), search.path_env(path.parent())));
+                Ok(ResolvedLaunch {
+                    program: bridge,
+                    args: vec![
+                        BRIDGE_FLAG.to_string(),
+                        kind.clone(),
+                        path.to_string_lossy().into_owned(),
+                    ],
+                    env: env_vars,
+                })
+            }
         }
     }
 }
 
-/// This machine's Node.js `bin` directory when it is new enough and has npm next to it.
-/// The same configured/local/bundled CLI choices used by the Codex adapter, without installing.
+/// ZJ's own executable (or [`BRIDGE_ENV`]).
+fn bridge_program() -> Result<PathBuf, String> {
+    match env::var_os(BRIDGE_ENV).filter(|p| !p.is_empty()) {
+        Some(path) => Ok(PathBuf::from(path)),
+        None => env::current_exe().map_err(|e| e.to_string()),
+    }
+}
+
+/// `codex app-server` for the short-lived quota connection: the configured or installed
+/// Codex CLI, when it is recent enough.
 pub(crate) fn codex_app_server(
     search: &SearchPath,
     overrides: &BTreeMap<String, String>,
-    root: Option<&Path>,
     inherited: Option<&std::ffi::OsStr>,
 ) -> Option<ResolvedLaunch> {
-    let env: Vec<_> = overrides
+    let cli = codex_cli();
+    let configured = overrides
+        .get(&cli.env)
+        .map(std::ffi::OsStr::new)
+        .or(inherited.filter(|p| !p.is_empty()));
+    let program = match configured {
+        Some(path) => search.find(path.to_str()?)?,
+        None => search
+            .find(&cli.program)
+            .filter(|p| cli_version(p).is_some_and(|v| v >= cli.min_version))?,
+    };
+    let mut env: Vec<(String, OsString)> = overrides
         .iter()
         .map(|(k, v)| (k.clone(), OsString::from(v)))
         .collect();
-    let configured = overrides
-        .get("CODEX_PATH")
-        .map(std::ffi::OsStr::new)
-        .or(inherited.filter(|p| !p.is_empty()));
-    let native = if let Some(path) = configured {
-        Some(search.find(path.to_str()?)?)
-    } else {
-        search.find("codex").filter(|p| {
-            provision::cli_version(p).is_some_and(|v| v >= codex_cli().unwrap().min_version)
-        })
-    };
-    if let Some(program) = native {
-        let mut env = env;
-        env.push(("PATH".into(), search.path_env(None)));
-        return Some(ResolvedLaunch {
-            program,
-            args: vec!["app-server".into()],
-            env,
-        });
-    }
-    let entry = root
-        .and_then(|r| provision::installed_entry(r, CODEX_ACP_PACKAGE, "codex-acp", true))
-        .or_else(|| {
-            search
-                .find("codex-acp")
-                .and_then(|p| std::fs::canonicalize(p).ok())
-        })?;
-    let modules = entry
-        .ancestors()
-        .find(|p| p.file_name().is_some_and(|n| n == "node_modules"))?;
-    let codex = modules.join("@openai/codex/bin/codex.js");
-    if !codex.is_file() {
-        return None;
-    }
-    let node = local_node(search).or_else(|| root.and_then(provision::managed_node_bin))?;
-    Some(node_launch(
-        &node,
-        &codex,
-        &["app-server".into()],
+    env.push(("PATH".into(), search.path_env(None)));
+    Some(ResolvedLaunch {
+        program,
+        args: vec!["app-server".into()],
         env,
-        search,
-    ))
+    })
 }
 
-fn local_node(search: &SearchPath) -> Option<PathBuf> {
-    let node = search.find("node")?;
-    let bin = node.parent()?.to_path_buf();
-    (bin.join("npm").is_file() && provision::cli_version(&node).is_some_and(|v| v >= MIN_NODE))
-        .then_some(bin)
+/// How long `<cli> --version` may take.
+const VERSION_LIMIT: Duration = Duration::from_secs(5);
+
+/// `x.y.z` from `<program> --version` (e.g. `2.1.285 (Claude Code)`, `codex-cli 0.159.0`).
+pub(crate) fn cli_version(program: &Path) -> Option<(u64, u64, u64)> {
+    let mut child = Command::new(program)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stdout.read_to_string(&mut text);
+        text
+    });
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() < VERSION_LIMIT => {
+                thread::sleep(Duration::from_millis(20))
+            }
+            _ => {
+                // SAFETY: the child was started with process_group(0), so -pid only reaches
+                // it and its descendants; kill() has no memory-safety preconditions.
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    parse_version(&reader.join().ok()?)
+}
+
+fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
+    text.split_whitespace().find_map(|word| {
+        let mut parts = word.trim_start_matches('v').split('.');
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next()?.parse().ok()?;
+        let patch: String = parts
+            .next()?
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        Some((major, minor, patch.parse().ok()?))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-
-    #[test]
-    fn quota_cli_honors_config_inheritance_and_the_bundled_install() {
-        let root = std::env::temp_dir().join(format!("zj-quota-cli-{}", std::process::id()));
-        let bin = root.join("bin");
-        let data = root.join("data");
-        let cli = script(&bin, "custom-codex", "echo codex-cli 0.159.0");
-        let old = script(&bin, "codex", "echo codex-cli 0.158.9");
-        let node = script(&bin, "node", "echo v24.0.0");
-        script(&bin, "npm", "echo 11.0.0");
-        let search = SearchPath::new(vec![bin]);
-        let overrides = BTreeMap::from([("CODEX_PATH".into(), cli.display().to_string())]);
-        assert_eq!(
-            codex_app_server(&search, &overrides, Some(&data), None)
-                .unwrap()
-                .program,
-            cli
-        );
-        assert_eq!(
-            codex_app_server(
-                &search,
-                &BTreeMap::new(),
-                Some(&data),
-                Some(cli.as_os_str())
-            )
-            .unwrap()
-            .program,
-            cli
-        );
-        let adapter = provision::tests::fake_install(&data, CODEX_ACP_PACKAGE, "codex-acp", true);
-        let modules = adapter
-            .ancestors()
-            .find(|p| p.file_name().is_some_and(|n| n == "node_modules"))
-            .unwrap();
-        let bundled = modules.join("@openai/codex/bin/codex.js");
-        std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
-        std::fs::write(&bundled, "// fixture").unwrap();
-        let launch = codex_app_server(&search, &BTreeMap::new(), Some(&data), None).unwrap();
-        assert_eq!(launch.program, node);
-        assert_eq!(
-            launch.args,
-            [bundled.display().to_string(), "app-server".into()]
-        );
-        std::fs::remove_file(old).unwrap();
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     fn fake_bin(dir: &Path, name: &str) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
@@ -812,112 +679,88 @@ mod tests {
         path
     }
 
-    fn ready(plan: LaunchPlan) -> ResolvedLaunch {
-        match plan {
-            LaunchPlan::Ready(launch) => launch,
-            LaunchPlan::Install(install) => panic!("expected a ready launch: {install:?}"),
-        }
-    }
-
-    fn install(plan: LaunchPlan) -> PackageInstall {
-        match plan {
-            LaunchPlan::Install(install) => install,
-            LaunchPlan::Ready(launch) => panic!("expected an install: {launch:?}"),
-        }
-    }
-
     fn env_of<'a>(env: &'a [(String, OsString)], key: &str) -> Option<&'a OsString> {
         env.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
     #[test]
-    fn npm_adapters_install_once_then_run_with_node() {
-        let root = temp("package");
-        let data = root.join("data");
-        let node_dir = root.join("node/bin");
-        let search = SearchPath::new(vec![node_dir.clone(), root.join("native")]);
-        let claude = AgentPreset::find_builtin("claude-code").unwrap();
+    fn versions_parse_from_cli_output() {
+        assert_eq!(parse_version("2.1.285 (Claude Code)"), Some((2, 1, 285)));
+        assert_eq!(parse_version("codex-cli 0.159.0"), Some((0, 159, 0)));
+        assert_eq!(parse_version("v24.21.0-rc1"), Some((24, 21, 0)));
+        assert_eq!(parse_version("no version"), None);
+    }
+
+    #[test]
+    fn bridged_agents_need_a_recent_cli_and_never_install() {
+        if env::var_os("CODEX_PATH").is_some() {
+            return;
+        }
+        let root = temp("bridge");
+        let bin = root.join("bin");
+        let search = SearchPath::new(vec![bin.clone()]);
+        let codex = AgentPreset::find_builtin("codex").unwrap();
         let none = BTreeMap::new();
-        assert!(matches!(
-            claude.resolve(&search, &none, None),
-            Err(LaunchError::NodeMissing { .. })
-        ));
-        // No Node.js here: ZJ downloads its own.
-        let plan = install(claude.resolve(&search, &none, Some(&data)).unwrap());
-        assert_eq!(plan.node_bin, None);
-        assert!(plan.full, "no claude CLI: the bundled one is installed");
-
-        // Too old, then new enough (with npm next to it).
-        script(&node_dir, "node", "echo v18.20.0");
-        fake_bin(&node_dir, "npm");
+        let missing = codex.resolve(&search, &none).unwrap_err();
+        assert!(matches!(missing, LaunchError::NotFound { ref program, .. } if program == "codex"));
+        assert!(
+            missing.to_string().contains("brew install --cask codex"),
+            "{missing}"
+        );
+        script(&bin, "codex", "echo codex-cli 0.158.9");
+        let old = codex.resolve(&search, &none).unwrap_err();
+        assert!(matches!(old, LaunchError::Outdated { ref found, .. } if found == "0.158.9"));
+        assert!(old.to_string().contains("0.159.0"), "{old}");
+        let cli = script(&bin, "codex", "echo codex-cli 0.160.1");
+        let launch = codex.resolve(&search, &none).unwrap();
         assert_eq!(
-            install(claude.resolve(&search, &none, Some(&data)).unwrap()).node_bin,
-            None
+            launch.args,
+            [
+                BRIDGE_FLAG.to_string(),
+                "codex".into(),
+                cli.display().to_string()
+            ]
         );
-        script(&node_dir, "node", "echo v24.1.0");
-        let plan = install(claude.resolve(&search, &none, Some(&data)).unwrap());
-        assert_eq!(plan.node_bin.as_deref(), Some(node_dir.as_path()));
-
-        let entry = crate::provision::tests::fake_install(
-            &data,
-            CLAUDE_ACP_PACKAGE,
-            "claude-agent-acp",
-            true,
-        );
-        let launch = ready(claude.resolve(&search, &none, Some(&data)).unwrap());
-        assert_eq!(launch.program, node_dir.join("node"));
-        assert_eq!(launch.args, vec![entry.to_string_lossy().into_owned()]);
         assert!(
             env_of(&launch.env, "PATH")
                 .unwrap()
                 .to_string_lossy()
-                .starts_with(&*node_dir.to_string_lossy())
+                .starts_with(&*bin.to_string_lossy())
         );
-        assert_eq!(env_of(&launch.env, "CLAUDE_CODE_EXECUTABLE"), None);
-
-        let native = fake_bin(&root.join("native"), "claude-agent-acp");
+        // The user's own executable wins.
+        let custom = script(&root.join("custom"), "my-codex", "echo codex-cli 0.161.0");
+        let overrides = BTreeMap::from([("CODEX_PATH".to_string(), custom.display().to_string())]);
         assert_eq!(
-            ready(claude.resolve(&search, &none, Some(&data)).unwrap()).program,
-            native
+            codex.resolve(&search, &overrides).unwrap().args[2],
+            custom.display().to_string()
         );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn a_recent_local_cli_is_handed_to_the_adapter() {
-        if env::var_os("CODEX_PATH").is_some() {
-            return;
-        }
-        let root = temp("cli");
-        let data = root.join("data");
+    fn quota_uses_the_configured_or_a_recent_codex() {
+        let root = temp("quota");
         let bin = root.join("bin");
-        script(&bin, "node", "echo v22.0.0");
-        fake_bin(&bin, "npm");
+        let cli = script(&bin, "custom-codex", "echo codex-cli 0.159.0");
+        let old = script(&bin, "codex", "echo codex-cli 0.158.9");
         let search = SearchPath::new(vec![bin.clone()]);
-        let codex = AgentPreset::find_builtin("codex").unwrap();
-        let none = BTreeMap::new();
-        let codex_bin = script(&bin, "codex", "echo codex-cli 0.158.9");
-        let plan = install(codex.resolve(&search, &none, Some(&data)).unwrap());
-        assert!(plan.full);
-        assert_eq!(env_of(&plan.env, "CODEX_PATH"), None);
-        script(&bin, "codex", "echo codex-cli 0.159.2");
-        let plan = install(codex.resolve(&search, &none, Some(&data)).unwrap());
-        assert!(!plan.full, "the local CLI replaces the bundled one");
+        let overrides = BTreeMap::from([("CODEX_PATH".into(), cli.display().to_string())]);
         assert_eq!(
-            env_of(&plan.env, "CODEX_PATH"),
-            Some(&codex_bin.into_os_string())
+            codex_app_server(&search, &overrides, None).unwrap().program,
+            cli
         );
-        // A full install also serves the lean case.
-        crate::provision::tests::fake_install(&data, CODEX_ACP_PACKAGE, "codex-acp", true);
-        let launch = ready(codex.resolve(&search, &none, Some(&data)).unwrap());
-        assert_eq!(launch.program, bin.join("node"));
-        assert!(env_of(&launch.env, "CODEX_PATH").is_some());
-        // The user's own choice wins.
-        let overrides = BTreeMap::from([("CODEX_PATH".to_string(), "/x/codex".to_string())]);
-        let launch = ready(codex.resolve(&search, &overrides, Some(&data)).unwrap());
         assert_eq!(
-            env_of(&launch.env, "CODEX_PATH"),
-            Some(&OsString::from("/x/codex"))
+            codex_app_server(&search, &BTreeMap::new(), Some(cli.as_os_str()))
+                .unwrap()
+                .program,
+            cli
+        );
+        assert!(codex_app_server(&search, &BTreeMap::new(), None).is_none());
+        script(&bin, "codex", "echo codex-cli 0.160.0");
+        let launch = codex_app_server(&search, &BTreeMap::new(), None).unwrap();
+        assert_eq!(
+            (launch.program, launch.args),
+            (old, vec!["app-server".to_string()])
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -937,26 +780,29 @@ mod tests {
 
     #[test]
     fn deepseek_needs_a_key_from_settings_or_env() {
+        if env::var_os("CLAUDE_CODE_EXECUTABLE").is_some() {
+            return;
+        }
         let root = temp("deepseek");
-        let search = SearchPath::new(vec![root.join("bin")]);
-        let data = root.join("data");
+        let bin = root.join("bin");
+        script(&bin, "claude", "echo '2.1.285 (Claude Code)'");
+        let search = SearchPath::new(vec![bin]);
         let preset = AgentPreset::find_builtin("claude-code-deepseek").unwrap();
         if env::var_os("DEEPSEEK_API_KEY").is_none() {
-            let err = preset
-                .resolve(&search, &BTreeMap::new(), Some(&data))
-                .unwrap_err();
+            let err = preset.resolve(&search, &BTreeMap::new()).unwrap_err();
             assert!(err.to_string().contains("DEEPSEEK_API_KEY"), "{err}");
         }
         let overrides =
             BTreeMap::from([("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-test".to_string())]);
-        let plan = install(preset.resolve(&search, &overrides, Some(&data)).unwrap());
-        let get = |k: &str| env_of(&plan.env, k).map(|v| v.to_string_lossy().into_owned());
+        let launch = preset.resolve(&search, &overrides).unwrap();
+        let get = |k: &str| env_of(&launch.env, k).map(|v| v.to_string_lossy().into_owned());
         assert_eq!(
             get("ANTHROPIC_BASE_URL").unwrap(),
             "https://api.deepseek.com/anthropic"
         );
         assert_eq!(get("ANTHROPIC_AUTH_TOKEN").unwrap(), "sk-test");
         assert_eq!(get("ANTHROPIC_MODEL").unwrap(), "deepseek-v4-pro[1m]");
+        assert_eq!(launch.args[1], "claude");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -975,7 +821,7 @@ mod tests {
                 .contains(&("B".into(), EnvValue::FromEnv("HOME".into())))
         );
         let missing = preset
-            .resolve(&SearchPath::new(vec![]), &BTreeMap::new(), None)
+            .resolve(&SearchPath::new(vec![]), &BTreeMap::new())
             .unwrap_err();
         assert!(
             matches!(missing, LaunchError::NotFound { ref program, .. } if program == "opencode")
@@ -992,22 +838,10 @@ mod tests {
                     .modes
                     .allows(preset.modes.initial.as_deref().unwrap())
             );
+            assert!(!preset.install_hint.is_empty());
+            assert!(!preset.glyph.lucide_name().is_empty());
         }
         let claude = AgentPreset::find_builtin("claude-code").unwrap();
         assert!(!claude.modes.allows("bypassPermissions"));
-        let meta = claude.session_meta.unwrap();
-        assert_eq!(
-            meta["claudeCode"]["options"]["allowDangerouslySkipPermissions"],
-            serde_json::json!(false)
-        );
-    }
-
-    #[test]
-    fn every_preset_has_a_glyph_and_hint() {
-        for preset in builtin_presets() {
-            assert!(!preset.glyph.lucide_name().is_empty());
-            assert!(!preset.install_hint.is_empty());
-            assert!(!preset.launch.is_empty());
-        }
     }
 }

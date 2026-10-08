@@ -1,8 +1,9 @@
 //! ACP (Agent Client Protocol) client for ZJ's agent panel. No GPUI.
 //!
 //! - [`registry`]: built-in presets (Claude Code, Codex, Claude Code · DeepSeek) and
-//!   user-defined agents; launch resolution with friendly errors. [`provision`] installs npm
-//!   adapters (and Node.js when needed) into ZJ's data directory on first use.
+//!   user-defined agents; launch resolution with friendly errors. The built-in agents run
+//!   behind ZJ's own bridge (`agent_bridge`, docs/adr/0009) in front of their CLI on this
+//!   machine; nothing is installed.
 //! - [`AgentClient`]: one session. Its agent process starts on first use in its own process
 //!   group with a sanitized environment and speaks ACP v1 over stdio; sessions from the same
 //!   [`AgentPool`] with the same agent and variables share it. Each session streams typed
@@ -25,7 +26,6 @@ pub mod fs;
 mod host;
 mod login;
 mod process;
-pub mod provision;
 mod quota;
 pub mod registry;
 pub mod review;

@@ -696,7 +696,7 @@ impl Workbench {
         this.focus_handle.focus(window, cx);
         this.refresh(window, cx);
         if this.agent.visible {
-            this.agent_ensure_session();
+            this.agent_ensure_session(cx);
             this.agent_sync_quota_timer(cx);
         }
         // Snapshots an abnormal exit left: first each window takes its folder's, then (one

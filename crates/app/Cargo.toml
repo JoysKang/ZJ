@@ -9,6 +9,7 @@ gpui-kit.workspace = true
 workspace-editor-core.workspace = true
 workspace-editor-git.workspace = true
 workspace-editor-agent.workspace = true
+workspace-editor-agent-bridge.workspace = true
 workspace-editor-agent-history.workspace = true
 libc = "0.2"
 # Already in the tree through GPUI Kit; used to build the syntax theme in Kit's JSON shape.
