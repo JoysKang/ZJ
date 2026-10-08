@@ -37,7 +37,9 @@ ADR 0004 里，Claude Code 和 Codex 通过 npm 适配器（`claude-agent-acp`�
 - 我们发出的每条用户消息都带 uuid，`result` 会标明它回答的是哪几条（`user_message_uuid(s)`，已用 CLI 实测）。所以一轮在所有消息都得到回答后才结束；
 - 追加指令就是再写一条用户消息，优先级 `now`，有未答的权限请求时用 `later`。它会打断正在生成的那一段，被打断的那段先产生一个 `result`，这个 `result` 不结束本轮；
 - `can_use_tool` 变成权限请求，Bash 命令的原文放在 `rawInput` 里，审批卡片照常显示命令。其余工具复用「本会话都允许」的规则；
-- `ExitPlanMode` 问「按计划开始改动？」，选择决定之后的模式。`AskUserQuestion` 拒绝，并让模型直接在回复里提问；
+- `ExitPlanMode` 问「按计划开始改动？」，选择决定之后的模式；
+- `AskUserQuestion`（2026-10-08 追加）：每个问题变成一个权限请求，选项是各个答案（`answer:<n>`）加「跳过」。ZJ 识别后显示为问题卡片，每个答案一个按钮，⏎ 选第一个，Esc 跳过（记为「已跳过」）；答案按工具要求的 `answers` 字段交回。原来的适配器在 ZJ 下是直接禁用这个工具的（ZJ 不支持 ACP 的 elicitation），所以这是新增能力。多选题只能选一项，也不能自己输入答案；
+- 会话标题（追加）：第一轮结束后，用对话的最后 1000 个字符发 `generate_session_title` 控制请求（`persist`），拿到的标题整理成一行、最多 256 个字符，作为 `session_info_update` 发给 ZJ。和适配器一样每个会话只生成一次（失败了下一轮再试），从历史恢复的会话不再生成；
 - 编辑的 diff 是 ZJ 做改动前快照和审阅的依据，而 Claude Code 可能在 diff 送到前就已经写了文件。所以单处替换（`Edit`）直接发送这一处的「改前 → 改后」片段，ZJ 不论文件写没写都能还原改前的内容；其余情况（`Write`、`MultiEdit`、`replace_all`、删除文本）发送整个文件，改前内容在工具调用的流式输入结束时就读取。子 Agent 的编辑也会作为工具调用显示，进入审阅；它的其他步骤不显示；
 - 某个会话的 `claude` 意外退出，只影响这一个会话：下一条消息用 `--resume` 重新启动。
 
@@ -46,6 +48,11 @@ ADR 0004 里，Claude Code 和 Codex 通过 npm 适配器（`claude-agent-acp`�
 - `session/new` 对应 `thread/start`，`session/load` 对应 `thread/resume`（`excludeTurns`），`session/close` 对应 `thread/unsubscribe`；
 - `session/prompt` 对应 `turn/start`，带上本会话的审批策略、沙箱、审查方和模型设置。快速模式用 `serviceTier: "fast"`；
 - 追加指令用 `turn/steer`，取消用 `turn/interrupt`；
+- 只有本次提示自己的那一轮（按 turn id）结束时才回答提示。Codex 会自己开回合（例如为目标继续工作），这些回合的结束不会误结束当前提示；
+- `turn/start` 带 `summary: "auto"`，推理摘要显示为思考过程；规划协作模式下的计划（`plan` 条目）作为回复显示；
+- 提问（追加）：规划模式下 Codex 用 `item/tool/requestUserInput` 提问，有选项的问题和 Claude 的选择题一样显示为问题卡片；只能自由输入或保密的问题不回答（codex-acp 在 ZJ 下靠 elicitation，同样回答不了）；
+- 内置 `/` 命令（追加，与 codex-acp 一致，排在技能前面，不区分大小写）：`/review`、`/review-branch`、`/review-commit`（`review/start`，审查结果作为回复）、`/compact`（`thread/compact/start`，完成后提示已压缩）、`/goal`（`thread/goal/set|clear`，设定后 Codex 自己开回合推进）、`/plan`（`thread/settings/update` 切换规划协作模式，需要初始化时声明 `experimentalApi`，codex-acp 也这样声明）、`/status`、`/mcp`、`/skills`、`/rename`（`thread/name/set`）、`/logout`。会自己开回合的命令，本次提示跟着那一轮结束；5 秒内没有回合开始时，`/goal` 像 codex-acp 一样发一句「Continue working toward the active goal.」开始推进，其他命令直接结束并说明没有开始新回合；
+- 会话标题（追加）：Codex 本身不给会话起名，codex-acp 是自己生成的，这里照做。第一轮完成后，开一个临时的 ephemeral thread，用小模型（账号提供 `gpt-5.6-luna` 就用它，否则用名字含 luna / mini 的模型）和固定提示，从第一条消息生成 JSON 格式的标题，再 `thread/name/set`。`thread/name/updated`（生成的标题或 `/rename`）转成 `session_info_update`。用户 `/rename` 过就不再覆盖；从历史恢复的会话不再生成；
 - 图片用 data URL 发送。工作区的技能（`skills/list`）作为 `/` 命令，消息开头是 `/技能名` 时按技能输入发送；
 - `app-server` 意外退出时桥接也退出，由 ZJ 按崩溃处理：每个会话在下一条消息时恢复。
 
@@ -56,6 +63,11 @@ ADR 0004 里，Claude Code 和 Codex 通过 npm 适配器（`claude-agent-acp`�
 - 在面板里选中一个 Agent 时（包括打开面板时的第一个会话），后台检查它能否启动：CLI 是否存在、版本是否够新、Key 是否设置。不能启动就在空会话里直接显示原因，不必等发出第一条消息。每次选中都重新检查，装好之后再选一次即可。
 - 登录：Claude 提供「Claude 订阅」「Anthropic Console」，Codex 提供「ChatGPT」。都是终端登录方式，ZJ 在「终端」里运行 `workspace-editor --agent-bridge <类型> <CLI> --login …`，桥接再 `exec` CLI 自己的登录命令（`claude auth login --claudeai|--console`、`codex login`）。脚本只带 `PATH`。
 - 数据目录里以前装的适配器和 Node.js（`~/Library/Application Support/ZJ/agents`）不再使用，ZJ 不自动删除，用户可以自己删掉。
+
+## 多个会话的资源
+
+- Claude Code：桥接进程按 Agent 共用（同一种 Agent、同样的环境变量，整个应用一个），但 Claude Code 的 stream-json 一个进程只能跑一个会话，所以每个会话一个 `claude`（约 115–145 MB）。这和原来的适配器一样（ADR 0004 的实测：2 个会话约 297 MB）。会话空闲 10 分钟（设置 `agent.idle_minutes`）后，桥接关闭它的 `claude`，下次提问时用 `--resume` 恢复。
+- Codex：所有会话共用一个 `codex app-server`，会话只是其中的 thread。实测第二个会话只多约 18 MB（69 → 87 MB）。
 
 ## 依赖与资源
 
@@ -73,16 +85,15 @@ ADR 0004 里，Claude Code 和 Codex 通过 npm 适配器（`claude-agent-acp`�
 ## 验证
 
 - 单元测试：桥接 15 项（steering 和取消的回合结束判定、结果到停止原因、模型设置跟随模型、提示内容、工具调用和 diff、Codex 模式和输入）；`agent_client` 的启动解析改为测试找不到 CLI、版本太旧和用户指定路径；界面新增「选中未安装的 Agent 时直接提示」的回归。
-- 真实 CLI 冒烟（`crates/agent_client/examples/agent_smoke.rs`，经过 ZJ 自己的 `AgentClient` 和进程池）：Claude Code 和 Codex 都通过了以下场景：回复、新建文件和修改已有文件（快照等于改前内容）、追加指令、取消、切换模型设置和模式后继续对话、同一进程上的第二个会话（第一个会话仍能继续）、进程重启后恢复会话、生成提交信息。图片两边都能送达；Codex 对 8×8 的纯红测试图回答过 Red / Orange / Peach，是模型对极小图片的判断波动，codex-acp 发送的也是同样的 data URL。
+- 真实 CLI 冒烟（`crates/agent_client/examples/agent_smoke.rs`，经过 ZJ 自己的 `AgentClient` 和进程池）：Claude Code 和 Codex 都通过了以下场景：回复、新建文件和修改已有文件（快照等于改前内容）、追加指令、取消、切换模型设置和模式后继续对话、同一进程上的第二个会话（第一个会话仍能继续）、进程重启后恢复会话、生成提交信息。图片两边都能送达；Codex 对 8×8 的纯红测试图回答过 Red / Orange / Peach，是模型对极小图片的判断波动，codex-acp 发送的也是同样的 data URL。追加的冒烟：Claude Code 的问题卡片（答案被模型采用）和自动标题；Codex 在 `/rename` 之前就有自动生成的标题、10 个内置命令（不含 `/logout`，以免退出真实账号）、规划模式下显示计划，以及规划时的提问卡片（答案被采用）。
 
 - 旧适配器建立的会话：从历史库里各取一个 claude-agent-acp 和 codex-acp 的会话 id，用桥接 `session/load` 都成功（只加载，没有发消息）。
 
 ## 代价与风险
 
 - Claude Code 的 stream-json 控制协议没有完整的公开文档（Agent SDK 用的就是它）。CLI 大版本升级后要跑一遍冒烟。Codex 可以对照 `codex app-server generate-json-schema`。
-- 维护方式从「跟着适配器版本走」变成「自己跟着两个 CLI 的协议走」。适配器里的一些附加功能没有做：上下文用量（面板本来就不显示）、自动生成会话标题、子 Agent 的过程展示、IDE 专用扩展。
-- Codex 的取消在新旧两种方式下都要 40 多秒才收到 `turn/completed`，这是 Codex 本身的问题，不是这次的回退。
+- 维护方式从「跟着适配器版本走」变成「自己跟着两个 CLI 的协议走」。适配器里的一些附加功能没有做：上下文用量（面板本来就不显示）、子 Agent 的过程展示、IDE 专用扩展。
+- 更正：冒烟里 Codex「取消」用了 40–70 秒，原因不在取消本身。直接测 `codex app-server`，`turn/interrupt` 的回复和 `turn/completed` 都在 20 ms 内到达；慢在 Codex 用 xhigh 思考强度时，要先思考约 70 秒才输出第一段文字，而冒烟要等到有文字才按停止。
 - 两种适配器原来都没有通过 ACP 的 `fs/read_text_file` 读取编辑器里未保存的内容，现在也一样，都是直接读磁盘。
-- Codex 的 `/` 命令只有工作区的技能（实测 79 个），codex-acp 自己实现的内置命令（`/review`、`/compact`、`/init` 等，约 11 个）没有提供。
-- Claude Code 的 `AskUserQuestion`（选择题）面板显示不了，会被拒绝，并让模型直接在回复里提问。
+- `/goal` 设定的目标在 Codex 那边持续有效，Codex 会自己开回合推进。这些回合的输出在没有提示进行时也会出现在会话里；用 `/goal pause` 或 `/goal clear` 停止。
 - 只在 `claude` 2.1.285 和 `codex` 0.160.0 上做过冒烟。更早但高于最低版本的 CLI 如果缺少 `user_message_uuid(s)`，追加指令会在被打断的那一段结束时就结束本轮（功能退化，不会卡住）。
