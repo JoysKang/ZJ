@@ -38,7 +38,7 @@ ADR 0004 里，Claude Code 和 Codex 通过 npm 适配器（`claude-agent-acp`�
 - 追加指令就是再写一条用户消息，优先级 `now`，有未答的权限请求时用 `later`。它会打断正在生成的那一段，被打断的那段先产生一个 `result`，这个 `result` 不结束本轮；
 - `can_use_tool` 变成权限请求，Bash 命令的原文放在 `rawInput` 里，审批卡片照常显示命令。其余工具复用「本会话都允许」的规则；
 - `ExitPlanMode` 问「按计划开始改动？」，选择决定之后的模式；
-- `AskUserQuestion`（2026-10-08 追加）：每个问题变成一个权限请求，选项是各个答案（`answer:<n>`）加「跳过」。ZJ 识别后显示为问题卡片，每个答案一个按钮，⏎ 选第一个，Esc 跳过（记为「已跳过」）；答案按工具要求的 `answers` 字段交回。原来的适配器在 ZJ 下是直接禁用这个工具的（ZJ 不支持 ACP 的 elicitation），所以这是新增能力。多选题只能选一项，也不能自己输入答案；
+- `AskUserQuestion`（2026-10-08 追加）：每个问题变成一个权限请求，ZJ 识别后显示为问题卡片。单选题每个答案一个按钮，点一下就回答，⏎ 选第一个；多选题的答案是可切换的按钮，选好后「提交」；每个问题都可以在输入框里自己输入答案（CLI 的「Other」），没选答案时输入的就是答案，选了答案时作为补充说明。答案按 CLI 的写法交回：`answers` 里多选用「, 」连接（含「, 」或引号的加引号），单选的补充说明放进 `annotations.notes`。Esc 跳过（记为「已跳过」）。原来的适配器在 ZJ 下直接禁用这个工具（ZJ 不支持 ACP 的 elicitation），所以这是新增能力；
 - 会话标题（追加）：第一轮结束后，用对话的最后 1000 个字符发 `generate_session_title` 控制请求（`persist`），拿到的标题整理成一行、最多 256 个字符，作为 `session_info_update` 发给 ZJ。和适配器一样每个会话只生成一次（失败了下一轮再试），从历史恢复的会话不再生成；
 - 编辑的 diff 是 ZJ 做改动前快照和审阅的依据，而 Claude Code 可能在 diff 送到前就已经写了文件。所以单处替换（`Edit`）直接发送这一处的「改前 → 改后」片段，ZJ 不论文件写没写都能还原改前的内容；其余情况（`Write`、`MultiEdit`、`replace_all`、删除文本）发送整个文件，改前内容在工具调用的流式输入结束时就读取。子 Agent 的编辑也会作为工具调用显示，进入审阅；它的其他步骤不显示；
 - 某个会话的 `claude` 意外退出，只影响这一个会话：下一条消息用 `--resume` 重新启动。
@@ -50,7 +50,7 @@ ADR 0004 里，Claude Code 和 Codex 通过 npm 适配器（`claude-agent-acp`�
 - 追加指令用 `turn/steer`，取消用 `turn/interrupt`；
 - 只有本次提示自己的那一轮（按 turn id）结束时才回答提示。Codex 会自己开回合（例如为目标继续工作），这些回合的结束不会误结束当前提示；
 - `turn/start` 带 `summary: "auto"`，推理摘要显示为思考过程；规划协作模式下的计划（`plan` 条目）作为回复显示；
-- 提问（追加）：规划模式下 Codex 用 `item/tool/requestUserInput` 提问，有选项的问题和 Claude 的选择题一样显示为问题卡片；只能自由输入或保密的问题不回答（codex-acp 在 ZJ 下靠 elicitation，同样回答不了）；
+- 提问（追加）：规划模式下 Codex 用 `item/tool/requestUserInput` 提问，也显示为问题卡片：有选项的点选；`isOther` 或没有选项的问题有输入框，`isSecret` 的输入框隐藏输入，卡片上的结果也不显示内容；答案照 codex-acp 和 Codex 自己的界面交回：每个问题一个列表；有选项时输入的文字是 `user_note: …`，跟在所选答案后面，没选答案时前面是 "None of the above"；没有选项的问题直接交回文字。codex-acp 在 ZJ 下靠 elicitation，回答不了这些问题；
 - 内置 `/` 命令（追加，与 codex-acp 一致，排在技能前面，不区分大小写）：`/review`、`/review-branch`、`/review-commit`（`review/start`，审查结果作为回复）、`/compact`（`thread/compact/start`，完成后提示已压缩）、`/goal`（`thread/goal/set|clear`，设定后 Codex 自己开回合推进）、`/plan`（`thread/settings/update` 切换规划协作模式，需要初始化时声明 `experimentalApi`，codex-acp 也这样声明）、`/status`、`/mcp`、`/skills`、`/rename`（`thread/name/set`）、`/logout`。会自己开回合的命令，本次提示跟着那一轮结束；5 秒内没有回合开始时，`/goal` 像 codex-acp 一样发一句「Continue working toward the active goal.」开始推进，其他命令直接结束并说明没有开始新回合；
 - 会话标题（追加）：Codex 本身不给会话起名，codex-acp 是自己生成的，这里照做。第一轮完成后，开一个临时的 ephemeral thread，用小模型（账号提供 `gpt-5.6-luna` 就用它，否则用名字含 luna / mini 的模型）和固定提示，从第一条消息生成 JSON 格式的标题，再 `thread/name/set`。`thread/name/updated`（生成的标题或 `/rename`）转成 `session_info_update`。用户 `/rename` 过就不再覆盖；从历史恢复的会话不再生成；
 - 图片用 data URL 发送。工作区的技能（`skills/list`）作为 `/` 命令，消息开头是 `/技能名` 时按技能输入发送；
@@ -68,6 +68,10 @@ ADR 0004 里，Claude Code 和 Codex 通过 npm 适配器（`claude-agent-acp`�
 
 - Claude Code：桥接进程按 Agent 共用（同一种 Agent、同样的环境变量，整个应用一个），但 Claude Code 的 stream-json 一个进程只能跑一个会话，所以每个会话一个 `claude`（约 115–145 MB）。这和原来的适配器一样（ADR 0004 的实测：2 个会话约 297 MB）。会话空闲 10 分钟（设置 `agent.idle_minutes`）后，桥接关闭它的 `claude`，下次提问时用 `--resume` 恢复。
 - Codex：所有会话共用一个 `codex app-server`，会话只是其中的 thread。实测第二个会话只多约 18 MB（69 → 87 MB）。
+
+## 问题卡片的协议
+
+单个答案用 `answer:<n>` 选项直接回答。多选和输入的文字走桥接额外提供的 `submit` 选项，所选答案的序号和文字放在 ACP 回答的 `_meta.zj = { choices, text }` 里（`AgentClient::answer_question`）。问题本身规整成 `{ question, header, options, multiSelect, allowText, secret }` 作为工具调用的输入，界面据此决定怎么画（`agent_client::thread::permission_question`）。输入的文字只发给 Agent，不写日志。
 
 ## 依赖与资源
 
