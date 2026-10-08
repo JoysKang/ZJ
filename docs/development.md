@@ -729,3 +729,12 @@ fmt、Clippy（`-D warnings`）、差异空白检查和 dist 构建通过，二�
 - 运行中没有输出：当前 `claude` 默认把思考以空的 `thinking_delta` 发出（只有 token 估计），Opus 高思考强度下长时间思考时，面板只显示「运行中」。原来的适配器内置的 CLI 版本行为不同，没有暴露这个问题。桥接启动 `claude` 时加 `--thinking-display summarized`。实测一次约 4 分钟的思考，摘要从第 11 秒到第 240 秒持续流出（1823 段）。
 - 模型名缺版本号：控制协议给的名字是 "Opus"、"Fable"，原来的适配器从模型 id 或描述里补上版本。桥接照做，菜单显示 "Opus 5.5"、"Fable 5.1"、"Sonnet 5.5"、"Haiku 4.5"；多词名称（"Default (recommended)"）、已带版本的名称和自定义模型保持原样。
 - 验证：桥接 22 项单元测试（新增模型名用例）、全工作区测试和 Clippy 通过；真实 CLI 冒烟新增 think 场景，确认思考片段在回合中送达，模型名带版本。
+
+## 同日追加：Codex 运行中长时间没有输出
+
+用户在 11:46 向一个空闲了一小时的 Codex 会话发消息，面板只显示「运行中」，没有任何内容。排查结果：
+- 桥接按时启动，恢复会话、开始回合都正常（Codex 记录 11:46:27 task_started）。
+- 之后 Codex 先跑这一轮的 hook（`~/.codex/hooks.json` 的 SessionStart、UserPromptSubmit）。这次 SessionStart 的 3 个 hook 和 UserPromptSubmit 的 2 个都卡到 600 秒（Codex 的默认超时）才结束，同一时刻 Codex 还记录了 "Failed to create shell snapshot for zsh: Snapshot command timed out"。也就是说，这个 Codex 进程当时启动 shell 卡住了，20 分钟后才开始调用模型。
+- 当天其余 535 次 hook 都在 0.1 秒左右完成，前后的 shell 快照也都成功；用 ZJ 给桥接的同一组环境变量重跑，hook 同样很快。所以这是 Codex 进程里偶发的卡顿，不是桥接引起的。原来的 codex-acp 也忽略 hook 通知，遇到同样情况一样没有输出。
+
+改进：桥接收到 `hook/started` 后，超过 3 秒还没结束的 hook 显示为运行中的步骤（如「运行 hook：UserPromptSubmit（hooks.json）」），结束时标为完成或失败并写明用时；正常的快速 hook 不显示。用一个模拟的 app-server（一个 0.08 秒、一个 5 秒的 hook）验证：快的不显示，慢的在第 3 秒出现、第 5 秒完成，回复照常送达。全工作区测试和 Clippy 通过。
