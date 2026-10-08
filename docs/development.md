@@ -655,3 +655,22 @@ GitHub CI 的 `steering_retired_requests_are_released_on_process_exit_or_session
 全工作区 441 项测试通过、4 项忽略；Agent 客户端集成测试以默认并发和 32 线程各重复 10 轮，20 轮均通过。常规差异与简化自检未发现额外抽象或测试断言削弱。
 
 fmt、Clippy（`-D warnings`）、差异空白检查和 dist 构建通过，二进制仍为 29,396,624 字节。本轮没有提交或推送，尚未触发新的 GitHub CI 运行。
+
+## 2026-10-08：Claude Code / Codex 改走自己的桥接（分支 feat/agent-bridge）
+
+按用户要求去掉 Node.js：新增 `crates/agent_bridge`，ZJ 自己的可执行文件以 `--agent-bridge claude|codex <CLI>` 运行它，直接驱动 `claude -p` stream-json 和 `codex app-server`；`agent_client` 把它当普通 ACP Agent 启动，进程池、权限、快照和审阅不变。协议形状对齐原来的 npm 适配器（会话 id、模式 id、模型设置 id、引用写法），旧历史照常恢复。补齐了 Orbvane 参考实现缺少的部分：多会话、图片、追加指令（Claude 按 `result` 回报的消息 uuid 判断一轮结束，已用 CLI 实测；Codex 用 `turn/steer`）、`session/close`、`/` 命令（Claude 的命令列表、Codex 的技能）、模型 / 思考强度 / 快速模式切换、终端登录。决策和数据见 [ADR 0009](adr/0009-agent-bridge.md)。
+
+按用户要求不再主动安装：删除 `provision.rs`（npm 适配器和 Node.js 的下载安装）、`Launch::Package`、`LocalCli` 和 `ClientOptions::install_root`。找不到 CLI 或版本太旧时，`LaunchError` 带上安装命令；面板里每次选中 Agent 都在后台检查能否启动，不能启动就在空会话里直接显示原因。新增界面回归覆盖这个提示。
+
+验证：全工作区测试通过（app 299 项，含新增的界面回归；agent_client 43 + 28 项；桥接 14 项）；fmt、Clippy（`-D warnings`）通过。真实 CLI 冒烟（`crates/agent_client/examples/agent_smoke.rs`，`claude` 2.1.285、`codex` 0.160.0）两种 Agent 都通过：编辑并生成审阅快照、追加指令、取消、切换模型设置和模式、同一进程两个会话、重启后恢复会话、生成提交信息；图片能送达，Codex 对 8×8 测试图的颜色回答有波动（模型行为）。最后一轮冒烟用 dist 版 `workspace-editor` 作为桥接。
+
+按项目规则先做 `ponytail-review`，再做 `code-review`（Standards / Spec 两轴）。简化：CLI 的 stderr 直接继承（去掉转发线程和截断），去掉重复的 `end()` 和两份思考强度名称表。复核后修正：
+
+- Claude 会话在进程重启失败时不再丢失；`initialize` 失败时排队的消息也会得到回答；旧进程迟到的输出不会送到新进程的会话；
+- 编辑的快照不再依赖读文件的时机：`Edit` 发送片段，其余在流式输入结束时读取改前内容；子 Agent 的编辑也进入审阅；
+- Codex 在知道回合 id 之前按下停止，会在回合开始时补发中断；
+- 界面的可用性检查加上 generation 校验，打开面板时的第一个会话也会检查。
+
+另外用历史库里旧适配器建立的会话验证了 `session/load`。冒烟新增「修改已有文件，快照等于改前内容」，两种 Agent 都通过。没有采纳的意见：Codex 的内置 `/` 命令（`/review`、`/compact` 等）和选择题仍未支持，记在 ADR 0009 的风险里；可用性检查顺带报告缺少 Key，保留；冒烟示例和 `ZJ_AGENT_BRIDGE` 是验收用的工具，保留。
+
+依赖树去重行数 614 → 615（新增的是 bridge crate 本身）；dist 二进制 29,396,624 → 29,611,648 字节（+215,024），超过 200 KB，写入 ADR 0009，仍低于 30 MB 目标。Agent 进程：Claude Code 一个会话从 Node 适配器 71 MB + `claude` 115 MB 变为桥接 4.3 MB + 115 MB；Codex 从 45 MB + 86 MB 变为 4.9 MB + 66–69 MB。ZJ 主进程代码路径不变，没有另测空闲 footprint。冒烟会在真实账号上运行少量短对话。本轮没有推送。

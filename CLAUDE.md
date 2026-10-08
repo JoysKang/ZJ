@@ -14,7 +14,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 | 指标 | 目标 | 上限 |
 | --- | --- | --- |
-| 二进制体积（aarch64，stripped）| ≤ 30 MB | 32 MB（CI 会检查，2026-10-07 实测 29.4 MB；语法占用见 docs/adr/0001，Agent 面板见 docs/adr/0004）|
+| 二进制体积（aarch64，stripped）| ≤ 30 MB | 32 MB（CI 会检查，2026-10-08 实测 29.6 MB；语法占用见 docs/adr/0001，Agent 面板见 docs/adr/0004，Agent 桥接见 docs/adr/0009）|
 | 冷启动到首帧 | ≤ 250 ms | 400 ms |
 | 空闲 footprint，1 个窗口 | ≤ 70 MB | 100 MB |
 | 3 个窗口 + 20 个文档 | ≤ 220 MB | 300 MB |
@@ -45,7 +45,8 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 - `crates/core`：身份模型与共享常量（`RepoId`、`DocumentId`、`EXCLUDED_DIRS`、按 Git 规则校验 `.git` 的 `git_marker`），**不依赖 GPUI**。
 - `crates/git_service`：调用系统 git，负责有界输出、超时、取消、全局限流，**不依赖 GPUI**。仓库发现最多向下 4 层，跳过 `EXCLUDED_DIRS` 和上层仓库忽略的目录，无效的 `.git` 静默跳过（自动发现找不到的仓库可以手动添加，见 `settings.rs` 的 `extra_repos`）。`lib.rs` 是服务本体（进程、限流、发现、查询），解析放在各自的文件里：`status.rs`（porcelain v2）、`refs.rs`（分支）、`log.rs`（未推送的提交）、`graph.rs`（Git 图的分页和提交详情）、`ls_files.rs`（快速打开的路径）、`stash.rs`（stash 和 blame），写操作在 `write.rs`。
-- `crates/agent_client`：ACP 客户端（Agent 预设、子进程、会话、权限、`fs/*`、改动前快照与审阅、空闲退出），**不依赖 GPUI**，见 docs/adr/0004。`client.rs` 是一个会话（`AgentClient`），其私有子模块 `steering.rs` 处理运行中追加指令、适配器续跑的结束通知和延迟响应的取消；仅在初始化声明支持时使用 `_session/steering`，不改变权限审批。`host.rs` 是 Agent 进程：同一种 Agent、同样的环境变量在整个应用里共用一个进程（`AgentPool`），请求按会话 id 分发，会话空闲时 `session/close`，没有会话时进程退出。应用退出时同步关闭进程池，停止并回收全部 Agent 进程组，拒绝晚到的启动；输出队列已满也不会阻塞退出。
+- `crates/agent_client`：ACP 客户端（Agent 预设、子进程、会话、权限、`fs/*`、改动前快照与审阅、空闲退出），**不依赖 GPUI**，见 docs/adr/0004。内置的 Claude Code / Codex 预设是 `Launch::Bridge`：只用本机的 CLI，ZJ 不安装 CLI、Node.js 或适配器；找不到或版本太旧时返回带安装命令的 `LaunchError`（docs/adr/0009）。`client.rs` 是一个会话（`AgentClient`），其私有子模块 `steering.rs` 处理运行中追加指令、适配器续跑的结束通知和延迟响应的取消；仅在初始化声明支持时使用 `_session/steering`，不改变权限审批。`host.rs` 是 Agent 进程：同一种 Agent、同样的环境变量在整个应用里共用一个进程（`AgentPool`），请求按会话 id 分发，会话空闲时 `session/close`，没有会话时进程退出。应用退出时同步关闭进程池，停止并回收全部 Agent 进程组，拒绝晚到的启动；输出队列已满也不会阻塞退出。
+- `crates/agent_bridge`：Claude Code / Codex 的 ACP 桥接，**不依赖 GPUI**，只依赖 `serde_json`，见 docs/adr/0009。ZJ 自己的可执行文件以 `--agent-bridge claude|codex <CLI>` 运行它（`main` 在 GPUI 之前转入），`agent_client` 把它当普通 ACP Agent 启动；`ZJ_AGENT_BRIDGE` 可指向单独构建的 `zj-agent-bridge`（开发、冒烟）。`claude.rs` 每个会话一个 `claude -p` stream-json 进程，按 `result` 回报的用户消息 uuid 判断一轮结束（追加指令会打断当前段落）；`codex.rs` 所有会话共用一个 `codex app-server`，会话就是 thread。会话 id、模式 id、模型设置 id 和引用写法都与原来的 npm 适配器一致。改了任何一边的协议处理，都要用 `crates/agent_client/examples/agent_smoke.rs` 对真实 CLI 跑一遍。
 - `crates/agent_history`：Agent 会话历史（SQLite + FTS5，后台写线程、搜索、钉住、硬删除），**不依赖 GPUI**。
 - `crates/app`：GPUI 界面。
   - `theme.rs`：唯一允许写字面尺寸和颜色的地方。

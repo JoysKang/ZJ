@@ -57,6 +57,7 @@ python3 tools/fixtures.py /tmp/zj-fixture-f
 - 编辑器复用 Kit 的真实 Editor，带行号、Rust、Python、JavaScript / JSX、TypeScript / TSX、JSON、TOML、YAML、Go、Shell、HTML、CSS、C、C++、Java、SQL、Markdown、Diff 高亮（映射见 `crates/app/src/languages.rs`）、选择、复制粘贴、撤销重做及组件内置查找替换。JSONC 使用已有 JSON grammar 的注释与容错高亮，不作为语法校验器；其他语言是纯文本。中文组合输入仍需要实机专项验收。
 - 代码跳转（不跑语言服务器，基于 tree-sitter）：⌘ 悬停显示下划线，⌘ 单击或 F12 转到定义（同文件局部变量按作用域解析，跨文件用后台建立的符号索引；多个候选时弹出列表），⌘⇧O 转到文件中的符号，⇧F12 查找引用，⌃- / ⌃⇧- 后退 / 前进。支持 Rust、Python、JS、TS / TSX、Go、C、C++、Java、Bash。打开文件夹的快捷键改为 ⌘K ⌘O（⌘⇧O 让给符号列表，与 VS Code 一致）。
 - Markdown 预览（原型样例已移除）将在 P6 接入。
+- Claude Code 和 Codex 由 ZJ 自己的桥接直接驱动本机的 `claude` / `codex` CLI，不需要 Node.js 或 npm 适配器（docs/adr/0009）。ZJ 不会自动安装任何东西：在面板里选中一个本机没装或版本太旧的 Agent 时，空会话里会直接显示原因和安装命令（`brew install --cask claude-code` / `brew install --cask codex`），装好后再选一次即可。以前自动装进 `~/Library/Application Support/ZJ/agents` 的适配器和 Node.js 已不再使用，可以删除。
 - Codex、Claude 运行时可在 Agent 输入框继续补充指令，按 Enter 或点击发送即可；停止按钮独立保留。追加指令沿用当前会话和文件引用，待审批的操作仍需审批；不支持此能力或尚未启动完成的 Agent 会保留输入，供稍后发送。
 - Codex 额度详情贴近额度按钮，悬停或点击都会查询最新账户额度；点击后保留详情，点外部关闭。查询失败会显示原因，缓存记录保留实际时间，不作为本次刷新结果。
 - Agent 输入区支持粘贴、拖入、选择图片，以及粘贴图片路径或通过 `@` 添加图片。图片显示缩略图和删除按钮，可删除后重新添加；支持 PNG、JPEG、WebP、GIF，最多 8 张、总大小不超过 16 MB。图片按 ACP 图片内容发送，也可只发送图片；不支持图片的 Agent 会显示错误。
