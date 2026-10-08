@@ -738,3 +738,11 @@ fmt、Clippy（`-D warnings`）、差异空白检查和 dist 构建通过，二�
 - 当天其余 535 次 hook 都在 0.1 秒左右完成，前后的 shell 快照也都成功；用 ZJ 给桥接的同一组环境变量重跑，hook 同样很快。所以这是 Codex 进程里偶发的卡顿，不是桥接引起的。原来的 codex-acp 也忽略 hook 通知，遇到同样情况一样没有输出。
 
 改进：桥接收到 `hook/started` 后，超过 3 秒还没结束的 hook 显示为运行中的步骤（如「运行 hook：UserPromptSubmit（hooks.json）」），结束时标为完成或失败并写明用时；正常的快速 hook 不显示。用一个模拟的 app-server（一个 0.08 秒、一个 5 秒的 hook）验证：快的不显示，慢的在第 3 秒出现、第 5 秒完成，回复照常送达。全工作区测试和 Clippy 通过。
+
+## 2026-10-08：输入法跟随焦点
+
+按用户的决定实现：进入终端总是切到英文输入法，要用别的在终端里自己切；点 Agent 输入框时切回上次在那里用的输入法，第一次用之前见过的非英文输入法，都没见过就用系统里第一个启用的输入法；编辑器不管；所有终端共用同一规则；设置 `auto_input_source` 默认开启。
+
+- 实现：`platform.rs` 用 Carbon 的 Text Input Sources（`TISCopyCurrentKeyboardInputSource`、`TISCopyCurrentASCIICapableKeyboardInputSource`、`TISSelectInputSource`、`TISCreateInputSourceList`）读取和切换，切换后让当前文本输入上下文重新激活一次，防止部分第三方输入法只改了菜单栏、实际没有生效；`input_switch.rs` 是纯逻辑；`workbench/input_area.rs` 接在终端和输入框的 focus-in、输入框的 focus-out 和窗口激活上。只在窗口在前台时切换，没有定时器。没有新增依赖。
+- 原型：在用户机器上（ABC + 微信输入法拼音）切到 ABC 和切回微信输入法各约 10 ms，系统报告的当前输入源随之改变。是否能立刻打出中文，需要用户实际打字确认（这里不能向窗口发送按键）。
+- 测试：新增纯逻辑单元测试 3 项；测试构建里输入源接口是空实现，跑完全部测试后用户的输入法保持不变。全工作区测试和 Clippy 通过。dist 二进制 29,711,616 字节，低于 30 MB 目标。本地 `target/ZJ.app` 已更新，重启后生效。

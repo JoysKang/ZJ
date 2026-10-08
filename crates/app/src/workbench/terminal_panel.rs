@@ -216,6 +216,11 @@ impl<T> TerminalPanel<T> {
 }
 
 impl Workbench {
+    /// Whether a terminal holds keyboard focus.
+    pub(super) fn focused_terminal_any(&self, window: &Window, cx: &App) -> bool {
+        self.focused_terminal(window, cx).is_some()
+    }
+
     /// The terminal holding keyboard focus, if any.
     fn focused_terminal(&self, window: &Window, cx: &App) -> Option<(usize, usize)> {
         self.terminals
@@ -245,6 +250,11 @@ impl Workbench {
                         TerminalEvent::TitleChanged => cx.notify(),
                     });
                 self.terminals.subscribe(pane.entity_id(), subscription);
+                let focus = pane.read(cx).focus_handle(cx);
+                let entered = cx.on_focus_in(&focus, window, |this, window, cx| {
+                    this.input_area_entered(crate::input_switch::Area::Terminal, window, cx)
+                });
+                self.terminals.subscribe(pane.entity_id(), entered);
                 Some(pane)
             }
             Err(error) => {

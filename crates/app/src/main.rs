@@ -10,6 +10,7 @@ mod file_ops;
 mod files;
 mod fuzzy;
 mod indent;
+mod input_switch;
 mod languages;
 mod large_file;
 mod markdown;

@@ -162,6 +162,9 @@ pub struct Settings {
     /// macOS: the Dock icon's cursor blinks while the app runs (off by default; never with
     /// 减少动态效果).
     pub dock_icon_blink: bool,
+    /// macOS: entering a terminal switches to the English input source, the Agent composer
+    /// back to the one last used in it (`input_switch`). On by default.
+    pub auto_input_source: bool,
     pub agent: AgentSettings,
     /// files.autoSave: "off" (default), "afterDelay" (1 s after the last edit) or
     /// "onFocusChange" (when the window loses focus or another tab is chosen).
@@ -186,6 +189,7 @@ impl Default for Settings {
             search_use_excludes: true,
             search_exclude: SEARCH_EXCLUDE_DEFAULT.into(),
             dock_icon_blink: false,
+            auto_input_source: true,
             agent: AgentSettings::default(),
             auto_save: crate::save::AutoSave::Off,
             extra_repos: BTreeMap::new(),
@@ -263,6 +267,7 @@ impl Settings {
                 .map(str::to_string)
                 .unwrap_or(defaults.search_exclude),
             dock_icon_blink: flag("dock_icon_blink", defaults.dock_icon_blink),
+            auto_input_source: flag("auto_input_source", defaults.auto_input_source),
             agent: AgentSettings::from_json(value.get("agent")),
             auto_save: value
                 .get("auto_save")
@@ -299,6 +304,7 @@ impl Settings {
             "search_use_excludes": self.search_use_excludes,
             "search_exclude": self.search_exclude,
             "dock_icon_blink": self.dock_icon_blink,
+            "auto_input_source": self.auto_input_source,
             "agent": self.agent.to_json(),
             "auto_save": self.auto_save.as_str(),
             "extra_repos": self.extra_repos,
@@ -427,6 +433,7 @@ mod tests {
             search_use_excludes: false,
             search_exclude: "*.log".into(),
             dock_icon_blink: true,
+            auto_input_source: false,
             agent: AgentSettings {
                 panel_visible: true,
                 panel_width: 380.,

@@ -375,6 +375,13 @@ impl AgentPanel {
                 _ => {}
             },
         );
+        let focus = composer.read(cx).focus_handle(cx);
+        let entered = cx.on_focus_in(&focus, window, |this: &mut Workbench, window, cx| {
+            this.input_area_entered(crate::input_switch::Area::Composer, window, cx)
+        });
+        let left = cx.on_focus_out(&focus, window, |this: &mut Workbench, _, window, cx| {
+            this.input_composer_left(window, cx)
+        });
         let presets = presets_from(&settings);
         let thread_list = ListState::new(0, ListAlignment::Top, theme::AGENT_THREAD_MAX);
         thread_list.set_follow_mode(FollowMode::Tail);
@@ -434,7 +441,7 @@ impl AgentPanel {
             presets,
             composer_focused: false,
             code: highlights::CodeHighlights::new(cx),
-            _subscriptions: vec![events],
+            _subscriptions: vec![events, entered, left],
         }
     }
 

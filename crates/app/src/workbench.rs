@@ -67,6 +67,7 @@ mod find_widget;
 #[path = "workbench/go_to_line_ui_tests.rs"]
 mod go_to_line_ui_tests;
 mod graph_view;
+mod input_area;
 mod large_view;
 pub use large_view::CopyLargeLines;
 mod markdown_preview;
@@ -523,6 +524,7 @@ impl Workbench {
         });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.switch_hud_activation(window, cx);
+            this.input_area_activation(window, cx);
             this.agent_update_spin(window, cx);
             this.agent_reclaim_idle(cx);
             if window.is_window_active() {
