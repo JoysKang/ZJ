@@ -309,7 +309,11 @@ impl Workbench {
                 let session = self.agent.current();
                 let glyph = session.map_or(Glyph::Generic, |s| s.preset.glyph);
                 let title = session.map_or_else(|| "新会话".to_string(), LiveSession::title);
-                let status = session.map_or(RowStatus::None, LiveSession::row_status);
+                // "Done, unread" means nothing for the session on screen.
+                let status = match session.map_or(RowStatus::None, LiveSession::row_status) {
+                    RowStatus::Unread => RowStatus::None,
+                    status => status,
+                };
                 bar.child(glyph_tile(glyph, theme::AGENT_GLYPH, colors))
                     .child(
                         h_flex()
@@ -360,7 +364,6 @@ impl Workbench {
                                                 .text_color(match status {
                                                     RowStatus::Awaiting => colors.attention,
                                                     RowStatus::Error => colors.deleted,
-                                                    RowStatus::Unread => colors.unread,
                                                     _ => colors.muted,
                                                 })
                                                 .child(label),
