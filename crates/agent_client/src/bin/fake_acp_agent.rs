@@ -281,6 +281,44 @@ async fn run_prompt(
                 }
             }
         }
+        // Like Claude Code's AskUserQuestion through ZJ's bridge: the answers are the options.
+        "question" => {
+            let fields = acp::ToolCallUpdateFields::new()
+                .title("库")
+                .kind(acp::ToolKind::Other)
+                .raw_input(serde_json::json!({
+                    "question": "用哪个库？",
+                    "options": [{ "label": "serde", "description": "最常用" }, { "label": "miniserde" }],
+                }));
+            let request = acp::RequestPermissionRequest::new(
+                session.clone(),
+                acp::ToolCallUpdate::new("q1", fields),
+                vec![
+                    acp::PermissionOption::new(
+                        "answer:0",
+                        "serde",
+                        acp::PermissionOptionKind::AllowOnce,
+                    ),
+                    acp::PermissionOption::new(
+                        "answer:1",
+                        "miniserde",
+                        acp::PermissionOptionKind::AllowOnce,
+                    ),
+                    acp::PermissionOption::new(
+                        "skip",
+                        "跳过",
+                        acp::PermissionOptionKind::RejectOnce,
+                    ),
+                ],
+            );
+            let response = cx.send_request(request).block_task().await?;
+            match response.outcome {
+                acp::RequestPermissionOutcome::Selected(s) => {
+                    say(&cx, &session, format!("selected:{}", s.option_id))?
+                }
+                _ => say(&cx, &session, "question-cancelled")?,
+            }
+        }
         "read" => {
             let result = cx
                 .send_request(acp::ReadTextFileRequest::new(session.clone(), &arg))

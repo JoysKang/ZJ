@@ -490,6 +490,9 @@ impl Workbench {
         }
         let key = session.key;
         let id = request.id;
+        if let Some(question) = workspace_editor_agent::thread::permission_question(request) {
+            return self.render_question(key, id, &agent, question, compact, cx);
+        }
         let offers_always = request
             .options
             .iter()
@@ -674,6 +677,97 @@ impl Workbench {
                             .child(reject)
                             .when(!compact, |b| b.child(keycap("Esc"))),
                     ),
+            )
+            .into_any_element()
+    }
+
+    /// A question from the agent: its text, what each answer means, one button per answer
+    /// (the first is the default for ⏎) and "skip" (Esc).
+    fn render_question(
+        &self,
+        key: u64,
+        id: workspace_editor_agent::PermissionId,
+        agent: &str,
+        question: workspace_editor_agent::thread::Question,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = theme::colors(cx);
+        let described: Vec<String> = question
+            .answers
+            .iter()
+            .filter_map(|a| a.description.as_ref().map(|d| format!("{}：{d}", a.label)))
+            .collect();
+        let buttons = question.answers.into_iter().enumerate().map(|(i, answer)| {
+            let option = answer.option;
+            // Unique within this card, which is the permission request's.
+            let element = SharedString::from(format!("agent-answer-{id}"));
+            let button = Button::new((element, i))
+                .xsmall()
+                .label(answer.label)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    let choice = PermissionChoice::Answer(option.clone());
+                    this.agent_answer(key, id, choice, window, cx)
+                }));
+            if i == 0 {
+                button.primary()
+            } else {
+                button.outline()
+            }
+        });
+        let skip = Button::new(("agent-question-skip", id))
+            .ghost()
+            .xsmall()
+            .label("跳过")
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.agent_answer(key, id, PermissionChoice::Reject, window, cx)
+            }));
+        v_flex()
+            .w_full()
+            .rounded(theme::RADIUS_LARGE)
+            .border_1()
+            .border_color(colors.attention_border)
+            .bg(colors.card)
+            .overflow_hidden()
+            .when(!compact, |card| {
+                card.child(
+                    h_flex()
+                        .px_3()
+                        .pt_2()
+                        .gap_2()
+                        .text_size(theme::TEXT_CAPTION)
+                        .child(
+                            Icon::new(IconName::Info)
+                                .size(theme::SMALL_ICON_SIZE)
+                                .text_color(colors.attention),
+                        )
+                        .child(format!("{agent} 想问你")),
+                )
+            })
+            .child(
+                div().px_3().pt_2().child(
+                    gpui_kit::base::SelectableText::new(("agent-question-text", id), question.text)
+                        .selection_color(colors.text_selection),
+                ),
+            )
+            .children((!described.is_empty()).then(|| {
+                v_flex()
+                    .px_3()
+                    .pt_1()
+                    .gap_1()
+                    .text_size(theme::TEXT_SECTION)
+                    .text_color(colors.muted)
+                    .children(described)
+            }))
+            .child(
+                h_flex()
+                    .p_2()
+                    .px_3()
+                    .gap_2()
+                    .flex_wrap()
+                    .children(buttons)
+                    .child(div().flex_1())
+                    .child(skip),
             )
             .into_any_element()
     }

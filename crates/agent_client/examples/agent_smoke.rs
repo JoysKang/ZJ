@@ -9,7 +9,8 @@
 //! ```
 //!
 //! Arguments: `<preset id> <empty or scratch workspace> [scenario,…]` with scenarios
-//! `edit,image,steer,cancel,config,pool,resume,text` (all by default).
+//! `edit,image,steer,cancel,config,title,question,commands,pool,resume,text` (all by default;
+//! `question` is Claude Code's, `commands` Codex's built-in `/` commands except `/logout`).
 #![allow(clippy::print_stdout)] // A report for the terminal.
 
 use std::{
@@ -30,6 +31,7 @@ struct Run {
     rx: async_channel::Receiver<AgentEvent>,
     session: Option<String>,
     configs: Vec<(String, String, usize)>,
+    title: Option<String>,
 }
 
 fn next(rx: &async_channel::Receiver<AgentEvent>, wait: Duration) -> Option<AgentEvent> {
@@ -122,6 +124,10 @@ fn turn(run: &mut Run, parts: Vec<PromptPart>, steer: Option<&str>, cancel: bool
             }
             AgentEvent::AvailableCommands(c) => t.notes.push(format!("commands {}", c.len())),
             AgentEvent::ModeChanged { mode_id } => t.notes.push(format!("mode {mode_id}")),
+            AgentEvent::TitleChanged { title } => {
+                t.notes.push(format!("title {title:?}"));
+                run.title = title.clone();
+            }
             AgentEvent::Error { message } => t.notes.push(format!("ERROR {message}")),
             AgentEvent::AuthRequired { methods } => t.notes.push(format!("AUTH {methods:?}")),
             AgentEvent::Exited { reason } => t.notes.push(format!("exited {reason:?}")),
@@ -145,6 +151,7 @@ fn start(preset: &AgentPreset, ws: &Path, pool: &Arc<AgentPool>, resume: Option<
         rx,
         session: None,
         configs: Vec::new(),
+        title: None,
     }
 }
 
@@ -308,6 +315,63 @@ fn main() {
         show("after settings", &t);
         check("turn after settings", t.end.starts_with("EndTurn"));
         println!("  settings now: {:?}", run.configs);
+    }
+    // Generated after the first turn (in the background); before any `/rename`.
+    if want("title") {
+        println!("\n### title: {:?}", run.title);
+        check("session titled", run.title.is_some());
+    }
+    if want("question") && preset.id != "codex" {
+        // The harness picks a question's first answer, as ⏎ does.
+        let t = turn(
+            &mut run,
+            vec![PromptPart::Text(
+                "Use your AskUserQuestion tool to ask me which color I prefer, with the options Teal and Amber (in that order). Then reply with just the color I chose.".into(),
+            )],
+            None,
+            false,
+        );
+        show("question", &t);
+        check("asked", t.notes.iter().any(|n| n.starts_with("permission")));
+        check("answer used", t.reply.contains("Teal"));
+    }
+    if want("commands") && preset.id == "codex" {
+        std::fs::write(ws.join("notes.txt"), "alpha\nBETA\ngamma\nTODO: remove\n").unwrap();
+        for (command, expect) in [
+            ("/status", "模型"),
+            ("/skills", "技能"),
+            ("/mcp", "MCP"),
+            ("/plan", "规划模式"),
+            (
+                "Plan how to rename notes.txt to log.txt. Before planning, use your request_user_input tool to ask me whether to keep a backup copy (options: Yes, No). Don't change anything yet.",
+                "notes",
+            ),
+            ("/plan", "已关闭规划模式"),
+            ("/rename 冒烟测试会话", "已重命名"),
+            (
+                "/goal Reply with the single word GOALDONE, then stop.",
+                "GOALDONE",
+            ),
+            ("/goal clear", "目标已清除"),
+            ("/review", ""),
+            ("/compact", "压缩"),
+        ] {
+            let t = turn(
+                &mut run,
+                vec![PromptPart::Text(command.into())],
+                None,
+                false,
+            );
+            show(command, &t);
+            check(
+                command,
+                t.end.starts_with("EndTurn") && t.reply.contains(expect),
+            );
+        }
+        check(
+            "title from /rename",
+            run.title.as_deref() == Some("冒烟测试会话"),
+        );
     }
     if want("pool") {
         let mut second = start(&preset, &ws, &pool, None);

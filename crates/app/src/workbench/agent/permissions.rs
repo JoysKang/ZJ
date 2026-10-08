@@ -24,6 +24,14 @@ impl Workbench {
         else {
             return;
         };
+        // ⏎ on a question picks its first answer (a question has at least one).
+        let question = workspace_editor_agent::thread::permission_question(&card.request);
+        let choice = match (choice, &question) {
+            (PermissionChoice::Once, Some(q)) => {
+                PermissionChoice::Answer(q.answers[0].option.clone())
+            }
+            (choice, _) => choice,
+        };
         let options = &card.request.options;
         let allow = options
             .iter()
@@ -56,8 +64,28 @@ impl Workbench {
             ),
             PermissionChoice::Reject => (
                 reject.map(|o| o.id.clone()),
-                PermissionState::Answered(PermissionKind::RejectOnce, "已拒绝".into()),
+                PermissionState::Answered(
+                    PermissionKind::RejectOnce,
+                    if question.is_some() {
+                        "已跳过"
+                    } else {
+                        "已拒绝"
+                    }
+                    .into(),
+                ),
             ),
+            PermissionChoice::Answer(id) => {
+                let Some(option) = options.iter().find(|o| &o.id == id) else {
+                    return;
+                };
+                (
+                    Some(option.id.clone()),
+                    PermissionState::Answered(
+                        PermissionKind::AllowOnce,
+                        format!("已回答：{}", option.name),
+                    ),
+                )
+            }
         };
         // The client answered `cancelled` already (a stop, the agent exited): the card waits
         // for the turn's end instead of claiming an answer the agent never got.
@@ -78,6 +106,7 @@ impl Workbench {
                 PermissionChoice::Once => "once",
                 PermissionChoice::Always => "always",
                 PermissionChoice::Reject => "reject",
+                PermissionChoice::Answer(_) => "answer",
             }
         );
         self.agent_sync_list(false);
@@ -160,4 +189,6 @@ pub(in crate::workbench) enum PermissionChoice {
     /// The agent's own "always allow" option (offered only when the agent has one).
     Always,
     Reject,
+    /// One of a question's answers (its option id).
+    Answer(String),
 }

@@ -234,6 +234,49 @@ pub fn permission_command(request: &PermissionRequest) -> Option<String> {
     .then(|| title.to_string())
 }
 
+/// Answer options' id prefix in a question (the bridge's `acp::ANSWER`).
+pub const ANSWER: &str = "answer:";
+
+/// A question the agent asks (Claude Code's `AskUserQuestion` or Codex's `requestUserInput`
+/// through ZJ's bridge): a permission request whose allow options are the answers
+/// (`answer:<n>`) and whose input is the question (`{ question, options: [{ label,
+/// description }] }`). Never empty.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Question {
+    pub text: String,
+    pub answers: Vec<Answer>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Answer {
+    /// The permission option to answer with.
+    pub option: String,
+    pub label: String,
+    pub description: Option<String>,
+}
+
+pub fn permission_question(request: &PermissionRequest) -> Option<Question> {
+    let input = request.raw_input.as_ref()?;
+    let text = input.get("question")?.as_str()?.to_string();
+    let described = |n: usize| -> Option<String> {
+        let description = input.get("options")?.get(n)?.get("description")?.as_str()?;
+        (!description.is_empty()).then(|| description.to_string())
+    };
+    let answers: Vec<Answer> = request
+        .options
+        .iter()
+        .filter_map(|o| {
+            let n = o.id.strip_prefix(ANSWER)?.parse().ok()?;
+            Some(Answer {
+                option: o.id.clone(),
+                label: o.name.clone(),
+                description: described(n),
+            })
+        })
+        .collect();
+    (!answers.is_empty()).then_some(Question { text, answers })
+}
+
 /// Only a directory actually supplied by the agent is labelled as the command's cwd.
 pub fn permission_cwd(request: &PermissionRequest) -> Option<&str> {
     request
@@ -754,7 +797,40 @@ mod tests {
         request.raw_input = Some(serde_json::json!({"cmd": "cargo test", "cwd": "  "}));
         assert_eq!(permission_command(&request).as_deref(), Some("cargo test"));
         assert_eq!(permission_cwd(&request), None);
+        request.raw_input = Some(serde_json::json!({
+            "question": "用哪个库？",
+            "options": [{ "label": "serde", "description": "最常用" }, { "label": "miniserde" }],
+        }));
+        request.options = vec![
+            PermissionOption {
+                id: "answer:0".into(),
+                name: "serde".into(),
+                kind: PermissionKind::AllowOnce,
+            },
+            PermissionOption {
+                id: "answer:1".into(),
+                name: "miniserde".into(),
+                kind: PermissionKind::AllowOnce,
+            },
+            PermissionOption {
+                id: "skip".into(),
+                name: "跳过".into(),
+                kind: PermissionKind::RejectOnce,
+            },
+        ];
+        let q = permission_question(&request).unwrap();
+        assert_eq!(q.text, "用哪个库？");
+        assert_eq!(
+            q.answers[0],
+            Answer {
+                option: "answer:0".into(),
+                label: "serde".into(),
+                description: Some("最常用".into())
+            }
+        );
+        assert_eq!(q.answers[1].description, None);
         request.raw_input = None;
+        assert!(permission_question(&request).is_none());
         request.tool_call.title = Some("`printf 'a  b'\ncargo test`".into());
         assert_eq!(
             permission_command(&request).as_deref(),

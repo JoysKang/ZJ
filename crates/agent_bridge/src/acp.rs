@@ -60,6 +60,54 @@ impl Requests {
     }
 }
 
+/// A question for the user (Claude Code's `AskUserQuestion`, Codex's `requestUserInput`;
+/// both `{ question, header, options: [{ label, description }] }`) as a permission request
+/// whose options are the answers (`answer:<n>`) plus "skip". ZJ shows it as a question card
+/// (`agent_client::thread::permission_question`). Only questions with options can be asked.
+pub(crate) fn ask_question(
+    requests: &mut Requests,
+    session: &str,
+    call_id: String,
+    q: &Value,
+) -> i64 {
+    let mut options: Vec<Value> = q["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(|(n, o)| {
+            option(
+                &format!("{ANSWER}{n}"),
+                o["label"].as_str().unwrap_or(""),
+                "allow_once",
+            )
+        })
+        .collect();
+    options.push(option("skip", "跳过", "reject_once"));
+    let call = json!({
+        "toolCallId": call_id,
+        "title": q["header"].as_str().filter(|h| !h.is_empty()).or(q["question"].as_str()),
+        "kind": "other",
+        "status": "pending",
+        "rawInput": q,
+    });
+    requests.ask_permission(session, call, json!(options))
+}
+
+/// Answer options' id prefix, shared with `agent_client::thread::ANSWER`.
+pub(crate) const ANSWER: &str = "answer:";
+
+/// The label of the answer ZJ picked for `q`, if any (`None`: skipped or cancelled).
+pub(crate) fn answer_label<'a>(q: &'a Value, answer: &Value) -> Option<&'a str> {
+    let n: usize = chosen_option(answer)?.strip_prefix(ANSWER)?.parse().ok()?;
+    q["options"][n]["label"].as_str()
+}
+
+/// Whether `q` can be asked (it has text and options).
+pub(crate) fn askable(q: &Value) -> bool {
+    q["question"].is_string() && q["options"].as_array().is_some_and(|o| !o.is_empty())
+}
+
 /// The option ZJ picked for a permission question (`None`: cancelled).
 pub(crate) fn chosen_option(answer: &Value) -> Option<&str> {
     let outcome = &answer["result"]["outcome"];

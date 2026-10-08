@@ -2482,3 +2482,32 @@ async fn picking_an_agent_that_is_not_installed_says_so_before_any_prompt(cx: &m
     });
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[gpui_kit::test]
+async fn a_question_shows_its_answers_and_enter_picks_the_first(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("question");
+    let (handle, this) = open(cx, Some(root.clone()));
+    send(cx, handle, &this, "question");
+    until(cx, &this, "a question", |p| pending_permission(p).is_some());
+    let (key, id) = this.read_with(cx, |p, _| pending_permission(p).unwrap());
+    cx.update_window(handle.into(), |_, window, cx| {
+        // The question card draws (answers as buttons, "skip").
+        window.render_frame(cx);
+        this.update(cx, |p, cx| {
+            p.agent_answer(key, id, PermissionChoice::Once, window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, &this);
+    assert!(replies(cx, &this).contains("selected:answer:0"));
+    this.read_with(cx, |p, _| {
+        let thread = &p.agent.current().unwrap().thread;
+        let answered = thread.items.iter().any(|item| {
+            matches!(item, agent_thread::Item::Permission(card)
+                if matches!(&card.state, agent_thread::PermissionState::Answered(_, label) if label == "已回答：serde"))
+        });
+        assert!(answered);
+    });
+    let _ = std::fs::remove_dir_all(root);
+}

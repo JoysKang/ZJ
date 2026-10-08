@@ -41,6 +41,19 @@ const MODES: [(&str, &str, &str); 4] = [
 ];
 
 const INIT: &str = "zj-init";
+/// How much of the conversation (characters) a title is generated from, as the adapter did.
+const TITLE_CONTEXT: usize = 1000;
+
+/// The session's generated title.
+#[derive(Default)]
+struct Title {
+    /// What it is generated from: the last [`TITLE_CONTEXT`] characters of prompts and replies.
+    context: String,
+    /// The session has one, or is getting one.
+    done: bool,
+    /// The control request asking for it.
+    request: Option<String>,
+}
 
 /// A model from the control `initialize`.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -67,6 +80,9 @@ struct Asked {
     input: Value,
     /// What "for this session" remembers.
     rule: String,
+    /// `AskUserQuestion`: the question asked now and the answers so far (question text →
+    /// the chosen option's label).
+    question: Option<(usize, serde_json::Map<String, Value>)>,
 }
 
 #[derive(Default)]
@@ -106,6 +122,7 @@ struct Session {
     fast: bool,
     models: Vec<Model>,
     commands: Vec<Value>,
+    title: Title,
     /// Our control requests waiting: request id → (ZJ's request to answer, the change).
     changes: HashMap<String, (Option<Value>, Change)>,
     next_control: u64,
@@ -233,8 +250,33 @@ impl Session {
         if self.last_text.as_deref().is_some_and(|m| m != message) {
             text.insert_str(0, "\n\n");
         }
+        self.remember_for_title(&text);
         self.last_text = Some(message.to_string());
         self.update(acp::text_chunk("agent_message_chunk", &text));
+    }
+
+    fn remember_for_title(&mut self, text: &str) {
+        let t = &mut self.title;
+        if t.done {
+            return;
+        }
+        t.context.push_str(text);
+        let excess = t.context.chars().count().saturating_sub(TITLE_CONTEXT);
+        if excess > 0 {
+            t.context = t.context.chars().skip(excess).collect();
+        }
+    }
+
+    /// After the first finished turn: Claude Code generates a title from the conversation (a
+    /// small-model call; `persist` keeps it in the session file). Once per session.
+    fn request_title(&mut self) {
+        if self.title.done || self.title.context.trim().chars().count() < 10 {
+            return;
+        }
+        self.title.done = true;
+        let description = self.title.context.trim().to_string();
+        let request = json!({ "subtype": "generate_session_title", "description": description, "persist": true });
+        self.title.request = Some(self.control(request));
     }
 
     /// A user message with a uuid of ours; the turn waits for its answer.
@@ -406,6 +448,8 @@ impl Bridge {
                 eprintln!("event=agent_bridge_claude_start resume={resume}");
                 s.claude = Some(child);
                 s.key = Some(key);
+                // A session from the history has its title.
+                s.title.done |= matches!(reply, Some((_, true)));
                 s.starting = reply;
                 let init = json!({
                     "type": "control_request",
@@ -456,6 +500,7 @@ impl Bridge {
     }
 
     fn send_prompt(s: &mut Session, id: Value, blocks: &Value) {
+        s.remember_for_title(&format!("\n{}\n", acp::prompt(blocks).text));
         s.outstanding.clear();
         s.interrupted = false;
         s.last_text = None;
@@ -572,6 +617,30 @@ impl Bridge {
         };
         s.asking = s.asking.saturating_sub(1);
         let option = acp::chosen_option(answer).unwrap_or("cancelled");
+        if let Some((index, mut answers)) = asked.question {
+            let questions = questions(&asked.input);
+            if option == "cancelled" {
+                let response = json!({ "behavior": "deny", "message": "用户停止了这一轮。", "interrupt": true });
+                return s.control_reply(&asked.request_id, response);
+            }
+            let q = &questions[index];
+            if let (Some(text), Some(label)) =
+                (q["question"].as_str(), acp::answer_label(q, answer))
+            {
+                answers.insert(text.to_string(), json!(label));
+            }
+            if index + 1 < questions.len() {
+                let next = Asked {
+                    question: Some((index + 1, answers)),
+                    ..asked
+                };
+                return self.ask_question(next);
+            }
+            let mut input = asked.input.clone();
+            input["answers"] = Value::Object(answers);
+            let response = json!({ "behavior": "allow", "updatedInput": input });
+            return s.control_reply(&asked.request_id, response);
+        }
         if option == "allow_always" {
             s.allowed.insert(asked.rule.clone());
         }
@@ -597,6 +666,22 @@ impl Bridge {
             let rid = s.control(json!({ "subtype": "set_permission_mode", "mode": mode }));
             s.changes.insert(rid, (None, Change::Mode(mode.into())));
         }
+    }
+
+    /// One of `AskUserQuestion`'s questions (see [`acp::ask_question`]). A multi-select
+    /// question is answered with one option.
+    fn ask_question(&mut self, asked: Asked) {
+        let Some(s) = self.sessions.get_mut(&asked.session) else {
+            return;
+        };
+        let Some((index, _)) = asked.question else {
+            return;
+        };
+        let call_id = format!("{}-q{index}", asked.request_id.as_str().unwrap_or("ask"));
+        s.asking += 1;
+        let q = &questions(&asked.input)[index];
+        let id = acp::ask_question(&mut self.requests, &asked.session, call_id, q);
+        self.asked.insert(id, asked);
     }
 
     // ------------------------------------------------------------------ Claude Code
@@ -683,6 +768,22 @@ impl Bridge {
         };
         if rid == INIT {
             return self.ready(sid, ok, &r["response"], &error);
+        }
+        if s.title.request.as_deref() == Some(rid) {
+            s.title.request = None;
+            match r["response"]["title"]
+                .as_str()
+                .map(sanitize_title)
+                .filter(|t| ok && !t.is_empty())
+            {
+                Some(title) => {
+                    s.title.context.clear();
+                    s.update(json!({ "sessionUpdate": "session_info_update", "title": title }));
+                }
+                // Tried again after a later turn.
+                None => s.title.done = false,
+            }
+            return;
         }
         let Some((id, change)) = s.changes.remove(rid) else {
             return;
@@ -779,11 +880,20 @@ impl Bridge {
         let tool = r["tool_name"].as_str().unwrap_or("").to_string();
         let input = r["input"].clone();
         if tool == "AskUserQuestion" {
-            let response = json!({
-                "behavior": "deny",
-                "message": "ZJ 的面板不能显示选择题。请直接在回复里提出问题，等用户回答。",
-            });
-            return s.control_reply(&request_id, response);
+            if questions(&input).is_empty() {
+                let response =
+                    json!({ "behavior": "deny", "message": "AskUserQuestion 没有有效的问题。" });
+                return s.control_reply(&request_id, response);
+            }
+            let asked = Asked {
+                session: sid.to_string(),
+                request_id,
+                tool,
+                input,
+                rule: String::new(),
+                question: Some((0, serde_json::Map::new())),
+            };
+            return self.ask_question(asked);
         }
         let rule = if tool == "Bash" {
             format!("Bash:{}", input["command"].as_str().unwrap_or(""))
@@ -843,9 +953,32 @@ impl Bridge {
                 tool,
                 input,
                 rule,
+                question: None,
             },
         );
     }
+}
+
+/// `AskUserQuestion`'s questions that have options.
+fn questions(input: &Value) -> Vec<Value> {
+    input["questions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|q| acp::askable(q))
+        .cloned()
+        .collect()
+}
+
+/// One line, at most 256 characters, as the adapter published titles.
+fn sanitize_title(title: &str) -> String {
+    let line = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= 256 {
+        return line;
+    }
+    let mut cut: String = line.chars().take(255).collect();
+    cut.push('…');
+    cut
 }
 
 fn model(m: &Value) -> Option<Model> {
@@ -1075,7 +1208,10 @@ fn result(s: &mut Session, m: &Value) {
         return acp::reply(id, json!({ "stopReason": "cancelled" }));
     }
     match turn_end(m) {
-        Ok(reason) => acp::reply(id, json!({ "stopReason": reason })),
+        Ok(reason) => {
+            acp::reply(id, json!({ "stopReason": reason }));
+            s.request_title();
+        }
         Err((code, message)) => acp::reply_error(id, code, &message),
     }
 }
@@ -1355,6 +1491,27 @@ mod tests {
         stream_event(&mut s, &json!({ "type": "content_block_stop", "index": 1 }));
         assert_eq!(s.before.get("w"), Some(&Some("old\n".to_string())));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn questions_need_text_and_options_and_titles_take_the_conversation_tail() {
+        let input = json!({ "questions": [
+            { "question": "用哪个库？", "header": "库", "options": [{ "label": "serde" }] },
+            { "question": "没有选项" , "options": [] },
+            { "options": [{ "label": "x" }] },
+        ] });
+        assert_eq!(questions(&input).len(), 1);
+        assert!(questions(&json!({})).is_empty());
+        let mut s = session();
+        s.remember_for_title(&"字".repeat(TITLE_CONTEXT + 5));
+        s.remember_for_title("尾");
+        assert_eq!(s.title.context.chars().count(), TITLE_CONTEXT);
+        assert!(s.title.context.ends_with('尾'));
+        s.title.done = true;
+        s.remember_for_title("不再记录");
+        assert!(s.title.context.ends_with('尾'));
+        assert_eq!(sanitize_title(" 修复\n  登录 "), "修复 登录");
+        assert_eq!(sanitize_title(&"长".repeat(300)).chars().count(), 256);
     }
 
     #[test]
