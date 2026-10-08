@@ -30,7 +30,7 @@ ADR 0004 里，Claude Code 和 Codex 通过 npm 适配器（`claude-agent-acp`�
 
 ### 2. Claude Code：每个会话一个 `claude -p`
 
-参数为 `--input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio --permission-mode <模式>`，加上 `--session-id` 或 `--resume`。不传 `--allow-dangerously-skip-permissions`。
+参数为 `--input-format stream-json --output-format stream-json --verbose --include-partial-messages --thinking-display summarized --permission-prompt-tool stdio --permission-mode <模式>`（不加 `--thinking-display` 时，当前 CLI 只发空的思考片段，长时间思考时面板没有输出），加上 `--session-id` 或 `--resume`。不传 `--allow-dangerously-skip-permissions`。
 
 - 控制协议的 `initialize` 返回模型（含每个模型支持的思考强度和是否支持快速模式）和命令（技能、自定义命令），分别变成 `configOptions` 和 `available_commands_update`；
 - 切换用控制请求：`set_permission_mode`、`set_model`、`apply_flag_settings`（`effortLevel` / `fastMode`）；
