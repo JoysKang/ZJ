@@ -80,6 +80,76 @@ fn rows(cx: &mut TestAppContext, this: &Entity<Workbench>) -> Vec<String> {
 }
 
 #[gpui_kit::test]
+async fn repositories_keep_name_order_after_changes_and_commits(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("name-order", 0);
+    let base = repo.parent().unwrap().to_path_buf();
+    // The parent paths deliberately sort differently from the displayed repository names.
+    let zeta = base.join("a-parent/zeta");
+    let alpha = base.join("z-parent/alpha");
+    let other_alpha = base.join("m-parent/alpha");
+    for path in [&zeta, &alpha, &other_alpha] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    }
+    std::fs::rename(repo, &zeta).unwrap();
+    for path in [&alpha, &other_alpha] {
+        git(
+            &base,
+            &[
+                "clone",
+                "-q",
+                base.join("remote.git").to_str().unwrap(),
+                path.to_str().unwrap(),
+            ],
+        );
+    }
+    let (window, this) = open(cx, base.clone());
+    let order = |cx: &mut TestAppContext| {
+        this.read_with(cx, |p, _| {
+            p.rows
+                .iter()
+                .filter_map(|row| match row {
+                    Row::Group(g) => Some(p.groups[*g].repo.worktree.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    let refresh = |cx: &mut TestAppContext| {
+        cx.update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| p.refresh(window, cx));
+        })
+        .unwrap();
+        settle(cx, None, |cx| this.read_with(cx, |p, _| !p.loading));
+    };
+    let expected = vec![other_alpha, alpha, zeta.clone()];
+    assert_eq!(order(cx), expected);
+
+    std::fs::write(zeta.join("a.txt"), "changed\n").unwrap();
+    refresh(cx);
+    assert_eq!(order(cx), expected);
+    this.update(cx, |p, _| {
+        p.hide_clean_repos = true;
+        p.rebuild_rows();
+    });
+    assert_eq!(order(cx).as_slice(), std::slice::from_ref(&zeta));
+    this.update(cx, |p, _| {
+        p.hide_clean_repos = false;
+        p.rebuild_rows();
+    });
+
+    git(&zeta, &["commit", "-q", "-am", "local change"]);
+    refresh(cx);
+    this.read_with(cx, |p, _| {
+        let group = p.groups.iter().find(|g| g.repo.worktree == zeta).unwrap();
+        assert!(group.clean());
+        assert_eq!(group.ahead(), 1);
+    });
+    assert_eq!(order(cx), expected);
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[gpui_kit::test]
 async fn a_clean_repository_with_unpushed_commits_lists_them(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let repo = fixture("ahead", 2);

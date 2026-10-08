@@ -1,7 +1,7 @@
 //! Source Control view, VS Code's multi-repository layout: every repository is a section with
 //! its branch and actions in the header, its own message box and 提交 button, then its
-//! "暂存的更改" / "更改" groups, then "未推送的提交". Clean repositories are listed last (or
-//! hidden). Expanded repositories keep their commit controls even when clean.
+//! "暂存的更改" / "更改" groups, then "未推送的提交". Repositories are sorted by name;
+//! clean ones can be hidden. Expanded repositories keep their commit controls even when clean.
 //! File row actions appear on hover; the status letter stays at the right edge.
 
 use super::SINGLE_LINE;

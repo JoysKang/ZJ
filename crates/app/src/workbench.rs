@@ -293,8 +293,7 @@ struct Group {
     outgoing_collapsed: bool,
 }
 impl Group {
-    /// A repository whose status loaded and has nothing to commit; it is listed compactly
-    /// after the others (or hidden), as in VS Code.
+    /// A repository whose loaded status has no file changes; used by the hide-clean filter.
     fn clean(&self) -> bool {
         matches!(&self.status, Some(Ok(status)) if status.changes.is_empty())
     }
@@ -1885,23 +1884,14 @@ impl Workbench {
     fn fill_rows(&mut self) {
         self.rows.clear();
         let hide_clean = self.hide_clean_repos;
-        // Repositories with changes (or still loading, or failing) first, clean ones after;
-        // each part by path.
-        let mut active: Vec<usize> = (0..self.groups.len())
-            .filter(|g| !self.groups[*g].clean())
+        let mut order: Vec<usize> = (0..self.groups.len())
+            .filter(|g| !hide_clean || !self.groups[*g].clean())
             .collect();
-        let mut clean: Vec<usize> = (0..self.groups.len())
-            .filter(|g| self.groups[*g].clean() && !hide_clean)
-            .collect();
-        let by_path = |a: &usize, b: &usize| {
-            self.groups[*a]
-                .repo
-                .worktree
-                .cmp(&self.groups[*b].repo.worktree)
-        };
-        active.sort_by(by_path);
-        clean.sort_by(by_path);
-        let order: Vec<usize> = active.into_iter().chain(clean).collect();
+        // Status updates must not move repositories; full paths only break name ties.
+        order.sort_by_key(|g| {
+            let path = &self.groups[*g].repo.worktree;
+            (path.file_name().unwrap_or(path.as_os_str()), path)
+        });
         for g in order {
             let group = &self.groups[g];
             self.rows.push(Row::Group(g));
