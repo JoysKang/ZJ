@@ -681,8 +681,10 @@ impl Workbench {
             .into_any_element()
     }
 
-    /// A question from the agent: its text, what each answer means, one button per answer
-    /// (the first is the default for ⏎) and "skip" (Esc).
+    /// A question from the agent: its text, what each answer means, its answers and
+    /// "skip" (Esc). A single-select's answer is one click (⏎: the first); a multi-select's
+    /// are toggles sent with "submit". A question that takes typed text has a field (⏎
+    /// submits; hidden for a secret), which next to a single pick goes along as a note.
     fn render_question(
         &self,
         key: u64,
@@ -693,6 +695,10 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = theme::colors(cx);
+        let draft = self.agent.questions.get(&(key, id));
+        let held = self.agent_question_input(key, id, cx);
+        let (picks, typed) = (held.picks, held.text);
+        let multi = question.multi;
         let described: Vec<String> = question
             .answers
             .iter()
@@ -700,20 +706,37 @@ impl Workbench {
             .collect();
         let buttons = question.answers.into_iter().enumerate().map(|(i, answer)| {
             let option = answer.option;
+            let picked = picks.contains(&i);
             // Unique within this card, which is the permission request's.
             let element = SharedString::from(format!("agent-answer-{id}"));
             let button = Button::new((element, i))
                 .xsmall()
                 .label(answer.label)
+                .when(picked, |b| b.icon(IconName::Check))
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    let choice = PermissionChoice::Answer(option.clone());
-                    this.agent_answer(key, id, choice, window, cx)
+                    if multi {
+                        this.agent_toggle_pick(key, id, i, cx);
+                    } else {
+                        let choice = PermissionChoice::Answer(option.clone());
+                        this.agent_answer(key, id, choice, window, cx);
+                    }
                 }));
-            if i == 0 {
+            if picked || (!multi && i == 0) {
                 button.primary()
             } else {
                 button.outline()
             }
+        });
+        let input = draft.and_then(|d| d.input.clone());
+        let submit = (multi || input.is_some()).then(|| {
+            Button::new(("agent-question-submit", id))
+                .primary()
+                .xsmall()
+                .label("提交")
+                .disabled(picks.is_empty() && typed.is_empty())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.agent_answer(key, id, PermissionChoice::Submit, window, cx)
+                }))
         });
         let skip = Button::new(("agent-question-skip", id))
             .ghost()
@@ -730,6 +753,7 @@ impl Workbench {
             .bg(colors.card)
             .overflow_hidden()
             .when(!compact, |card| {
+                let hint = if multi { "（可多选）" } else { "" };
                 card.child(
                     h_flex()
                         .px_3()
@@ -741,7 +765,7 @@ impl Workbench {
                                 .size(theme::SMALL_ICON_SIZE)
                                 .text_color(colors.attention),
                         )
-                        .child(format!("{agent} 想问你")),
+                        .child(format!("{agent} 想问你{hint}")),
                 )
             })
             .child(
@@ -759,6 +783,19 @@ impl Workbench {
                     .text_color(colors.muted)
                     .children(described)
             }))
+            .children(input.map(|input| {
+                div()
+                    .px_3()
+                    .pt_2()
+                    // Esc in the field skips, as in the composer.
+                    .capture_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
+                        if e.keystroke.key == "escape" {
+                            this.agent_answer(key, id, PermissionChoice::Reject, window, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+                    .child(gpui_kit::component::input::Input::new(&input).small())
+            }))
             .child(
                 h_flex()
                     .p_2()
@@ -767,6 +804,7 @@ impl Workbench {
                     .flex_wrap()
                     .children(buttons)
                     .child(div().flex_1())
+                    .children(submit)
                     .child(skip),
             )
             .into_any_element()

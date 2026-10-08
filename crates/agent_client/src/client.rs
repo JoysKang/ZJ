@@ -171,6 +171,12 @@ pub(crate) struct Init {
     pub auth_methods: Vec<acp::AuthMethod>,
 }
 
+/// The answer to a permission request: an option, and data for the agent in `_meta`.
+pub(crate) struct Choice {
+    option: String,
+    meta: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
 /// One session: its commands, turn, permission requests and review snapshots. It runs as a
 /// task on its agent's process ([`Host`]), which it may share with other sessions.
 pub(crate) struct SessionState {
@@ -195,7 +201,7 @@ pub(crate) struct SessionState {
     /// A prompt the agent refused with "auth required" (sent before `turn_done`): the turn
     /// stays open, the session loop asks for a login and sends it again.
     parked: Mutex<Option<(TurnId, Vec<PromptPart>)>>,
-    permissions: Mutex<HashMap<PermissionId, oneshot::Sender<Option<String>>>>,
+    permissions: Mutex<HashMap<PermissionId, oneshot::Sender<Option<Choice>>>>,
     next_permission: AtomicU64,
     turn: Mutex<Option<TurnId>>,
     steering: Mutex<steering::Steering>,
@@ -696,8 +702,25 @@ impl AgentClient {
     /// Answers a permission request with one of its option ids (`None` = dismissed, sent as
     /// `cancelled`). Returns `false` if the request is no longer pending.
     pub fn respond_permission(&self, id: PermissionId, option_id: Option<String>) -> bool {
+        let choice = option_id.map(|option| Choice { option, meta: None });
+        self.respond(id, choice)
+    }
+
+    /// Answers a question ([`crate::thread::permission_question`]) with the picked answers
+    /// (their indices) and the typed text: its [`crate::thread::SUBMIT`] option, with both in
+    /// `_meta.zj`.
+    pub fn answer_question(&self, id: PermissionId, choices: &[usize], text: &str) -> bool {
+        let meta = serde_json::json!({ "zj": { "choices": choices, "text": text } });
+        let choice = Choice {
+            option: crate::thread::SUBMIT.into(),
+            meta: meta.as_object().cloned(),
+        };
+        self.respond(id, Some(choice))
+    }
+
+    fn respond(&self, id: PermissionId, choice: Option<Choice>) -> bool {
         match self.session.permissions.lock().unwrap().remove(&id) {
-            Some(tx) => tx.send(option_id).is_ok(),
+            Some(tx) => tx.send(choice).is_ok(),
             None => false,
         }
     }
@@ -1747,9 +1770,9 @@ pub(crate) async fn handle_permission(
         .await;
     cx.spawn(async move {
         let outcome = match rx.await {
-            Ok(Some(option)) => {
-                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option))
-            }
+            Ok(Some(choice)) => acp::RequestPermissionOutcome::Selected(
+                acp::SelectedPermissionOutcome::new(choice.option).meta(choice.meta),
+            ),
             _ => acp::RequestPermissionOutcome::Cancelled,
         };
         responder.respond(acp::RequestPermissionResponse::new(outcome))

@@ -2511,3 +2511,145 @@ async fn a_question_shows_its_answers_and_enter_picks_the_first(cx: &mut TestApp
     });
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[gpui_kit::test]
+async fn a_multi_select_question_sends_its_picks_and_typed_text(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("multi-question");
+    let (handle, this) = open(cx, Some(root.clone()));
+    send(cx, handle, &this, "question multi");
+    until(cx, &this, "a question with its draft", |p| {
+        pending_permission(p).is_some_and(|(key, id)| p.agent.questions.contains_key(&(key, id)))
+    });
+    let (key, id) = this.read_with(cx, |p, _| pending_permission(p).unwrap());
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        this.update(cx, |p, cx| {
+            // ⏎ with nothing picked does nothing on a multi-select.
+            p.agent_answer(key, id, PermissionChoice::Once, window, cx);
+            assert!(pending_permission(p).is_some());
+            p.agent_toggle_pick(key, id, 1, cx);
+            p.agent_toggle_pick(key, id, 0, cx);
+            p.agent_toggle_pick(key, id, 1, cx);
+            p.agent_toggle_pick(key, id, 1, cx);
+            let input = p.agent.questions[&(key, id)].input.clone().unwrap();
+            input.update(cx, |i, cx| i.set_value("  还有 serde_json  ", window, cx));
+        });
+        window.render_frame(cx);
+        this.update(cx, |p, cx| {
+            p.agent_answer(key, id, PermissionChoice::Submit, window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, &this);
+    let reply = replies(cx, &this);
+    assert!(reply.contains("selected:submit"), "{reply}");
+    assert!(reply.contains(r#""choices":[0,1]"#), "{reply}");
+    assert!(reply.contains(r#""text":"还有 serde_json""#), "{reply}");
+    this.read_with(cx, |p, _| {
+        assert!(
+            p.agent.questions.is_empty(),
+            "the draft goes with the answer"
+        );
+        let thread = &p.agent.current().unwrap().thread;
+        assert!(thread.items.iter().any(|item| {
+            matches!(item, agent_thread::Item::Permission(card)
+                if matches!(&card.state, agent_thread::PermissionState::Answered(_, label)
+                    if label == "已回答：serde、miniserde、还有 serde_json"))
+        }));
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn a_single_pick_takes_the_typed_text_along(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("question-note");
+    let (handle, this) = open(cx, Some(root.clone()));
+    send(cx, handle, &this, "question");
+    until(cx, &this, "a question with its draft", |p| {
+        pending_permission(p).is_some_and(|(key, id)| p.agent.questions.contains_key(&(key, id)))
+    });
+    let (key, id) = this.read_with(cx, |p, _| pending_permission(p).unwrap());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            let input = p.agent.questions[&(key, id)].input.clone().unwrap();
+            input.update(cx, |i, cx| i.set_value("要支持 no_std", window, cx));
+            p.agent_answer(
+                key,
+                id,
+                PermissionChoice::Answer("answer:1".into()),
+                window,
+                cx,
+            )
+        });
+    })
+    .unwrap();
+    settle(cx, &this);
+    let reply = replies(cx, &this);
+    assert!(reply.contains(r#""choices":[1]"#), "{reply}");
+    assert!(reply.contains("要支持 no_std"), "{reply}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn a_typed_only_question_takes_the_keyboard_and_hides_a_secret(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("secret-question");
+    let (handle, this) = open(cx, Some(root.clone()));
+    send(cx, handle, &this, "question secret");
+    until(cx, &this, "a question with its draft", |p| {
+        pending_permission(p).is_some_and(|(key, id)| p.agent.questions.contains_key(&(key, id)))
+    });
+    let (key, id) = this.read_with(cx, |p, _| pending_permission(p).unwrap());
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        // ⏎ in the composer: nothing to pick, so into the field.
+        this.update(cx, |p, cx| {
+            p.agent_answer(key, id, PermissionChoice::Once, window, cx)
+        });
+        let input = this.read_with(cx, |p, _| {
+            p.agent.questions[&(key, id)].input.clone().unwrap()
+        });
+        assert!(input.read(cx).focus_handle(cx).is_focused(window));
+        window.render_frame(cx);
+        window.input("sk-123", cx);
+        window.render_frame(cx);
+        window.press("enter", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    settle(cx, &this);
+    let reply = replies(cx, &this);
+    assert!(reply.contains(r#""text":"sk-123""#), "{reply}");
+    this.read_with(cx, |p, _| {
+        let thread = &p.agent.current().unwrap().thread;
+        let label = thread.items.iter().find_map(|item| match item {
+            agent_thread::Item::Permission(card) => match &card.state {
+                agent_thread::PermissionState::Answered(_, label) => Some(label.clone()),
+                _ => None,
+            },
+            _ => None,
+        });
+        assert_eq!(label.as_deref(), Some("已回答：（已隐藏的输入）"));
+    });
+    // Esc in the field skips.
+    send(cx, handle, &this, "question");
+    until(cx, &this, "another question with its draft", |p| {
+        pending_permission(p).is_some_and(|(key, id)| p.agent.questions.contains_key(&(key, id)))
+    });
+    let (key, id) = this.read_with(cx, |p, _| pending_permission(p).unwrap());
+    cx.update_window(handle.into(), |_, window, cx| {
+        let input = this.read_with(cx, |p, _| {
+            p.agent.questions[&(key, id)].input.clone().unwrap()
+        });
+        input.update(cx, |i, cx| i.focus(window, cx));
+        window.render_frame(cx);
+        window.press("escape", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    settle(cx, &this);
+    assert!(replies(cx, &this).contains("selected:skip"));
+    let _ = std::fs::remove_dir_all(root);
+}

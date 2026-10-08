@@ -405,15 +405,17 @@ impl Workbench {
         let mut title = None;
         let mut acp_id = None;
         let mut learned = false;
+        let mut requests = Vec::new();
         for event in &batch {
             let ends_current_turn = matches!(event, AgentEvent::TurnEnded { turn, .. }
                 if session.thread.turn == Some(*turn));
             session.thread.apply(event, visible);
             match event {
-                AgentEvent::PermissionRequested(_) => {
+                AgentEvent::PermissionRequested(request) => {
                     // Every request is the user's to answer; the agent keeps its own
                     // "always allow" rules (ADR 0004).
                     eprintln!("event=agent_permission_asked agent={}", session.preset.id);
+                    requests.push(request.clone());
                 }
                 AgentEvent::FileWritten { path } => {
                     written.push(path.clone());
@@ -504,6 +506,23 @@ impl Workbench {
         if let Some((place, commands)) = learned {
             self.agent.known_commands.insert(place, commands);
         }
+        // Drafts live while their question waits; new questions get theirs.
+        let pending: Vec<workspace_editor_agent::PermissionId> = self
+            .agent
+            .session(key)
+            .map(|s| {
+                s.thread
+                    .pending_permissions()
+                    .map(|c| c.request.id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.agent
+            .questions
+            .retain(|(k, id), _| *k != key || pending.contains(id));
+        for request in requests.iter().filter(|r| pending.contains(&r.id)) {
+            self.agent_question_draft(key, request, window, cx);
+        }
         // Codex wrote the request's rate limits to its log.
         if turn_ended {
             self.agent_refresh_quota(cx);
@@ -562,6 +581,11 @@ impl Workbench {
 
     /// Keeps the thread list's item count in step with the current thread.
     pub(in crate::workbench) fn agent_sync_list(&mut self, switched: bool) {
+        // A session put away or deleted takes its question drafts along.
+        let sessions = &self.agent.sessions;
+        self.agent
+            .questions
+            .retain(|(key, _), _| sessions.iter().any(|s| s.key == *key));
         let Some(session) = self.agent.current() else {
             self.agent.thread_list.reset(0);
             self.agent.thread_rows.clear();

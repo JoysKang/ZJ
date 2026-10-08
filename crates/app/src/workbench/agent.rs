@@ -310,6 +310,8 @@ pub(super) struct AgentPanel {
     /// Why an agent can't start here (CLI not installed or too old, key missing), by preset
     /// id: checked whenever it is picked, shown in its empty session. ZJ installs nothing.
     pub unavailable: HashMap<String, String>,
+    /// Questions being answered (several picks, typed text), by (session key, request id).
+    pub questions: HashMap<(u64, workspace_editor_agent::PermissionId), permissions::QuestionDraft>,
     /// The latest of those checks: an older answer arriving later is dropped.
     check_generation: u64,
     /// The Codex account quota (see `crate::quota`) and whether its card is open.
@@ -393,6 +395,7 @@ impl AgentPanel {
             slash: None,
             known_commands: HashMap::new(),
             unavailable: HashMap::new(),
+            questions: HashMap::new(),
             check_generation: 0,
             quota: None,
             quota_open: false,

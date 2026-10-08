@@ -281,40 +281,51 @@ async fn run_prompt(
                 }
             }
         }
-        // Like Claude Code's AskUserQuestion through ZJ's bridge: the answers are the options.
+        // Like Claude Code's AskUserQuestion through ZJ's bridge: the answers are the options,
+        // "submit" carries picks and typed text in `_meta`. `question multi`: a multi-select;
+        // `question secret`: typed text only, hidden.
         "question" => {
+            let secret = arg == "secret";
+            let input = if secret {
+                serde_json::json!({ "question": "访问令牌？", "options": [], "allowText": true, "secret": true })
+            } else {
+                serde_json::json!({
+                    "question": "用哪个库？",
+                    "options": [{ "label": "serde", "description": "最常用" }, { "label": "miniserde" }],
+                    "multiSelect": arg == "multi",
+                    "allowText": true,
+                })
+            };
             let fields = acp::ToolCallUpdateFields::new()
                 .title("库")
                 .kind(acp::ToolKind::Other)
-                .raw_input(serde_json::json!({
-                    "question": "用哪个库？",
-                    "options": [{ "label": "serde", "description": "最常用" }, { "label": "miniserde" }],
-                }));
+                .raw_input(input);
+            let allow = acp::PermissionOptionKind::AllowOnce;
+            let mut options = Vec::new();
+            if !secret {
+                options.push(acp::PermissionOption::new("answer:0", "serde", allow));
+                options.push(acp::PermissionOption::new("answer:1", "miniserde", allow));
+            }
+            options.push(acp::PermissionOption::new("submit", "提交", allow));
+            options.push(acp::PermissionOption::new(
+                "skip",
+                "跳过",
+                acp::PermissionOptionKind::RejectOnce,
+            ));
             let request = acp::RequestPermissionRequest::new(
                 session.clone(),
                 acp::ToolCallUpdate::new("q1", fields),
-                vec![
-                    acp::PermissionOption::new(
-                        "answer:0",
-                        "serde",
-                        acp::PermissionOptionKind::AllowOnce,
-                    ),
-                    acp::PermissionOption::new(
-                        "answer:1",
-                        "miniserde",
-                        acp::PermissionOptionKind::AllowOnce,
-                    ),
-                    acp::PermissionOption::new(
-                        "skip",
-                        "跳过",
-                        acp::PermissionOptionKind::RejectOnce,
-                    ),
-                ],
+                options,
             );
             let response = cx.send_request(request).block_task().await?;
             match response.outcome {
                 acp::RequestPermissionOutcome::Selected(s) => {
-                    say(&cx, &session, format!("selected:{}", s.option_id))?
+                    let meta = s.meta.map(|m| serde_json::Value::Object(m).to_string());
+                    say(
+                        &cx,
+                        &session,
+                        format!("selected:{} meta:{}", s.option_id, meta.unwrap_or_default()),
+                    )?
                 }
                 _ => say(&cx, &session, "question-cancelled")?,
             }

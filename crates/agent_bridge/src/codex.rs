@@ -646,8 +646,11 @@ impl Bridge {
                 mut answers,
             } => {
                 let q = &questions[index];
-                if let (Some(qid), Some(label)) = (q["id"].as_str(), acp::answer_label(q, answer)) {
-                    answers.insert(qid.to_string(), json!({ "answers": [label] }));
+                if let (Some(qid), Some((labels, typed))) =
+                    (q["id"].as_str(), acp::picked(q, answer))
+                    && let Some(values) = codex_answer(q, labels, typed)
+                {
+                    answers.insert(qid.to_string(), json!({ "answers": values }));
                 }
                 // A stop ends the questions; the turn is being cancelled anyway.
                 if acp::chosen_option(answer).is_some() && index + 1 < questions.len() {
@@ -671,7 +674,7 @@ impl Bridge {
     ) {
         let q = &questions[index];
         let call_id = format!("{}-{}", thread, q["id"].as_str().unwrap_or("q"));
-        let id = acp::ask_question(&mut self.requests, &thread, call_id, q);
+        let id = acp::ask_question(&mut self.requests, &thread, call_id, q, answering(q));
         let asked = Asked::Question {
             thread,
             codex_id,
@@ -1040,13 +1043,12 @@ impl Bridge {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter(|q| acp::askable(q) && q["isSecret"].as_bool() != Some(true))
+                .filter(|q| acp::askable(q, answering(q).text))
                 .cloned()
                 .collect();
             if !questions.is_empty() {
                 return self.ask_user(thread, codex_id, questions, 0, serde_json::Map::new());
             }
-            // Free-text or secret questions only: unanswered, as the panel can't ask them.
             let message = json!({ "jsonrpc": "2.0", "id": codex_id, "result": { "answers": {} } });
             return self.codex_send(&message);
         }
@@ -1093,6 +1095,35 @@ impl Bridge {
         ]);
         let id = self.requests.ask_permission(&thread, call.0, options);
         self.asked.insert(id, Asked::Approval { thread, codex_id });
+    }
+}
+
+/// Codex's answer to one question, as its TUI and codex-acp write it: the picked label; text
+/// typed next to options as a note (`user_note: …`), after "None of the above" when nothing
+/// is picked; a question without options answered by the text itself. `None`: no answer.
+fn codex_answer(q: &Value, mut labels: Vec<String>, typed: String) -> Option<Vec<String>> {
+    let has_options = q["options"].as_array().is_some_and(|o| !o.is_empty());
+    if !typed.is_empty() {
+        if has_options {
+            if labels.is_empty() {
+                labels.push("None of the above".into());
+            }
+            labels.push(format!("user_note: {typed}"));
+        } else {
+            labels.push(typed);
+        }
+    }
+    (!labels.is_empty()).then_some(labels)
+}
+
+/// How a `requestUserInput` question is answered: one option, or typed text when it
+/// offers "other" or has no options (hidden when secret).
+fn answering(q: &Value) -> acp::Answering {
+    let no_options = q["options"].as_array().is_none_or(Vec::is_empty);
+    acp::Answering {
+        multi: false,
+        text: no_options || q["isOther"].as_bool() == Some(true),
+        secret: q["isSecret"].as_bool() == Some(true),
     }
 }
 
@@ -1411,6 +1442,40 @@ mod tests {
         assert_eq!(acp::current(&configs, "fast-mode").as_deref(), Some("off"));
         t.model = Some("b".into());
         assert_eq!(t.configs(&models).len(), 1);
+    }
+
+    #[test]
+    fn typed_answers_are_notes_next_to_options() {
+        let with = json!({ "options": [{ "label": "Yes" }] });
+        let without = json!({ "options": [] });
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            codex_answer(&with, s(&["Yes"]), String::new()),
+            Some(s(&["Yes"]))
+        );
+        assert_eq!(
+            codex_answer(&with, s(&["Yes"]), "keep two".into()),
+            Some(s(&["Yes", "user_note: keep two"]))
+        );
+        assert_eq!(
+            codex_answer(&with, vec![], "later".into()),
+            Some(s(&["None of the above", "user_note: later"]))
+        );
+        assert_eq!(
+            codex_answer(&without, vec![], "backups".into()),
+            Some(s(&["backups"]))
+        );
+        assert_eq!(codex_answer(&with, vec![], String::new()), None);
+    }
+
+    #[test]
+    fn questions_take_text_when_codex_allows_it() {
+        let options = json!([{ "label": "Yes", "description": "" }]);
+        let plain = answering(&json!({ "question": "?", "options": options }));
+        assert!(!plain.text && !plain.multi && !plain.secret);
+        assert!(answering(&json!({ "question": "?", "options": options, "isOther": true })).text);
+        let secret = answering(&json!({ "question": "令牌？", "options": null, "isSecret": true }));
+        assert!(secret.text && secret.secret);
     }
 
     #[test]

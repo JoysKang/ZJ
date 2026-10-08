@@ -236,20 +236,32 @@ pub fn permission_command(request: &PermissionRequest) -> Option<String> {
 
 /// Answer options' id prefix in a question (the bridge's `acp::ANSWER`).
 pub const ANSWER: &str = "answer:";
+/// The option answering a question with several picks and/or typed text, carried in the
+/// answer's `_meta.zj` (the bridge's `acp::SUBMIT`; see [`AgentClient::answer_question`]).
+///
+/// [`AgentClient::answer_question`]: crate::AgentClient::answer_question
+pub const SUBMIT: &str = "submit";
 
 /// A question the agent asks (Claude Code's `AskUserQuestion` or Codex's `requestUserInput`
 /// through ZJ's bridge): a permission request whose allow options are the answers
-/// (`answer:<n>`) and whose input is the question (`{ question, options: [{ label,
-/// description }] }`). Never empty.
+/// (`answer:<n>`) and [`SUBMIT`], and whose input is the question (`{ question, options:
+/// [{ label, description }], multiSelect, allowText, secret }`). It has answers, or takes
+/// typed text.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Question {
     pub text: String,
     pub answers: Vec<Answer>,
+    /// Several answers may be picked (then submitted together).
+    pub multi: bool,
+    /// Typed text answers it, or is added to the picks.
+    pub typed: bool,
+    /// The typed text is hidden.
+    pub secret: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Answer {
-    /// The permission option to answer with.
+    /// The permission option to answer with this one alone.
     pub option: String,
     pub label: String,
     pub description: Option<String>,
@@ -258,6 +270,7 @@ pub struct Answer {
 pub fn permission_question(request: &PermissionRequest) -> Option<Question> {
     let input = request.raw_input.as_ref()?;
     let text = input.get("question")?.as_str()?.to_string();
+    let flag = |key: &str| input.get(key).and_then(serde_json::Value::as_bool) == Some(true);
     let described = |n: usize| -> Option<String> {
         let description = input.get("options")?.get(n)?.get("description")?.as_str()?;
         (!description.is_empty()).then(|| description.to_string())
@@ -274,7 +287,16 @@ pub fn permission_question(request: &PermissionRequest) -> Option<Question> {
             })
         })
         .collect();
-    (!answers.is_empty()).then_some(Question { text, answers })
+    // Several picks and typed text go through `SUBMIT`.
+    let submit = request.options.iter().any(|o| o.id == SUBMIT);
+    let question = Question {
+        text,
+        multi: submit && flag("multiSelect") && !answers.is_empty(),
+        typed: submit && flag("allowText"),
+        secret: flag("secret"),
+        answers,
+    };
+    (!question.answers.is_empty() || question.typed).then_some(question)
 }
 
 /// Only a directory actually supplied by the agent is labelled as the command's cwd.
@@ -820,6 +842,7 @@ mod tests {
         ];
         let q = permission_question(&request).unwrap();
         assert_eq!(q.text, "用哪个库？");
+        assert!(!q.multi && !q.typed, "no SUBMIT option: one answer only");
         assert_eq!(
             q.answers[0],
             Answer {
@@ -829,6 +852,26 @@ mod tests {
             }
         );
         assert_eq!(q.answers[1].description, None);
+        request.options.push(PermissionOption {
+            id: SUBMIT.into(),
+            name: "提交".into(),
+            kind: PermissionKind::AllowOnce,
+        });
+        request.raw_input = Some(serde_json::json!({
+            "question": "改哪些文件？",
+            "options": [{ "label": "a.rs" }, { "label": "b.rs" }],
+            "multiSelect": true,
+            "allowText": true,
+        }));
+        let q = permission_question(&request).unwrap();
+        assert!(q.multi && q.typed && !q.secret);
+        // Typed text only (a token): no answers, still a question.
+        request.options.retain(|o| !o.id.starts_with(ANSWER));
+        request.raw_input = Some(serde_json::json!({
+            "question": "访问令牌？", "options": [], "allowText": true, "secret": true,
+        }));
+        let q = permission_question(&request).unwrap();
+        assert!(q.answers.is_empty() && q.typed && q.secret && !q.multi);
         request.raw_input = None;
         assert!(permission_question(&request).is_none());
         request.tool_call.title = Some("`printf 'a  b'\ncargo test`".into());

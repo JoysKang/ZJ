@@ -32,6 +32,9 @@ struct Run {
     session: Option<String>,
     configs: Vec<(String, String, usize)>,
     title: Option<String>,
+    /// How the next questions are answered (picks, typed text); `None`: the first answer,
+    /// as ⏎ does.
+    answers: Option<(Vec<usize>, String)>,
 }
 
 fn next(rx: &async_channel::Receiver<AgentEvent>, wait: Duration) -> Option<AgentEvent> {
@@ -91,8 +94,15 @@ fn turn(run: &mut Run, parts: Vec<PromptPart>, steer: Option<&str>, cancel: bool
                     .iter()
                     .find(|o| o.kind == PermissionKind::AllowOnce);
                 t.notes.push(format!("permission: {:?}", p.tool_call.title));
-                run.client
-                    .respond_permission(p.id, allow.or(p.options.first()).map(|o| o.id.clone()));
+                let question = workspace_editor_agent::thread::permission_question(p);
+                if let (Some(q), Some((picks, text))) = (&question, &run.answers) {
+                    t.notes
+                        .push(format!("question multi={} typed={}", q.multi, q.typed));
+                    run.client.answer_question(p.id, picks, text);
+                } else {
+                    let first = allow.or(p.options.first()).map(|o| o.id.clone());
+                    run.client.respond_permission(p.id, first);
+                }
             }
             AgentEvent::ToolCall(c) => t
                 .notes
@@ -152,6 +162,7 @@ fn start(preset: &AgentPreset, ws: &Path, pool: &Arc<AgentPool>, resume: Option<
         session: None,
         configs: Vec::new(),
         title: None,
+        answers: None,
     }
 }
 
@@ -334,6 +345,38 @@ fn main() {
         show("question", &t);
         check("asked", t.notes.iter().any(|n| n.starts_with("permission")));
         check("answer used", t.reply.contains("Teal"));
+        run.answers = Some((vec![0, 2], String::new()));
+        let t = turn(
+            &mut run,
+            vec![PromptPart::Text(
+                "Use your AskUserQuestion tool with multiSelect set to true to ask which fruits I like, with the options Apple, Banana and Cherry (in that order). Then reply with just the fruits I chose.".into(),
+            )],
+            None,
+            false,
+        );
+        show("multi-select question", &t);
+        check(
+            "multi-select offered",
+            t.notes
+                .iter()
+                .any(|n| n == "question multi=true typed=true"),
+        );
+        check(
+            "both picks used",
+            t.reply.contains("Apple") && t.reply.contains("Cherry") && !t.reply.contains("Banana"),
+        );
+        run.answers = Some((Vec::new(), "Zoltan".into()));
+        let t = turn(
+            &mut run,
+            vec![PromptPart::Text(
+                "Use your AskUserQuestion tool to ask what my name is, with the options Alice and Bob. Then reply with just the name I gave.".into(),
+            )],
+            None,
+            false,
+        );
+        show("typed answer", &t);
+        check("typed answer used", t.reply.contains("Zoltan"));
+        run.answers = None;
     }
     if want("commands") && preset.id == "codex" {
         std::fs::write(ws.join("notes.txt"), "alpha\nBETA\ngamma\nTODO: remove\n").unwrap();
@@ -372,6 +415,42 @@ fn main() {
             "title from /rename",
             run.title.as_deref() == Some("冒烟测试会话"),
         );
+        // Typed answers to plan-mode questions (the model decides how it asks): text alone,
+        // then a pick with a note.
+        let typed = [
+            (
+                "Before planning anything, use your request_user_input tool to ask me what the backup folder should be called, letting me type my own answer. Then reply with just the folder name I gave.",
+                (Vec::new(), "smoke-backups"),
+                "smoke-backups",
+            ),
+            (
+                "Use your request_user_input tool to ask me whether to keep backups, with the options Yes and No, letting me add a note. Then reply with my choice and my note, verbatim.",
+                (vec![0], "keep them for 7 days"),
+                "7 days",
+            ),
+        ];
+        let t = turn(
+            &mut run,
+            vec![PromptPart::Text("/plan".into())],
+            None,
+            false,
+        );
+        show("/plan", &t);
+        for (prompt, (picks, text), expect) in typed {
+            run.answers = Some((picks, text.into()));
+            let t = turn(&mut run, vec![PromptPart::Text(prompt.into())], None, false);
+            show(prompt, &t);
+            check("asked", t.notes.iter().any(|n| n.starts_with("question")));
+            check("typed answer used", t.reply.contains(expect));
+        }
+        run.answers = None;
+        let t = turn(
+            &mut run,
+            vec![PromptPart::Text("/plan".into())],
+            None,
+            false,
+        );
+        show("/plan", &t);
     }
     if want("pool") {
         let mut second = start(&preset, &ws, &pool, None);

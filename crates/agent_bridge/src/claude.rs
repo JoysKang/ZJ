@@ -80,9 +80,60 @@ struct Asked {
     input: Value,
     /// What "for this session" remembers.
     rule: String,
-    /// `AskUserQuestion`: the question asked now and the answers so far (question text →
-    /// the chosen option's label).
-    question: Option<(usize, serde_json::Map<String, Value>)>,
+    /// `AskUserQuestion`: where its questions stand.
+    question: Option<Progress>,
+}
+
+/// `AskUserQuestion` in progress: the question asked now, and the answers so far, keyed by
+/// question text as the tool reads them (`answers`, and `annotations` for a note typed
+/// next to a picked option).
+#[derive(Default)]
+struct Progress {
+    index: usize,
+    answers: serde_json::Map<String, Value>,
+    notes: serde_json::Map<String, Value>,
+}
+
+/// How an `AskUserQuestion` question is answered: several options when it is a multi-select,
+/// and always typed text, as the CLI's "Other".
+fn answering(q: &Value) -> acp::Answering {
+    acp::Answering {
+        multi: q["multiSelect"].as_bool() == Some(true),
+        text: true,
+        secret: false,
+    }
+}
+
+/// The tool's answer to one question, as the CLI writes it: a multi-select joins the picks
+/// and the typed text; a single-select's typed text is the answer when nothing is picked,
+/// else a note on the pick. `None`: no answer.
+fn claude_answer(
+    multi: bool,
+    mut labels: Vec<String>,
+    typed: String,
+) -> Option<(String, Option<String>)> {
+    if multi {
+        if !typed.is_empty() {
+            labels.push(typed);
+        }
+        let quoted: Vec<String> = labels
+            .iter()
+            .map(|l| {
+                if l.contains(", ") || l.contains('"') {
+                    json!(l).to_string()
+                } else {
+                    l.clone()
+                }
+            })
+            .collect();
+        return (!quoted.is_empty()).then(|| (quoted.join(", "), None));
+    }
+    match (labels.into_iter().next(), typed.is_empty()) {
+        (Some(pick), true) => Some((pick, None)),
+        (Some(pick), false) => Some((pick, Some(typed))),
+        (None, false) => Some((typed, None)),
+        (None, true) => None,
+    }
 }
 
 #[derive(Default)]
@@ -617,27 +668,37 @@ impl Bridge {
         };
         s.asking = s.asking.saturating_sub(1);
         let option = acp::chosen_option(answer).unwrap_or("cancelled");
-        if let Some((index, mut answers)) = asked.question {
-            let questions = questions(&asked.input);
+        if let Some(mut progress) = asked.question {
+            let all = questions(&asked.input);
             if option == "cancelled" {
                 let response = json!({ "behavior": "deny", "message": "用户停止了这一轮。", "interrupt": true });
                 return s.control_reply(&asked.request_id, response);
             }
-            let q = &questions[index];
-            if let (Some(text), Some(label)) =
-                (q["question"].as_str(), acp::answer_label(q, answer))
+            let current = &all[progress.index];
+            if let (Some(text), Some((labels, typed))) =
+                (current["question"].as_str(), acp::picked(current, answer))
+                && let Some((value, notes)) = claude_answer(answering(current).multi, labels, typed)
             {
-                answers.insert(text.to_string(), json!(label));
+                progress.answers.insert(text.to_string(), json!(value));
+                if let Some(notes) = notes {
+                    progress
+                        .notes
+                        .insert(text.to_string(), json!({ "notes": notes }));
+                }
             }
-            if index + 1 < questions.len() {
+            if progress.index + 1 < all.len() {
+                progress.index += 1;
                 let next = Asked {
-                    question: Some((index + 1, answers)),
+                    question: Some(progress),
                     ..asked
                 };
                 return self.ask_question(next);
             }
             let mut input = asked.input.clone();
-            input["answers"] = Value::Object(answers);
+            input["answers"] = Value::Object(progress.answers);
+            if !progress.notes.is_empty() {
+                input["annotations"] = Value::Object(progress.notes);
+            }
             let response = json!({ "behavior": "allow", "updatedInput": input });
             return s.control_reply(&asked.request_id, response);
         }
@@ -668,19 +729,18 @@ impl Bridge {
         }
     }
 
-    /// One of `AskUserQuestion`'s questions (see [`acp::ask_question`]). A multi-select
-    /// question is answered with one option.
+    /// One of `AskUserQuestion`'s questions (see [`acp::ask_question`]).
     fn ask_question(&mut self, asked: Asked) {
         let Some(s) = self.sessions.get_mut(&asked.session) else {
             return;
         };
-        let Some((index, _)) = asked.question else {
+        let Some(index) = asked.question.as_ref().map(|q| q.index) else {
             return;
         };
         let call_id = format!("{}-q{index}", asked.request_id.as_str().unwrap_or("ask"));
         s.asking += 1;
         let q = &questions(&asked.input)[index];
-        let id = acp::ask_question(&mut self.requests, &asked.session, call_id, q);
+        let id = acp::ask_question(&mut self.requests, &asked.session, call_id, q, answering(q));
         self.asked.insert(id, asked);
     }
 
@@ -891,7 +951,7 @@ impl Bridge {
                 tool,
                 input,
                 rule: String::new(),
-                question: Some((0, serde_json::Map::new())),
+                question: Some(Progress::default()),
             };
             return self.ask_question(asked);
         }
@@ -965,7 +1025,7 @@ fn questions(input: &Value) -> Vec<Value> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|q| acp::askable(q))
+        .filter(|q| acp::askable(q, true))
         .cloned()
         .collect()
 }
@@ -1494,13 +1554,15 @@ mod tests {
     }
 
     #[test]
-    fn questions_need_text_and_options_and_titles_take_the_conversation_tail() {
+    fn questions_need_text_and_titles_take_the_conversation_tail() {
+        // Any question takes a typed answer, as in the CLI ("Other"); one without text can't
+        // be asked.
         let input = json!({ "questions": [
             { "question": "用哪个库？", "header": "库", "options": [{ "label": "serde" }] },
             { "question": "没有选项" , "options": [] },
             { "options": [{ "label": "x" }] },
         ] });
-        assert_eq!(questions(&input).len(), 1);
+        assert_eq!(questions(&input).len(), 2);
         assert!(questions(&json!({})).is_empty());
         let mut s = session();
         s.remember_for_title(&"字".repeat(TITLE_CONTEXT + 5));
@@ -1512,6 +1574,30 @@ mod tests {
         assert!(s.title.context.ends_with('尾'));
         assert_eq!(sanitize_title(" 修复\n  登录 "), "修复 登录");
         assert_eq!(sanitize_title(&"长".repeat(300)).chars().count(), 256);
+    }
+
+    #[test]
+    fn answers_are_written_as_the_cli_writes_them() {
+        let l = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // A multi-select joins the picks and the typed text, quoting those with ", ".
+        assert_eq!(
+            claude_answer(true, l(&["A", "B, C"]), "D".into()),
+            Some((r#"A, "B, C", D"#.into(), None))
+        );
+        assert_eq!(claude_answer(true, vec![], String::new()), None);
+        // A single-select: the pick, the typed text as a note; or the text alone.
+        assert_eq!(
+            claude_answer(false, l(&["A"]), String::new()),
+            Some(("A".into(), None))
+        );
+        assert_eq!(
+            claude_answer(false, l(&["A"]), "因为快".into()),
+            Some(("A".into(), Some("因为快".into())))
+        );
+        assert_eq!(
+            claude_answer(false, vec![], "其他".into()),
+            Some(("其他".into(), None))
+        );
     }
 
     #[test]

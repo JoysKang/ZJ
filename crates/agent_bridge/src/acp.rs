@@ -60,15 +60,29 @@ impl Requests {
     }
 }
 
+/// How a question may be answered.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Answering {
+    /// Several options at once.
+    pub multi: bool,
+    /// Typed text: the answer when nothing is picked, else added to the picks.
+    pub text: bool,
+    /// The text is hidden (a password, a token).
+    pub secret: bool,
+}
+
 /// A question for the user (Claude Code's `AskUserQuestion`, Codex's `requestUserInput`;
-/// both `{ question, header, options: [{ label, description }] }`) as a permission request
-/// whose options are the answers (`answer:<n>`) plus "skip". ZJ shows it as a question card
-/// (`agent_client::thread::permission_question`). Only questions with options can be asked.
+/// both `{ question, header, options: [{ label, description }] }`) as a permission request.
+/// ZJ shows it as a question card (`agent_client::thread::permission_question`): its input
+/// is the question with how it may be answered (`multiSelect`, `allowText`, `secret`), its
+/// options the answers (`answer:<n>`, one picked) plus [`SUBMIT`] (picks and text in the
+/// answer's `_meta`, see [`picked`]) and "skip".
 pub(crate) fn ask_question(
     requests: &mut Requests,
     session: &str,
     call_id: String,
     q: &Value,
+    how: Answering,
 ) -> i64 {
     let mut options: Vec<Value> = q["options"]
         .as_array()
@@ -83,29 +97,59 @@ pub(crate) fn ask_question(
             )
         })
         .collect();
+    options.push(option(SUBMIT, "提交", "allow_once"));
     options.push(option("skip", "跳过", "reject_once"));
+    let input = json!({
+        "question": q["question"],
+        "header": q["header"],
+        "options": q["options"].as_array().cloned().unwrap_or_default(),
+        "multiSelect": how.multi,
+        "allowText": how.text,
+        "secret": how.secret,
+    });
     let call = json!({
         "toolCallId": call_id,
         "title": q["header"].as_str().filter(|h| !h.is_empty()).or(q["question"].as_str()),
         "kind": "other",
         "status": "pending",
-        "rawInput": q,
+        "rawInput": input,
     });
     requests.ask_permission(session, call, json!(options))
 }
 
 /// Answer options' id prefix, shared with `agent_client::thread::ANSWER`.
 pub(crate) const ANSWER: &str = "answer:";
+/// The option answering with picks and text (`agent_client::thread::SUBMIT`).
+pub(crate) const SUBMIT: &str = "submit";
 
-/// The label of the answer ZJ picked for `q`, if any (`None`: skipped or cancelled).
-pub(crate) fn answer_label<'a>(q: &'a Value, answer: &Value) -> Option<&'a str> {
-    let n: usize = chosen_option(answer)?.strip_prefix(ANSWER)?.parse().ok()?;
-    q["options"][n]["label"].as_str()
+/// What the user answered `q` with: the picked options' labels and the typed text (trimmed,
+/// maybe empty). `None`: skipped or cancelled.
+pub(crate) fn picked(q: &Value, answer: &Value) -> Option<(Vec<String>, String)> {
+    let label = |n: u64| {
+        let n = usize::try_from(n).ok()?;
+        q["options"][n]["label"].as_str().map(String::from)
+    };
+    let option = chosen_option(answer)?;
+    if let Some(n) = option.strip_prefix(ANSWER) {
+        return Some((vec![label(n.parse().ok()?)?], String::new()));
+    }
+    if option != SUBMIT {
+        return None;
+    }
+    let zj = &answer["result"]["outcome"]["_meta"]["zj"];
+    let labels = zj["choices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|n| label(n.as_u64()?))
+        .collect();
+    let text = zj["text"].as_str().unwrap_or("").trim().to_string();
+    Some((labels, text))
 }
 
-/// Whether `q` can be asked (it has text and options).
-pub(crate) fn askable(q: &Value) -> bool {
-    q["question"].is_string() && q["options"].as_array().is_some_and(|o| !o.is_empty())
+/// Whether `q` can be asked: it has text, and options or a text answer.
+pub(crate) fn askable(q: &Value, text: bool) -> bool {
+    q["question"].is_string() && (text || q["options"].as_array().is_some_and(|o| !o.is_empty()))
 }
 
 /// The option ZJ picked for a permission question (`None`: cancelled).
@@ -337,6 +381,33 @@ mod tests {
         let id = uuid();
         assert_eq!((id.len(), &id[14..15]), (36, "4"));
         assert_ne!(uuid(), id);
+    }
+
+    #[test]
+    fn answers_come_from_one_pick_or_submit() {
+        let q = json!({ "question": "?", "options": [{ "label": "A" }, { "label": "B" }] });
+        let pick =
+            json!({ "result": { "outcome": { "outcome": "selected", "optionId": "answer:1" } } });
+        assert_eq!(picked(&q, &pick), Some((vec!["B".into()], String::new())));
+        let submit = json!({ "result": { "outcome": {
+            "outcome": "selected", "optionId": "submit",
+            "_meta": { "zj": { "choices": [0, 1, 9], "text": "  还有 C " } },
+        } } });
+        assert_eq!(
+            picked(&q, &submit),
+            Some((vec!["A".into(), "B".into()], "还有 C".into()))
+        );
+        let skip =
+            json!({ "result": { "outcome": { "outcome": "selected", "optionId": "skip" } } });
+        assert_eq!(picked(&q, &skip), None);
+        assert!(askable(
+            &json!({ "question": "令牌？", "options": [] }),
+            true
+        ));
+        assert!(!askable(
+            &json!({ "question": "令牌？", "options": [] }),
+            false
+        ));
     }
 
     #[test]
