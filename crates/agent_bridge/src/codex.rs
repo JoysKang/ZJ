@@ -171,6 +171,30 @@ const TITLE_PROMPT: &str = "Your task is to generate a very short title for a co
 /// How much of the first prompt the title is generated from.
 const TITLE_SOURCE: usize = 4000;
 
+/// A hook running longer than this is shown.
+const SLOW_HOOK: Duration = Duration::from_secs(3);
+
+/// A hook Codex runs (`hook/started`): shown once slow.
+struct Hook {
+    thread: String,
+    title: String,
+    started: Instant,
+    shown: bool,
+}
+
+/// "运行 hook：UserPromptSubmit（hooks.json）", as the hook's config names its event.
+fn hook_title(run: &Value) -> String {
+    let event = run["eventName"].as_str().unwrap_or("hook");
+    let mut name = event.to_string();
+    if let Some(first) = name.get(..1) {
+        name.replace_range(..1, &first.to_ascii_uppercase());
+    }
+    match run["sourcePath"].as_str().map(acp::file_name) {
+        Some(file) => format!("运行 hook：{name}（{file}）"),
+        None => format!("运行 hook：{name}"),
+    }
+}
+
 /// How long a command's own turn may take to start.
 const EXPECT_TURN: Duration = Duration::from_secs(5);
 
@@ -185,6 +209,8 @@ struct Bridge {
     asked: HashMap<i64, Asked>,
     /// Ephemeral threads naming a session: theirs → the session's.
     title_threads: HashMap<String, String>,
+    /// Hooks running now, by run id: shown once they take longer than [`SLOW_HOOK`].
+    hooks: HashMap<String, Hook>,
     signed_in: Option<bool>,
     models: Vec<Model>,
     models_known: bool,
@@ -205,6 +231,7 @@ pub(crate) fn serve(cli: PathBuf, events: Sender<Event>, inbox: Receiver<Event>)
         requests: acp::Requests::default(),
         asked: HashMap::new(),
         title_threads: HashMap::new(),
+        hooks: HashMap::new(),
         signed_in: None,
         models: Vec::new(),
         models_known: false,
@@ -213,12 +240,15 @@ pub(crate) fn serve(cli: PathBuf, events: Sender<Event>, inbox: Receiver<Event>)
         account: "未知".into(),
     };
     loop {
-        // Woken only while a command waits for its turn to start.
-        let event = if b.threads.values().any(|t| t.expect_turn.is_some()) {
+        // Woken only while a command waits for its turn to start or a hook runs.
+        let waiting = b.threads.values().any(|t| t.expect_turn.is_some())
+            || b.hooks.values().any(|h| !h.shown);
+        let event = if waiting {
             match inbox.recv_timeout(Duration::from_millis(500)) {
                 Ok(event) => event,
                 Err(RecvTimeoutError::Timeout) => {
                     b.expire_commands();
+                    b.show_slow_hooks();
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -909,6 +939,9 @@ impl Bridge {
         if self.title_threads.contains_key(&thread) {
             return self.title_notification(&thread, method, p);
         }
+        if let Some(started) = method.strip_prefix("hook/") {
+            return self.hook(&thread, started == "started", &p["run"]);
+        }
         let Some(t) = self.threads.get_mut(&thread) else {
             return;
         };
@@ -1003,6 +1036,68 @@ impl Bridge {
                 eprintln!("event=agent_bridge_codex_turn_error");
             }
             _ => {}
+        }
+    }
+
+    /// A hook started or ended. Codex waits for a turn's hooks before it does anything
+    /// else (up to 10 minutes each by default), so a slow one is shown while it runs; the
+    /// usual quick ones are not.
+    fn hook(&mut self, thread: &str, started: bool, run: &Value) {
+        let Some(id) = run["id"].as_str().map(String::from) else {
+            return;
+        };
+        if started {
+            if self.threads.contains_key(thread) {
+                let hook = Hook {
+                    thread: thread.to_string(),
+                    title: hook_title(run),
+                    started: Instant::now(),
+                    shown: false,
+                };
+                self.hooks.insert(id, hook);
+            }
+            return;
+        }
+        let Some(hook) = self.hooks.remove(&id) else {
+            return;
+        };
+        if hook.shown {
+            let failed = matches!(
+                run["status"].as_str(),
+                Some("failed" | "blocked" | "stopped")
+            );
+            let mut update = json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": format!("hook-{id}"),
+                "status": if failed { "failed" } else { "completed" },
+            });
+            let secs = run["durationMs"]
+                .as_u64()
+                .map_or_else(|| hook.started.elapsed().as_secs(), |ms| ms / 1000);
+            let mut text = format!("用了 {secs} 秒");
+            if let Some(message) = run["statusMessage"].as_str().filter(|m| !m.is_empty()) {
+                text.push_str(&format!("：{message}"));
+            }
+            update["content"] = acp::output_content(&text).unwrap_or_default();
+            acp::update(&hook.thread, update);
+        }
+    }
+
+    fn show_slow_hooks(&mut self) {
+        for (id, hook) in &mut self.hooks {
+            if !hook.shown && hook.started.elapsed() >= SLOW_HOOK {
+                hook.shown = true;
+                acp::update(
+                    &hook.thread,
+                    json!({
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": format!("hook-{id}"),
+                        "title": hook.title,
+                        "kind": "execute",
+                        "status": "in_progress",
+                    }),
+                );
+            }
         }
     }
 
@@ -1476,6 +1571,20 @@ mod tests {
         assert!(answering(&json!({ "question": "?", "options": options, "isOther": true })).text);
         let secret = answering(&json!({ "question": "令牌？", "options": null, "isSecret": true }));
         assert!(secret.text && secret.secret);
+    }
+
+    #[test]
+    fn hooks_are_named_as_configured() {
+        let run =
+            json!({ "eventName": "userPromptSubmit", "sourcePath": "/Users/x/.codex/hooks.json" });
+        assert_eq!(
+            hook_title(&run),
+            "运行 hook：UserPromptSubmit（hooks.json）"
+        );
+        assert_eq!(
+            hook_title(&json!({ "eventName": "stop" })),
+            "运行 hook：Stop"
+        );
     }
 
     #[test]
