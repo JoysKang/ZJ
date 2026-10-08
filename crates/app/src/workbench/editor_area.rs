@@ -49,6 +49,7 @@ impl Workbench {
         let close = div()
             .id(("tab-close", spec.key))
             .size(theme::TAB_CLOSE)
+            .flex_shrink_0()
             .flex()
             .items_center()
             .justify_center()
@@ -111,8 +112,10 @@ impl Workbench {
             .id(("tab", spec.key))
             .group(group.clone())
             .flex_shrink_0()
-            .h_full()
-            .pl_3()
+            .max_w_full()
+            .min_w_0()
+            .h(theme::TAB_HEIGHT)
+            .pl_2()
             .pr_1()
             .gap_1()
             .relative()
@@ -151,7 +154,8 @@ impl Workbench {
             .child(
                 div()
                     .id(("tab-label", spec.key))
-                    .pl_1()
+                    .min_w_0()
+                    .text_ellipsis()
                     .when(spec.deleted, |label| label.line_through())
                     .child(spec.label)
                     .test_support(),
@@ -309,27 +313,33 @@ impl Workbench {
         let tabs: Vec<AnyElement> = specs.into_iter().map(|spec| self.tab(spec, cx)).collect();
         let strip = h_flex()
             .id("tab-strip")
-            .h_full()
             .flex_1()
             .min_w_0()
-            .overflow_x_scroll()
+            .flex_wrap()
+            .content_start()
             .children(tabs)
             .child(
                 div()
                     .flex_1()
-                    .h_full()
+                    .h(theme::TAB_HEIGHT)
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::double_click_new_file)),
             );
         h_flex()
-            .h(theme::TAB_HEIGHT)
+            .min_h(theme::TAB_HEIGHT)
             .w_full()
             .flex_shrink_0()
+            .items_start()
             .bg(colors.tabs)
             .child(strip)
-            .children(self.render_markdown_toggle(cx))
-            .when(
-                self.active == Pane::Diff && !self.diff_is_agent_review(),
-                |bar| bar.child(self.render_diff_actions(cx)),
+            .child(
+                h_flex()
+                    .h(theme::TAB_HEIGHT)
+                    .flex_shrink_0()
+                    .children(self.render_markdown_toggle(cx))
+                    .when(
+                        self.active == Pane::Diff && !self.diff_is_agent_review(),
+                        |bar| bar.child(self.render_diff_actions(cx)),
+                    ),
             )
             .into_any_element()
     }

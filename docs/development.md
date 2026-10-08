@@ -746,3 +746,9 @@ fmt、Clippy（`-D warnings`）、差异空白检查和 dist 构建通过，二�
 - 实现：`platform.rs` 用 Carbon 的 Text Input Sources（`TISCopyCurrentKeyboardInputSource`、`TISCopyCurrentASCIICapableKeyboardInputSource`、`TISSelectInputSource`、`TISCreateInputSourceList`）读取和切换，切换后让当前文本输入上下文重新激活一次，防止部分第三方输入法只改了菜单栏、实际没有生效；`input_switch.rs` 是纯逻辑；`workbench/input_area.rs` 接在终端和输入框的 focus-in、输入框的 focus-out 和窗口激活上。只在窗口在前台时切换，没有定时器。没有新增依赖。
 - 原型：在用户机器上（ABC + 微信输入法拼音）切到 ABC 和切回微信输入法各约 10 ms，系统报告的当前输入源随之改变。是否能立刻打出中文，需要用户实际打字确认（这里不能向窗口发送按键）。
 - 测试：新增纯逻辑单元测试 3 项；测试构建里输入源接口是空实现，跑完全部测试后用户的输入法保持不变。全工作区测试和 Clippy 通过。dist 二进制 29,711,616 字节，低于 30 MB 目标。本地 `target/ZJ.app` 已更新，重启后生效。
+
+## 同日追加：文件标签收紧并自动换行
+
+- 标签左侧留白从 12 px 减为 8 px，图标与文件名的间距从 8 px 减为 4 px；字号、36 px 行高和关闭按钮大小保持原样。
+- 标签在宽度不足时按打开顺序换行，标签栏高度随行数调整；Markdown 和 Diff 的操作按钮留在首行。超长文件名省略显示，完整路径仍可悬停查看。
+- 验证：全工作区测试通过（466 项通过，4 项忽略，含标签右键菜单、快捷键和恢复标签的现有界面回归）；fmt、Clippy（`-D warnings`）及 Git 超时检查通过。
