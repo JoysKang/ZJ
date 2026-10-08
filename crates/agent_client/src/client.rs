@@ -171,6 +171,10 @@ pub(crate) struct Init {
     pub auth_methods: Vec<acp::AuthMethod>,
 }
 
+/// Permission ids for the whole app, never reused: a card left over from an earlier client of
+/// the same panel session (or another session) can't be mistaken for a new request.
+static NEXT_PERMISSION: AtomicU64 = AtomicU64::new(1);
+
 /// The answer to a permission request: an option, and data for the agent in `_meta`.
 pub(crate) struct Choice {
     option: String,
@@ -202,7 +206,6 @@ pub(crate) struct SessionState {
     /// stays open, the session loop asks for a login and sends it again.
     parked: Mutex<Option<(TurnId, Vec<PromptPart>)>>,
     permissions: Mutex<HashMap<PermissionId, oneshot::Sender<Option<Choice>>>>,
-    next_permission: AtomicU64,
     turn: Mutex<Option<TurnId>>,
     steering: Mutex<steering::Steering>,
     steering_supported: AtomicBool,
@@ -568,7 +571,6 @@ impl AgentClient {
             turn_done_rx: done_rx,
             parked: Mutex::new(None),
             permissions: Mutex::new(HashMap::new()),
-            next_permission: AtomicU64::new(1),
             turn: Mutex::new(None),
             steering: Mutex::new(Default::default()),
             steering_supported: AtomicBool::new(false),
@@ -1757,7 +1759,7 @@ pub(crate) async fn handle_permission(
             acp::RequestPermissionOutcome::Cancelled,
         ));
     }
-    let id = shared.next_permission.fetch_add(1, Ordering::Relaxed);
+    let id = NEXT_PERMISSION.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = oneshot::channel();
     shared.permissions.lock().unwrap().insert(id, tx);
     shared

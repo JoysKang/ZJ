@@ -1644,3 +1644,25 @@ fn a_session_comes_back_in_the_mode_it_was_left_in() {
     let reply = message(&events.turn());
     assert!(reply.ends_with("modes:plan"), "{reply}");
 }
+
+#[test]
+fn permission_ids_are_never_reused_by_another_client() {
+    let ws = Workspace::new("permission-ids");
+    let mut ids = Vec::new();
+    // A panel session gets a new client when its agent restarts or changes: its old card must
+    // not share an id with the new client's first request.
+    for _ in 0..2 {
+        let client = AgentClient::start(options(&ws, &[])).unwrap();
+        let events = Events::of(&client);
+        client.prompt(text("permission")).unwrap();
+        let seen = events.until(|e| matches!(e, AgentEvent::PermissionRequested(_)));
+        let Some(AgentEvent::PermissionRequested(request)) = seen.last() else {
+            unreachable!()
+        };
+        ids.push(request.id);
+        assert!(client.respond_permission(request.id, Some("reject".into())));
+        events.turn();
+        client.shutdown();
+    }
+    assert_ne!(ids[0], ids[1]);
+}

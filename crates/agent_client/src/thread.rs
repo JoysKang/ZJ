@@ -728,6 +728,15 @@ impl Thread {
                 if self.close_login(LoginState::Cancelled) && self.turn.is_none() {
                     self.status = Status::Idle;
                 }
+                // Nothing can answer them now: the process that asked is gone.
+                self.cancel_permissions();
+                if self.status == Status::Awaiting {
+                    self.status = if self.turn.is_some() {
+                        Status::Running
+                    } else {
+                        Status::Idle
+                    };
+                }
                 if let ExitReason::Crashed { stderr_tail, .. } = reason {
                     let tail: String = stderr_tail
                         .lines()
@@ -797,6 +806,28 @@ mod tests {
                 kind: PermissionKind::AllowOnce,
             }],
         }
+    }
+
+    #[test]
+    fn an_exited_agent_leaves_no_card_waiting() {
+        let mut t = Thread::new();
+        t.apply(
+            &AgentEvent::PermissionRequested(request(1, "cargo test", ToolKind::Execute)),
+            true,
+        );
+        assert_eq!(t.status, Status::Awaiting);
+        t.apply(
+            &AgentEvent::Exited {
+                reason: ExitReason::Crashed {
+                    code: Some(1),
+                    signal: None,
+                    stderr_tail: String::new(),
+                },
+            },
+            true,
+        );
+        assert!(t.pending_permissions().next().is_none());
+        assert_ne!(t.status, Status::Awaiting);
     }
 
     #[test]
