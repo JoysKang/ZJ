@@ -125,7 +125,19 @@ fn turn(run: &mut Run, parts: Vec<PromptPart>, steer: Option<&str>, cancel: bool
                 "ready {:?} image={} load={}",
                 info.name, info.image, info.load_session
             )),
+            AgentEvent::ThoughtChunk { text } if !text.is_empty() => {
+                if !t.notes.iter().any(|n| n.starts_with("thought at")) {
+                    t.notes.push(format!(
+                        "thought at {:.1}s",
+                        started.elapsed().as_secs_f64()
+                    ));
+                }
+            }
             AgentEvent::ConfigOptions(c) => {
+                if let Some(model) = c.iter().find(|o| o.id == "model") {
+                    let names: Vec<&String> = model.values.iter().map(|v| &v.1).collect();
+                    t.notes.push(format!("models {names:?}"));
+                }
                 run.configs = c
                     .iter()
                     .map(|o| (o.id.clone(), o.current.clone(), o.values.len()))
@@ -222,6 +234,21 @@ fn main() {
     check("reply", t.reply.contains("PINEAPPLE"));
     if let Some(pid) = run.client.pid() {
         println!("\n### footprint after the first turn: {}", footprint(pid));
+    }
+    if want("think") {
+        let t = turn(
+            &mut run,
+            vec![PromptPart::Text(
+                "Think step by step about whether 2^61-1 is prime, then answer yes or no in one word.".into(),
+            )],
+            None,
+            false,
+        );
+        show("thinking", &t);
+        check(
+            "thoughts shown while running",
+            t.notes.iter().any(|n| n.starts_with("thought at")),
+        );
     }
     if want("edit") {
         let t = turn(

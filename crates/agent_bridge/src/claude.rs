@@ -475,6 +475,10 @@ impl Bridge {
             "stream-json",
             "--verbose",
             "--include-partial-messages",
+            // Without it, current CLIs stream thinking as empty deltas: a long think shows
+            // nothing at all.
+            "--thinking-display",
+            "summarized",
             "--permission-prompt-tool",
             "stdio",
             "--permission-mode",
@@ -1053,11 +1057,59 @@ fn model(m: &Value) -> Option<Model> {
     } else {
         Vec::new()
     };
+    let display = m["displayName"].as_str().unwrap_or(&value);
+    let sources = [&m["resolvedModel"], &m["description"], &m["value"]].map(|v| v.as_str());
     Some(Model {
-        name: m["displayName"].as_str().unwrap_or(&value).to_string(),
+        name: versioned_name(display, sources.into_iter().flatten()),
         value,
         efforts,
         fast: m["supportsFastMode"].as_bool() == Some(true),
+    })
+}
+
+/// A terse model name with its version, as the adapter showed them ("Opus" → "Opus 5.5"),
+/// found after the family's name in the model's id or description. Names with a version,
+/// several words (`Default (recommended)`) or no version found are kept.
+fn versioned_name<'a>(display: &str, sources: impl Iterator<Item = &'a str>) -> String {
+    let (base, context) = match display.find(" (") {
+        Some(at) if display.ends_with(" context)") => display.split_at(at),
+        _ => (display, ""),
+    };
+    let family = base.strip_prefix("Claude ").unwrap_or(base);
+    let terse = !family.is_empty() && family.chars().all(|c| c.is_ascii_alphabetic() || c == '-');
+    if !terse {
+        return display.to_string();
+    }
+    let version = sources
+        .into_iter()
+        .find_map(|source| version_after(source, family));
+    match version {
+        Some(version) => format!("{base} {version}{context}"),
+        None => display.to_string(),
+    }
+}
+
+/// `5.5` from `claude-opus-5-5` or `Opus 5.5 · …` for `opus`; a minor of more than two
+/// digits is a date (`claude-sonnet-4-20250514` → `4`).
+fn version_after(source: &str, family: &str) -> Option<String> {
+    let lower = source.to_ascii_lowercase();
+    let at = lower.find(&family.to_ascii_lowercase())? + family.len();
+    let rest = lower[at..].trim_start_matches(['-', ' ']);
+    if rest.len() == lower[at..].len() {
+        return None;
+    }
+    let major: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if major.is_empty() {
+        return None;
+    }
+    let after = &rest[major.len()..];
+    let minor: String = after
+        .strip_prefix(['-', '.'])
+        .map(|m| m.chars().take_while(char::is_ascii_digit).collect())
+        .unwrap_or_default();
+    Some(match minor.len() {
+        1 | 2 => format!("{major}.{minor}"),
+        _ => major,
     })
 }
 
@@ -1598,6 +1650,33 @@ mod tests {
             claude_answer(false, vec![], "其他".into()),
             Some(("其他".into(), None))
         );
+    }
+
+    #[test]
+    fn model_names_get_their_versions() {
+        let name =
+            |display: &str, sources: &[&str]| versioned_name(display, sources.iter().copied());
+        assert_eq!(
+            name("Opus", &["claude-opus-5-5", "Opus 5.5 · Best"]),
+            "Opus 5.5"
+        );
+        assert_eq!(name("Haiku", &["claude-haiku-4-5-20251001"]), "Haiku 4.5");
+        assert_eq!(name("Sonnet", &["claude-sonnet-4-20250514"]), "Sonnet 4");
+        assert_eq!(name("Fable", &["claude-fable-5-1"]), "Fable 5.1");
+        assert_eq!(
+            name("Opus (1M context)", &["claude-opus-5-5"]),
+            "Opus 5.5 (1M context)"
+        );
+        assert_eq!(
+            name("Default (recommended)", &["claude-opus-5-5"]),
+            "Default (recommended)"
+        );
+        assert_eq!(name("Opus 5.5", &["claude-opus-5-5"]), "Opus 5.5");
+        assert_eq!(
+            name("deepseek-v4-pro", &["deepseek-v4-pro"]),
+            "deepseek-v4-pro"
+        );
+        assert_eq!(name("Opus", &["opusplan"]), "Opus");
     }
 
     #[test]
