@@ -362,6 +362,8 @@ pub enum Attachment {
     Directory(PathBuf),
     Image {
         id: u64,
+        /// Assigned when inserted into a draft; deleting another image keeps this number.
+        ordinal: Option<u64>,
         name: String,
         path: Option<PathBuf>,
         data: Arc<str>,
@@ -404,6 +406,22 @@ impl Attachment {
     }
 }
 
+/// Draft images keep their ordinals; unassigned images are numbered in attachment order.
+pub fn attachment_labels(attachments: &[Attachment]) -> Vec<String> {
+    let mut image = 0;
+    attachments
+        .iter()
+        .map(|attachment| {
+            if let Attachment::Image { ordinal, .. } = attachment {
+                image = ordinal.unwrap_or(image + 1);
+                format!("图 {image}")
+            } else {
+                attachment.label()
+            }
+        })
+        .collect()
+}
+
 pub fn file_name(path: &std::path::Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -412,17 +430,20 @@ pub fn file_name(path: &std::path::Path) -> String {
 
 /// The prompt: attachments first (as resource links / embedded selections), then the text.
 pub fn prompt_parts(text: &str, attachments: &[Attachment]) -> Vec<PromptPart> {
-    let mut parts: Vec<PromptPart> = attachments
-        .iter()
-        .map(|a| match a {
+    let mut parts = Vec::new();
+    for (attachment, label) in attachments.iter().zip(attachment_labels(attachments)) {
+        let part = match attachment {
             Attachment::File(path) => PromptPart::File(path.clone()),
             Attachment::Directory(path) => PromptPart::Directory(path.clone()),
             Attachment::Image {
                 data, mime_type, ..
-            } => PromptPart::Image {
-                data: data.clone(),
-                mime_type: mime_type.clone(),
-            },
+            } => {
+                parts.push(PromptPart::Text(format!("[{label}]")));
+                PromptPart::Image {
+                    data: data.clone(),
+                    mime_type: mime_type.clone(),
+                }
+            }
             Attachment::Selection {
                 path,
                 start,
@@ -434,8 +455,9 @@ pub fn prompt_parts(text: &str, attachments: &[Attachment]) -> Vec<PromptPart> {
                 end_line: *end,
                 text: Some(text.clone()),
             },
-        })
-        .collect();
+        };
+        parts.push(part);
+    }
     // Agents only run a `/command` when it is the first thing in the prompt.
     if text.starts_with('/') {
         parts.insert(0, PromptPart::Text(text.to_string()));
@@ -987,6 +1009,40 @@ mod tests {
             vec![6..12, 24..30]
         );
         assert_eq!(mark_ranges("WebSocket", "socket"), vec![3..9]);
+    }
+
+    #[test]
+    fn image_labels_are_numbered_without_counting_other_attachments() {
+        let image = Attachment::Image {
+            id: 1,
+            ordinal: None,
+            name: "screenshot.png".into(),
+            path: Some("/tmp/secret-image.png".into()),
+            data: "AA==".into(),
+            mime_type: "image/png".into(),
+        };
+        let mut attachments = vec![
+            Attachment::File("/w/code.rs".into()),
+            image.clone(),
+            Attachment::Directory("/w/docs".into()),
+            image,
+        ];
+        assert_eq!(
+            attachment_labels(&attachments),
+            ["code.rs", "图 1", "docs/", "图 2"]
+        );
+        attachments.remove(1);
+        assert_eq!(
+            attachment_labels(&attachments),
+            ["code.rs", "docs/", "图 1"]
+        );
+        let parts = prompt_parts("look", &attachments);
+        assert_eq!(parts[2], PromptPart::Text("[图 1]".into()));
+        assert!(matches!(parts[3], PromptPart::Image { .. }));
+        let slash = prompt_parts("/review [图 1]", &attachments);
+        assert_eq!(slash[0], PromptPart::Text("/review [图 1]".into()));
+        assert_eq!(slash[3], PromptPart::Text("[图 1]".into()));
+        assert!(matches!(slash[4], PromptPart::Image { .. }));
     }
 
     #[test]

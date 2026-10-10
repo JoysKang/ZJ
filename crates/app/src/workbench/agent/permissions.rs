@@ -319,6 +319,9 @@ impl Workbench {
             session.preset.id,
             choice.name()
         );
+        if session.thread.pending_permissions().next().is_none() {
+            self.agent_dismiss_notification(key, cx);
+        }
         self.agent.questions.remove(&(key, request));
         self.agent_sync_list(false);
         self.agent_update_spin(window, cx);

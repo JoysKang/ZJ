@@ -18,6 +18,7 @@
 //!   did; `thread/name/updated` brings it (or a `/rename`) to ZJ.
 
 mod commands;
+mod subagents;
 
 use crate::{
     Event,
@@ -67,7 +68,7 @@ enum Pending {
     /// `account/read`, and the session start waiting for it.
     Account(Option<Start>),
     /// `thread/start` / `thread/resume`.
-    Thread(Start),
+    Thread(Start, Option<i64>),
     /// A turn's `turn/start`.
     Turn(String),
     /// ZJ's `_session/steering`.
@@ -77,6 +78,10 @@ enum Pending {
     Command(String, commands::Reply),
     /// The ephemeral thread that names this session, from its first prompt.
     TitleThread(String, String),
+    CloseSession(Value, String, i64),
+    LoadedChildren(String, i64, Option<String>),
+    ChildMetadata(String, i64, String, u64),
+    ChildUnsubscribe(String),
     Ignore,
 }
 
@@ -217,6 +222,7 @@ struct Bridge {
     /// Sessions answered once the model list is there: (ZJ's id, thread, load).
     waiting: Vec<(Value, String, bool)>,
     threads: HashMap<String, Thread>,
+    subagents: subagents::Subagents,
     /// The signed-in account, for `/status`.
     account: String,
 }
@@ -237,6 +243,7 @@ pub(crate) fn serve(cli: PathBuf, events: Sender<Event>, inbox: Receiver<Event>)
         models_known: false,
         waiting: Vec::new(),
         threads: HashMap::new(),
+        subagents: subagents::Subagents::default(),
         account: "未知".into(),
     };
     loop {
@@ -413,10 +420,16 @@ impl Bridge {
                     && self.threads.remove(thread).is_some()
                 {
                     self.asked.retain(|_, a| a.thread() != thread);
-                    let params = json!({ "threadId": thread });
-                    self.request("thread/unsubscribe", params, Pending::Ignore);
+                    let generation = self.next_id + 1;
+                    self.subagents.close(thread, generation);
+                    self.request(
+                        "thread/unsubscribe",
+                        json!({ "threadId": thread }),
+                        Pending::CloseSession(id, thread.to_string(), generation),
+                    );
+                } else {
+                    acp::reply(id, json!({}));
                 }
-                acp::reply(id, json!({}));
             }
             "authenticate" => acp::reply_error(id, INTERNAL, "请在「终端」里登录 Codex"),
             _ => acp::reply_error(id, NOT_FOUND, &format!("不支持 {method}")),
@@ -545,17 +558,23 @@ impl Bridge {
             "approvalPolicy": "on-request",
             "sandbox": "workspace-write",
         });
+        let mut resume = None;
         let method = if start.load {
             let Some(thread) = p["sessionId"].as_str() else {
                 return acp::reply_error(start.id, INVALID_PARAMS, "缺少 sessionId");
             };
             params["threadId"] = json!(thread);
             params["excludeTurns"] = json!(true);
+            let request = self.next_id + 1;
+            if !self.subagents.begin_resume(thread, request) {
+                return acp::reply_error(start.id, INTERNAL, "会话正在恢复");
+            }
+            resume = Some(request);
             "thread/resume"
         } else {
             "thread/start"
         };
-        self.request(method, params, Pending::Thread(start));
+        self.request(method, params, Pending::Thread(start, resume));
     }
 
     fn prompt(&mut self, id: Value, params: &Value) {
@@ -783,8 +802,8 @@ impl Bridge {
                     (Err(e), _) => acp::reply_error(start.id, INTERNAL, &e),
                 }
             }
-            (Pending::Thread(start), Ok(r)) => self.thread_started(start, &r),
-            (Pending::Thread(start), Err(e)) => acp::reply_error(start.id, INTERNAL, &e),
+            (Pending::Thread(start, resume), Ok(r)) => self.thread_started(start, resume, &r),
+            (Pending::Thread(start, resume), Err(e)) => self.thread_start_failed(start, resume, &e),
             (Pending::Turn(thread), Ok(r)) => {
                 if let Some(turn) = r["turn"]["id"].as_str() {
                     self.turn_known(&thread, turn);
@@ -836,14 +855,135 @@ impl Bridge {
             (Pending::TitleThread(..), Err(_)) => {
                 eprintln!("event=agent_bridge_codex_title_failed")
             }
-            (Pending::Ignore, _) => {}
+            (Pending::CloseSession(id, root, generation), Ok(_)) => {
+                acp::reply(id, json!({}));
+                self.request(
+                    "thread/loaded/list",
+                    json!({ "limit": 100 }),
+                    Pending::LoadedChildren(root, generation, None),
+                );
+            }
+            (Pending::CloseSession(id, root, generation), Err(e)) => {
+                self.subagents.close_failed(&root, generation);
+                acp::reply_error(id, INTERNAL, &format!("Codex 关闭会话失败：{e}"));
+            }
+            (Pending::LoadedChildren(root, generation, cursor), result) => {
+                if !self.subagents.current(&root, generation) {
+                    return;
+                }
+                let Ok(r) = result else {
+                    eprintln!("event=agent_bridge_codex_child_discovery_failed");
+                    self.children_discovered(&root, generation);
+                    return;
+                };
+                for child in r["data"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                {
+                    if child == root
+                        || self.threads.contains_key(child)
+                        || self.title_threads.contains_key(child)
+                    {
+                        continue;
+                    }
+                    self.read_child(&root, generation, child);
+                }
+                if let Some(next) = r["nextCursor"]
+                    .as_str()
+                    .filter(|next| Some(*next) != cursor.as_deref())
+                {
+                    self.request(
+                        "thread/loaded/list",
+                        json!({ "limit": 100, "cursor": next }),
+                        Pending::LoadedChildren(root.clone(), generation, Some(next.to_string())),
+                    );
+                }
+                self.children_discovered(&root, generation);
+            }
+            (Pending::ChildMetadata(root, generation, child, version), result) => {
+                if !self.subagents.current(&root, generation) {
+                    return;
+                }
+                match result {
+                    Ok(r) if r["thread"]["id"].as_str() == Some(&child) => {
+                        self.subagents.metadata(&r["thread"], version);
+                        self.reclaim_subagents();
+                    }
+                    _ => eprintln!("event=agent_bridge_codex_child_read_failed"),
+                }
+                self.children_discovered(&root, generation);
+            }
+            (Pending::ChildUnsubscribe(child), Err(_)) => {
+                self.subagents.releasing(&child, false);
+                eprintln!("event=agent_bridge_codex_child_close_failed");
+            }
+            (Pending::ChildUnsubscribe(_), Ok(_)) | (Pending::Ignore, _) => {}
         }
     }
 
-    fn thread_started(&mut self, start: Start, r: &Value) {
+    fn children_discovered(&mut self, root: &str, generation: i64) {
+        if !self.pending.values().any(|p| match p {
+            Pending::LoadedChildren(r, g, _) | Pending::ChildMetadata(r, g, ..) => {
+                r == root && *g == generation
+            }
+            _ => false,
+        }) {
+            self.subagents.discovered(root, generation);
+        }
+    }
+
+    fn read_child(&mut self, root: &str, generation: i64, child: &str) {
+        let version = self.subagents.read_version(child);
+        self.request(
+            "thread/read",
+            json!({ "threadId": child, "includeTurns": false }),
+            Pending::ChildMetadata(root.to_string(), generation, child.to_string(), version),
+        );
+    }
+
+    fn reclaim_subagents(&mut self) {
+        for child in self.subagents.ready() {
+            self.subagents.releasing(&child, true);
+            self.request(
+                "thread/unsubscribe",
+                json!({ "threadId": child }),
+                Pending::ChildUnsubscribe(child),
+            );
+        }
+    }
+
+    fn thread_start_failed(&mut self, start: Start, resume: Option<i64>, error: &str) {
+        if let Some(request) = resume
+            && let Some(thread) = start.params["sessionId"].as_str()
+        {
+            let generation = self.next_id + 1;
+            if let Some(root) = self.subagents.resume_failed(thread, request, generation) {
+                self.request(
+                    "thread/loaded/list",
+                    json!({ "limit": 100 }),
+                    Pending::LoadedChildren(root, generation, None),
+                );
+            }
+        }
+        acp::reply_error(start.id, INTERNAL, error);
+    }
+
+    fn thread_started(&mut self, start: Start, resume: Option<i64>, r: &Value) {
+        if let Some(request) = resume {
+            let thread = start.params["sessionId"].as_str().unwrap_or("");
+            if !self.subagents.resuming(thread, request) {
+                return acp::reply_error(start.id, INTERNAL, "会话恢复已取消");
+            }
+            if r["thread"]["id"].as_str() != Some(thread) {
+                return self.thread_start_failed(start, resume, "Codex 没有恢复请求的会话");
+            }
+        }
         let Some(thread) = r["thread"]["id"].as_str().map(String::from) else {
             return acp::reply_error(start.id, INTERNAL, "Codex 没有开始会话");
         };
+        self.subagents.resume(&thread);
         let cwd = r["cwd"]
             .as_str()
             .or(start.params["cwd"].as_str())
@@ -927,6 +1067,36 @@ impl Bridge {
     }
 
     fn notification(&mut self, method: &str, p: &Value) {
+        if method == "thread/started" {
+            self.subagents.observe(&p["thread"]);
+            self.reclaim_subagents();
+        }
+        if let Some(thread) = p["threadId"].as_str() {
+            match method {
+                "thread/status/changed" => {
+                    self.subagents.status(thread, &p["status"]);
+                    self.reclaim_subagents();
+                }
+                "thread/closed" => self.subagents.closed(thread),
+                "item/started" | "item/completed"
+                    if p["item"]["type"] == "collabAgentToolCall"
+                        && p["item"]["tool"] == "spawnAgent" =>
+                {
+                    for child in p["item"]["receiverThreadIds"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                    {
+                        self.subagents.spawned(child, thread);
+                        if let Some((root, generation)) = self.subagents.owner_closing(child) {
+                            self.read_child(&root, generation, child);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         if method == "account/updated" {
             if p["authMode"].is_string() {
                 self.signed_in = Some(true);
@@ -1485,6 +1655,194 @@ fn is_auth_error(message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_bridge() -> Bridge {
+        let (events, _) = std::sync::mpsc::channel();
+        Bridge {
+            cli: PathBuf::new(),
+            events,
+            codex: None,
+            next_id: 0,
+            pending: HashMap::new(),
+            requests: acp::Requests::default(),
+            asked: HashMap::new(),
+            title_threads: HashMap::new(),
+            hooks: HashMap::new(),
+            signed_in: None,
+            models: Vec::new(),
+            models_known: true,
+            waiting: Vec::new(),
+            threads: HashMap::new(),
+            subagents: subagents::Subagents::default(),
+            account: String::new(),
+        }
+    }
+
+    #[test]
+    fn closing_a_session_discovers_children_and_keeps_active_or_unrelated_ones() {
+        let mut b = test_bridge();
+        b.threads.insert("root".into(), Thread::default());
+        b.subagents.resume("root");
+        b.on_client(&json!({"id":1,"method":"session/close","params":{"sessionId":"root"}}));
+        let close = b.pending.remove(&b.next_id).unwrap();
+        b.answered(close, Ok(json!({"status":"unsubscribed"})));
+        let list = b.pending.remove(&b.next_id).unwrap();
+        b.answered(
+            list,
+            Ok(json!({"data":["done","active","unrelated"],"nextCursor":null})),
+        );
+        let reads: Vec<_> = b.pending.drain().map(|(_, p)| p).collect();
+        assert_eq!(reads.len(), 3);
+        for read in reads {
+            let Pending::ChildMetadata(_, _, ref child, _) = read else {
+                panic!("expected metadata read")
+            };
+            let (parent, status) = match child.as_str() {
+                "done" => ("root", "idle"),
+                "active" => ("root", "active"),
+                _ => ("other", "idle"),
+            };
+            let response = json!({"thread":{"id":child,"parentThreadId":parent,"status":{"type":status,"activeFlags":["waitingOnUserInput"]}}});
+            b.answered(read, Ok(response));
+        }
+        let released: Vec<_> = b
+            .pending
+            .values()
+            .filter_map(|p| match p {
+                Pending::ChildUnsubscribe(child) => Some(child.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(released, ["done"]);
+        b.pending.clear();
+        b.notification("thread/closed", &json!({"threadId":"root"}));
+        b.notification(
+            "thread/status/changed",
+            &json!({"threadId":"active","status":{"type":"idle"}}),
+        );
+        assert!(
+            b.pending
+                .values()
+                .any(|p| matches!(p, Pending::ChildUnsubscribe(child) if child == "active"))
+        );
+    }
+
+    #[test]
+    fn resumed_session_ignores_old_cleanup_responses_and_close_errors_are_reported() {
+        let mut b = test_bridge();
+        b.subagents.close("root", 1);
+        b.subagents.resume("root");
+        b.answered(
+            Pending::ChildMetadata("root".into(), 1, "child".into(), 0),
+            Ok(json!({"thread":{"id":"child","parentThreadId":"root","status":{"type":"idle"}}})),
+        );
+        assert!(b.pending.is_empty());
+        b.subagents.close("root", 2);
+        b.answered(
+            Pending::CloseSession(json!(1), "root".into(), 1),
+            Err("old close failed".into()),
+        );
+        assert!(b.subagents.current("root", 2));
+        b.answered(
+            Pending::CloseSession(json!(2), "root".into(), 2),
+            Err("close failed".into()),
+        );
+        assert!(!b.subagents.current("root", 2));
+    }
+
+    #[test]
+    fn resume_in_flight_protects_the_subtree_and_failure_restarts_cleanup() {
+        for target in ["root", "child"] {
+            let mut b = test_bridge();
+            b.signed_in = Some(true);
+            b.subagents.spawned("child", "root");
+            b.subagents.spawned("grandchild", "child");
+            b.subagents.close("root", 10);
+            b.read_child("root", 10, "child");
+            let old = b.pending.remove(&b.next_id).unwrap();
+            b.on_client(
+                &json!({"id":1,"method":"session/load","params":{"sessionId":target,"cwd":"/tmp"}}),
+            );
+            let resume = b.pending.remove(&b.next_id).unwrap();
+            assert!(matches!(resume, Pending::Thread(_, Some(_))));
+            b.answered(old, Ok(json!({"thread":{"id":"child","parentThreadId":"root","status":{"type":"idle"}}})));
+            b.notification(
+                "thread/status/changed",
+                &json!({"threadId":"grandchild","status":{"type":"idle"}}),
+            );
+            assert!(b.pending.is_empty());
+            b.notification("thread/closed", &json!({"threadId":"root"}));
+            assert!(b.subagents.current("root", 10));
+            b.answered(resume, Err("resume failed".into()));
+            let generation = b.next_id;
+            assert!(b.subagents.current("root", generation));
+            assert!(!b.subagents.current("root", 10));
+            let discovery = b.pending.remove(&generation).unwrap();
+            b.answered(discovery, Ok(json!({"data":["child"],"nextCursor":null})));
+            let read = b.pending.remove(&b.next_id).unwrap();
+            b.answered(read, Ok(json!({"thread":{"id":"child","parentThreadId":"root","status":{"type":"idle"}}})));
+            assert!(
+                b.pending
+                    .values()
+                    .any(|p| matches!(p, Pending::ChildUnsubscribe(child) if child == "child"))
+            );
+        }
+    }
+
+    #[test]
+    fn late_close_failure_does_not_cancel_a_new_resume() {
+        let mut b = test_bridge();
+        b.threads.insert("root".into(), Thread::default());
+        b.subagents.resume("root");
+        b.on_client(&json!({"id":1,"method":"session/close","params":{"sessionId":"root"}}));
+        let close = b.pending.remove(&b.next_id).unwrap();
+        b.start_thread(Start {
+            id: json!(2),
+            load: true,
+            params: json!({"sessionId":"root","cwd":"/tmp"}),
+        });
+        let resume = b.pending.remove(&b.next_id).unwrap();
+        b.answered(close, Err("close failed".into()));
+        b.answered(resume, Ok(json!({"thread":{"id":"root"}})));
+        assert!(b.threads.contains_key("root"));
+        assert!(
+            !b.pending
+                .values()
+                .any(|p| matches!(p, Pending::LoadedChildren(..)))
+        );
+    }
+
+    #[test]
+    fn successful_resume_cancels_cleanup_and_invalid_reply_restores_it() {
+        for valid in [true, false] {
+            let mut b = test_bridge();
+            b.subagents.close("root", 10);
+            b.start_thread(Start {
+                id: json!(1),
+                load: true,
+                params: json!({"sessionId":"root","cwd":"/tmp"}),
+            });
+            let resume = b.pending.remove(&b.next_id).unwrap();
+            let thread = if valid { "root" } else { "unexpected" };
+            b.answered(resume, Ok(json!({"thread":{"id":thread}})));
+            assert!(!b.subagents.current("root", 10));
+            if valid {
+                assert!(b.threads.contains_key("root"));
+                assert!(
+                    !b.pending
+                        .values()
+                        .any(|p| matches!(p, Pending::LoadedChildren(..)))
+                );
+            } else {
+                assert!(b.threads.is_empty());
+                assert!(
+                    b.pending.values().any(
+                        |p| matches!(p, Pending::LoadedChildren(root, _, _) if root == "root")
+                    )
+                );
+            }
+        }
+    }
 
     #[test]
     fn modes_follow_codex_acp() {

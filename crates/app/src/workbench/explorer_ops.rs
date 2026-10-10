@@ -13,7 +13,10 @@ use gpui_kit::{
     },
     *,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 gpui_kit::actions!(
     explorer,
@@ -28,7 +31,8 @@ gpui_kit::actions!(
         CopyPath,
         CopyRelativePath,
         RevealInFinder,
-        FindInFolder
+        FindInFolder,
+        SelectAllFiles
     ]
 );
 
@@ -37,6 +41,8 @@ gpui_kit::actions!(
 pub struct FileClipboard {
     pub paths: Vec<PathBuf>,
     pub cut: bool,
+    // Identifies the clipboard operation, including its consumed (empty) state.
+    revision: Rc<()>,
 }
 
 impl Global for FileClipboard {}
@@ -88,9 +94,66 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.explorer.selection = Some(path);
+        self.explorer.set_selected(vec![path]);
         self.explorer.focus.focus(window, cx);
         cx.notify();
+    }
+
+    pub(super) fn select_tree_click(
+        &mut self,
+        path: PathBuf,
+        modifiers: Modifiers,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if modifiers.shift {
+            let start = self.explorer.anchor.as_ref().and_then(|anchor| {
+                self.explorer
+                    .rows
+                    .iter()
+                    .position(|row| &row.entry.path == anchor)
+            });
+            let end = self
+                .explorer
+                .rows
+                .iter()
+                .position(|row| row.entry.path == path);
+            if let (Some(start), Some(end)) = (start, end) {
+                let paths = self.explorer.rows[start.min(end)..=start.max(end)]
+                    .iter()
+                    .filter(|row| !row.pending && self.root.as_ref() != Some(&row.entry.path))
+                    .map(|row| row.entry.path.clone())
+                    .collect::<Vec<_>>();
+                if !modifiers.platform {
+                    self.explorer.selected.clear();
+                }
+                self.explorer.selected.extend(paths);
+                self.explorer.selection = Some(path);
+            } else {
+                self.explorer.set_selected(vec![path]);
+            }
+        } else if modifiers.platform {
+            if !self.explorer.selected.insert(path.clone()) {
+                self.explorer.selected.remove(&path);
+            }
+            self.explorer.anchor = Some(path.clone());
+            // Keep a focused row even when the last highlighted item is toggled off.
+            self.explorer.selection = Some(path);
+        } else {
+            self.explorer.set_selected(vec![path]);
+        }
+        self.explorer.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn selected_file_paths(&self) -> Vec<PathBuf> {
+        file_ops::top_level_paths(
+            self.explorer
+                .selected
+                .iter()
+                .filter(|path| self.root.as_ref() != Some(*path))
+                .cloned(),
+        )
     }
 
     /// The right-click menu for `path` (a row, or the workspace root for the header).
@@ -136,7 +199,7 @@ impl Workbench {
         .separator()
         .item(
             PopupMenuItem::new("重命名…")
-                .disabled(root)
+                .disabled(root || self.explorer.selected.len() != 1)
                 .action(Box::new(Rename)),
         )
         .item(
@@ -294,7 +357,7 @@ impl Workbench {
                             }
                         }
                         let opens = matches!(kind, EditKind::NewFile(_));
-                        this.explorer.selection = Some(path.clone());
+                        this.explorer.set_selected(vec![path.clone()]);
                         if opens {
                             this.open_file(path, this.root.clone(), window, cx);
                         } else {
@@ -336,9 +399,22 @@ impl Workbench {
                 document.path = path;
             }
         }
-        if let Some(selection) = self.explorer.selection.as_deref().and_then(moved) {
-            self.explorer.selection = Some(selection);
-        }
+        self.explorer.selected = self
+            .explorer
+            .selected
+            .iter()
+            .map(|path| moved(path).unwrap_or_else(|| path.clone()))
+            .collect();
+        self.explorer.selection = self
+            .explorer
+            .selection
+            .as_deref()
+            .map(|path| moved(path).unwrap_or_else(|| path.to_path_buf()));
+        self.explorer.anchor = self
+            .explorer
+            .anchor
+            .as_deref()
+            .map(|path| moved(path).unwrap_or_else(|| path.to_path_buf()));
         let expanded: Vec<_> = self
             .explorer
             .expanded
@@ -350,26 +426,38 @@ impl Workbench {
     }
 
     pub(super) fn delete_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.explorer.selection.clone() else {
-            return;
-        };
-        if self.root.as_deref() == Some(path.as_path()) {
+        let paths = self.selected_file_paths();
+        if paths.is_empty() {
             return;
         }
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
+        let title = if paths.len() == 1 {
+            format!(
+                "删除“{}”？",
+                paths[0].file_name().unwrap_or_default().to_string_lossy()
+            )
+        } else {
+            format!("删除选中的 {} 个项目？", paths.len())
+        };
         let (trash, detail) = if cfg!(target_os = "macos") {
             ("移到废纸篓", "可以从废纸篓里恢复。")
         } else {
             ("移到回收站", "可以从回收站里恢复。")
         };
+        let names = paths
+            .iter()
+            .take(5)
+            .map(|path| {
+                self.relative(path)
+                    .display()
+                    .to_string()
+                    .replace(super::SINGLE_LINE, "⏎")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         let answer = window.prompt(
             PromptLevel::Warning,
-            &format!("删除“{name}”？"),
-            Some(detail),
+            &title,
+            Some(&format!("{detail}\n{names}")),
             &crate::workbench::prompt_buttons(&[trash, "取消"]),
             cx,
         );
@@ -377,36 +465,69 @@ impl Workbench {
             if answer.await != Ok(0) {
                 return;
             }
-            let target = path.clone();
-            let result = cx
-                .background_spawn(async move { file_ops::trash(&target) })
+            let results = cx
+                .background_spawn(async move {
+                    paths
+                        .into_iter()
+                        .map(|path| {
+                            let result = file_ops::trash(&path);
+                            (path, result)
+                        })
+                        .collect::<Vec<_>>()
+                })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
-                match result {
-                    Ok(()) => {
-                        this.explorer.selection = None;
-                        // Unedited tabs of what was deleted close; edited ones stay open.
-                        let closing: Vec<_> = this
-                            .documents
-                            .iter()
-                            .filter(|doc| doc.path.starts_with(&path) && !doc.dirty)
-                            .map(|doc| doc.id)
-                            .collect();
-                        for id in closing {
-                            this.remove_document(id, window, cx);
-                        }
-                        // The edited ones are now the only copy: marked 已删除, saving recreates them.
-                        for doc in &mut this.documents {
-                            if doc.path.starts_with(&path) {
-                                doc.deleted = true;
-                                doc.banner = None;
-                            }
-                        }
-                        if let Some(parent) = path.parent() {
-                            this.relist(parent.to_path_buf(), window, cx);
+                let mut directories = std::collections::BTreeSet::new();
+                let mut errors = Vec::new();
+                for (path, result) in results {
+                    if let Err(error) = result {
+                        errors.push(format!("{}：{error}", path.display()));
+                        continue;
+                    }
+                    this.explorer
+                        .selected
+                        .retain(|selected| !selected.starts_with(&path));
+                    if this
+                        .explorer
+                        .selection
+                        .as_ref()
+                        .is_some_and(|p| p.starts_with(&path))
+                    {
+                        this.explorer.selection = this.explorer.selected.last().cloned();
+                    }
+                    if this
+                        .explorer
+                        .anchor
+                        .as_ref()
+                        .is_some_and(|p| p.starts_with(&path))
+                    {
+                        this.explorer.anchor = this.explorer.selection.clone();
+                    }
+                    // Unedited tabs close; edited buffers stay available after deletion.
+                    let closing: Vec<_> = this
+                        .documents
+                        .iter()
+                        .filter(|doc| doc.path.starts_with(&path) && !doc.dirty)
+                        .map(|doc| doc.id)
+                        .collect();
+                    for id in closing {
+                        this.remove_document(id, window, cx);
+                    }
+                    for doc in &mut this.documents {
+                        if doc.path.starts_with(&path) {
+                            doc.deleted = true;
+                            doc.banner = None;
                         }
                     }
-                    Err(error) => this.message = format!("删除失败：{error}"),
+                    if let Some(parent) = path.parent() {
+                        directories.insert(parent.to_path_buf());
+                    }
+                }
+                for directory in directories {
+                    this.relist(directory, window, cx);
+                }
+                if !errors.is_empty() {
+                    this.message = format!("删除失败：{}", errors.join("\n"));
                 }
                 cx.notify();
             });
@@ -415,15 +536,14 @@ impl Workbench {
     }
 
     pub(super) fn copy_selection(&mut self, cut: bool, cx: &mut Context<Self>) {
-        let Some(path) = self.explorer.selection.clone() else {
-            return;
-        };
-        if self.root.as_deref() == Some(path.as_path()) {
+        let paths = self.selected_file_paths();
+        if paths.is_empty() {
             return;
         }
         cx.set_global(FileClipboard {
-            paths: vec![path],
+            paths,
             cut,
+            ..Default::default()
         });
         cx.notify();
     }
@@ -439,9 +559,27 @@ impl Workbench {
             _ => return,
         };
         if cut {
-            // A cut is pasted once; the originals are gone afterwards.
+            // Consume this cut once; failed paths are restored unless a newer copy replaces it.
             cx.set_global(FileClipboard::default());
         }
+        self.transfer_files(paths, dir, cut, window, cx);
+    }
+
+    /// Shared by paste and Finder drops; IO runs off the render thread.
+    pub(super) fn transfer_files(
+        &mut self,
+        paths: Vec<PathBuf>,
+        dir: PathBuf,
+        cut: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let paths = file_ops::top_level_paths(paths);
+        if paths.is_empty() {
+            return;
+        }
+        let selection = self.explorer.selected.clone();
+        let clipboard_revision = cx.try_global::<FileClipboard>().map(|c| c.revision.clone());
         let destination = dir.clone();
         let job = cx.background_spawn(async move {
             paths
@@ -456,27 +594,72 @@ impl Workbench {
                 })
                 .collect::<Vec<_>>()
         });
+        let app = cx.to_async();
         cx.spawn_in(window, async move |this, cx| {
             let results = job.await;
+            // The clipboard belongs to the app, even if the originating window closes.
+            if cut {
+                let failed: Vec<_> = results
+                    .iter()
+                    .filter(|(_, result)| result.is_err())
+                    .map(|(source, _)| source.clone())
+                    .collect();
+                app.update(|cx| {
+                    if !failed.is_empty()
+                        && cx.try_global::<FileClipboard>().is_some_and(|clipboard| {
+                            clipboard.paths.is_empty()
+                                && clipboard_revision.as_ref().is_some_and(|revision| {
+                                    Rc::ptr_eq(&clipboard.revision, revision)
+                                })
+                        })
+                    {
+                        cx.set_global(FileClipboard {
+                            paths: failed,
+                            cut: true,
+                            ..Default::default()
+                        });
+                    }
+                });
+            }
             let _ = this.update_in(cx, |this, window, cx| {
-                let mut last = None;
+                let untouched = this.explorer.selected == selection;
+                let mut targets = Vec::new();
+                let mut errors = Vec::new();
+                let mut directories = std::collections::BTreeSet::from([dir.clone()]);
                 for (source, result) in results {
                     match result {
                         Ok(target) => {
                             if cut {
                                 this.follow_move(&source, &target);
                                 if let Some(parent) = source.parent() {
-                                    this.relist(parent.to_path_buf(), window, cx);
+                                    directories.insert(parent.to_path_buf());
                                 }
                             }
-                            last = Some(target);
+                            targets.push(target);
                         }
-                        Err(error) => this.message = format!("粘贴失败：{error}"),
+                        Err(error) => {
+                            errors.push(format!("{}：{error}", source.display()));
+                        }
                     }
                 }
-                this.relist(dir, window, cx);
-                if last.is_some() {
-                    this.explorer.selection = last;
+                if !targets.is_empty() {
+                    this.explorer.collapsed = false;
+                }
+                if !targets.is_empty()
+                    && !this.explorer.expanded.contains(&dir)
+                    && this.explorer.rows.iter().any(|row| row.entry.path == dir)
+                {
+                    this.load_directory(dir.clone(), window, cx);
+                    directories.remove(&dir);
+                }
+                for directory in directories {
+                    this.relist(directory, window, cx);
+                }
+                if !targets.is_empty() && untouched {
+                    this.explorer.set_selected(targets);
+                }
+                if !errors.is_empty() {
+                    this.message = format!("粘贴失败：{}", errors.join("\n"));
                 }
                 cx.notify();
             });
@@ -485,24 +668,29 @@ impl Workbench {
     }
 
     pub(super) fn copy_selection_path(&mut self, relative: bool, cx: &mut Context<Self>) {
-        let Some(path) = self
-            .explorer
-            .selection
-            .clone()
-            .or_else(|| self.root.clone())
-        else {
+        let mut paths: Vec<_> = self.explorer.selected.iter().cloned().collect();
+        if paths.is_empty() {
+            paths.extend(self.root.clone());
+        }
+        if paths.is_empty() {
             return;
-        };
-        let text = if relative {
-            self.root
-                .as_deref()
-                .and_then(|root| path.strip_prefix(root).ok())
-                .map(|p| p.display().to_string())
-                .filter(|p| !p.is_empty())
-                .unwrap_or_else(|| ".".into())
-        } else {
-            path.display().to_string()
-        };
+        }
+        let text = paths
+            .iter()
+            .map(|path| {
+                if relative {
+                    self.root
+                        .as_deref()
+                        .and_then(|root| path.strip_prefix(root).ok())
+                        .map(|p| p.display().to_string())
+                        .filter(|p| !p.is_empty())
+                        .unwrap_or_else(|| ".".into())
+                } else {
+                    path.display().to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.message = "已复制路径".into();
         cx.notify();
@@ -550,6 +738,20 @@ impl Workbench {
     pub(super) fn explorer_actions(&self, element: Div, cx: &mut Context<Self>) -> Div {
         element
             .key_context("Explorer")
+            .on_action(cx.listener(|this, _: &SelectAllFiles, _, cx| {
+                if this.explorer.edit.is_none() && !this.explorer.collapsed {
+                    let paths = this
+                        .explorer
+                        .rows
+                        .iter()
+                        .skip(1)
+                        .filter(|row| !row.pending)
+                        .map(|row| row.entry.path.clone())
+                        .collect();
+                    this.explorer.set_selected(paths);
+                    cx.notify();
+                }
+            }))
             .on_action(cx.listener(|this, _: &NewFile, window, cx| {
                 if let Some(dir) = this.target_folder() {
                     this.start_tree_edit(EditKind::NewFile(dir), window, cx);
@@ -561,7 +763,8 @@ impl Workbench {
                 }
             }))
             .on_action(cx.listener(|this, _: &Rename, window, cx| {
-                if let Some(path) = this.explorer.selection.clone()
+                if this.explorer.selected.len() == 1
+                    && let Some(path) = this.explorer.selected.first().cloned()
                     && this.root.as_ref() != Some(&path)
                 {
                     this.start_tree_edit(EditKind::Rename(path), window, cx);
@@ -588,11 +791,21 @@ impl Workbench {
 
     /// Opening a document from elsewhere moves the Explorer highlight back to it.
     pub(super) fn clear_tree_selection_for(&mut self, pane: Pane) {
-        if let Pane::Document(id) = pane
+        if !self.explorer.focus_on_open
+            && let Pane::Document(id) = pane
             && let Some(document) = self.documents.iter().find(|doc| doc.id == id)
-            && self.explorer.selection.as_ref() != Some(&document.path)
+            && !self.explorer.selected.contains(&document.path)
         {
-            self.explorer.selection = None;
+            self.explorer.set_selected(Vec::new());
         }
+    }
+}
+
+impl super::sidebar::Explorer {
+    /// The primary row and range anchor accompany the set of highlighted paths.
+    pub(super) fn set_selected(&mut self, paths: Vec<PathBuf>) {
+        self.anchor = paths.first().cloned();
+        self.selection = paths.last().cloned();
+        self.selected = paths.into_iter().collect();
     }
 }

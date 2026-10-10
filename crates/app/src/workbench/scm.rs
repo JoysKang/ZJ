@@ -329,9 +329,18 @@ impl Workbench {
             Row::OutgoingNote(g) => self.scm_outgoing_note_row(g, base, cx),
         };
         div()
+            .id(("scm-row-bounds", index))
             .w_full()
             .px(theme::ROW_INSET)
             .child(row)
+            .map(|row| {
+                #[cfg(test)]
+                let row = {
+                    use gpui_kit::test::TestSupportExt;
+                    row.test_support()
+                };
+                row
+            })
             .into_any_element()
     }
 
@@ -1084,8 +1093,11 @@ impl Workbench {
             .child(file_icons::icon(file_icons::for_file(&name)))
             .child(
                 div()
-                    .flex_shrink_0()
+                    .min_w_0()
                     .pl_1()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .text_color(color)
                     .when(deleted, |name| name.line_through())
                     .child(name),
@@ -1134,6 +1146,15 @@ impl Workbench {
             )
             .child(
                 div()
+                    .id(("scm-status", index))
+                    .map(|tag| {
+                        #[cfg(test)]
+                        let tag = {
+                            use gpui_kit::test::TestSupportExt;
+                            tag.test_support()
+                        };
+                        tag
+                    })
                     .w(theme::DECORATION_WIDTH)
                     .flex_shrink_0()
                     .flex()

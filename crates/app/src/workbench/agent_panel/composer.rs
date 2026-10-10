@@ -13,12 +13,14 @@ impl Workbench {
         let busy = session.is_some_and(LiveSession::busy);
         let empty = self.agent.composer.read(cx).value().trim().is_empty()
             && self.agent.attachments.is_empty();
+        let labels = agent_model::attachment_labels(&self.agent.attachments);
         let chips = self
             .agent
             .attachments
             .iter()
+            .zip(labels)
             .enumerate()
-            .map(|(i, a)| {
+            .map(|(i, (a, label))| {
                 let icon = match a {
                     Attachment::File(_) => None,
                     Attachment::Directory(_) => Some(IconName::Folder),
@@ -30,9 +32,10 @@ impl Workbench {
                     .xsmall()
                     .icon(IconName::Close)
                     .tooltip("删除附件")
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.agent_remove_attachment(i, cx)),
-                    );
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.agent_remove_attachment(i, window, cx);
+                    }));
                 if let Attachment::Image { id, .. } = a {
                     v_flex()
                         .w(theme::AGENT_IMAGE_WIDTH)
@@ -45,11 +48,23 @@ impl Workbench {
                                 .rounded(theme::RADIUS)
                                 .overflow_hidden()
                                 .bg(colors.editor)
-                                .children(self.agent.image_previews.get(id).map(|image| {
-                                    img(image.clone())
-                                        .size_full()
-                                        .object_fit(ObjectFit::Contain)
-                                }))
+                                .child(
+                                    Button::new(("agent-image-preview", i))
+                                        .ghost()
+                                        .w_full()
+                                        .h(theme::AGENT_IMAGE_HEIGHT)
+                                        .p_0()
+                                        .tooltip("点击查看大图")
+                                        .accessibility_label(format!("查看{label}"))
+                                        .children(self.agent.image_previews.get(id).map(|image| {
+                                            img(image.clone())
+                                                .size_full()
+                                                .object_fit(ObjectFit::Contain)
+                                        }))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.agent_preview_image(i, window, cx);
+                                        })),
+                                )
                                 .child(
                                     div()
                                         .absolute()
@@ -67,13 +82,11 @@ impl Workbench {
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
-                                .child(a.label()),
+                                .child(label),
                         )
                         .into_any_element()
                 } else {
-                    chip(&a.label(), icon, colors)
-                        .child(remove)
-                        .into_any_element()
+                    chip(&label, icon, colors).child(remove).into_any_element()
                 }
             })
             .collect::<Vec<_>>();
@@ -153,7 +166,7 @@ impl Workbench {
                 Button::new("agent-config")
                     .ghost()
                     .xsmall()
-                    .w_full()
+                    .max_w_full()
                     .label(agent_model::config_label(&configs))
                     .dropdown_caret(true)
                     .tooltip("模型与思考强度")
@@ -263,8 +276,10 @@ impl Workbench {
                 }
             })
             .capture_action(
-                cx.listener(|this, _: &gpui_kit::component::input::Paste, _, cx| {
-                    if !this.agent_paste_images(cx) {
+                cx.listener(|this, _: &gpui_kit::component::input::Paste, window, cx| {
+                    if this.agent_paste_images(window, cx) {
+                        cx.stop_propagation();
+                    } else {
                         cx.propagate();
                     }
                 }),
@@ -319,8 +334,8 @@ impl Workbench {
                     cx.stop_propagation();
                 }
             }))
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                this.agent_attach_images(paths.paths().to_vec(), cx)
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.agent_attach_images(paths.paths().to_vec(), window, cx)
             }))
             .when(!chips.is_empty() || !compact, |c| {
                 c.child(
@@ -365,6 +380,23 @@ impl Workbench {
                         .min_h(theme::AGENT_COMPOSER_MIN)
                         .appearance(false)
                         .bordered(false)
+                        .token(|context, _, cx| {
+                            h_flex()
+                                .id(SharedString::from(format!("agent-image-reference-{}", context.token().id())))
+                                .test_support()
+                                .cursor_pointer()
+                                .child(gpui_kit::component::input::InputToken::new(context)
+                                    .icon(Icon::new(IconName::Image))
+                                    .text_color(theme::colors(cx).accent))
+                        })
+                        .on_token_click(cx.listener(|this, event: &gpui_kit::component::input::InlineTokenClickEvent, window, cx| {
+                            if let Some(Some(id)) = this.agent.image_references.get(event.token().id().as_ref())
+                                && let Some(index) = this.agent.attachments.iter().position(|a|
+                                    matches!(a, Attachment::Image { id: other, .. } if other == id))
+                            {
+                                this.agent_preview_image(index, window, cx);
+                            }
+                        }))
                         .aria_label("给 Agent 的消息"),
                 ),
             )
@@ -400,7 +432,7 @@ impl Workbench {
                             .xsmall()
                             .icon(IconName::Image)
                             .tooltip("添加图片（也可粘贴或拖入）")
-                            .on_click(cx.listener(|this, _, _, cx| this.agent_pick_images(cx))),
+                            .on_click(cx.listener(|this, _, window, cx| this.agent_pick_images(window, cx))),
                     )
                     .child(
                         Button::new("agent-attach")

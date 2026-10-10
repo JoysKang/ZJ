@@ -209,6 +209,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     });
     app.run(move |cx| {
         gpui_kit::init(cx);
+        cx.set_app_identity("local.zj.editor", "ZJ");
+        workbench::init_agent_notifications(cx);
         cx.set_global(settings::Settings::load());
         cx.set_global(watch::WatchService::default());
         workbench::init_agent_store(cx);
@@ -347,6 +349,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             KeyBinding::new("enter", workbench::RenameFile, Some("Explorer")),
             KeyBinding::new("delete", workbench::DeleteFile, Some("Explorer")),
             KeyBinding::new("cmd-backspace", workbench::DeleteFile, Some("Explorer")),
+            KeyBinding::new("secondary-a", workbench::SelectAllFiles, Some("Explorer")),
             KeyBinding::new("secondary-c", workbench::CopyFiles, Some("Explorer")),
             KeyBinding::new("secondary-x", workbench::CutFiles, Some("Explorer")),
             KeyBinding::new("secondary-v", workbench::PasteFiles, Some("Explorer")),

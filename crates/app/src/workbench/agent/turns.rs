@@ -217,26 +217,33 @@ impl Workbench {
         let submitted = result.is_ok();
         match result {
             Ok(turn) => {
-                let labels: Vec<String> = attachments.iter().map(Attachment::label).collect();
-                let stored = if labels.is_empty() {
+                let labels = agent_model::attachment_labels(&attachments);
+                let context =
+                    attachments
+                        .iter()
+                        .zip(&labels)
+                        .filter_map(|(a, label)| match a {
+                            Attachment::Image { .. } => {
+                                let reference = format!("[{label}]");
+                                (!text.contains(&reference)).then_some(reference)
+                            }
+                            _ => Some(a.path().map_or_else(
+                                || label.clone(),
+                                |path| format!("@{}", path.display()),
+                            )),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                let stored = if context.is_empty() {
                     text.clone()
                 } else {
-                    format!(
-                        "{}\n{text}",
-                        attachments
-                            .iter()
-                            .map(|a| a.path().map_or_else(
-                                || format!("[图片：{}]", a.label()),
-                                |path| format!("@{}", path.display())
-                            ))
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    )
+                    format!("{context}\n{text}")
                 };
                 session.thread.push_user(text.clone(), labels, turn);
                 if !steering {
                     session.turns += 1;
                     session.turn_started = session.last_active;
+                    session.cancelled_turn = None;
                 }
                 if session.branch.is_none() {
                     session.branch = branch.clone();
@@ -369,10 +376,18 @@ impl Workbench {
     }
 
     pub(in crate::workbench) fn agent_cancel(&mut self, cx: &mut Context<Self>) {
-        if let Some(session) = self.agent.current.and_then(|key| self.agent.session(key))
-            && let Some(client) = &session.client
+        if let Some(session) = self
+            .agent
+            .current
+            .and_then(|key| self.agent.session_mut(key))
         {
-            client.cancel();
+            session.cancelled_turn = session.thread.turn;
+            if let Some(client) = &session.client {
+                client.cancel();
+            }
+        }
+        if let Some(key) = self.agent.current {
+            self.agent_dismiss_notification(key, cx);
         }
         cx.notify();
     }
@@ -394,12 +409,20 @@ impl Workbench {
         let mut written = Vec::new();
         let mut recount = false;
         let mut turn_ended = false;
+        let mut notify_finished = false;
         let mut completed_from = None;
         let mut review_changed = false;
         let Some(session) = self.agent.session_mut(key) else {
             return;
         };
         session.last_active = std::time::Instant::now();
+        let previously_pending: Vec<_> = session
+            .thread
+            .pending_permissions()
+            .map(|card| card.request.id)
+            .collect();
+        let mut suppress_approvals =
+            session.cancelled_turn.is_some() && session.cancelled_turn == session.thread.turn;
         let before = session.thread.items.len() + session.thread.dropped;
         let mut touched: Vec<String> = Vec::new();
         let mut title = None;
@@ -431,8 +454,13 @@ impl Workbench {
                     acp_id = Some(session_id.clone());
                     session.resume = Some(session_id.clone());
                 }
-                AgentEvent::TurnEnded { .. } if ends_current_turn => {
+                AgentEvent::TurnEnded { turn, outcome } if ends_current_turn => {
                     turn_ended = true;
+                    let cancelled = session.cancelled_turn.take() == Some(*turn);
+                    suppress_approvals |= cancelled
+                        || matches!(outcome, workspace_editor_agent::TurnOutcome::Cancelled);
+                    notify_finished |= !cancelled
+                        && !matches!(outcome, workspace_editor_agent::TurnOutcome::Cancelled);
                     recount = true;
                     // Shown under the turn's last row (the reply, or the notice it ended with).
                     if session.thread.status != agent_thread::Status::Running
@@ -520,6 +548,15 @@ impl Workbench {
         self.agent
             .questions
             .retain(|(k, id), _| *k != key || pending.contains(id));
+        let notify_approval = !suppress_approvals
+            && requests.iter().any(|request| {
+                pending.contains(&request.id) && !previously_pending.contains(&request.id)
+            });
+        if notify_finished || notify_approval {
+            self.agent_notify(key, !pending.is_empty(), cx);
+        } else if turn_ended || (!previously_pending.is_empty() && pending.is_empty()) {
+            self.agent_dismiss_notification(key, cx);
+        }
         for request in requests.iter().filter(|r| pending.contains(&r.id)) {
             self.agent_question_draft(key, request, window, cx);
         }

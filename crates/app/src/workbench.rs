@@ -29,7 +29,7 @@ use workspace_editor_git::{
 mod agent;
 pub use agent::{
     AddSelectionToAgent, NewAgentSession, NextApproval, SearchSessions, ToggleAgentPanel,
-    init_store as init_agent_store,
+    init_notifications as init_agent_notifications, init_store as init_agent_store,
 };
 mod agent_history;
 mod agent_panel;
@@ -62,6 +62,9 @@ pub use edit_commands::{
 mod edit_commands_ui_tests;
 mod editor_area;
 mod explorer_ops;
+#[cfg(test)]
+#[path = "workbench/explorer_ui_tests.rs"]
+mod explorer_ui_tests;
 mod find_widget;
 #[cfg(test)]
 #[path = "workbench/go_to_line_ui_tests.rs"]
@@ -76,7 +79,7 @@ mod markdown_preview;
 mod markdown_ui_tests;
 pub use explorer_ops::{
     CopyFiles, CopyPath, CopyRelativePath, CutFiles, Delete as DeleteFile, FindInFolder, NewFile,
-    NewFolder, PasteFiles, Rename as RenameFile, RevealInFinder,
+    NewFolder, PasteFiles, Rename as RenameFile, RevealInFinder, SelectAllFiles,
 };
 pub use find_widget::{
     FindInFile, FindNext, FindPrevious, FindReplace, ReplaceAll, ReplaceOne, ToggleFindCase,
@@ -603,10 +606,12 @@ impl Workbench {
                 scroll: UniformListScrollHandle::new(),
                 show_hidden: cx.global::<crate::settings::Settings>().show_hidden,
                 selection: None,
+                selected: Default::default(),
+                anchor: None,
                 focus: cx.focus_handle(),
                 edit: None,
                 focus_on_open: false,
-                reveal_pending: false,
+                reveal_pending: None,
                 expanded: HashSet::new(),
                 restore_expanded: HashSet::new(),
                 tasks: HashMap::new(),
@@ -722,7 +727,7 @@ impl Workbench {
 
     /// Lists the root and every expanded folder again, keeping what is expanded.
     fn reload_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.explorer.reveal_pending = matches!(self.active, Pane::Document(_));
+        self.explorer.reveal_pending = self.active_document().map(|(path, _)| path.clone());
         self.explorer.generation += 1;
         self.explorer.tasks.clear();
         self.explorer.restore_expanded = std::mem::take(&mut self.explorer.expanded);
@@ -800,7 +805,7 @@ impl Workbench {
                             }),
                         );
                         this.explorer.message.clear();
-                        this.reveal_current_file(window, cx);
+                        this.reveal_tree_entry(window, cx);
                         for path in restore {
                             if !this.explorer.expanded.contains(&path) {
                                 this.load_directory(path, window, cx);
@@ -810,10 +815,13 @@ impl Workbench {
                     Err(error) => {
                         this.explorer.expanded.remove(&path);
                         this.explorer.message = format!("{}: {error}", path.display());
-                        if this.documents.iter().any(|doc| {
-                            this.active == Pane::Document(doc.id) && doc.path.starts_with(&path)
-                        }) {
-                            this.explorer.reveal_pending = false;
+                        if this
+                            .explorer
+                            .reveal_pending
+                            .as_ref()
+                            .is_some_and(|target| target.starts_with(&path))
+                        {
+                            this.explorer.reveal_pending = None;
                         }
                     }
                 }
@@ -825,7 +833,7 @@ impl Workbench {
     }
 
     fn toggle_directory(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.explorer.reveal_pending = false;
+        self.explorer.reveal_pending = None;
         let path = self.explorer.rows[index].entry.path.clone();
         if self.explorer.expanded.remove(&path) {
             self.explorer
@@ -1101,7 +1109,7 @@ impl Workbench {
             self.auto_save_on_focus_change(Some(previous), window, cx);
         }
         self.active = pane;
-        self.explorer.reveal_pending = matches!(pane, Pane::Document(_));
+        self.explorer.reveal_pending = self.active_document().map(|(path, _)| path.clone());
         self.clear_tree_selection_for(pane);
         self.find_update(false, cx);
         if std::mem::take(&mut self.explorer.focus_on_open) {
@@ -1110,24 +1118,13 @@ impl Workbench {
             self.focus_active_editor(window, cx);
         }
         self.observe_cursor(cx);
-        self.reveal_current_file(window, cx);
+        self.reveal_tree_entry(window, cx);
         self.remember_tabs(false, window, cx);
         cx.notify();
     }
 
-    fn reveal_current_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.explorer.reveal_pending {
-            return;
-        }
-        let Pane::Document(id) = self.active else {
-            return;
-        };
-        let Some(path) = self
-            .documents
-            .iter()
-            .find(|doc| doc.id == id)
-            .map(|doc| doc.path.clone())
-        else {
+    fn reveal_tree_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.explorer.reveal_pending.clone() else {
             return;
         };
         let Some(root) = self.root.clone() else {
@@ -1158,11 +1155,108 @@ impl Workbench {
             .iter()
             .position(|row| row.entry.path == path)
         {
+            if self.explorer.rows[index].entry.directory && !self.explorer.expanded.contains(&path)
+            {
+                self.load_directory(path, window, cx);
+            }
             self.explorer
                 .scroll
                 .scroll_to_item(index, ScrollStrategy::Nearest);
-            self.explorer.reveal_pending = false;
+            self.explorer.reveal_pending = None;
         }
+    }
+
+    /// A directory link reuses a workspace that contains it, or opens another workspace.
+    fn open_directory_link(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .root
+            .as_ref()
+            .is_some_and(|root| path.starts_with(root))
+        {
+            self.show_directory(path, window, cx);
+            return;
+        }
+        let existing = cx
+            .windows()
+            .into_iter()
+            .filter_map(|handle| {
+                let view = handle
+                    .downcast::<gpui_kit::base::Root>()?
+                    .read(cx)
+                    .ok()?
+                    .view()
+                    .clone()
+                    .downcast::<Workbench>()
+                    .ok()?;
+                if view.entity_id() == cx.entity_id() {
+                    return None;
+                }
+                let depth = view
+                    .read(cx)
+                    .root
+                    .as_ref()
+                    .filter(|root| path.starts_with(root))?
+                    .components()
+                    .count();
+                Some((depth, handle, view))
+            })
+            .max_by_key(|(depth, _, _)| *depth);
+        if let Some((_, handle, view)) = existing {
+            if let Err(error) = handle.update(cx, |_, window, cx| {
+                view.update(cx, |this, cx| this.show_directory(path, window, cx));
+                window.activate_window();
+            }) {
+                self.message = format!("无法打开工作区：{error}");
+                cx.notify();
+            }
+        } else {
+            self.open_directory(path, window, cx);
+        }
+    }
+
+    fn open_directory(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self.root.is_none() {
+            window.set_window_title(&format!("ZJ · {}", path.display()));
+            self.root = Some(path.clone());
+            crate::session::remember(window, self.root.as_deref(), true, cx);
+            self.start_watching(window, cx);
+            self.refresh_tree(window, cx);
+            self.refresh(window, cx);
+            self.show_directory(path, window, cx);
+        } else if let Err(error) = crate::open_workspace(
+            Some(path),
+            self.service.clone(),
+            self.owners.clone(),
+            cx.windows().len(),
+            None,
+            Default::default(),
+            cx,
+        ) {
+            self.message = format!("无法打开工作区：{error}");
+            cx.notify();
+        }
+    }
+
+    fn show_directory(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar = Sidebar::Explorer;
+        self.sidebar_visible = true;
+        if !self.explorer.show_hidden
+            && self
+                .root
+                .as_ref()
+                .and_then(|root| path.strip_prefix(root).ok())
+                .is_some_and(|relative| {
+                    relative
+                        .components()
+                        .any(|part| part.as_os_str().to_string_lossy().starts_with('.'))
+                })
+        {
+            self.explorer.show_hidden = true;
+            self.refresh_tree(window, cx);
+        }
+        self.select_tree_path(path.clone(), window, cx);
+        self.explorer.reveal_pending = Some(path);
+        self.reveal_tree_entry(window, cx);
     }
 
     fn new_window(&mut self, cx: &mut Context<Self>) {
@@ -1230,25 +1324,7 @@ impl Workbench {
                 this.path_prompt_open = false;
                 match selected {
                     Ok(Some(path)) if directory => {
-                        if this.root.is_none() {
-                            window.set_window_title(&format!("ZJ · {}", path.display()));
-                            this.root = Some(path);
-                            crate::session::remember(window, this.root.as_deref(), true, cx);
-                            this.sidebar = Sidebar::Explorer;
-                            this.start_watching(window, cx);
-                            this.refresh_tree(window, cx);
-                            this.refresh(window, cx);
-                        } else if let Err(error) = crate::open_workspace(
-                            Some(path),
-                            this.service.clone(),
-                            this.owners.clone(),
-                            cx.windows().len(),
-                            None,
-                            Default::default(),
-                            cx,
-                        ) {
-                            this.message = format!("无法打开工作区：{error}");
-                        }
+                        this.open_directory(path, window, cx);
                     }
                     Ok(Some(path)) => this.open_file(path, None, window, cx),
                     Ok(None) => {}
@@ -1975,11 +2051,19 @@ impl Workbench {
     }
 
     fn collapse_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.explorer.reveal_pending = false;
+        self.explorer.reveal_pending = None;
         let Some(root) = self.explorer.rows.first().map(|row| row.entry.path.clone()) else {
             return;
         };
         self.explorer.rows.retain(|row| row.depth <= 1);
+        let selected = self
+            .explorer
+            .rows
+            .iter()
+            .filter(|row| self.explorer.selected.contains(&row.entry.path))
+            .map(|row| row.entry.path.clone())
+            .collect();
+        self.explorer.set_selected(selected);
         self.explorer.expanded.retain(|path| *path == root);
         self.explorer.restore_expanded.clear();
         self.explorer.tasks.clear();

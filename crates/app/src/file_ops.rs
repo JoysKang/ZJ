@@ -251,12 +251,29 @@ pub fn unique_name(dir: &Path, name: &OsStr) -> PathBuf {
     unreachable!("an unbounded range always yields a free name")
 }
 
+/// Removes duplicate paths and descendants already covered by a selected parent.
+pub fn top_level_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let paths: std::collections::BTreeSet<_> = paths.into_iter().collect();
+    paths
+        .iter()
+        .filter(|path| {
+            !path
+                .ancestors()
+                .skip(1)
+                .any(|parent| paths.contains(parent))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Copies a file or folder into `dir`; a name that is taken gets a `copy` suffix.
 pub fn copy_into(source: &Path, dir: &Path) -> io::Result<PathBuf> {
     let name = source
         .file_name()
         .ok_or_else(|| io::Error::other("无法复制根目录"))?;
-    if dir.starts_with(source) {
+    if fs::symlink_metadata(source)?.is_dir()
+        && fs::canonicalize(dir)?.starts_with(fs::canonicalize(source)?)
+    {
         return Err(io::Error::other("不能把文件夹复制到它自己里面"));
     }
     let target = unique_name(dir, name);
@@ -300,7 +317,13 @@ fn copy_recursive(source: &Path, target: &Path, skipped: &mut usize) -> io::Resu
         }
         Ok(())
     } else if kind.is_file() {
-        fs::copy(source, target).map(|_| ())
+        let mut input = fs::File::open(source)?;
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(target)?;
+        io::copy(&mut input, &mut output)?;
+        output.set_permissions(metadata.permissions())
     } else {
         *skipped += 1;
         Ok(())
@@ -313,10 +336,11 @@ pub fn move_into(source: &Path, dir: &Path) -> io::Result<PathBuf> {
     let name = source
         .file_name()
         .ok_or_else(|| io::Error::other("无法移动根目录"))?;
-    if source.parent() == Some(dir) {
+    let directory = fs::symlink_metadata(source)?.is_dir();
+    if source.parent().map(fs::canonicalize).transpose()? == Some(fs::canonicalize(dir)?) {
         return Ok(source.to_path_buf());
     }
-    if dir.starts_with(source) {
+    if directory && fs::canonicalize(dir)?.starts_with(fs::canonicalize(source)?) {
         return Err(io::Error::other("不能把文件夹移动到它自己里面"));
     }
     // The name is free when chosen; if something takes it before the rename, pick again.
@@ -630,6 +654,49 @@ mod tests {
         assert_eq!(error.to_string(), "“b.md”已存在");
         rename_no_replace(&root.join("a.md"), &root.join("c.md")).unwrap();
         assert_eq!(fs::read_to_string(root.join("c.md")).unwrap(), "a");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn batch_paths_and_copy_destinations_preserve_existing_data() {
+        let root = std::env::temp_dir().join(format!("zj-ops-batch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("source/sub")).unwrap();
+        let source = root.join("source/a.txt");
+        fs::write(&source, "new").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(
+            top_level_paths([
+                source.clone(),
+                root.join("source"),
+                source.clone(),
+                root.join("elsewhere")
+            ]),
+            vec![root.join("elsewhere"), root.join("source")]
+        );
+        let target = root.join("a.txt");
+        fs::write(&target, "keep").unwrap();
+        assert_eq!(
+            copy_recursive(&source, &target, &mut 0).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+        let copied = copy_into(&source, &root).unwrap();
+        assert_eq!(fs::read_to_string(copied.clone()).unwrap(), "new");
+        assert_eq!(
+            fs::metadata(copied).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(root.join("source/sub"), &alias).unwrap();
+        assert!(copy_into(&root.join("source"), &alias).is_err());
+        assert!(move_into(&root.join("source"), &alias).is_err());
+        // A symlink itself is copied as a link, even when it points into the destination.
+        assert!(
+            fs::symlink_metadata(copy_into(&alias, &root).unwrap())
+                .unwrap()
+                .is_symlink()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

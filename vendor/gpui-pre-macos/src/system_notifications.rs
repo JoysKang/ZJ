@@ -5,9 +5,11 @@
 //! not-in-a-bundle abort) until the application posts a notification or
 //! registers a response callback.
 
+use parking_lot::Mutex;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use block2::RcBlock;
 use futures::StreamExt as _;
@@ -24,7 +26,7 @@ use objc2_user_notifications::{
     UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationAction,
     UNNotificationActionOptions, UNNotificationCategory, UNNotificationCategoryOptions,
     UNNotificationDefaultActionIdentifier, UNNotificationPresentationOptions,
-    UNNotificationRequest, UNNotificationResponse, UNUserNotificationCenter,
+    UNNotificationRequest, UNNotificationResponse, UNNotificationSound, UNUserNotificationCenter,
     UNUserNotificationCenterDelegate,
 };
 
@@ -108,10 +110,12 @@ struct NotificationCenter {
     /// The union of every action set registered so far. Categories are shared
     /// by notifications with identical actions because macOS replaces the
     /// entire registered set whenever a category is added.
+    // ZJ patch: only the latest request per tag may leave an authorization callback.
+    pending: Arc<Mutex<HashMap<SharedString, u64>>>,
+    next_request: Cell<u64>,
     categories: RefCell<
         HashMap<Vec<SystemNotificationAction>, (SharedString, Retained<UNNotificationCategory>)>,
     >,
-    authorization_requested: Cell<bool>,
 }
 
 impl NotificationCenter {
@@ -134,39 +138,17 @@ impl NotificationCenter {
             center,
             _delegate: delegate,
             categories: RefCell::new(HashMap::new()),
-            authorization_requested: Cell::new(false),
+            pending: Arc::default(),
+            next_request: Cell::new(0),
         })
     }
 
-    fn request_authorization(&self) {
-        if self.authorization_requested.replace(true) {
-            return;
-        }
-        let completion = RcBlock::new(|granted: Bool, error: *mut NSError| {
-            // SAFETY: when non-null, `error` is a valid `NSError` for the
-            // duration of the callback.
-            if let Some(error) = unsafe { error.as_ref() } {
-                log::warn!(
-                    "system notification authorization failed: {}",
-                    error.localizedDescription()
-                );
-            } else if !granted.as_bool() {
-                log::info!("system notification authorization denied");
-            }
-        });
-        self.center
-            .requestAuthorizationWithOptions_completionHandler(
-                UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
-                &completion,
-            );
-    }
-
     fn show(&self, notification: SystemNotification) {
-        self.request_authorization();
-
         let content = UNMutableNotificationContent::new();
         content.setTitle(&NSString::from_str(&notification.title));
         content.setBody(&NSString::from_str(&notification.body));
+        // ZJ patch: authorization alone does not give a notification a sound.
+        content.setSound(Some(&UNNotificationSound::defaultSound()));
         if !notification.actions.is_empty() {
             let category_identifier = self.register_category(&notification.actions);
             content.setCategoryIdentifier(&NSString::from_str(&category_identifier));
@@ -180,18 +162,48 @@ impl NotificationCenter {
             &content,
             None,
         );
-        let completion = RcBlock::new(|error: *mut NSError| {
-            // SAFETY: when non-null, `error` is a valid `NSError` for the
-            // duration of the callback.
+        // ZJ patch: keep the request alive until authorization completes, including the
+        // first permission dialog. Rechecking also observes permissions changed in Settings.
+        let center = self.center.clone();
+        let version = self.next_request.get().wrapping_add(1);
+        self.next_request.set(version);
+        let pending = self.pending.clone();
+        let tag = notification.tag;
+        pending.lock().insert(tag.clone(), version);
+        let completion = RcBlock::new(move |granted: Bool, error: *mut NSError| {
+            // ZJ patch: a newer event or dismissal invalidates an older queued notification.
+            // Keep the lock through submission so callbacks cannot reorder the same tag.
+            let mut pending = pending.lock();
+            if pending.get(&tag) != Some(&version) {
+                return;
+            }
+            pending.remove(&tag);
+            // SAFETY: a non-null NSError is valid for the duration of this callback.
             if let Some(error) = unsafe { error.as_ref() } {
                 log::warn!(
-                    "failed to deliver system notification: {}",
+                    "system notification authorization failed: {}",
                     error.localizedDescription()
                 );
+            } else if granted.as_bool() {
+                let delivered = RcBlock::new(|error: *mut NSError| {
+                    // SAFETY: a non-null NSError is valid for the duration of this callback.
+                    if let Some(error) = unsafe { error.as_ref() } {
+                        log::warn!(
+                            "failed to deliver system notification: {}",
+                            error.localizedDescription()
+                        );
+                    }
+                });
+                center.addNotificationRequest_withCompletionHandler(&request, Some(&delivered));
+            } else {
+                log::info!("system notification authorization denied");
             }
         });
         self.center
-            .addNotificationRequest_withCompletionHandler(&request, Some(&completion));
+            .requestAuthorizationWithOptions_completionHandler(
+                UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+                &completion,
+            );
     }
 
     fn register_category(&self, actions: &[SystemNotificationAction]) -> SharedString {
@@ -231,6 +243,9 @@ impl NotificationCenter {
     }
 
     fn dismiss(&self, tag: &str) {
+        // ZJ patch: invalidate notifications still waiting for authorization too.
+        let mut pending = self.pending.lock();
+        pending.remove(tag);
         let identifiers = NSArray::from_retained_slice(&[NSString::from_str(tag)]);
         self.center
             .removePendingNotificationRequestsWithIdentifiers(&identifiers);
@@ -293,9 +308,10 @@ define_class!(
             _notification: &UNNotification,
             completion_handler: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
         ) {
-            completion_handler
-                .call((UNNotificationPresentationOptions::Banner
-                    | UNNotificationPresentationOptions::List,));
+            completion_handler.call((UNNotificationPresentationOptions::Banner
+                    | UNNotificationPresentationOptions::List
+                    // ZJ patch: allow notification sounds when ZJ is frontmost as well.
+                    | UNNotificationPresentationOptions::Sound,));
         }
     }
 );

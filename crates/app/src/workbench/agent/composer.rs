@@ -2,13 +2,17 @@
 //! picker.
 
 use super::*;
+use gpui_kit::component::{WindowExt as _, input::InlineToken};
 
 impl Workbench {
     // ----- composer context ---------------------------------------------------------------
 
     pub(super) fn agent_clear_attachments(&mut self, cx: &mut Context<Self>) {
         self.agent.attachments.clear();
+        self.agent.image_references.clear();
+        self.agent.next_image_reference = 0;
         self.agent.image_generation += 1;
+        self.agent.image_preview_task = None;
         for (_, preview) in self.agent.image_previews.drain() {
             preview.remove_asset(cx);
         }
@@ -63,8 +67,10 @@ impl Workbench {
     pub(in crate::workbench) fn agent_remove_attachment(
         &mut self,
         index: usize,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.agent.image_preview_task = None;
         if index < self.agent.attachments.len()
             && let Attachment::Image { id, .. } = self.agent.attachments.remove(index)
             && !self
@@ -76,10 +82,131 @@ impl Workbench {
         {
             preview.remove_asset(cx);
         }
+        let attachments = &self.agent.attachments;
+        self.agent.image_references.retain(|_, id| {
+            id.is_none_or(|id| {
+                attachments
+                    .iter()
+                    .any(|a| matches!(a, Attachment::Image { id: other, .. } if *other == id))
+            })
+        });
+        self.agent_sync_image_references(window, cx);
         cx.notify();
     }
 
-    pub(in crate::workbench) fn agent_paste_images(&mut self, cx: &mut Context<Self>) -> bool {
+    fn agent_sync_image_references(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let labels = agent_model::attachment_labels(&self.agent.attachments);
+        let images: HashMap<_, _> = self
+            .agent
+            .attachments
+            .iter()
+            .zip(labels)
+            .filter_map(|(attachment, label)| match attachment {
+                Attachment::Image { id, .. } => Some((*id, label)),
+                _ => None,
+            })
+            .collect();
+        self.agent.composer.update(cx, |input, cx| {
+            let tokens = input.tokens().to_vec();
+            for span in tokens.into_iter().rev() {
+                let token = span.token();
+                if !token.id().starts_with("image-reference:") {
+                    continue;
+                }
+                let reference = self.agent.image_references.get(token.id().as_ref());
+                if matches!(reference, Some(None)) {
+                    continue;
+                }
+                let label = reference.and_then(|id| id.and_then(|id| images.get(&id)));
+                if label.is_some_and(|label| token.label().as_ref() == label) {
+                    continue;
+                }
+                let replacement = label.map(|label| {
+                    InlineToken::new(token.id().clone(), format!("[{label}]"))
+                        .with_label(label.clone())
+                });
+                let _ = replace_image_reference(input, span.range(), replacement, window, cx);
+            }
+        });
+    }
+
+    pub(in crate::workbench) fn agent_preview_image(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.agent.image_preview_task.is_some() || window.has_active_dialog(cx) {
+            return;
+        }
+        let Some(Attachment::Image { id, data, .. }) = self.agent.attachments.get(index) else {
+            return;
+        };
+        let id = *id;
+        let data = data.clone();
+        let generation = self.agent.image_generation;
+        let job = cx.background_spawn(async move { crate::agent_images::enlarged(&data) });
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = job.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.agent.image_generation != generation {
+                    return;
+                }
+                this.agent.image_preview_task = None;
+                let Some(index) =
+                    this.agent.attachments.iter().position(
+                        |a| matches!(a, Attachment::Image { id: other, .. } if *other == id),
+                    )
+                else {
+                    return;
+                };
+                let label = agent_model::attachment_labels(&this.agent.attachments)[index].clone();
+                match result {
+                    Ok(image) if !window.has_active_dialog(cx) => {
+                        window.open_dialog(cx, move |dialog, window, cx| {
+                            let image = image.clone();
+                            let viewport = window.viewport_size();
+                            let margin = theme::AGENT_IMAGE_PREVIEW_MARGIN;
+                            let width = (viewport.width - margin * 2.)
+                                .min(theme::AGENT_IMAGE_PREVIEW_WIDTH);
+                            let height = (viewport.height - margin * 4.)
+                                .min(theme::AGENT_IMAGE_PREVIEW_HEIGHT);
+                            dialog
+                                .title(label.clone())
+                                .width(width)
+                                .margin_top((viewport.height - height - margin * 2.) / 2.)
+                                .overlay_closable(true)
+                                .child(
+                                    div()
+                                        .id("agent-enlarged-image")
+                                        .test_support()
+                                        .w_full()
+                                        .h(height)
+                                        .bg(theme::colors(cx).editor)
+                                        .child(
+                                            img(image.clone())
+                                                .size_full()
+                                                .object_fit(ObjectFit::Contain),
+                                        ),
+                                )
+                                .on_close(move |_, _, cx| image.clone().remove_asset(cx))
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(error) => this.message = error,
+                }
+                cx.notify();
+            });
+        });
+        self.agent.image_preview_task = Some(task);
+        cx.notify();
+    }
+
+    pub(in crate::workbench) fn agent_paste_images(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(clipboard) = cx.read_from_clipboard() else {
             return false;
         };
@@ -91,6 +218,7 @@ impl Workbench {
                     let name = format!("粘贴的图片.{}", image.format.extension());
                     self.agent_load_image(
                         move || crate::agent_images::from_bytes(name, None, image.bytes),
+                        window,
                         cx,
                     );
                 }
@@ -101,12 +229,12 @@ impl Workbench {
                         .all(|p| crate::agent_images::is_image(p)) =>
                 {
                     handled = true;
-                    self.agent_attach_images(paths.paths().to_vec(), cx);
+                    self.agent_attach_images(paths.paths().to_vec(), window, cx);
                 }
                 ClipboardEntry::String(text) => {
                     if let Some(paths) = crate::agent_images::pasted_paths(&text.text) {
                         handled = true;
-                        self.agent_attach_images(paths, cx);
+                        self.agent_attach_images(paths, window, cx);
                     }
                 }
                 _ => {}
@@ -118,16 +246,18 @@ impl Workbench {
     pub(in crate::workbench) fn agent_attach_images(
         &mut self,
         paths: Vec<PathBuf>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         for path in paths {
-            self.agent_load_image(move || crate::agent_images::from_path(path), cx);
+            self.agent_load_image(move || crate::agent_images::from_path(path), window, cx);
         }
     }
 
     fn agent_load_image(
         &mut self,
         load: impl FnOnce() -> Result<(Attachment, Arc<Image>), String> + Send + 'static,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let count = self
@@ -141,48 +271,97 @@ impl Workbench {
             cx.notify();
             return;
         }
+        // Reserve the insertion point before decoding, so later typing cannot move the image.
+        let ordinal = self.agent.next_image_reference + 1;
+        let reference = format!("image-reference:{}:{ordinal}", self.agent.image_generation);
+        self.agent.next_image_reference = ordinal;
+        let label = format!("图 {ordinal}");
+        let token = InlineToken::new(reference.clone(), format!("[{label}]")).with_label(label);
+        if let Err(error) = self.agent.composer.update(cx, |input, cx| {
+            // An image reference is inserted at the caret; selected draft text is retained.
+            let selection = input.selected_range();
+            let cursor = input.cursor();
+            input.set_selected_range(cursor..cursor, cx);
+            let result = input.replace_with_token(token, window, cx);
+            if result.is_err() {
+                input.set_selected_range(selection, cx);
+            }
+            result
+        }) {
+            self.message = format!("无法插入图片引用：{error}");
+            cx.notify();
+            return;
+        }
+        self.agent.image_references.insert(reference.clone(), None);
         self.agent.images_loading += 1;
         let generation = self.agent.image_generation;
         let job = cx.background_spawn(async move { load() });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let result = job.await;
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.agent.images_loading -= 1;
                 if this.agent.image_generation != generation {
                     cx.notify();
                     return;
                 }
+                let result = result.and_then(|(attachment, preview)| {
+                    let total: usize = this
+                        .agent
+                        .attachments
+                        .iter()
+                        .map(|a| match a {
+                            Attachment::Image { data, .. } => data.len(),
+                            _ => 0,
+                        })
+                        .sum();
+                    if let Attachment::Image { id, data, .. } = &attachment
+                        && !this.agent.attachments.iter().any(
+                            |a| matches!(a, Attachment::Image { id: other, .. } if other == id),
+                        )
+                        && total + data.len()
+                            > crate::md_images::MAX_FILE_BYTES as usize * 4 / 3 + 4
+                    {
+                        return Err("所有图片的总大小不能超过 16 MB".into());
+                    }
+                    Ok((attachment, preview))
+                });
                 match result {
-                    Ok((attachment, preview)) => {
-                        if this.agent.attachments.contains(&attachment) {
-                            cx.notify();
-                            return;
-                        }
-                        let total: usize = this
-                            .agent
-                            .attachments
-                            .iter()
-                            .map(|a| match a {
-                                Attachment::Image { data, .. } => data.len(),
-                                _ => 0,
-                            })
-                            .sum();
-                        if let Attachment::Image { id, data, .. } = &attachment {
-                            if total + data.len()
-                                > crate::md_images::MAX_FILE_BYTES as usize * 4 / 3 + 4
-                            {
-                                this.message = "所有图片的总大小不能超过 16 MB".into();
-                                cx.notify();
-                                return;
-                            }
-                            this.agent.image_previews.insert(*id, preview);
-                        }
-                        if !this.agent.attachments.contains(&attachment) {
-                            this.agent.attachments.push(attachment);
+                    Ok((mut attachment, preview)) => {
+                        let Attachment::Image {
+                            id,
+                            ordinal: number,
+                            ..
+                        } = &mut attachment
+                        else {
+                            unreachable!()
+                        };
+                        let id = *id;
+                        *number = Some(ordinal);
+                        this.agent
+                            .image_references
+                            .insert(reference.clone(), Some(id));
+                        if !this.agent.attachments.iter().any(
+                            |a| matches!(a, Attachment::Image { id: other, .. } if *other == id),
+                        ) {
+                            this.agent.image_previews.insert(id, preview);
+                            // Keep paste/drop order even when a later image finishes decoding first.
+                            let index = this
+                                .agent
+                                .attachments
+                                .iter()
+                                .position(|a| {
+                                    matches!(a, Attachment::Image { ordinal: Some(other), .. } if *other > ordinal)
+                                })
+                                .unwrap_or(this.agent.attachments.len());
+                            this.agent.attachments.insert(index, attachment);
                         }
                     }
-                    Err(error) => this.message = error,
+                    Err(error) => {
+                        this.agent.image_references.remove(&reference);
+                        this.message = error;
+                    }
                 }
+                this.agent_sync_image_references(window, cx);
                 cx.notify();
             });
         })
@@ -190,17 +369,21 @@ impl Workbench {
         cx.notify();
     }
 
-    pub(in crate::workbench) fn agent_pick_images(&mut self, cx: &mut Context<Self>) {
+    pub(in crate::workbench) fn agent_pick_images(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let answer = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: true,
             prompt: Some("添加图片".into()),
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let result = answer.await;
-            let _ = this.update(cx, |this, cx| match result {
-                Ok(Ok(Some(paths))) => this.agent_attach_images(paths, cx),
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(Ok(Some(paths))) => this.agent_attach_images(paths, window, cx),
                 Ok(Ok(None)) => {}
                 Ok(Err(e)) => {
                     this.message = format!("无法选择图片：{e}");
@@ -220,6 +403,7 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.agent_sync_image_references(window, cx);
         let (text, cursor) = {
             let composer = self.agent.composer.read(cx);
             (composer.value().to_string(), composer.cursor())
@@ -350,15 +534,13 @@ impl Workbench {
         };
         let text = self.agent.composer.read(cx).value().to_string();
         if mention.range.end <= text.len() {
-            let mut next = String::with_capacity(text.len());
-            next.push_str(&text[..mention.range.start]);
-            next.push_str(&text[mention.range.end..]);
-            self.agent
-                .composer
-                .update(cx, |composer, cx| composer.set_value(next, window, cx));
+            self.agent.composer.update(cx, |composer, cx| {
+                composer.set_selected_range(mention.range, cx);
+                composer.replace("", window, cx);
+            });
         }
         if !entry.directory && crate::agent_images::is_image(&entry.path) {
-            self.agent_attach_images(vec![entry.path], cx);
+            self.agent_attach_images(vec![entry.path], window, cx);
         } else {
             let attachment = if entry.directory {
                 Attachment::Directory(entry.path)
@@ -453,10 +635,13 @@ impl Workbench {
         if let Some(command) = self.agent_slash_matches(cx).get(index.unwrap_or(selected)) {
             let text = self.agent.composer.read(cx).value().to_string();
             let next = agent_model::with_command(&text, &command.name);
-            let end = next.len();
+            let trimmed = text.trim_start();
+            let word_end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+            let suffix_len = trimmed[word_end..].trim_start().len();
             self.agent.composer.update(cx, |composer, cx| {
-                composer.set_value(next, window, cx);
-                composer.set_selected_range(end..end, cx);
+                composer.set_selected_range(0..text.len() - suffix_len, cx);
+                composer.replace(&next[..next.len() - suffix_len], window, cx);
+                composer.set_selected_range(next.len()..next.len(), cx);
             });
             self.agent.slash = None;
         }
@@ -469,4 +654,31 @@ impl Workbench {
             cx.notify();
         }
     }
+}
+
+/// Keep the user's selection when an attachment changes a reference elsewhere in the draft.
+fn replace_image_reference(
+    input: &mut TextareaState,
+    range: std::ops::Range<usize>,
+    replacement: Option<InlineToken>,
+    window: &mut Window,
+    cx: &mut Context<TextareaState>,
+) -> Result<(), gpui_kit::component::input::InlineTokenError> {
+    let mut selection = input.selected_range();
+    let len = replacement.as_ref().map_or(0, |token| token.text().len());
+    if let Some(token) = replacement {
+        input.replace_range_with_token(range.clone(), token, window, cx)?;
+    } else {
+        input.set_selected_range(range.clone(), cx);
+        input.replace("", window, cx);
+    }
+    for offset in [&mut selection.start, &mut selection.end] {
+        if *offset >= range.end {
+            *offset = offset.saturating_add_signed(len as isize - range.len() as isize);
+        } else if *offset > range.start {
+            *offset = range.start + len;
+        }
+    }
+    input.set_selected_range(selection, cx);
+    Ok(())
 }

@@ -45,7 +45,7 @@ ADR 0004 里，Claude Code 和 Codex 通过 npm 适配器（`claude-agent-acp`�
 
 ### 3. Codex：所有会话共用一个 `codex app-server`
 
-- `session/new` 对应 `thread/start`，`session/load` 对应 `thread/resume`（`excludeTurns`），`session/close` 对应 `thread/unsubscribe`；
+- `session/new` 对应 `thread/start`，`session/load` 对应 `thread/resume`（`excludeTurns`），`session/close` 等待主会话 `thread/unsubscribe` 的结果，再通过只读元数据发现并取消其归属明确、状态空闲的子会话订阅；保留运行中、待审批、待回答和其他打开会话的子树，恢复请求期间暂停目标子树回收；
 - `session/prompt` 对应 `turn/start`，带上本会话的审批策略、沙箱、审查方和模型设置。快速模式用 `serviceTier: "fast"`；
 - 追加指令用 `turn/steer`，取消用 `turn/interrupt`；
 - 只有本次提示自己的那一轮（按 turn id）结束时才回答提示。Codex 会自己开回合（例如为目标继续工作），这些回合的结束不会误结束当前提示；
@@ -65,6 +65,10 @@ ADR 0004 里，Claude Code 和 Codex 通过 npm 适配器（`claude-agent-acp`�
 - 数据目录里以前装的适配器和 Node.js（`~/Library/Application Support/ZJ/agents`）不再使用，ZJ 不自动删除，用户可以自己删掉。
 
 ## 多个会话的资源
+
+桥接只适配 Agent 会话协议。Codex 子会话回收限定于当前 `app-server` 内、归属 ZJ 已关闭主会话的订阅，资源释放交给 Codex 的 `thread/unsubscribe`。这是 Codex 桥接内部的协议适配，不能视为适用于所有 Agent 的通用回收算法。
+
+外部 MCP 工具的传输方式、共享服务启停、模型、索引与缓存由 Agent 配置及工具自身负责。ZJ 不按工具名称增加专属适配，也不修改全局 MCP 配置或结束外部共享守护进程。
 
 - Claude Code：桥接进程按 Agent 共用（同一种 Agent、同样的环境变量，整个应用一个），但 Claude Code 的 stream-json 一个进程只能跑一个会话，所以每个会话一个 `claude`（约 115–145 MB）。这和原来的适配器一样（ADR 0004 的实测：2 个会话约 297 MB）。会话空闲 10 分钟（设置 `agent.idle_minutes`）后，桥接关闭它的 `claude`，下次提问时用 `--resume` 恢复。
 - Codex：所有会话共用一个 `codex app-server`，会话只是其中的 thread。实测第二个会话只多约 18 MB（69 → 87 MB）。

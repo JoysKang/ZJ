@@ -7,6 +7,7 @@ use super::*;
 // to the built-in one.
 #[allow(unused_imports)]
 use core::prelude::v1::test;
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{TestAppContext, base::Root};
 use workspace_editor_agent::{
@@ -139,8 +140,25 @@ async fn pasted_images_preview_remove_and_send_as_image_only(cx: &mut TestAppCon
     use base64::{Engine, engine::general_purpose::STANDARD};
     cx.executor().allow_parking();
     let root = temp_root("image-composer");
-    let (handle, this) = open(cx, Some(root.clone()));
+    let store = Arc::new(History::new(root.join("history.sqlite")));
+    let mut settings = crate::settings::Settings::default();
+    settings.agent.panel_visible = true;
+    let mut fake = fake_agent();
+    fake.env.insert("FAKE_PROMPT".into(), "images".into());
+    settings.agent.custom = vec![fake];
+    settings.agent.default_agent = "fake".into();
+    let (handle, this) = open_window(
+        cx,
+        Some(root.clone()),
+        settings,
+        AgentStore {
+            history: Some(store.clone()),
+            default_workspace: None,
+        },
+    );
     let bytes = crate::agent_images::tests::png();
+    let file = root.join("CleanShot image.png");
+    std::fs::write(&file, &bytes).unwrap();
     cx.update_window(handle.into(), |_, window, cx| {
         cx.write_to_clipboard(ClipboardItem::new_string("普通文字".into()));
         this.update(cx, |p, cx| p.agent_focus_composer(window, cx));
@@ -154,12 +172,14 @@ async fn pasted_images_preview_remove_and_send_as_image_only(cx: &mut TestAppCon
         });
     })
     .unwrap();
-    let paste = |cx: &mut TestAppContext| {
+    let paste = |cx: &mut TestAppContext, from_file: bool| {
         cx.update_window(handle.into(), |_, window, cx| {
-            cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
-                ImageFormat::Png,
-                bytes.clone(),
-            )));
+            let item = if from_file {
+                ClipboardItem::new_string(file.display().to_string())
+            } else {
+                ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, bytes.clone()))
+            };
+            cx.write_to_clipboard(item);
             this.update(cx, |p, cx| p.agent_focus_composer(window, cx));
             window.render_frame(cx);
             window.press("cmd-v", cx);
@@ -169,21 +189,46 @@ async fn pasted_images_preview_remove_and_send_as_image_only(cx: &mut TestAppCon
             p.agent.images_loading == 0 && p.agent.attachments.len() == 1
         });
     };
-    paste(cx);
+    paste(cx, false);
     this.read_with(cx, |p, cx| {
-        assert!(p.agent.composer.read(cx).value().is_empty());
+        assert_eq!(p.agent.composer.read(cx).value().as_ref(), "[图 1]");
         assert_eq!(p.agent.image_previews.len(), 1);
     });
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
+        window.click(("agent-image-preview", 0usize), cx);
+    })
+    .unwrap();
+    until(cx, &this, "enlarged preview loaded", |p| {
+        p.agent.image_preview_task.is_none()
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.has_active_dialog(cx));
+        let bounds = window.find("agent-enlarged-image").bounds();
+        assert!(bounds.size.width > theme::AGENT_IMAGE_WIDTH);
+        assert!(bounds.size.height > theme::AGENT_IMAGE_HEIGHT);
+        assert!(bounds.bottom() <= window.viewport_size().height);
+        window.press("escape", cx);
+        window.render_frame(cx);
+        assert!(!window.has_active_dialog(cx));
+    })
+    .unwrap();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
         window.click(("agent-chip-remove", 0usize), cx);
+        assert!(!window.has_active_dialog(cx));
     })
     .unwrap();
     this.read_with(cx, |p, _| {
         assert!(p.agent.attachments.is_empty());
         assert!(p.agent.image_previews.is_empty());
     });
-    paste(cx);
+    paste(cx, true);
+    this.read_with(cx, |p, cx| {
+        assert_eq!(p.agent.composer.read(cx).value().as_ref(), "[图 2]");
+        assert_eq!(p.agent.attachments[0].path(), Some(&file));
+    });
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
         window.click("agent-send", cx);
@@ -194,7 +239,58 @@ async fn pasted_images_preview_remove_and_send_as_image_only(cx: &mut TestAppCon
     this.read_with(cx, |p, _| {
         assert!(p.agent.attachments.is_empty());
         assert!(p.agent.image_previews.is_empty());
+        assert!(p.agent.current().unwrap().thread.items.iter().any(|item| {
+            matches!(item, Item::User { attachments, .. } if attachments == &["图 2".to_string()])
+        }));
     });
+    until(cx, &this, "history id", |p| {
+        p.agent.current().unwrap().db.is_some()
+    });
+    let id = this.read_with(cx, |p, _| p.agent.current().unwrap().db.unwrap());
+    store.flush().unwrap();
+    let messages = store.messages(id).unwrap();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.role == workspace_editor_agent_history::Role::User && m.text == "[图 2]")
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn removing_an_image_cancels_its_pending_enlarged_preview(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("cancel-image-preview");
+    let (handle, this) = open(cx, Some(root.clone()));
+    let (attachment, preview) = crate::agent_images::from_bytes(
+        "preview.png".into(),
+        None,
+        crate::agent_images::tests::png(),
+    )
+    .unwrap();
+    let id = match &attachment {
+        Attachment::Image { id, .. } => *id,
+        _ => unreachable!(),
+    };
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent.attachments.push(attachment.clone());
+            p.agent.image_previews.insert(id, preview);
+            p.agent_preview_image(0, window, cx);
+            assert!(p.agent.image_preview_task.is_some());
+            p.agent_remove_attachment(0, window, cx);
+            // Re-adding the same bytes must not let the old request open a dialog.
+            p.agent.attachments.push(attachment);
+            assert!(p.agent.image_preview_task.is_none());
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(!window.has_active_dialog(cx));
+    })
+    .unwrap();
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -395,6 +491,11 @@ async fn composer_controls_stay_inside_the_panel_with_quota_and_model_options(
                         "{id} escapes composer at width={width}, busy={busy}: control={control:?}, composer={composer:?}");
                     assert!(control.top() >= composer.top() && control.bottom() <= composer.bottom());
                 }
+                if width == 900. {
+                    let config = window.find("agent-config").bounds();
+                    assert!(config.size.width < composer.size.width / 2.,
+                        "model selector should hug its text: {config:?}");
+                }
                 let quota = window.find("agent-quota").bounds();
                 let send = window.find("agent-send").bounds();
                 assert!(quota.right() <= send.left(), "quota overlaps send at width={width}");
@@ -406,6 +507,154 @@ async fn composer_controls_stay_inside_the_panel_with_quota_and_model_options(
             }).unwrap();
         }
     }
+}
+
+#[gpui_kit::test]
+async fn agent_completion_and_pending_approvals_send_notifications_once_without_streaming_or_cancel_alerts(
+    cx: &mut TestAppContext,
+) {
+    use workspace_editor_agent::TurnOutcome;
+    let (handle, this) = open(cx, None);
+    let observer = cx.clone();
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_ensure_session(cx);
+            let key = p.agent.current.unwrap();
+            let initial = observer.shown_system_notifications().len();
+            p.agent
+                .session_mut(key)
+                .unwrap()
+                .thread
+                .push_user("task".into(), vec![], 1);
+            p.agent_events(
+                key,
+                vec![AgentEvent::MessageChunk {
+                    text: "working".into(),
+                }],
+                window,
+                cx,
+            );
+            assert_eq!(observer.shown_system_notifications().len(), initial);
+            let request = |id| {
+                AgentEvent::PermissionRequested(PermissionRequest {
+                    id,
+                    tool_call: ToolCallPatch {
+                        id: format!("approval-{id}"),
+                        ..Default::default()
+                    },
+                    raw_input: None,
+                    options: vec![],
+                })
+            };
+            p.agent_events(key, vec![request(100), request(101)], window, cx);
+            assert_eq!(
+                p.agent
+                    .current()
+                    .unwrap()
+                    .thread
+                    .pending_permissions()
+                    .count(),
+                2
+            );
+            assert_eq!(observer.shown_system_notifications().len(), initial + 1);
+            let notification = observer.shown_system_notifications().pop().unwrap();
+            assert_eq!(notification.title.as_ref(), "Fake 等待你的确认");
+            assert!(notification.body.contains("默认工作区") && notification.body.contains("task"));
+            p.agent_events(key, vec![request(100)], window, cx);
+            assert_eq!(observer.shown_system_notifications().len(), initial + 1);
+
+            p.agent_events(
+                key,
+                vec![AgentEvent::Progress {
+                    message: "waiting".into(),
+                }],
+                window,
+                cx,
+            );
+            assert_eq!(observer.shown_system_notifications().len(), initial + 1);
+            // The completion must also notify when its session is hidden; duplicate ends are ignored.
+            p.agent.visible = false;
+            let end = |turn, outcome| AgentEvent::TurnEnded { turn, outcome };
+            p.agent_events(
+                key,
+                vec![end(1, TurnOutcome::EndTurn), end(1, TurnOutcome::EndTurn)],
+                window,
+                cx,
+            );
+            assert_eq!(observer.shown_system_notifications().len(), initial + 2);
+            assert_eq!(
+                observer
+                    .shown_system_notifications()
+                    .last()
+                    .unwrap()
+                    .title
+                    .as_ref(),
+                "Fake 已完成"
+            );
+
+            p.agent
+                .session_mut(key)
+                .unwrap()
+                .thread
+                .push_user("cancel".into(), vec![], 2);
+            p.agent_events(
+                key,
+                vec![request(102), end(2, TurnOutcome::Cancelled)],
+                window,
+                cx,
+            );
+            assert_eq!(observer.shown_system_notifications().len(), initial + 2);
+            assert!(observer.delivered_system_notifications().is_empty());
+            p.agent
+                .session_mut(key)
+                .unwrap()
+                .thread
+                .push_user("fail".into(), vec![], 3);
+            p.agent_events(
+                key,
+                vec![end(3, TurnOutcome::Failed("error".into()))],
+                window,
+                cx,
+            );
+            assert_eq!(observer.shown_system_notifications().len(), initial + 3);
+            assert_eq!(
+                observer
+                    .shown_system_notifications()
+                    .last()
+                    .unwrap()
+                    .title
+                    .as_ref(),
+                "Fake 运行失败"
+            );
+
+            p.agent
+                .session_mut(key)
+                .unwrap()
+                .thread
+                .push_user("stop".into(), vec![], 4);
+            p.agent_cancel(cx);
+            assert!(observer.delivered_system_notifications().is_empty());
+            p.agent_events(key, vec![request(103)], window, cx);
+            assert_eq!(observer.shown_system_notifications().len(), initial + 3);
+            assert!(observer.delivered_system_notifications().is_empty());
+            p.agent_events(
+                key,
+                vec![end(4, TurnOutcome::Failed("cancel timed out".into()))],
+                window,
+                cx,
+            );
+            assert_eq!(observer.shown_system_notifications().len(), initial + 3);
+            p.agent
+                .session_mut(key)
+                .unwrap()
+                .thread
+                .push_user("next task".into(), vec![], 5);
+            p.agent_events(key, vec![end(5, TurnOutcome::EndTurn)], window, cx);
+            assert_eq!(observer.shown_system_notifications().len(), initial + 4);
+            assert_eq!(observer.delivered_system_notifications().len(), 1);
+        });
+    })
+    .unwrap();
 }
 
 #[gpui_kit::test]
@@ -1462,10 +1711,16 @@ async fn a_permission_waits_for_the_user_and_allow_once_continues(cx: &mut TestA
             agent_model::RowStatus::Awaiting
         );
     });
+    let observer = cx.clone();
+    assert_eq!(observer.delivered_system_notifications().len(), 1);
     let (key, id) = this.read_with(cx, |p, _| pending_permission(p).unwrap());
     cx.update_window(handle.into(), |_, window, cx| {
         this.update(cx, |p, cx| {
-            p.agent_answer(key, id, PermissionChoice::Once, window, cx)
+            p.agent_answer(key, id, PermissionChoice::Once, window, cx);
+            assert!(
+                observer.delivered_system_notifications().is_empty(),
+                "answering must immediately dismiss its notification"
+            );
         });
     })
     .unwrap();
@@ -2341,7 +2596,10 @@ async fn folder_mentions_attach_deduplicate_remove_and_send_as_links(cx: &mut Te
             workspace_editor_agent::PromptPart::Directory(_)
         ));
     });
-    this.update(cx, |p, cx| p.agent_remove_attachment(0, cx));
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.agent_remove_attachment(0, window, cx));
+    })
+    .unwrap();
     this.read_with(cx, |p, _| assert!(p.agent.attachments.is_empty()));
     pick(cx, "links @资料");
     cx.update_window(handle.into(), |_, window, cx| {
@@ -2431,6 +2689,116 @@ async fn a_file_link_in_a_reply_opens_in_zj(cx: &mut TestAppContext) {
     .unwrap();
     this.read_with(cx, |p, _| assert!(p.message.contains("找不到链接的文件")));
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn a_directory_link_reveals_nested_folder_without_moving_the_editor(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("directory-link");
+    let dir = root.join("configs/generated");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("output.txt"), "result").unwrap();
+    let file = root.join("current.rs");
+    std::fs::write(&file, "first\nsecond\nthird\n").unwrap();
+    let (handle, this) = open(cx, Some(root.clone()));
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.agent_open_link("current.rs:3", window, cx));
+    })
+    .unwrap();
+    until(cx, &this, "editor opened", |p| {
+        p.active_document().is_some()
+    });
+    let before = this.read_with(cx, |p, cx| {
+        (p.active, p.active_document().unwrap().1.read(cx).cursor())
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.sidebar_visible = false;
+            p.agent_open_link("configs/generated", window, cx);
+        });
+    })
+    .unwrap();
+    until(cx, &this, "folder expanded", |p| {
+        p.explorer
+            .rows
+            .iter()
+            .any(|row| row.entry.path == dir.join("output.txt"))
+    });
+    this.read_with(cx, |p, cx| {
+        assert!(p.sidebar_visible);
+        assert!(p.sidebar == Sidebar::Explorer);
+        assert_eq!(p.explorer.selection.as_ref(), Some(&dir));
+        assert!(p.explorer.expanded.contains(&dir));
+        assert_eq!(p.root.as_ref(), Some(&root));
+        assert_eq!(
+            (p.active, p.active_document().unwrap().1.read(cx).cursor()),
+            before
+        );
+        assert_eq!(cx.windows().len(), 1);
+    });
+    let hidden = root.join(".generated");
+    std::fs::create_dir_all(&hidden).unwrap();
+    std::fs::write(hidden.join("result.txt"), "result").unwrap();
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.agent_open_link(".generated", window, cx));
+    })
+    .unwrap();
+    until(cx, &this, "hidden folder revealed", |p| {
+        p.explorer
+            .rows
+            .iter()
+            .any(|row| row.entry.path == hidden.join("result.txt"))
+    });
+    this.read_with(cx, |p, cx| {
+        assert!(p.explorer.show_hidden);
+        assert_eq!(p.explorer.selection.as_ref(), Some(&hidden));
+        assert_eq!(
+            (p.active, p.active_document().unwrap().1.read(cx).cursor()),
+            before
+        );
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn an_external_directory_link_opens_and_reuses_a_workspace_window(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let base = temp_root("external-directory-link");
+    let root = base.join("project");
+    let dir = base.join("generated output");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let (handle, this) = open(cx, Some(root.clone()));
+    for _ in 0..2 {
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.agent_open_link(&dir.display().to_string(), window, cx)
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        this.read_with(cx, |p, cx| {
+            assert_eq!(p.root.as_ref(), Some(&root));
+            assert!(p.message.is_empty(), "{}", p.message);
+            assert_eq!(cx.windows().len(), 2);
+            assert!(cx.windows().into_iter().any(|handle| {
+                handle
+                    .downcast::<Root>()
+                    .unwrap()
+                    .read(cx)
+                    .unwrap()
+                    .view()
+                    .clone()
+                    .downcast::<Workbench>()
+                    .unwrap()
+                    .read(cx)
+                    .root
+                    .as_ref()
+                    == Some(&dir)
+            }));
+        });
+    }
+    let _ = std::fs::remove_dir_all(base);
 }
 
 #[gpui_kit::test]
@@ -2652,4 +3020,312 @@ async fn a_typed_only_question_takes_the_keyboard_and_hides_a_secret(cx: &mut Te
     settle(cx, &this);
     assert!(replies(cx, &this).contains("selected:skip"));
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn clicking_an_agent_notification_opens_its_window_and_session(cx: &mut TestAppContext) {
+    use workspace_editor_agent::TurnOutcome;
+    let (first_handle, first) = open(cx, None);
+    let (_, second) = open(cx, None);
+    let second_state =
+        second.read_with(cx, |p, _| (p.agent.current, p.agent.view, p.agent.visible));
+    let mut first_key = 0;
+    cx.update_window(first_handle.into(), |_, window, cx| {
+        first.update(cx, |p, cx| {
+            p.agent_ensure_session(cx);
+            first_key = p.agent.current.unwrap();
+            p.agent.session_mut(first_key).unwrap().thread.push_user(
+                "first task".into(),
+                vec![],
+                1,
+            );
+            p.agent_events(
+                first_key,
+                vec![AgentEvent::TurnEnded {
+                    turn: 1,
+                    outcome: TurnOutcome::EndTurn,
+                }],
+                window,
+                cx,
+            );
+            p.agent.visible = false;
+            p.agent.view = AgentView::History;
+            p.agent
+                .composer
+                .update(cx, |input, cx| input.set_value("draft", window, cx));
+            p.agent
+                .attachments
+                .push(Attachment::File("/tmp/draft.rs".into()));
+        });
+    })
+    .unwrap();
+    let notification = cx.shown_system_notifications().last().unwrap().clone();
+    let respond = |cx: &TestAppContext, tag| {
+        cx.simulate_system_notification_response(SystemNotificationResponse {
+            tag,
+            action_id: None,
+        });
+    };
+    respond(cx, "zj-agent-stale-0-0".into());
+    first.read_with(cx, |p, _| assert!(!p.agent.visible));
+    respond(cx, notification.tag.clone());
+    cx.run_until_parked();
+    first.read_with(cx, |p, cx| {
+        assert!(p.agent.visible);
+        assert_eq!(p.agent.current, Some(first_key));
+        assert_eq!(p.agent.view, AgentView::Thread);
+        assert_eq!(p.agent.composer.read(cx).value().as_ref(), "draft");
+        assert_eq!(p.agent.attachments.len(), 1);
+    });
+    second.read_with(cx, |p, _| {
+        assert_eq!(
+            (p.agent.current, p.agent.view, p.agent.visible),
+            second_state
+        )
+    });
+    assert!(
+        cx.dismissed_system_notifications()
+            .contains(&notification.tag)
+    );
+    cx.update_window(first_handle.into(), |_, window, cx| {
+        first.update(cx, |p, cx| {
+            p.agent_new_session(None, window, cx);
+            assert_ne!(p.agent.current, Some(first_key));
+        });
+    })
+    .unwrap();
+    respond(cx, notification.tag);
+    cx.run_until_parked();
+    first.read_with(cx, |p, _| assert_eq!(p.agent.current, Some(first_key)));
+}
+
+#[gpui_kit::test]
+async fn image_references_are_inserted_at_the_composer_cursor(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (handle, this) = open(cx, None);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_focus_composer(window, cx);
+            p.agent.composer.update(cx, |input, cx| {
+                input.set_value("前文后文", window, cx);
+                input.set_selected_range("前文".len().."前文".len(), cx);
+            });
+        });
+        cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+            ImageFormat::Png,
+            crate::agent_images::tests::png(),
+        )));
+        window.render_frame(cx);
+        window.press("cmd-v", cx);
+    })
+    .unwrap();
+    until(cx, &this, "inline image loaded", |p| {
+        p.agent.images_loading == 0 && p.agent.attachments.len() == 1
+    });
+    this.read_with(cx, |p, cx| {
+        let input = p.agent.composer.read(cx);
+        assert_eq!(input.value().as_ref(), "前文[图 1]后文");
+        assert_eq!(input.tokens().len(), 1);
+        assert_eq!(input.tokens()[0].token().label().as_ref(), "图 1");
+        assert_eq!(input.cursor(), "前文[图 1]".len());
+    });
+}
+
+#[gpui_kit::test]
+async fn image_references_keep_their_images_when_editing_and_removing(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = temp_root("inline-images");
+    let first = root.join("first.png");
+    let second = root.join("second.png");
+    std::fs::write(&first, crate::agent_images::tests::png()).unwrap();
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(20, 10)
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+    std::fs::write(&second, bytes.into_inner()).unwrap();
+    let (handle, this) = open(cx, Some(root.clone()));
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_focus_composer(window, cx);
+            p.agent.composer.update(cx, |input, cx| {
+                input.set_value("第一段；第二段", window, cx)
+            });
+            p.agent_attach_images(vec![first], window, cx);
+            // Decode finishes in the background. Typing must leave the image at its insertion point.
+            p.agent.composer.update(cx, |input, cx| {
+                let end = input.value().len();
+                input.set_selected_range(end..end, cx);
+                input.replace("补充", window, cx);
+            });
+        });
+    })
+    .unwrap();
+    until(cx, &this, "first inline image loaded", |p| {
+        p.agent.images_loading == 0
+    });
+    this.read_with(cx, |p, cx| {
+        assert_eq!(
+            p.agent.composer.read(cx).value().as_ref(),
+            "[图 1]第一段；第二段补充"
+        )
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent.composer.update(cx, |input, cx| {
+                let at = "[图 1]第一段；".len();
+                input.set_selected_range(at..at, cx);
+            });
+            p.agent_attach_images(vec![second], window, cx);
+        });
+    })
+    .unwrap();
+    until(cx, &this, "second inline image loaded", |p| {
+        p.agent.images_loading == 0
+    });
+    let reference = this.read_with(cx, |p, cx| {
+        let input = p.agent.composer.read(cx);
+        assert_eq!(input.value().as_ref(), "[图 1]第一段；[图 2]第二段补充");
+        input.tokens()[1].token().id().clone()
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(
+            SharedString::from(format!("agent-image-reference-{reference}")),
+            cx,
+        );
+    })
+    .unwrap();
+    until(cx, &this, "inline preview loaded", |p| {
+        p.agent.image_preview_task.is_none()
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.has_active_dialog(cx));
+        window.press("escape", cx);
+        this.update(cx, |p, cx| {
+            p.agent_focus_composer(window, cx);
+            p.agent.composer.update(cx, |input, cx| {
+                let end = input.tokens()[1].range().end;
+                input.set_selected_range(end..end, cx);
+            });
+        });
+        window.press("backspace", cx);
+        assert_eq!(this.read(cx).agent.composer.read(cx).tokens().len(), 1);
+        window.press("cmd-z", cx);
+        assert_eq!(this.read(cx).agent.composer.read(cx).tokens().len(), 2);
+        this.update(cx, |p, cx| {
+            p.agent.composer.update(cx, |input, cx| {
+                let end = input.value().len();
+                input.set_selected_range(end..end, cx);
+            });
+            p.agent_remove_attachment(0, window, cx);
+        });
+    })
+    .unwrap();
+    this.read_with(cx, |p, cx| {
+        let input = p.agent.composer.read(cx);
+        assert_eq!(input.value().as_ref(), "第一段；[图 2]第二段补充");
+        assert_eq!(input.tokens()[0].token().id(), &reference);
+        assert_eq!(input.tokens()[0].token().label().as_ref(), "图 2");
+        assert_eq!(input.cursor(), input.value().len());
+        let Attachment::Image { id, .. } = &p.agent.attachments[0] else {
+            panic!()
+        };
+        assert_eq!(
+            p.agent.image_references.get(reference.as_ref()),
+            Some(&Some(*id))
+        );
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn slash_completion_preserves_inline_image_references(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (handle, this) = open(cx, None);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_ensure_session(cx);
+            p.agent
+                .session_mut(p.agent.current.unwrap())
+                .unwrap()
+                .thread
+                .commands = vec![AgentCommand {
+                name: "review".into(),
+                description: "Review".into(),
+                input_hint: None,
+            }];
+            p.agent_focus_composer(window, cx);
+            p.agent.composer.update(cx, |input, cx| {
+                input.set_value("/re 说明 ", window, cx);
+                let end = input.value().len();
+                input.set_selected_range(end..end, cx);
+            });
+        });
+        cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+            ImageFormat::Png,
+            crate::agent_images::tests::png(),
+        )));
+        window.render_frame(cx);
+        window.press("cmd-v", cx);
+    })
+    .unwrap();
+    until(cx, &this, "slash image loaded", |p| {
+        p.agent.images_loading == 0
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent
+                .composer
+                .update(cx, |input, cx| input.set_selected_range(3..3, cx));
+            p.agent.slash = Some(0);
+            p.agent_pick_slash(None, window, cx);
+            let input = p.agent.composer.read(cx);
+            assert_eq!(input.value().as_ref(), "/review 说明 [图 1]");
+            assert_eq!(input.tokens().len(), 1);
+        });
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn undo_restores_a_reference_deleted_while_its_image_was_loading(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (handle, this) = open(cx, None);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.agent_focus_composer(window, cx));
+        cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+            ImageFormat::Png,
+            crate::agent_images::tests::png(),
+        )));
+        window.render_frame(cx);
+        window.press("cmd-v", cx);
+        assert_eq!(this.read(cx).agent.images_loading, 1);
+        window.press("backspace", cx);
+        assert!(this.read(cx).agent.composer.read(cx).tokens().is_empty());
+    })
+    .unwrap();
+    until(cx, &this, "image loaded without its reference", |p| {
+        p.agent.images_loading == 0
+    });
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.agent.attachments.len(), 1);
+        assert_eq!(p.agent.image_previews.len(), 1);
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.press("cmd-z", cx);
+        window.render_frame(cx);
+        this.read_with(cx, |p, cx| {
+            let input = p.agent.composer.read(cx);
+            assert_eq!(input.value().as_ref(), "[图 1]");
+            assert_eq!(input.tokens().len(), 1);
+            assert!(matches!(
+                p.agent
+                    .image_references
+                    .get(input.tokens()[0].token().id().as_ref()),
+                Some(Some(_))
+            ));
+        });
+    })
+    .unwrap();
 }

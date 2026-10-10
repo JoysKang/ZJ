@@ -225,7 +225,7 @@ impl Workbench {
             self.watch.refresh_pending = false;
             self.watch.pending_plan = None;
             // Re-enumeration preserves expansion and never forces open a manually collapsed path.
-            let reveal_pending = self.explorer.reveal_pending;
+            let reveal_pending = self.explorer.reveal_pending.take();
             self.refresh_tree(window, cx);
             self.explorer.reveal_pending = reveal_pending;
             self.refresh(window, cx);

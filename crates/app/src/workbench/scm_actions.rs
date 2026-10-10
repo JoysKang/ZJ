@@ -363,43 +363,54 @@ impl Workbench {
             WriteOperation::Push | WriteOperation::Commit { push: true, .. } => "已推送",
             _ => "",
         };
-        // Started from the repository header or the status bar, where the commit box (and
-        // the message under it) may not be showing: progress goes to the status bar and a
-        // failure to a dialog.
-        let progress = match &request.operation {
-            WriteOperation::Fetch => Some(("正在抓取…".to_string(), "抓取失败".to_string())),
-            WriteOperation::Pull => Some(("正在拉取…".into(), "拉取失败".into())),
-            WriteOperation::Sync => Some(("正在同步…".into(), "同步失败".into())),
-            WriteOperation::Checkout { branch, .. } => {
-                Some((format!("正在签出 {branch}…"), format!("无法签出 {branch}")))
-            }
-            WriteOperation::CreateBranch { name, .. } => Some((
-                format!("正在创建分支 {name}…"),
+        // Progress stays in the status bar; every failed write gets one dialog.
+        let (progress, failed): (Option<String>, String) = match &request.operation {
+            WriteOperation::Fetch => (Some("正在抓取…".into()), "抓取失败".into()),
+            WriteOperation::Pull => (Some("正在拉取…".into()), "拉取失败".into()),
+            WriteOperation::Sync => (Some("正在同步…".into()), "同步失败".into()),
+            WriteOperation::Checkout { branch, .. } => (
+                Some(format!("正在签出 {branch}…")),
+                format!("无法签出 {branch}"),
+            ),
+            WriteOperation::CreateBranch { name, .. } => (
+                Some(format!("正在创建分支 {name}…")),
                 format!("无法创建分支 {name}"),
-            )),
-            WriteOperation::CreateTag { name, push, .. } => Some((
-                if *push {
+            ),
+            WriteOperation::CreateTag { name, push, .. } => (
+                Some(if *push {
                     format!("正在创建并推送标签 {name}…")
                 } else {
                     format!("正在创建标签 {name}…")
-                },
+                }),
                 format!("无法创建标签 {name}"),
-            )),
-            WriteOperation::PushTag { name } => Some((
-                format!("正在推送标签 {name}…"),
+            ),
+            WriteOperation::PushTag { name } => (
+                Some(format!("正在推送标签 {name}…")),
                 format!("无法推送标签 {name}"),
-            )),
-            WriteOperation::DeleteTag { name, .. } => Some((
-                format!("正在删除标签 {name}…"),
+            ),
+            WriteOperation::DeleteTag { name, .. } => (
+                Some(format!("正在删除标签 {name}…")),
                 format!("无法删除标签 {name}"),
-            )),
-            _ => None,
-        }
-        .map(|(text, failed)| {
+            ),
+            WriteOperation::Stage { .. } => (None, "暂存失败".into()),
+            WriteOperation::Unstage { .. } => (None, "取消暂存失败".into()),
+            WriteOperation::Discard { .. } => (None, "放弃更改失败".into()),
+            WriteOperation::Commit { push: true, .. } => (None, "提交并推送失败".into()),
+            WriteOperation::Commit { amend: true, .. } => (None, "修改上次提交失败".into()),
+            WriteOperation::Commit { .. } => (None, "提交失败".into()),
+            WriteOperation::Push => (None, "推送失败".into()),
+            WriteOperation::ApplyPatch { cached: true, .. } => (None, "更新暂存区失败".into()),
+            WriteOperation::ApplyPatch { .. } => (None, "还原所选更改失败".into()),
+            WriteOperation::StashPush { .. } => (None, "创建 Stash 失败".into()),
+            WriteOperation::StashApply { pop: true, .. } => (None, "弹出 Stash 失败".into()),
+            WriteOperation::StashApply { .. } => (None, "应用 Stash 失败".into()),
+            WriteOperation::StashDrop { .. } => (None, "删除 Stash 失败".into()),
+        };
+        let progress = progress.map(|text| {
             let name = request.repo.worktree.file_name().unwrap_or_default();
-            (format!("{}：{text}", name.to_string_lossy()), failed)
+            format!("{}：{text}", name.to_string_lossy())
         });
-        if let Some((text, _)) = &progress {
+        if let Some(text) = &progress {
             self.message = text.clone();
         }
         group.write_pending = true;
@@ -417,21 +428,21 @@ impl Workbench {
                 }
             });
             let _ = this.update_in(cx, |this, window, cx| {
-                if let Some((text, failed)) = &progress {
-                    if this.message == *text {
-                        this.message.clear();
-                    }
-                    if let Err(error) = &result {
-                        let detail = format!("仓库：{}\n{error}", worktree.display());
-                        // The answer does not matter; the dialog is informational.
-                        let _answer = window.prompt(
-                            PromptLevel::Critical,
-                            failed,
-                            Some(&detail),
-                            &crate::workbench::prompt_buttons(&["确定"]),
-                            cx,
-                        );
-                    }
+                if let Some(text) = &progress
+                    && this.message == *text
+                {
+                    this.message.clear();
+                }
+                if let Err(error) = &result {
+                    let detail = format!("仓库：{}\n\n原因：\n{error}", worktree.display());
+                    // The answer does not matter; the dialog is informational.
+                    let _answer = window.prompt(
+                        PromptLevel::Critical,
+                        &failed,
+                        Some(&detail),
+                        &crate::workbench::prompt_buttons(&["确定"]),
+                        cx,
+                    );
                 }
                 if let Some(group) = this.groups.iter_mut().find(|g| g.repo.id == id) {
                     group.write_pending = false;
@@ -446,7 +457,7 @@ impl Workbench {
                             }
                             success.into()
                         }
-                        Err(error) => error.to_string(),
+                        Err(_) => String::new(),
                     };
                 }
                 this.refresh(window, cx);

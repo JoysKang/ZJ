@@ -62,10 +62,41 @@ pub fn from_bytes(
     path: Option<PathBuf>,
     bytes: Vec<u8>,
 ) -> Result<(Attachment, Arc<Image>), String> {
+    let (image, mime_type) = decode(&bytes)?;
+    let preview = thumbnail(&image, theme::AGENT_IMAGE_WIDTH, theme::AGENT_IMAGE_HEIGHT)?;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hash);
+    Ok((
+        Attachment::Image {
+            id: hash.finish(),
+            ordinal: None,
+            name,
+            path,
+            data: STANDARD.encode(&bytes).into(),
+            mime_type: mime_type.into(),
+        },
+        preview,
+    ))
+}
+
+/// Decode on demand, bounding the enlarged image rather than retaining full-size textures.
+pub fn enlarged(data: &str) -> Result<Arc<Image>, String> {
+    let bytes = STANDARD
+        .decode(data)
+        .map_err(|e| format!("无法读取图片内容：{e}"))?;
+    let (image, _) = decode(&bytes)?;
+    thumbnail(
+        &image,
+        theme::AGENT_IMAGE_PREVIEW_WIDTH,
+        theme::AGENT_IMAGE_PREVIEW_HEIGHT,
+    )
+}
+
+fn decode(bytes: &[u8]) -> Result<(image::DynamicImage, &'static str), String> {
     if bytes.len() as u64 > md_images::MAX_FILE_BYTES {
         return Err("图片超过 16 MB".into());
     }
-    let mut reader = image::ImageReader::new(Cursor::new(&bytes))
+    let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;
     let mime_type = match reader.format() {
@@ -79,26 +110,26 @@ pub fn from_bytes(
     limits.max_alloc = Some(md_images::MAX_DECODED_BYTES);
     reader.limits(limits);
     let image = reader.decode().map_err(|e| format!("无法解码图片：{e}"))?;
+    Ok((image, mime_type))
+}
+
+fn thumbnail(
+    image: &image::DynamicImage,
+    width: gpui_kit::Pixels,
+    height: gpui_kit::Pixels,
+) -> Result<Arc<Image>, String> {
     let thumb = image.thumbnail(
-        f32::from(theme::AGENT_IMAGE_WIDTH) as u32 * 2,
-        f32::from(theme::AGENT_IMAGE_HEIGHT) as u32 * 2,
+        (f32::from(width) as u32 * 2).min(image.width()),
+        (f32::from(height) as u32 * 2).min(image.height()),
     );
     let mut preview = Cursor::new(Vec::new());
     thumb
         .write_to(&mut preview, image::ImageFormat::Png)
         .map_err(|e| format!("无法生成图片预览：{e}"))?;
-    let mut hash = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut hash);
-    Ok((
-        Attachment::Image {
-            id: hash.finish(),
-            name,
-            path,
-            data: STANDARD.encode(&bytes).into(),
-            mime_type: mime_type.into(),
-        },
-        Arc::new(Image::from_bytes(ImageFormat::Png, preview.into_inner())),
-    ))
+    Ok(Arc::new(Image::from_bytes(
+        ImageFormat::Png,
+        preview.into_inner(),
+    )))
 }
 
 #[cfg(test)]
@@ -140,6 +171,15 @@ pub(crate) mod tests {
             Some(vec!["/tmp/with space.PNG".into(), "/tmp/a b.jpg".into()])
         );
         assert_eq!(pasted_paths("explain /tmp/a.png"), None);
+    }
+
+    #[test]
+    fn enlarged_preview_uses_original_image_and_rejects_invalid_data() {
+        let bytes = png();
+        let image = enlarged(&STANDARD.encode(bytes)).unwrap();
+        assert_eq!(md_images::dimensions(&image.bytes), Some((400, 200)));
+        assert!(enlarged("not base64!").is_err());
+        assert!(enlarged(&STANDARD.encode(b"not an image")).is_err());
     }
 
     #[test]

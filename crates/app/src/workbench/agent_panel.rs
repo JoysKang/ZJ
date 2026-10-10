@@ -176,8 +176,7 @@ impl Workbench {
             })
     }
 
-    /// A link in a reply: a file opens in ZJ (at its line, when the link has one); any other
-    /// URL in the system.
+    /// Local file and directory links open in ZJ; other URLs open in the system.
     pub(super) fn agent_open_link(
         &mut self,
         url: &str,
@@ -193,15 +192,19 @@ impl Workbench {
             cx.open_url(url);
             return;
         };
-        // One stat on a click; the canonical path matches an open tab.
+        // Canonical paths match open tabs and workspace roots.
         let Some(path) = std::fs::canonicalize(&link.path)
             .ok()
-            .filter(|path| path.is_file())
+            .filter(|path| path.is_file() || path.is_dir())
         else {
-            self.message = format!("找不到链接的文件：{}", link.path.display());
+            self.message = format!("找不到链接的文件或文件夹：{}", link.path.display());
             cx.notify();
             return;
         };
+        if path.is_dir() {
+            self.open_directory_link(path, window, cx);
+            return;
+        }
         let open = self
             .documents
             .iter()

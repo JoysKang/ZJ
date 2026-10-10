@@ -28,6 +28,8 @@ mod buffers;
 mod changes;
 mod composer;
 mod highlights;
+mod notifications;
+pub use notifications::init as init_notifications;
 pub(super) mod history;
 mod permissions;
 mod quota;
@@ -184,6 +186,8 @@ pub(super) struct LiveSession {
     last_active: std::time::Instant,
     /// The last prompt: the line above the composer counts from it.
     pub turn_started: std::time::Instant,
+    /// A turn stopped by the user remains quiet even when cancellation times out.
+    cancelled_turn: Option<workspace_editor_agent::TurnId>,
 }
 
 impl LiveSession {
@@ -213,6 +217,7 @@ impl LiveSession {
             queued: None,
             last_active: std::time::Instant::now(),
             turn_started: std::time::Instant::now(),
+            cancelled_turn: None,
         }
     }
 
@@ -299,7 +304,10 @@ pub(super) struct AgentPanel {
     pub attachments: Vec<Attachment>,
     pub image_previews: HashMap<u64, Arc<Image>>,
     pub images_loading: usize,
+    pub image_preview_task: Option<Task<()>>,
     image_generation: u64,
+    next_image_reference: u64,
+    pub image_references: HashMap<String, Option<u64>>,
     pub mention: Option<Mention>,
     mention_generation: u64,
     /// The selected row of the `/` command picker, while the message starts with a command.
@@ -396,7 +404,10 @@ impl AgentPanel {
             attachments: Vec::new(),
             image_previews: HashMap::new(),
             images_loading: 0,
+            image_preview_task: None,
             image_generation: 0,
+            next_image_reference: 0,
+            image_references: HashMap::new(),
             mention: None,
             mention_generation: 0,
             slash: None,

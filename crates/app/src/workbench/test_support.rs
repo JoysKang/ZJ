@@ -26,6 +26,8 @@ pub(super) fn install_globals(
     store: AgentStore,
 ) -> DocumentOwners {
     gpui_kit::init(cx);
+    cx.set_app_identity("local.zj.editor", "ZJ");
+    super::init_agent_notifications(cx);
     cx.set_global(settings);
     cx.set_global(crate::watch::WatchService::default());
     cx.set_global(store);

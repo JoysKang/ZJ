@@ -17,7 +17,7 @@ use gpui_kit::{
     prelude::FluentBuilder,
     *,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
 pub(super) fn chevron(expanded: bool, color: Hsla) -> Icon {
@@ -307,7 +307,8 @@ impl Workbench {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _, window, cx| {
-                    this.explorer.selection = this.root.clone();
+                    this.explorer
+                        .set_selected(this.root.clone().into_iter().collect());
                     this.explorer.focus.focus(window, cx);
                     cx.notify();
                 }),
@@ -326,8 +327,18 @@ impl Workbench {
         let explorer = v_flex()
             .size_full()
             .min_h_0()
-            .track_focus(&self.explorer.focus);
+            .track_focus(&self.explorer.focus)
+            .can_drop({
+                let available = self.root.is_some();
+                move |_, _, _| available
+            })
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                if let Some(root) = this.root.clone() {
+                    this.transfer_files(paths.paths().to_vec(), root, false, window, cx);
+                }
+            }));
         self.explorer_actions(explorer, cx)
+            .id("explorer-files")
             .child(header)
             .when(!self.explorer.message.is_empty(), |list| {
                 list.child(
@@ -453,7 +464,7 @@ impl Workbench {
         let directory = entry.directory;
         let expanded = self.explorer.expanded.contains(&path);
         let selected = match &self.explorer.selection {
-            Some(selection) => *selection == path,
+            Some(_) => self.explorer.selected.contains(&path),
             None => self
                 .documents
                 .iter()
@@ -486,6 +497,14 @@ impl Workbench {
         });
         let row = h_flex()
             .id(("tree-row", index))
+            .map(|row| {
+                #[cfg(test)]
+                let row = {
+                    use gpui_kit::test::TestSupportExt;
+                    row.test_support()
+                };
+                row
+            })
             .relative()
             .w_full()
             .h(theme::ROW_HEIGHT)
@@ -495,6 +514,7 @@ impl Workbench {
             .overflow_hidden()
             .text_size(theme::TEXT_BODY)
             .role(Role::TreeItem)
+            .aria_selected(selected)
             .aria_label(format!(
                 "{} {}",
                 if directory { "目录" } else { "文件" },
@@ -590,7 +610,12 @@ impl Workbench {
             .on_mouse_down(MouseButton::Right, {
                 let path = path.clone();
                 cx.listener(move |this, _, window, cx| {
-                    this.select_tree_path(path.clone(), window, cx)
+                    if !this.explorer.selected.contains(&path) {
+                        this.select_tree_path(path.clone(), window, cx);
+                    } else {
+                        this.explorer.selection = Some(path.clone());
+                        this.explorer.focus.focus(window, cx);
+                    }
                 })
             })
             .on_click({
@@ -599,7 +624,11 @@ impl Workbench {
                     if this.explorer.edit.is_some() {
                         return;
                     }
-                    this.select_tree_path(path.clone(), window, cx);
+                    let modifiers = event.modifiers();
+                    this.select_tree_click(path.clone(), modifiers, window, cx);
+                    if modifiers.platform || modifiers.shift {
+                        return;
+                    }
                     if directory {
                         this.toggle_directory(index, window, cx);
                     } else {
@@ -611,6 +640,22 @@ impl Workbench {
                 })
             });
         let weak = cx.weak_entity();
+        let destination = if directory {
+            path.clone()
+        } else {
+            path.parent().unwrap_or(&path).to_path_buf()
+        };
+        let row = row
+            .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(colors.selected))
+            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                this.transfer_files(
+                    paths.paths().to_vec(),
+                    destination.clone(),
+                    false,
+                    window,
+                    cx,
+                );
+            }));
         let row = row.context_menu(move |menu, _, cx| {
             let can_paste = cx
                 .try_global::<FileClipboard>()
@@ -638,11 +683,14 @@ pub(super) struct Explorer {
     pub(super) show_hidden: bool,
     /// The Explorer row file operations act on (clicked or right-clicked).
     pub(super) selection: Option<PathBuf>,
+    pub(super) selected: BTreeSet<PathBuf>,
+    pub(super) anchor: Option<PathBuf>,
     pub(super) focus: FocusHandle,
     pub(super) edit: Option<super::explorer_ops::TreeEdit>,
     /// A single click in the Explorer opens the file but keeps the focus in the tree.
     pub(super) focus_on_open: bool,
-    pub(super) reveal_pending: bool,
+    /// An explicit path survives asynchronous ancestor directory loading.
+    pub(super) reveal_pending: Option<PathBuf>,
     pub(super) expanded: HashSet<PathBuf>,
     pub(super) restore_expanded: HashSet<PathBuf>,
     pub(super) tasks: HashMap<PathBuf, Task<()>>,

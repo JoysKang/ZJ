@@ -107,6 +107,11 @@ and its debug-only screenshot configuration alongside ZJ's shared atlas and draw
     last scene again even if nothing changed.
 - `Cargo.toml`: the same lint override.
 
+- `src/system_notifications.rs`: native notifications use the default notification sound,
+  including while ZJ is frontmost. Submission waits for notification authorization; only the
+  latest request for a tag can leave an authorization callback, and dismissal also cancels
+  pending authorization requests. No requests are retained once the callbacks complete.
+
 `ZJ_GPU_LOWMEM=0` switches all of this off at startup, for A/B measurements. `ZJ_FRAME_LOG=1` logs
 every presented frame and every display-link stop / wake (`event=frame`, `event=display_link`),
 to find what wakes an idle window.

@@ -875,3 +875,135 @@ async fn staging_a_file_that_still_has_conflict_markers_asks_first(cx: &mut Test
     assert!(git_out(&repo, &["diff", "--name-only", "--diff-filter=U"]).contains("a.txt"));
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }
+
+#[gpui_kit::test]
+async fn failed_git_writes_prompt_without_leaving_inline_errors(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
+    cx.executor().allow_parking();
+    for (kind, title, reason) in [
+        ("stage", "暂存失败", "index.lock"),
+        ("commit", "提交失败", "fixture rejected commit"),
+        ("push", "推送失败", "missing-remote.git"),
+        ("fetch", "抓取失败", "missing-remote.git"),
+    ] {
+        let repo = fixture(&format!("error-dialog-{kind}"), 1);
+        std::fs::write(repo.join("a.txt"), "edited\n").unwrap();
+        if kind == "commit" {
+            git(&repo, &["add", "a.txt"]);
+            let hook = repo.join(".git/hooks/pre-commit");
+            std::fs::write(
+                &hook,
+                "#!/bin/sh\necho 'fixture rejected commit' >&2\nexit 1\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        if matches!(kind, "push" | "fetch") {
+            let remote = repo.parent().unwrap().join("missing-remote.git");
+            git(
+                &repo,
+                &["remote", "set-url", "origin", remote.to_str().unwrap()],
+            );
+        }
+        let (handle, this) = open(cx, repo.clone());
+        if kind == "stage" {
+            std::fs::write(repo.join(".git/index.lock"), "").unwrap();
+        }
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.sidebar = Sidebar::SourceControl;
+                let group = &p.groups[0];
+                let request = WriteRequest {
+                    repo: group.repo.clone(),
+                    generation: 0,
+                    expected: group.status.as_ref().unwrap().as_ref().unwrap().clone(),
+                    operation: match kind {
+                        "stage" => WriteOperation::Stage {
+                            paths: vec!["a.txt".into()],
+                        },
+                        "commit" => WriteOperation::Commit {
+                            message: "feat: 保留输入".into(),
+                            amend: false,
+                            push: false,
+                            all: false,
+                        },
+                        "push" => WriteOperation::Push,
+                        "fetch" => WriteOperation::Fetch,
+                        _ => unreachable!(),
+                    },
+                };
+                group.commit_input.update(cx, |input, cx| {
+                    input.set_value("feat: 保留输入", window, cx);
+                });
+                p.request_git_write(request, window, cx);
+            });
+        })
+        .unwrap();
+        if kind == "push" {
+            assert!(cx.has_pending_prompt());
+            cx.simulate_prompt_answer("推送");
+            cx.run_until_parked();
+        }
+        settle(cx, None, |cx| {
+            this.read_with(cx, |p, _| !p.groups[0].write_pending)
+        });
+        let (actual_title, detail) = cx
+            .pending_prompt()
+            .expect("failed Git write must show a dialog");
+        assert_eq!(actual_title, title);
+        assert!(detail.contains(repo.to_str().unwrap()), "{detail}");
+        assert!(detail.contains(reason), "{detail}");
+        this.read_with(cx, |p, cx| {
+            assert!(p.groups[0].write_message.is_empty());
+            assert_eq!(
+                p.groups[0].commit_input.read(cx).value().as_ref(),
+                "feat: 保留输入"
+            );
+            assert!(!p.message.contains("正在"));
+        });
+        cx.simulate_prompt_answer("确定");
+        cx.run_until_parked();
+        assert!(!cx.has_pending_prompt());
+        let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+    }
+}
+
+#[gpui_kit::test]
+async fn file_statuses_stay_in_the_right_column_for_long_names(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("status-column", 0);
+    std::fs::write(repo.join("a.txt"), "changed\n").unwrap();
+    std::fs::write(
+        repo.join("graft-statusline-with-a-very-long-file-name.cjs"),
+        "new\n",
+    )
+    .unwrap();
+    let (handle, this) = open(cx, repo.clone());
+    this.update(cx, |p, cx| {
+        p.sidebar = Sidebar::SourceControl;
+        cx.notify();
+    });
+    let indices = this.read_with(cx, |p, _| {
+        p.rows
+            .iter()
+            .enumerate()
+            .filter_map(|(i, row)| matches!(row, Row::File(..)).then_some(i))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(indices.len(), 2);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let mut right = None;
+        for index in indices {
+            let row = window.find(("scm-row-bounds", index)).bounds();
+            let tag = window.find(("scm-status", index)).bounds();
+            assert!(
+                tag.right() <= row.right(),
+                "status {tag:?} escapes row {row:?}"
+            );
+            assert_eq!(*right.get_or_insert(tag.right()), tag.right());
+        }
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
