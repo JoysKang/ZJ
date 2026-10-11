@@ -418,7 +418,11 @@ impl Workbench {
                         .gap_1()
                         .when(!compact, |bar| bar.child(agent_picker))
                         .children(mode_picker)
-                        .child(div().min_w_0().flex_1().children(config_picker)),
+                        .child(
+                            h_flex().min_w_0().flex_1().child(
+                                div().min_w_0().max_w_full().children(config_picker),
+                            ),
+                        ),
                 )
             })
             .child(

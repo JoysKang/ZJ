@@ -504,6 +504,19 @@ async fn composer_controls_stay_inside_the_panel_with_quota_and_model_options(
                     assert!(stop.right() <= composer.right(), "stop={stop:?} escapes composer={composer:?} at width={width}");
                     assert!(send.right() <= stop.left(), "send overlaps stop at width={width}");
                 }
+                this.update(cx, |p, cx| {
+                    let session = p.agent.session_mut(p.agent.current.unwrap()).unwrap();
+                    session.thread.modes = None;
+                    session.thread.configs[0].values[0].1 = "GPT-6.1-Sol · 很高 · 开".into();
+                    cx.notify();
+                });
+                window.render_frame(cx);
+                let config = window.find("agent-config").bounds();
+                assert!(config.left() >= composer.left() && config.right() <= composer.right());
+                if width == 900. {
+                    assert!(config.size.width < composer.size.width / 2.,
+                        "model selector stretches into empty space without a mode picker: {config:?}, composer={composer:?}");
+                }
             }).unwrap();
         }
     }
@@ -3328,4 +3341,161 @@ async fn undo_restores_a_reference_deleted_while_its_image_was_loading(cx: &mut 
         });
     })
     .unwrap();
+}
+
+#[gpui_kit::test]
+async fn scrolling_back_into_a_long_user_message_keeps_the_bottom_edge(cx: &mut TestAppContext) {
+    use gpui_kit::InputEvent as _;
+    cx.executor().allow_parking();
+    let (handle, this) = open(cx, None);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_ensure_session(cx);
+            let key = p.agent.current.unwrap();
+            let session = p.agent.session_mut(key).unwrap();
+            session.thread.push_user(
+                "长消息里的描述，应该跟随滚轮连续移动。\n".repeat(100),
+                vec![],
+                1,
+            );
+            session.thread.items.push_back(Item::User {
+                text: "后面的内容\n".repeat(100),
+                attachments: vec![],
+            });
+            p.agent_sync_list(true);
+            p.agent.thread_list.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.),
+            });
+            cx.notify();
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    wait(
+        cx,
+        None,
+        Some(handle),
+        |cx| {
+            this.read_with(cx, |p, _| {
+                p.agent
+                    .thread_list
+                    .bounds_for_item(0)
+                    .is_some_and(|b| b.size.height > px(1000.))
+            })
+        },
+        |_| "long user message did not finish layout".into(),
+    );
+    cx.update_window(handle.into(), |_, window, cx| {
+        let list = this.read(cx).agent.thread_list.clone();
+        list.scroll_to(ListOffset { item_ix: 1, offset_in_item: px(1000.) });
+        window.render_frame(cx);
+        list.scroll_to(ListOffset { item_ix: 1, offset_in_item: px(0.) });
+        window.render_frame(cx);
+        let viewport = list.viewport_bounds();
+        assert_eq!(list.logical_scroll_top().item_ix, 1);
+        assert_eq!(list.logical_scroll_top().offset_in_item, px(0.));
+        for step in 1..=5 {
+            window.dispatch_event(ScrollWheelEvent {
+                position: viewport.center(),
+                delta: ScrollDelta::Pixels(point(px(0.), px(8.))),
+                touch_phase: TouchPhase::Moved,
+                ..Default::default()
+            }.to_platform_input(), cx);
+            window.render_frame(cx);
+            let bounds = list.bounds_for_item(0).unwrap_or_else(|| panic!(
+                "previous message disappeared after 8px scrolling: offset={:?}, viewport={:?}", list.logical_scroll_top(), list.viewport_bounds()));
+            let visible = bounds.bottom() - viewport.top();
+            assert!((visible - px(8. * step as f32)).abs() <= px(1.),
+                "scrolling {step} × 8px jumped to another part of the message: bounds={bounds:?}, viewport={viewport:?}, offset={:?}", list.logical_scroll_top());
+        }
+    }).unwrap();
+}
+
+#[gpui_kit::test]
+async fn user_message_states_release_removed_messages_and_inactive_threads(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let (handle, this) = open(cx, None);
+    let (removed, kept) = cx
+        .update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.agent_ensure_session(cx);
+                p.agent
+                    .session_mut(p.agent.current.unwrap())
+                    .unwrap()
+                    .thread
+                    .load(
+                        vec![
+                            Item::User {
+                                text: "first".into(),
+                                attachments: vec![],
+                            },
+                            Item::User {
+                                text: "second".into(),
+                                attachments: vec![],
+                            },
+                        ],
+                        4,
+                    );
+                p.agent_sync_list(true);
+                cx.notify();
+            });
+            window.render_frame(cx);
+            this.read_with(cx, |p, _| {
+                let key = p.agent.current.unwrap();
+                let texts = p.agent.user_text.borrow();
+                (
+                    texts[&(key, 4)].state.downgrade(),
+                    texts[&(key, 5)].state.downgrade(),
+                )
+            })
+        })
+        .unwrap();
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            let thread = &mut p
+                .agent
+                .session_mut(p.agent.current.unwrap())
+                .unwrap()
+                .thread;
+            thread.items.pop_front();
+            thread.dropped += 1;
+            p.agent_sync_list(false);
+            cx.notify();
+        });
+        window.render_frame(cx);
+        this.read_with(cx, |p, _| {
+            let texts = p.agent.user_text.borrow();
+            assert_eq!(texts.len(), 1);
+            assert_eq!(
+                texts[&(p.agent.current.unwrap(), 5)].state.entity_id(),
+                kept.entity_id()
+            );
+        });
+    })
+    .unwrap();
+    wait(
+        cx,
+        None,
+        Some(handle),
+        |_| removed.upgrade().is_none(),
+        |_| "removed message retained its text state".into(),
+    );
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_new_session(None, window, cx);
+            assert!(p.agent.user_text.borrow().is_empty());
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    wait(
+        cx,
+        None,
+        Some(handle),
+        |_| kept.upgrade().is_none(),
+        |_| "inactive thread retained its text state".into(),
+    );
 }

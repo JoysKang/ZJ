@@ -106,14 +106,19 @@ impl Workbench {
         let prev_tool = is_tool(i.checked_sub(1));
         let next_tool = is_tool(Some(i + 1));
         let content = match item {
-            Item::User { text, attachments } => {
-                self.render_user_message(session.key, i, text, attachments, compact, cx)
-            }
+            Item::User { text, attachments } => self.render_user_message(
+                session.key,
+                session.thread.dropped + i,
+                text,
+                attachments,
+                compact,
+                cx,
+            ),
             Item::Agent { streaming, .. } => {
                 let index = session.thread.dropped + i;
                 let text = session.md.get(&index).cloned().unwrap_or_default();
                 let id = SharedString::from(format!("agent-md-{}-{index}", session.key));
-                let view = self.agent_text(id, text, false, cx);
+                let view = self.agent_text(TextView::markdown(id, text), false, cx);
                 // Highlighted once complete: a growing block would be highlighted every batch.
                 let view = if *streaming {
                     view
@@ -186,6 +191,18 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = theme::colors(cx);
+        let mut texts = self.agent.user_text.borrow_mut();
+        let text = texts.entry((key, index)).or_insert_with(|| {
+            let state = cx.new(|cx| {
+                gpui_kit::base::TextViewState::markdown(&agent_model::literal_markdown(text), cx)
+            });
+            let subscription = cx.observe(&state, |_, _, cx| cx.notify());
+            agent::UserMessageText {
+                state,
+                _subscription: subscription,
+            }
+        });
+        let view = self.agent_text(TextView::new(&text.state), false, cx);
         // A bubble on the right, like a chat: replies run full width on the left.
         let bubble = v_flex()
             .min_w_0()
@@ -208,12 +225,7 @@ impl Workbench {
                         .children(attachments.iter().map(|label| chip(label, None, colors))),
                 )
             })
-            .child(div().line_height(theme::AGENT_LINE).child(self.agent_text(
-                SharedString::from(format!("agent-user-{key}-{index}")),
-                agent_model::literal_markdown(text).into(),
-                false,
-                cx,
-            )));
+            .child(div().line_height(theme::AGENT_LINE).child(view));
         h_flex()
             .w_full()
             .justify_end()
@@ -271,8 +283,10 @@ impl Workbench {
                         .border_color(colors.border)
                         .text_size(theme::TEXT_CAPTION)
                         .child(self.agent_text(
-                            SharedString::from(format!("agent-thought-{key}-{index}")),
-                            text.to_string().into(),
+                            TextView::markdown(
+                                SharedString::from(format!("agent-thought-{key}-{index}")),
+                                text.to_string(),
+                            ),
                             true,
                             cx,
                         )),

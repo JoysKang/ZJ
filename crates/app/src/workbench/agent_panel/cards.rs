@@ -149,8 +149,10 @@ impl Workbench {
                         .bg(colors.panel)
                         .child(
                             self.agent_text(
-                                SharedString::from(format!("agent-tool-out-{key}-{}", call.id)),
-                                agent_model::fenced(&shown).into(),
+                                TextView::markdown(
+                                    SharedString::from(format!("agent-tool-out-{key}-{}", call.id)),
+                                    agent_model::fenced(&shown),
+                                ),
                                 true,
                                 cx,
                             )

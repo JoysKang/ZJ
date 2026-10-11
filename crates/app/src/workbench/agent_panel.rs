@@ -125,8 +125,7 @@ impl Workbench {
     /// messages); each code block gets a copy button.
     pub(super) fn agent_text(
         &self,
-        id: impl Into<ElementId>,
-        text: SharedString,
+        view: TextView,
         muted: bool,
         cx: &mut Context<Self>,
     ) -> TextView {
@@ -167,8 +166,7 @@ impl Workbench {
             );
         let weak = cx.weak_entity();
         let links = weak.clone();
-        TextView::markdown(id, text)
-            .style(style)
+        view.style(style)
             .code_block_actions(move |block, _, _| copy_button(weak.clone(), block.code()))
             .on_link_click(move |url, _, window, cx| {
                 cx.stop_propagation();

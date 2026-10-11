@@ -626,9 +626,19 @@ impl Workbench {
         let Some(session) = self.agent.current() else {
             self.agent.thread_list.reset(0);
             self.agent.thread_rows.clear();
+            self.agent.user_text.get_mut().clear();
             self.agent.list_shape = (0, 0, 0, false);
             return;
         };
+        self.agent
+            .user_text
+            .borrow_mut()
+            .retain(|&(key, index), _| {
+                key == session.key
+                    && index.checked_sub(session.thread.dropped).is_some_and(|i| {
+                        matches!(session.thread.items.get(i), Some(Item::User { .. }))
+                    })
+            });
         let older = self.agent.older_row();
         let following = self.agent.thread_list.is_following_tail();
         let top = self.agent.thread_list.logical_scroll_top();

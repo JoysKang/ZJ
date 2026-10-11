@@ -13,7 +13,7 @@
 use super::*;
 use crate::agent_model::{self, Attachment};
 use crate::markdown;
-use gpui_kit::component::input::InputState;
+use gpui_kit::{base::TextViewState, component::input::InputState};
 use workspace_editor_agent::{
     AgentClient, AgentCommand, AgentEvent, AgentPool, AgentPreset, ClientOptions, PermissionKind,
     builtin_presets,
@@ -293,6 +293,11 @@ pub(super) struct HistoryList {
     pub renaming: Option<(SessionId, Entity<InputState>, Subscription)>,
 }
 
+pub(super) struct UserMessageText {
+    pub state: Entity<TextViewState>,
+    pub _subscription: Subscription,
+}
+
 pub(super) struct AgentPanel {
     pub visible: bool,
     pub width: Pixels,
@@ -335,6 +340,8 @@ pub(super) struct AgentPanel {
     pub search: Option<super::agent_search::SessionSearch>,
     pub thread_list: ListState,
     pub thread_rows: Vec<agent_model::ThreadRow>,
+    /// Keep parsed user messages across virtual-list eviction, only for the current thread.
+    pub user_text: RefCell<HashMap<(u64, usize), UserMessageText>>,
     list_shape: (u64, usize, usize, bool),
     pub spin: usize,
     spin_task: Option<Task<()>>,
@@ -438,6 +445,7 @@ impl AgentPanel {
             search: None,
             thread_list,
             thread_rows: Vec::new(),
+            user_text: RefCell::new(HashMap::new()),
             list_shape: (0, 0, 0, false),
             spin: 0,
             spin_task: None,
