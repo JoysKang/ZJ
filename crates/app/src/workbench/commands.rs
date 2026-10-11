@@ -90,6 +90,7 @@ pub(super) const COMMANDS: &[Command] = &[
     command!("Agent: 新建会话", NewAgentSession),
     command!("Agent: 搜索会话…", SearchSessions),
     command!("Agent: 附加当前文件或选区", AddSelectionToAgent),
+    command!("Agent: 选区操作…", ShowSelectionActions),
     command!("Agent: 下一个待审批", NextApproval),
 ];
 

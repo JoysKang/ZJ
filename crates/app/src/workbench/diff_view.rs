@@ -13,6 +13,7 @@ use gpui_kit::{
         button::{Button, ButtonVariants},
         h_flex,
         scroll::Scrollbar,
+        v_flex,
     },
 };
 use std::rc::Rc;
@@ -214,18 +215,134 @@ impl Workbench {
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_diff_layout(window, cx))),
             )
             .child(
-                action("diff-open-file", IconName::File, "打开文件").on_click(cx.listener(
-                    |this, _, window, cx| {
+                action("diff-open-file", IconName::File, "打开文件")
+                    .disabled(self.diff_file_deleted())
+                    .on_click(cx.listener(|this, _, window, cx| {
                         if let Some(path) = this.diff.tab.as_ref().map(|d| d.path.clone()) {
                             this.scm_open_file(&path, window, cx);
                         }
-                    },
-                )),
+                    })),
             )
             .into_any_element()
     }
 
+    /// Known working-tree deletions have no file to open; historical paths use the normal flow.
+    fn diff_file_deleted(&self) -> bool {
+        self.diff.tab.as_ref().is_some_and(|tab| {
+            self.groups.iter().any(|group| {
+                group
+                    .status
+                    .as_ref()
+                    .and_then(|status| status.as_ref().ok())
+                    .is_some_and(|status| {
+                        status.changes.iter().any(|change| {
+                            group.repo.worktree.join(&change.path) == tab.path
+                                && (change.worktree == b'D'
+                                    || (change.index == b'D' && change.worktree == b'.'))
+                        }) && !status.changes.iter().any(|change| {
+                            group.repo.worktree.join(&change.path) == tab.path
+                                && change.kind == ChangeKind::Untracked
+                        })
+                    })
+            })
+        })
+    }
+
     pub(super) fn render_diff(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = theme::colors(cx);
+        let header = h_flex()
+            .w_full()
+            .h(theme::CODE_HEADER_HEIGHT)
+            .flex_shrink_0()
+            .px_3()
+            .gap_2()
+            .bg(colors.panel)
+            .border_b_1()
+            .border_color(colors.border)
+            .text_size(theme::TEXT_CAPTION)
+            .when_some(self.diff.tab.as_ref(), |bar, tab| {
+                let name = tab
+                    .path
+                    .file_name()
+                    .unwrap_or(tab.path.as_os_str())
+                    .to_string_lossy()
+                    .replace(SINGLE_LINE, "⏎");
+                let directory = tab
+                    .path
+                    .parent()
+                    .map(|parent| parent.to_string_lossy().replace(SINGLE_LINE, "⏎"))
+                    .unwrap_or_default();
+                bar.child(
+                    div()
+                        .min_w_0()
+                        .flex_shrink_1()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_color(colors.foreground)
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_color(colors.muted)
+                        .child(directory),
+                )
+            })
+            .when_some(self.diff.doc.as_ref(), |bar, doc| {
+                bar.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(colors.added)
+                        .child(format!("+{}", doc.added)),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(colors.deleted)
+                        .child(format!("−{}", doc.removed)),
+                )
+            })
+            .child(
+                Button::new("diff-copy-patch")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Copy)
+                    .tooltip("复制完整 Diff")
+                    .disabled(self.diff.source.is_none())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some((patch, _)) = &this.diff.source {
+                            cx.write_to_clipboard(ClipboardItem::new_string(patch.to_string()));
+                        }
+                    })),
+            )
+            .child(
+                Button::new("diff-header-open")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::File)
+                    .tooltip("打开文件")
+                    .disabled(self.diff.tab.is_none() || self.diff_file_deleted())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(path) = this.diff.tab.as_ref().map(|tab| tab.path.clone()) {
+                            this.scm_open_file(&path, window, cx);
+                        }
+                    })),
+            );
+        v_flex()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .child(header)
+            .child(div().flex_1().min_h_0().child(self.render_diff_body(cx)))
+            .into_any_element()
+    }
+
+    fn render_diff_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
         let Some(doc) = &self.diff.doc else {
             // Binary, combined or failed diffs: Git's own text, or the status message.

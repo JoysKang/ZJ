@@ -80,8 +80,8 @@ fn hover_actions(group: SharedString) -> Div {
     h_flex()
         .flex_shrink_0()
         .gap_1()
-        .opacity(0.)
-        .group_hover(group, |actions| actions.opacity(1.))
+        .invisible()
+        .group_hover(group, |actions| actions.visible())
 }
 
 impl Workbench {
@@ -114,6 +114,7 @@ impl Workbench {
         view: WeakEntity<Self>,
         extra: bool,
     ) -> PopupMenu {
+        let menu = super::menu_style::compact_menu(menu);
         let stage = self.scm_paths(g, None, DiffSide::Worktree);
         let unstage = self.scm_paths(g, None, DiffSide::Staged);
         let discard = self.scm_discard(g, None);
@@ -237,35 +238,36 @@ impl Workbench {
             .dropdown_menu(move |menu, _, _| {
                 let (toggle, collapse, refresh) = (weak.clone(), weak.clone(), weak.clone());
                 let add = weak.clone();
-                menu.item(
-                    PopupMenuItem::new("隐藏无变更的仓库")
-                        .checked(hide)
-                        .on_click(move |_, window, cx| {
-                            let _ = toggle.update(cx, |this, cx| {
-                                this.change_settings(window, cx, |s| s.hide_clean_repos = !hide)
-                            });
-                        }),
-                )
-                .separator()
-                .item(PopupMenuItem::new("全部折叠").on_click(move |_, _, cx| {
-                    let _ = collapse.update(cx, |this, cx| {
-                        for group in &mut this.groups {
-                            group.expanded = false;
-                        }
-                        this.rebuild_rows();
-                        cx.notify();
-                    });
-                }))
-                .item(PopupMenuItem::new("刷新").on_click(move |_, window, cx| {
-                    let _ = refresh.update(cx, |this, cx| this.refresh(window, cx));
-                }))
-                .item(
-                    PopupMenuItem::new("添加仓库…")
-                        .disabled(!has_root)
-                        .on_click(move |_, window, cx| {
-                            let _ = add.update(cx, |this, cx| this.add_repository(window, cx));
-                        }),
-                )
+                super::menu_style::compact_menu(menu)
+                    .item(
+                        PopupMenuItem::new("隐藏无变更的仓库")
+                            .checked(hide)
+                            .on_click(move |_, window, cx| {
+                                let _ = toggle.update(cx, |this, cx| {
+                                    this.change_settings(window, cx, |s| s.hide_clean_repos = !hide)
+                                });
+                            }),
+                    )
+                    .separator()
+                    .item(PopupMenuItem::new("全部折叠").on_click(move |_, _, cx| {
+                        let _ = collapse.update(cx, |this, cx| {
+                            for group in &mut this.groups {
+                                group.expanded = false;
+                            }
+                            this.rebuild_rows();
+                            cx.notify();
+                        });
+                    }))
+                    .item(PopupMenuItem::new("刷新").on_click(move |_, window, cx| {
+                        let _ = refresh.update(cx, |this, cx| this.refresh(window, cx));
+                    }))
+                    .item(
+                        PopupMenuItem::new("添加仓库…")
+                            .disabled(!has_root)
+                            .on_click(move |_, window, cx| {
+                                let _ = add.update(cx, |this, cx| this.add_repository(window, cx));
+                            }),
+                    )
             })
             .into_any_element()
     }
@@ -342,7 +344,9 @@ impl Workbench {
             .overflow_hidden()
             .text_size(theme::TEXT_BODY)
             .cursor_pointer()
-            .hover(|row| row.bg(colors.hover));
+            .when(!matches!(row, Row::File(..)), |base| {
+                base.hover(|row| row.bg(colors.hover))
+            });
         let row = match row {
             Row::Group(_) | Row::Commit(_) => unreachable!("handled above"),
             Row::Heading(g, side, count) => self.scm_heading_row(g, side, count, base, hover, cx),
@@ -1084,7 +1088,16 @@ impl Workbench {
                 self.groups[g].repo.worktree.display(),
                 change.path.display()
             ))
-            .when(selected, |row| row.bg(colors.selected))
+            .when(selected, |row| {
+                row.bg(colors.selected).text_color(colors.selected_fg)
+            })
+            .hover(|row| {
+                row.bg(if selected {
+                    colors.selected
+                } else {
+                    colors.hover
+                })
+            })
             .child(file_icons::icon(file_icons::for_file(&name)))
             .child(
                 div()
@@ -1093,7 +1106,7 @@ impl Workbench {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .text_color(color)
+                    .text_color(if selected { colors.selected_fg } else { color })
                     .when(deleted, |name| name.line_through())
                     .child(name),
             )
@@ -1106,11 +1119,16 @@ impl Workbench {
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .text_size(theme::TEXT_CAPTION)
-                    .text_color(colors.muted)
+                    .text_color(if selected {
+                        colors.selected_fg
+                    } else {
+                        colors.muted
+                    })
                     .child(directory),
             )
             .child(
                 hover_actions(hover)
+                    .id(("scm-file-actions", index))
                     .child(
                         action(("scm-open", index), IconName::File, "打开文件", cx).on_click(
                             cx.listener(move |this, _, window, cx| {
@@ -1137,6 +1155,14 @@ impl Workbench {
                                 }),
                             ),
                         )
+                    })
+                    .map(|actions| {
+                        #[cfg(test)]
+                        let actions = {
+                            use gpui_kit::test::TestSupportExt;
+                            actions.test_support()
+                        };
+                        actions
                     }),
             )
             .child(
@@ -1155,7 +1181,7 @@ impl Workbench {
                     .flex()
                     .justify_center()
                     .text_size(theme::TEXT_CAPTION)
-                    .text_color(color)
+                    .text_color(if selected { colors.selected_fg } else { color })
                     .child(decoration.letter.to_string()),
             )
             .on_click(
@@ -1164,25 +1190,27 @@ impl Workbench {
             .context_menu(move |menu, _, _| {
                 let view = weak.clone();
                 let path = context_file.clone();
-                menu.item(
-                    PopupMenuItem::new("打开文件").on_click(move |_, window, cx| {
-                        let _ = view.update(cx, |this, cx| this.scm_open_file(&path, window, cx));
-                    }),
-                )
-                .when_some(context_toggle.clone(), |menu, request| {
-                    menu.item(git_menu_item(toggle_label, request, weak.clone()))
-                })
-                .when_some(context_discard.clone(), |menu, request| {
-                    menu.item(git_menu_item(
-                        if untracked {
-                            "删除文件…"
-                        } else {
-                            "放弃更改…"
-                        },
-                        request,
-                        weak.clone(),
-                    ))
-                })
+                super::menu_style::compact_menu(menu)
+                    .item(
+                        PopupMenuItem::new("打开文件").on_click(move |_, window, cx| {
+                            let _ =
+                                view.update(cx, |this, cx| this.scm_open_file(&path, window, cx));
+                        }),
+                    )
+                    .when_some(context_toggle.clone(), |menu, request| {
+                        menu.item(git_menu_item(toggle_label, request, weak.clone()))
+                    })
+                    .when_some(context_discard.clone(), |menu, request| {
+                        menu.item(git_menu_item(
+                            if untracked {
+                                "删除文件…"
+                            } else {
+                                "放弃更改…"
+                            },
+                            request,
+                            weak.clone(),
+                        ))
+                    })
             })
             .into_any_element()
     }

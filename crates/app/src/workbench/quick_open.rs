@@ -653,7 +653,8 @@ impl Workbench {
         let selected = index == quick.selected;
         h_flex()
             .id(("quick-open-row", index))
-            .h(theme::ROW_HEIGHT)
+            .test_support()
+            .h(theme::QUICK_OPEN_ROW_HEIGHT)
             .w_full()
             .px_2()
             .gap_2()
@@ -664,19 +665,37 @@ impl Workbench {
                 row.bg(colors.selected).text_color(colors.selected_fg)
             })
             .when(!selected, |row| row.hover(|row| row.bg(colors.hover)))
-            .child(file_icons::icon(file_icons::for_file(&name)))
-            .child(div().flex_shrink_0().child(name))
             .child(
                 div()
+                    .flex_shrink_0()
+                    .child(file_icons::icon(file_icons::for_file(&name))),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .text_size(theme::TEXT_CAPTION)
-                    .text_color(if selected {
-                        colors.selected_fg
-                    } else {
-                        colors.muted
-                    })
-                    .child(directory),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(theme::TEXT_CAPTION)
+                            .text_color(if selected {
+                                colors.selected_fg
+                            } else {
+                                colors.muted
+                            })
+                            .child(directory),
+                    ),
             )
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.confirm_quick_open(Some(index), window, cx)
@@ -684,18 +703,31 @@ impl Workbench {
             .into_any_element()
     }
 
-    pub(super) fn render_quick_open(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_quick_open(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let quick = self.quick_open.as_ref()?;
         let colors = theme::colors(cx);
         let count = self.quick_open_len();
-        let visible = count.min(theme::QUICK_OPEN_ROWS);
+        let available = window.viewport_size().height
+            - theme::TITLE_HEIGHT
+            - theme::QUICK_OPEN_TOP
+            - theme::QUICK_OPEN_INPUT_HEIGHT
+            - theme::ROW_HEIGHT
+            - theme::ROW_INSET * 2.;
+        let visible = count.min(
+            ((available / theme::QUICK_OPEN_ROW_HEIGHT).floor() as usize)
+                .clamp(1, theme::QUICK_OPEN_ROWS),
+        );
         let query_empty = quick.input.read(cx).value().trim().is_empty();
         let note = if count > 0 {
             None
         } else if quick.items.is_some() {
             Some(quick.empty_note)
         } else if query_empty {
-            Some("输入文件名或路径片段；按 ↑↓ 选择，回车打开，Esc 关闭")
+            Some("输入文件名或路径片段")
         } else if self.index.is_none() {
             Some("正在建立文件索引…")
         } else {
@@ -703,10 +735,10 @@ impl Workbench {
         };
         let panel = v_flex()
             .id("quick-open")
+            .test_support()
             .key_context("QuickOpen")
             .w(theme::QUICK_OPEN_WIDTH)
-            .pb_1()
-            .gap_1()
+            .overflow_hidden()
             .rounded(theme::RADIUS_OVERLAY)
             .border_1()
             .border_color(colors.card_border)
@@ -724,12 +756,20 @@ impl Workbench {
                 }
                 cx.stop_propagation();
             }))
-            .child(div().p_1().child(Input::new(&quick.input).small()))
+            .child(
+                div()
+                    .h(theme::QUICK_OPEN_INPUT_HEIGHT)
+                    .flex_shrink_0()
+                    .p_2()
+                    .border_b_1()
+                    .border_color(colors.card_border)
+                    .child(Input::new(&quick.input).small()),
+            )
             .when_some(note, |panel, note| {
                 panel.child(
                     div()
                         .px_3()
-                        .h(theme::ROW_HEIGHT)
+                        .h(theme::QUICK_OPEN_EMPTY_HEIGHT)
                         .flex()
                         .items_center()
                         .text_size(theme::TEXT_CAPTION)
@@ -750,9 +790,24 @@ impl Workbench {
                     )
                     .track_scroll(&quick.scroll)
                     .px_1()
-                    .h(theme::ROW_HEIGHT * visible as f32),
+                    .h(theme::QUICK_OPEN_ROW_HEIGHT * visible as f32),
                 )
-            });
+            })
+            .child(
+                h_flex()
+                    .id("quick-open-footer")
+                    .test_support()
+                    .h(theme::ROW_HEIGHT)
+                    .flex_shrink_0()
+                    .px_3()
+                    .gap_2()
+                    .border_t_1()
+                    .border_color(colors.card_border)
+                    .text_size(theme::TEXT_CAPTION)
+                    .text_color(colors.muted)
+                    .child(div().flex_1().child("↑↓ 选择 · Enter 打开 · Esc 关闭"))
+                    .child(format!("{count} 项")),
+            );
         Some(
             div()
                 .absolute()
@@ -789,7 +844,7 @@ impl Workbench {
                 Some(
                     gpui_kit::component::Icon::new(name)
                         .size(theme::ICON_SIZE)
-                        .text_color(color)
+                        .text_color(if selected { colors.selected_fg } else { color })
                         .into_any_element(),
                 )
             }
@@ -855,7 +910,8 @@ impl Workbench {
         };
         h_flex()
             .id(("pick-row", index))
-            .h(theme::ROW_HEIGHT)
+            .test_support()
+            .h(theme::QUICK_OPEN_ROW_HEIGHT)
             .w_full()
             .px_2()
             .gap_2()
@@ -870,28 +926,33 @@ impl Workbench {
                 row.child(div().flex_shrink_0().child(icon))
             })
             .child(
-                div()
-                    .flex_shrink(1.)
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(label.replace(SINGLE_LINE, "⏎")),
-            )
-            .child(
-                div()
+                v_flex()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(theme::TEXT_CAPTION)
-                    .text_color(if selected {
-                        colors.selected_fg
-                    } else {
-                        colors.muted
-                    })
-                    .child(item.detail.replace(SINGLE_LINE, "⏎")),
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(label.replace(SINGLE_LINE, "⏎")),
+                    )
+                    .when(!item.detail.is_empty(), |text| {
+                        text.child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(theme::TEXT_CAPTION)
+                                .text_color(if selected {
+                                    colors.selected_fg
+                                } else {
+                                    colors.muted
+                                })
+                                .child(item.detail.replace(SINGLE_LINE, "⏎")),
+                        )
+                    }),
             )
             .when(!item.keys.is_empty(), |row| {
                 // The keycaps of the command's shortcut, the Welcome page's style.

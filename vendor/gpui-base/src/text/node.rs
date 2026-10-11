@@ -1997,8 +1997,14 @@ impl CodeBlock {
             div()
                 .id("actions")
                 .absolute()
-                .top_2()
-                .right_2()
+                // ZJ patch: keep the upstream corner slot unless explicitly enabled.
+                .map(|slot| {
+                    if style.code_block_header() {
+                        slot.top_0().left_0().right_0()
+                    } else {
+                        slot.top_2().right_2()
+                    }
+                })
                 .bg(style.code_background())
                 .rounded(cx.theme().tokens.radius.md)
                 .child(actions(&self, window, cx))

@@ -1,6 +1,7 @@
 //! The panel's settings view.
 
 use super::*;
+use crate::workbench::menu_style::{compact_dropdown, compact_menu};
 
 impl Workbench {
     // ----- settings -----------------------------------------------------------------------
@@ -19,13 +20,11 @@ impl Workbench {
         let idle = {
             let weak = cx.weak_entity();
             let current = settings.idle_minutes;
-            Button::new("agent-idle")
+            compact_dropdown("agent-idle", format!("{current} 分钟"))
                 .xsmall()
                 .outline()
-                .label(format!("{current} 分钟"))
-                .dropdown_caret(true)
                 .dropdown_menu(move |menu, _, _| {
-                    let mut menu = menu;
+                    let mut menu = compact_menu(menu);
                     for minutes in [5u32, 10, 20, 30, 60] {
                         let weak = weak.clone();
                         menu = menu.item(
@@ -53,13 +52,11 @@ impl Workbench {
                 .map(|p| (p.id.clone(), p.display_name.clone()))
                 .collect();
             let current = settings.default_agent.clone();
-            Button::new("agent-default")
+            compact_dropdown("agent-default", agent_name(&self.agent.presets, &current))
                 .xsmall()
                 .outline()
-                .label(agent_name(&self.agent.presets, &current))
-                .dropdown_caret(true)
                 .dropdown_menu(move |menu, _, _| {
-                    let mut menu = menu;
+                    let mut menu = compact_menu(menu);
                     for (id, name) in &presets {
                         let weak = weak.clone();
                         let id = id.clone();

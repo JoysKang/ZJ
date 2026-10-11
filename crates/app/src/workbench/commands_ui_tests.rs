@@ -131,3 +131,56 @@ async fn shift_cmd_p_runs_commands_and_remembers_recent(cx: &mut TestAppContext)
     }));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[gpui_kit::test]
+async fn command_results_and_footer_stay_visible_in_a_low_window(cx: &mut TestAppContext) {
+    use super::test_support::{empty_store, install_globals, new_window};
+    let (handle, this) = cx.update(|cx| {
+        let owners = install_globals(cx, crate::settings::Settings::default(), empty_store());
+        let (handle, this) = new_window(
+            cx,
+            None,
+            owners,
+            Bounds::new(point(px(0.), px(0.)), size(px(760.), px(480.))),
+        );
+        (handle.downcast::<Root>().unwrap(), this)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_quick_open_with(">", window, cx));
+        window.render_frame(cx);
+        let count = commands::COMMANDS.len();
+        assert!(count > theme::QUICK_OPEN_ROWS);
+        assert_eq!(
+            this.read(cx)
+                .quick_open
+                .as_ref()
+                .unwrap()
+                .items
+                .as_ref()
+                .unwrap()
+                .1
+                .len(),
+            count
+        );
+        assert!(
+            window.try_find(("pick-row", 0usize)).is_some(),
+            "first command missing: viewport={:?}, panel={:?}, footer={:?}",
+            window.viewport_size(),
+            window.find("quick-open").bounds(),
+            window.find("quick-open-footer").bounds()
+        );
+        for _ in 1..count {
+            window.press("down", cx);
+            window.render_frame(cx);
+        }
+        let selected = window.find(("pick-row", count - 1)).bounds();
+        let panel = window.find("quick-open").bounds();
+        let footer = window.find("quick-open-footer").bounds();
+        assert!(panel.bottom() <= window.viewport_size().height);
+        assert!(selected.top() >= panel.top() + theme::QUICK_OPEN_INPUT_HEIGHT);
+        assert!(selected.bottom() <= footer.top());
+        assert!(footer.bottom() <= window.viewport_size().height);
+        assert_eq!(selected.size.height, theme::QUICK_OPEN_ROW_HEIGHT);
+    })
+    .unwrap();
+}

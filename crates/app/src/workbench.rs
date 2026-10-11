@@ -78,6 +78,7 @@ mod markdown_preview;
 #[cfg(test)]
 #[path = "workbench/markdown_ui_tests.rs"]
 mod markdown_ui_tests;
+mod menu_style;
 pub use explorer_ops::{
     CopyFiles, CopyPath, CopyRelativePath, CutFiles, Delete as DeleteFile, FindInFolder, NewFile,
     NewFolder, PasteFiles, Rename as RenameFile, RevealInFinder, SelectAllFiles,
@@ -101,6 +102,11 @@ mod scm_actions;
 mod scm_message;
 mod search_replace;
 mod search_view;
+mod selection_actions;
+pub use selection_actions::ShowSelectionActions;
+#[cfg(test)]
+#[path = "workbench/selection_actions_ui_tests.rs"]
+mod selection_actions_ui_tests;
 #[cfg(test)]
 #[path = "workbench/session_ui_tests.rs"]
 mod session_ui_tests;
@@ -402,6 +408,7 @@ pub struct Workbench {
     sidebar: Sidebar,
     sidebar_visible: bool,
     quick_open: Option<quick_open::QuickOpen>,
+    selection_actions: Option<selection_actions::SelectionActions>,
     /// 命令面板里最近执行的命令名称，新的在前（只在内存，不持久化）。
     command_history: Vec<&'static str>,
     active: Pane,
@@ -596,6 +603,7 @@ impl Workbench {
             sidebar: Sidebar::Explorer,
             sidebar_visible: true,
             quick_open: None,
+            selection_actions: None,
             command_history: Vec::new(),
             active: Pane::Welcome,
             documents: Vec::new(),
@@ -1109,6 +1117,7 @@ impl Workbench {
         {
             self.auto_save_on_focus_change(Some(previous), window, cx);
         }
+        self.selection_actions = None;
         self.active = pane;
         self.explorer.reveal_pending = self.active_document().map(|(path, _)| path.clone());
         self.clear_tree_selection_for(pane);
@@ -2550,6 +2559,9 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &AddSelectionToAgent, window, cx| {
                 this.agent_add_selection(window, cx)
             }))
+            .on_action(cx.listener(|this, _: &ShowSelectionActions, window, cx| {
+                this.show_selection_actions(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &NextApproval, window, cx| {
                 this.agent_next_approval(window, cx)
             }))
@@ -2566,8 +2578,9 @@ impl Render for Workbench {
                     .child(workbench),
             )
             .child(self.render_status_bar(cx))
-            .children(self.render_quick_open(cx))
+            .children(self.render_quick_open(window, cx))
             .children(self.render_agent_search(cx))
             .children(self.render_switch_hud(cx))
+            .children(self.render_selection_actions(window, cx))
     }
 }

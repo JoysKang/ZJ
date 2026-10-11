@@ -1153,3 +1153,74 @@ async fn file_statuses_stay_in_the_right_column_for_long_names(cx: &mut TestAppC
     .unwrap();
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }
+
+#[gpui_kit::test]
+async fn hidden_file_actions_keep_their_slot_and_do_not_stage(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("hidden-actions", 0);
+    std::fs::write(repo.join("a.txt"), "changed\n").unwrap();
+    let (handle, this) = open(cx, repo.clone());
+    this.update(cx, |p, cx| {
+        p.sidebar = Sidebar::SourceControl;
+        cx.notify();
+    });
+    let index = this.read_with(cx, |p, _| {
+        p.rows
+            .iter()
+            .position(|row| matches!(row, Row::File(..)))
+            .unwrap()
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let slot = window.find(("scm-file-actions", index));
+        assert!(!slot.visible());
+        let bounds = slot.bounds();
+        let status = window.find(("scm-status", index)).bounds();
+        window.hover(("scm-row-bounds", index), cx);
+        assert!(window.find(("scm-file-actions", index)).visible());
+        assert_eq!(window.find(("scm-file-actions", index)).bounds(), bounds);
+        assert_eq!(window.find(("scm-status", index)).bounds(), status);
+        let stage = window.find(("scm-stage", index)).bounds().center();
+        window.hover(("scm-repo-graph", 0usize), cx);
+        assert!(!window.find(("scm-file-actions", index)).visible());
+        // A pointer-down without a preceding move must not hit the hidden button.
+        window.dispatch_event(
+            MouseDownEvent {
+                button: MouseButton::Left,
+                position: stage,
+                modifiers: Default::default(),
+                click_count: 1,
+                first_mouse: false,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.render_frame(cx);
+        window.dispatch_event(
+            MouseUpEvent {
+                button: MouseButton::Left,
+                position: stage,
+                modifiers: Default::default(),
+                click_count: 1,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.render_frame(cx);
+        this.read_with(cx, |p, _| assert!(!p.groups[0].write_pending));
+        window.hover(("scm-row-bounds", index), cx);
+        window.click(("scm-stage", index), cx);
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| {
+            !p.groups[0].write_pending
+                && p.groups[0]
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.as_ref().ok())
+                    .is_some_and(|s| s.changes.iter().any(|c| c.index != b'.'))
+        })
+    });
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}

@@ -73,6 +73,17 @@ pub const COMMAND_CENTER_WIDTH: Pixels = px(340.);
 pub const QUICK_OPEN_WIDTH: Pixels = px(600.);
 pub const QUICK_OPEN_TOP: Pixels = px(8.);
 pub const QUICK_OPEN_ROWS: usize = 12;
+pub const QUICK_OPEN_ROW_HEIGHT: Pixels = px(40.);
+pub const QUICK_OPEN_EMPTY_HEIGHT: Pixels = px(64.);
+pub const QUICK_OPEN_INPUT_HEIGHT: Pixels = px(48.);
+/// Compact native menus grow with their content, up to a readable line width.
+pub const MENU_MIN_WIDTH: Pixels = px(144.);
+pub const MENU_MAX_WIDTH: Pixels = px(360.);
+pub const CODE_HEADER_HEIGHT: Pixels = px(28.);
+pub const CODE_BLOCK_BODY_TOP: Pixels = px(36.);
+pub const AGENT_PERMISSION_COLLAPSED_MAX: Pixels = px(72.);
+pub const SELECTION_ACTIONS_WIDTH: Pixels = px(320.);
+pub const SELECTION_ACTIONS_HEIGHT: Pixels = px(36.);
 pub const RADIUS: Pixels = px(6.);
 pub const RADIUS_LARGE: Pixels = px(8.);
 /// Rounded surfaces inside the workbench shell.

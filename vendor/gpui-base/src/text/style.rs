@@ -21,6 +21,8 @@ pub struct TextViewStyle {
     paragraph_gap: Rems,
     heading: Arc<dyn Fn(u8) -> StyleRefinement + Send + Sync + 'static>,
     code_block: StyleRefinement,
+    // ZJ patch: opt in to a full-width application-owned code header.
+    code_block_header: bool,
     table: StyleRefinement,
     table_head: StyleRefinement,
     table_cell: StyleRefinement,
@@ -43,6 +45,7 @@ impl PartialEq for TextViewStyle {
             && self.border == other.border
             && (1..=6).all(|level| (self.heading)(level) == (other.heading)(level))
             && self.code_block == other.code_block
+            && self.code_block_header == other.code_block_header
             && self.table == other.table
             && self.table_head == other.table_head
             && self.table_cell == other.table_cell
@@ -83,6 +86,7 @@ impl TextViewStyle {
             paragraph_gap: rems(1.),
             heading: Arc::new(|_| StyleRefinement::default()),
             code_block: StyleRefinement::default(),
+            code_block_header: false,
             table: StyleRefinement::default(),
             table_head: StyleRefinement::default(),
             table_cell: StyleRefinement::default(),
@@ -158,6 +162,17 @@ impl TextViewStyle {
     pub fn with_code_block(mut self, style: StyleRefinement) -> Self {
         self.code_block = style;
         self
+    }
+
+    /// ZJ patch: pins custom code actions across the top of the block.
+    pub fn with_code_block_header(mut self, enabled: bool) -> Self {
+        self.code_block_header = enabled;
+        self
+    }
+
+    /// Whether custom code actions occupy a full-width header.
+    pub fn code_block_header(&self) -> bool {
+        self.code_block_header
     }
 
     /// Sets the highlight style for inline code spans.
@@ -357,6 +372,17 @@ mod tests {
     use gpui::{Styled as _, px};
 
     use super::*;
+
+    #[test]
+    fn code_headers_are_opt_in_and_part_of_the_layout_fingerprint() {
+        let base = TextViewStyle::default();
+        assert!(!base.code_block_header());
+        let header = base.clone().with_code_block_header(true);
+        assert!(header.code_block_header());
+        assert!(header != base);
+        assert!(header == header.clone());
+        assert!(header.with_code_block_header(false) == base);
+    }
 
     #[test]
     fn selection_layout_fingerprint_covers_callback_table_and_theme_fields() {

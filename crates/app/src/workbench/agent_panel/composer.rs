@@ -1,6 +1,7 @@
 //! The composer: attachments, the input, the toolbar and the @ path and / command pickers.
 
 use super::*;
+use crate::workbench::menu_style::{compact_dropdown, compact_menu};
 
 impl Workbench {
     // ----- composer -----------------------------------------------------------------------
@@ -99,15 +100,13 @@ impl Workbench {
                 .collect();
             let current = session.map_or(self.agent.agent_id.clone(), |s| s.preset.id.clone());
             let label = agent_name(&self.agent.presets, &current);
-            Button::new("agent-picker")
+            compact_dropdown("agent-picker", label)
                 .ghost()
                 .xsmall()
                 .max_w(theme::AGENT_SELECTOR_MAX)
-                .label(label)
-                .dropdown_caret(true)
                 .tooltip("选择 Agent（换 Agent 会开新会话）")
                 .dropdown_menu(move |menu, _, _| {
-                    let mut menu = menu;
+                    let mut menu = compact_menu(menu);
                     for (id, name) in &presets {
                         let weak = weak.clone();
                         let id = id.clone();
@@ -132,16 +131,14 @@ impl Workbench {
                 .iter()
                 .find(|(id, _)| *id == modes.current)
                 .map_or(modes.current.clone(), |(_, name)| name.clone());
-            Button::new("agent-mode")
+            compact_dropdown("agent-mode", label)
                 .ghost()
                 .xsmall()
                 .max_w(theme::AGENT_SELECTOR_MAX)
                 .icon(IconName::ShieldCheck)
-                .label(label)
-                .dropdown_caret(true)
                 .tooltip("会话模式（跳过审批的模式不提供）")
                 .dropdown_menu(move |menu, _, _| {
-                    let mut menu = menu;
+                    let mut menu = compact_menu(menu);
                     for (id, name) in &modes.available {
                         let weak = weak.clone();
                         let id = id.clone();
@@ -162,15 +159,13 @@ impl Workbench {
             .filter(|configs| !configs.is_empty())
             .map(|configs| {
                 let weak = cx.weak_entity();
-                Button::new("agent-config")
+                compact_dropdown("agent-config", agent_model::config_label(&configs))
                     .ghost()
                     .xsmall()
                     .max_w_full()
-                    .label(agent_model::config_label(&configs))
-                    .dropdown_caret(true)
                     .tooltip("模型与思考强度")
                     .dropdown_menu(move |menu, _, _| {
-                        let mut menu = menu;
+                        let mut menu = compact_menu(menu);
                         for (i, config) in configs.iter().enumerate() {
                             if i > 0 {
                                 menu = menu.separator();

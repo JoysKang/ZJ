@@ -59,6 +59,11 @@ and its debug-only screenshot configuration alongside ZJ's shared atlas and draw
 
 `gpui-base` (GPUI Kit 0.7.1, the input and editor engine):
 
+- `src/text/style.rs`, `src/text/node.rs`: opt-in `with_code_block_header(true)`
+  pins custom code-block actions to the full-width top edge. The default preserves
+  upstream's top-right action slot; callers reserve body padding for the header.
+  Markdown parsing, selection and highlighting stay unchanged.
+
 - `src/input/editor/mod.rs`, `src/input/base/kind.rs`, `src/input/base/element.rs`,
   `src/input/mod.rs`: one optional application-owned line-end annotation. It is
   positioned in prepaint using that frame's shaped logical line, after its last

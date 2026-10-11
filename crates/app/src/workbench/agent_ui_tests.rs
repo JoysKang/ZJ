@@ -3566,3 +3566,170 @@ async fn separated_agent_cards_keep_complete_borders_and_corners(cx: &mut TestAp
         }
     }
 }
+
+#[gpui_kit::test]
+async fn long_command_approvals_expand_and_copy_without_losing_text(cx: &mut TestAppContext) {
+    use workspace_editor_agent::{PermissionKind, thread::PermissionState};
+    let (handle, this) = open(cx, None);
+    for command in ["printf '%s' ".repeat(100), "printf 'line\n'\n".repeat(20)] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            let key = this.update(cx, |p, cx| {
+                p.agent_ensure_session(cx);
+                let key = p.agent.current.unwrap();
+                p.agent.session_mut(key).unwrap().thread = Thread::new();
+                let mut events = vec![AgentEvent::PermissionRequested(PermissionRequest {
+                    id: 900,
+                    tool_call: ToolCallPatch {
+                        id: "long-command".into(),
+                        kind: Some(ToolKind::Execute),
+                        ..Default::default()
+                    },
+                    raw_input: Some(
+                        serde_json::json!({ "command": command, "cwd": "/tmp/review folder" }),
+                    ),
+                    options: vec![],
+                })];
+                // Leave enough rows below this card to read at a nonzero offset.
+                events.extend((901..907).map(|id| {
+                    AgentEvent::PermissionRequested(PermissionRequest {
+                        id,
+                        tool_call: ToolCallPatch {
+                            id: format!("filler-{id}"),
+                            kind: Some(ToolKind::Execute),
+                            ..Default::default()
+                        },
+                        raw_input: Some(serde_json::json!({ "command": "pwd" })),
+                        options: vec![],
+                    })
+                }));
+                p.agent_events(key, events, window, cx);
+                key
+            });
+            window.render_frame(cx);
+            let item_ix = this.read_with(cx, |p, _| {
+                p.agent
+                    .thread_rows
+                    .iter()
+                    .position(|row| {
+                        matches!(&p.agent.current().unwrap().thread.items[row.range.start],
+                            Item::Permission(card) if card.request.id == 900)
+                    })
+                    .unwrap()
+            });
+            this.read(cx).agent.thread_list.scroll_to(ListOffset {
+                item_ix,
+                offset_in_item: theme::ROW_HEIGHT * 2.,
+            });
+            window.render_frame(cx);
+            assert!(window.try_find(("agent-allow-always", 900u64)).is_none());
+            assert!(
+                window
+                    .try_find(("agent-permission-expand", 900u64))
+                    .is_some()
+            );
+            window.click(("agent-permission-copy", 900u64), cx);
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|item| item.text()),
+                Some(command.clone())
+            );
+            let before = this.read(cx).agent.thread_list.logical_scroll_top();
+            assert_eq!(before.item_ix, item_ix);
+            assert!(before.offset_in_item > Pixels::ZERO);
+            window.click(("agent-permission-expand", 900u64), cx);
+            window.render_frame(cx);
+            assert!(
+                this.read(cx)
+                    .agent
+                    .expanded_permissions
+                    .contains(&(key, 900))
+            );
+            let after = this.read(cx).agent.thread_list.logical_scroll_top();
+            assert_eq!(before.item_ix, after.item_ix);
+            assert_eq!(before.offset_in_item, after.offset_in_item);
+            window.click(("agent-permission-copy", 900u64), cx);
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|item| item.text()),
+                Some(command.clone())
+            );
+            window.click(("agent-permission-expand", 900u64), cx);
+            window.render_frame(cx);
+            let collapsed = this.read(cx).agent.thread_list.logical_scroll_top();
+            assert_eq!(before.item_ix, collapsed.item_ix);
+            assert_eq!(before.offset_in_item, collapsed.offset_in_item);
+            assert!(
+                !this
+                    .read(cx)
+                    .agent
+                    .expanded_permissions
+                    .contains(&(key, 900))
+            );
+            this.update(cx, |p, _| {
+                p.agent.expanded_permissions.insert((key, 900));
+                p.agent.session_mut(key).unwrap().thread.answer_permission(
+                    900,
+                    PermissionState::Answered(PermissionKind::RejectOnce, "已拒绝".into()),
+                );
+                p.agent_sync_list(false);
+                assert!(!p.agent.expanded_permissions.contains(&(key, 900)));
+            });
+        })
+        .unwrap();
+    }
+}
+
+#[gpui_kit::test]
+async fn tool_code_headers_copy_full_output_in_both_themes(cx: &mut TestAppContext) {
+    use gpui_kit::component::{Theme, ThemeMode};
+    use workspace_editor_agent::ToolContent;
+    let (handle, this) = open(cx, None);
+    let output = (1..=100)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            Theme::change(mode, Some(window), cx);
+            this.update(cx, |p, cx| {
+                p.agent_ensure_session(cx);
+                let key = p.agent.current.unwrap();
+                let session = p.agent.session_mut(key).unwrap();
+                session.thread = Thread::new();
+                session.thread.push_user("task".into(), vec![], 1);
+                session.thread.apply(
+                    &AgentEvent::ToolCall(ToolCall {
+                        id: "output".into(),
+                        title: "Read output".into(),
+                        kind: ToolKind::Execute,
+                        status: ToolStatus::Completed,
+                        locations: vec![],
+                        content: vec![ToolContent::Text(output.clone())],
+                    }),
+                    true,
+                );
+                p.agent.expanded_processes.insert((key, 0));
+                p.agent.expanded_tools.insert((key, "output".into()));
+                p.agent_sync_list(false);
+                cx.notify();
+            });
+            this.read(cx).agent.thread_list.scroll_to(ListOffset {
+                item_ix: 2,
+                offset_in_item: Pixels::ZERO,
+            });
+            window.render_frame(cx);
+            let header = window.find("agent-code-header").bounds();
+            assert_eq!(header.size.height, theme::CODE_HEADER_HEIGHT);
+            assert!(header.size.width > this.read(cx).agent.width / 2.);
+            let copy = window
+                .within("agent-code-header")
+                .find("agent-copy")
+                .bounds();
+            assert!(header.contains(&copy.center()));
+            window.within("agent-code-header").click("agent-copy", cx);
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|item| item.text()),
+                Some(output.clone())
+            );
+        })
+        .unwrap();
+    }
+}

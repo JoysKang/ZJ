@@ -426,7 +426,7 @@ impl Workbench {
                             let _ = weak.update(cx, |this, cx| this.set_indent(id, next, cx));
                         })
                 };
-                let mut menu = menu
+                let mut menu = super::menu_style::compact_menu(menu)
                     .item(item(
                         "使用空格缩进".into(),
                         !indent.hard_tabs,

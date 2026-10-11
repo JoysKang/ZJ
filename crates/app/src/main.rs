@@ -451,6 +451,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 Some("WorkspaceEditor"),
             ),
             KeyBinding::new(
+                "alt-secondary-l",
+                workbench::ShowSelectionActions,
+                Some("DocumentEditor > Input"),
+            ),
+            KeyBinding::new(
                 "secondary-shift-a",
                 workbench::NextApproval,
                 Some("WorkspaceEditor"),

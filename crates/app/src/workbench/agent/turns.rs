@@ -623,6 +623,14 @@ impl Workbench {
         self.agent
             .questions
             .retain(|(key, _), _| sessions.iter().any(|s| s.key == *key));
+        self.agent.expanded_permissions.retain(|(key, id)| {
+            sessions.iter().any(|s| {
+                s.key == *key
+                    && s.thread
+                        .pending_permissions()
+                        .any(|card| card.request.id == *id)
+            })
+        });
         let Some(session) = self.agent.current() else {
             self.agent.thread_list.reset(0);
             self.agent.thread_rows.clear();

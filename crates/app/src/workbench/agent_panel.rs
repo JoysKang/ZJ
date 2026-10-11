@@ -109,6 +109,44 @@ fn copy_button(weak: WeakEntity<Workbench>, text: SharedString) -> Button {
         })
 }
 
+/// The language comes from the Markdown fence; output copies can contain more lines than shown.
+fn code_header(
+    weak: WeakEntity<Workbench>,
+    language: Option<SharedString>,
+    text: SharedString,
+    cx: &App,
+) -> AnyElement {
+    let colors = theme::colors(cx);
+    h_flex()
+        .id("agent-code-header")
+        .test_support()
+        .w_full()
+        .h(theme::CODE_HEADER_HEIGHT)
+        .px_2()
+        .gap_2()
+        .border_b_1()
+        .border_color(colors.card_border)
+        .bg(colors.panel)
+        .rounded_t(theme::RADIUS)
+        .text_size(theme::TEXT_CAPTION)
+        .text_color(colors.muted)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(
+                    language
+                        .filter(|lang| !lang.is_empty())
+                        .unwrap_or_else(|| "代码".into()),
+                ),
+        )
+        .child(div().flex_shrink_0().child(copy_button(weak, text)))
+        .into_any_element()
+}
+
 struct Fonts {
     mono: Font,
 }
@@ -142,6 +180,7 @@ impl Workbench {
             .with_link(colors.accent)
             .with_selection(colors.text_selection)
             .with_code_background(colors.editor)
+            .with_code_block_header(true)
             .with_border(colors.card_border)
             .with_paragraph_gap(theme::AGENT_PARAGRAPH_GAP)
             .with_heading(|_| {
@@ -156,7 +195,8 @@ impl Workbench {
             .with_code_block(
                 StyleRefinement::default()
                     .px_3()
-                    .py_2()
+                    .pb_2()
+                    .pt(theme::CODE_BLOCK_BODY_TOP)
                     .rounded(theme::RADIUS)
                     .border_1()
                     .border_color(colors.card_border)
@@ -167,7 +207,9 @@ impl Workbench {
         let weak = cx.weak_entity();
         let links = weak.clone();
         view.style(style)
-            .code_block_actions(move |block, _, _| copy_button(weak.clone(), block.code()))
+            .code_block_actions(move |block, _, cx| {
+                code_header(weak.clone(), block.lang(), block.code(), cx)
+            })
             .on_link_click(move |url, _, window, cx| {
                 cx.stop_propagation();
                 let _ = links.update(cx, |this, cx| this.agent_open_link(url, window, cx));

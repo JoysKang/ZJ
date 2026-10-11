@@ -268,8 +268,8 @@ impl Workbench {
             .child(
                 h_flex()
                     .gap_1()
-                    .opacity(0.)
-                    .group_hover("explorer-section", |actions| actions.opacity(1.))
+                    .invisible()
+                    .group_hover("explorer-section", |actions| actions.visible())
                     .child(
                         Button::new("explorer-new-file")
                             .xsmall()
@@ -396,11 +396,13 @@ impl Workbench {
             .icon(IconName::Ellipsis)
             .tooltip("更多操作")
             .dropdown_menu(move |menu, _, _| {
-                menu.action_context(focus.clone()).item(
-                    PopupMenuItem::new("显示隐藏文件")
-                        .checked(show_hidden)
-                        .action(Box::new(super::ToggleHiddenFiles)),
-                )
+                super::menu_style::compact_menu(menu)
+                    .action_context(focus.clone())
+                    .item(
+                        PopupMenuItem::new("显示隐藏文件")
+                            .checked(show_hidden)
+                            .action(Box::new(super::ToggleHiddenFiles)),
+                    )
             })
             .into_any_element()
     }
@@ -560,8 +562,9 @@ impl Workbench {
             )
             .child(
                 div()
+                    .flex_shrink_0()
                     .pl_1()
-                    .pr(theme::ROW_INSET * 3.)
+                    .pr_2()
                     .child(file_icons::icon(if directory {
                         if expanded {
                             file_icons::FOLDER_OPEN
@@ -596,7 +599,11 @@ impl Workbench {
                         row.child(
                             Icon::new(IconName::ExternalLink)
                                 .size(theme::SMALL_ICON_SIZE)
-                                .text_color(colors.muted),
+                                .text_color(if selected {
+                                    colors.selected_fg
+                                } else {
+                                    colors.muted
+                                }),
                         )
                     })
                     .into_any_element()

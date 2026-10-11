@@ -156,8 +156,8 @@ impl Workbench {
                                 true,
                                 cx,
                             )
-                            .code_block_actions(move |_, _, _| {
-                                copy_button(weak.clone(), whole.clone())
+                            .code_block_actions(move |block, _, cx| {
+                                code_header(weak.clone(), block.lang(), whole.clone(), cx)
                             }),
                         ),
                 )
@@ -495,6 +495,7 @@ impl Workbench {
         if let Some(question) = workspace_editor_agent::thread::permission_question(request) {
             return self.render_question(key, id, &agent, question, compact, cx);
         }
+        let expanded = self.agent.expanded_permissions.contains(&(key, id));
         let offers_always = request
             .options
             .iter()
@@ -530,7 +531,7 @@ impl Workbench {
         let once = Button::new(("agent-allow-once", id))
             .primary()
             .xsmall()
-            .label(if compact { "允许" } else { "允许一次" })
+            .label("允许一次")
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.agent_answer(key, id, PermissionChoice::Once, window, cx)
             }));
@@ -538,7 +539,7 @@ impl Workbench {
             Button::new(("agent-allow-always", id))
                 .outline()
                 .xsmall()
-                .label(if compact { "始终" } else { "始终允许" })
+                .label("始终允许")
                 .tooltip(format!("由 {agent} 记住这类请求，通常在本会话内有效"))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.agent_answer(key, id, PermissionChoice::Always, window, cx)
@@ -558,7 +559,7 @@ impl Workbench {
             .border_color(colors.attention_border)
             .bg(colors.card)
             .overflow_hidden()
-            .when(!compact, |card| {
+            .map(|card| {
                 card.child(
                     h_flex()
                         .px_3()
@@ -598,8 +599,13 @@ impl Workbench {
                                     .id(("agent-permission-command", id))
                                     .flex_1()
                                     .min_w_0()
-                                    .max_h(theme::AGENT_PERMISSION_BODY_MAX)
-                                    .overflow_y_scroll()
+                                    .max_h(if expanded {
+                                        theme::AGENT_PERMISSION_BODY_MAX
+                                    } else {
+                                        theme::AGENT_PERMISSION_COLLAPSED_MAX
+                                    })
+                                    .when(expanded, |body| body.overflow_y_scroll())
+                                    .when(!expanded, |body| body.overflow_hidden())
                                     .child(
                                         gpui_kit::base::SelectableText::new(
                                             ("agent-permission-command-text", id),
@@ -624,7 +630,31 @@ impl Workbench {
                             }),
                     ),
             )
-            .when(!compact || cwd.is_some(), |card| {
+            .child(
+                Button::new(("agent-permission-expand", id))
+                    .ghost()
+                    .xsmall()
+                    .label(if expanded {
+                        "收起命令"
+                    } else {
+                        "展开完整命令"
+                    })
+                    .icon(if expanded {
+                        IconName::ChevronUp
+                    } else {
+                        IconName::ChevronDown
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.agent.expanded_permissions.remove(&(key, id)) {
+                            this.agent.expanded_permissions.insert((key, id));
+                        }
+                        this.agent
+                            .thread_list
+                            .remeasure_items(0..this.agent.thread_list.item_count());
+                        cx.notify();
+                    })),
+            )
+            .map(|card| {
                 card.child(
                     h_flex()
                         .px_3()
@@ -644,7 +674,7 @@ impl Workbench {
                                         gpui_kit::base::SelectableText::new(
                                             ("agent-permission-cwd-text", id),
                                             cwd.map(|cwd| format!("工作目录：{cwd}"))
-                                                .unwrap_or_else(|| self.workspace_name()),
+                                                .unwrap_or_else(|| "Agent 未提供工作目录".into()),
                                         )
                                         .selection_color(colors.text_selection),
                                     ),

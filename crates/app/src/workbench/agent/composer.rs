@@ -26,27 +26,9 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         let attachment = match self.active {
-            Pane::Document(id) => self.documents.iter().find(|d| d.id == id).map(|doc| {
-                let editor = doc.editor.read(cx);
-                let range = editor.selected_range();
-                if range.is_empty() {
-                    return Attachment::File(doc.path.clone());
-                }
-                use gpui_kit::component::input::RopeExt;
-                let rope = editor.text();
-                let start = rope.offset_to_position(range.start);
-                let mut end = rope.offset_to_position(range.end);
-                // A selection ending at the start of a line does not include that line.
-                if end.character == 0 && end.line > start.line {
-                    end.line -= 1;
-                }
-                Attachment::Selection {
-                    path: doc.path.clone(),
-                    start: start.line + 1,
-                    end: end.line + 1,
-                    text: rope.slice(range).to_string(),
-                }
-            }),
+            Pane::Document(id) => self
+                .document(id)
+                .map(|doc| super::super::selection_actions::attachment(doc, cx)),
             _ => None,
         };
         if !self.agent.visible {

@@ -208,7 +208,11 @@ impl Workbench {
                     Some(view) => {
                         let focus = menu.focus_handle(cx);
                         view.update(cx, |this, _| this.tab_menu_focus = Some(focus));
-                        view.read(cx).tab_menu(pane, menu, view.clone())
+                        view.read(cx).tab_menu(
+                            pane,
+                            super::menu_style::compact_menu(menu),
+                            view.clone(),
+                        )
                     }
                     None => menu,
                 }
@@ -497,7 +501,17 @@ impl Workbench {
                 Some(doc) => div()
                     .key_context(super::edit_commands::CONTEXT)
                     .size_full()
-                    .child(Editor::new(&doc.editor).bordered(false).size_full())
+                    .child(
+                        Editor::new(&doc.editor)
+                            .bordered(false)
+                            .size_full()
+                            .context_menu({
+                                let editor = doc.editor.clone();
+                                move |menu, _, cx| {
+                                    super::selection_actions::editor_menu(editor.read(cx), menu)
+                                }
+                            }),
+                    )
                     .into_any_element(),
                 None => div().into_any_element(),
             },
