@@ -237,10 +237,12 @@ impl Workbench {
             .key_context("AgentPanel")
             .size_full()
             .min_w_0()
+            .min_h_0()
             .relative()
             .bg(colors.panel)
-            .border_l_1()
+            .border_1()
             .border_color(colors.border)
+            .rounded(theme::WORKBENCH_RADIUS)
             .text_size(theme::TEXT_BODY)
             .text_color(colors.foreground)
             .on_action(cx.listener(|this, _: &agent::NewAgentSession, window, cx| {
@@ -251,6 +253,7 @@ impl Workbench {
             .when(self.agent.switcher_open, |panel| {
                 panel.child(self.render_agent_switcher(cx))
             })
+            .test_support()
             .into_any_element()
     }
 
@@ -304,6 +307,7 @@ impl Workbench {
             .gap_2()
             .border_b_1()
             .border_color(colors.border)
+            .rounded_t(theme::WORKBENCH_RADIUS)
             .text_size(theme::TEXT_CAPTION);
         let bar = match self.agent.view {
             AgentView::Thread => {

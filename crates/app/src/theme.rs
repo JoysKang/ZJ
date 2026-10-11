@@ -1,9 +1,9 @@
 //! Design tokens: the only place with literal sizes and colors.
 //!
 //! Sizes sit on a 2/4 px grid modelled on VS Code's workbench. Colors are semantic; the dark
-//! and light palettes use neutral cool surfaces. Both are also written into GPUI Kit's
-//! theme (with the existing syntax palettes) so Kit components
-//! such as the Editor match.
+//! and light palettes use softly separated neutral surfaces. Both are also written into
+//! GPUI Kit's theme (with the existing syntax palettes) so Kit components such as the
+//! Editor match.
 
 use gpui_kit::{
     App, Hsla, Pixels, Rems, Window, WindowAppearance,
@@ -68,13 +68,17 @@ pub const TERMINAL_DIM_ALPHA: f32 = 0.66;
 pub const DECORATION_WIDTH: Pixels = px(16.);
 pub const BADGE_SIZE: Pixels = px(16.);
 pub const BADGE_OFFSET: Pixels = px(-3.);
-pub const COMMAND_CENTER_HEIGHT: Pixels = px(24.);
-pub const COMMAND_CENTER_WIDTH: Pixels = px(600.);
+pub const COMMAND_CENTER_HEIGHT: Pixels = px(28.);
+pub const COMMAND_CENTER_WIDTH: Pixels = px(340.);
 pub const QUICK_OPEN_WIDTH: Pixels = px(600.);
 pub const QUICK_OPEN_TOP: Pixels = px(8.);
 pub const QUICK_OPEN_ROWS: usize = 12;
 pub const RADIUS: Pixels = px(6.);
 pub const RADIUS_LARGE: Pixels = px(8.);
+/// Rounded surfaces inside the workbench shell.
+pub const WORKBENCH_RADIUS: Pixels = px(12.);
+/// Each panel contributes 4 px to the 8 px gap between surfaces.
+pub const WORKBENCH_INSET: Pixels = px(4.);
 /// The editor's floating find / replace widget (VS Code: 419 px wide, inputs about 220 px).
 pub const FIND_WIDTH: Pixels = px(440.);
 pub const FIND_INPUT_WIDTH: Pixels = px(236.);
@@ -98,6 +102,8 @@ pub const SIDEBAR_WIDTH: Pixels = px(300.);
 pub const SIDEBAR_MIN: Pixels = px(200.);
 pub const SIDEBAR_MAX: Pixels = px(520.);
 pub const EDITOR_MIN: Pixels = px(320.);
+/// Editor minimum when the sidebar, editor and Agent panel are all visible.
+pub const EDITOR_COMPACT_MIN: Pixels = px(240.);
 pub const EDITOR_MAX: Pixels = px(4000.);
 
 // Icons and text.
@@ -284,7 +290,7 @@ pub struct Palette {
     pub editor: u32,
     /// Sidebar and status bar.
     pub panel: u32,
-    /// Title bar.
+    /// Title bar and workbench shell.
     pub title: u32,
     /// Tab strip and inactive tabs.
     pub tabs: u32,
@@ -362,44 +368,43 @@ pub struct Palette {
     pub terminal: [u32; 16],
 }
 
-/// Neutral cool dark surfaces, with readable Git and Agent status colors.
+/// Softly separated neutral dark surfaces, with readable Git and Agent status colors.
 pub const DARK: Palette = Palette {
-    editor: 0x171b23,
-    panel: 0x141920,
-    title: 0x10141b,
-    tabs: 0x141920,
-    input_bg: 0x222936,
-    border: 0x2b3442,
-    hover: 0x252e3b,
-    selected: 0x29394f,
-    selected_fg: 0xe2e8f0,
-    active_line: 0x202631,
-    selection: 0x29394f,
-    caret: 0xa1c1fa,
-    foreground: 0xe2e8f0,
-    muted: 0xa4afbe,
-    accent: 0xa1c1fa,
-    badge: 0x315fb1,
-    badge_fg: 0xffffff,
-    primary_hover: 0x2a539e,
-    primary_active: 0x24488a,
-    // A shared deep green keeps white text readable in both appearances.
-    commit: 0x326443,
-    commit_fg: 0xffffff,
-    commit_hover: 0x2a5638,
-    keycap: 0x222936,
+    editor: 0x1e1f21,
+    panel: 0x202123,
+    title: 0x171819,
+    tabs: 0x202123,
+    input_bg: 0x1e1f21,
+    border: 0x343639,
+    hover: 0x2d2f32,
+    selected: 0x34373a,
+    selected_fg: 0xe8e9eb,
+    active_line: 0x26282b,
+    selection: 0x34373a,
+    caret: 0xe2e4e7,
+    foreground: 0xe8e9eb,
+    muted: 0xa2a6ad,
+    accent: 0xe2e4e7,
+    badge: 0xe2e4e7,
+    badge_fg: 0x202226,
+    primary_hover: 0xd2d5d9,
+    primary_active: 0xc3c7cd,
+    commit: 0x333f38,
+    commit_fg: 0xd3ead9,
+    commit_hover: 0x3e4f43,
+    keycap: 0x2d2f32,
     logo_cursor: 0xbf616a,
     // Solarized yellow.
     find_current: 0xb58900,
     find_current_alpha: 0.5,
     shadow_alpha: 0.36,
-    indent_guide: 0x343f50,
+    indent_guide: 0x3b3e43,
     added: 0x81b88b,
     modified: 0xe2c08d,
     deleted: 0xe8735f,
     untracked: 0x73c991,
     conflict: 0xe4676b,
-    code: 0xc5cdd8,
+    code: 0xcfd2d6,
     diff_green: 0x859900,
     diff_red: 0xdc322f,
     diff_line_alpha: 0.16,
@@ -408,11 +413,11 @@ pub const DARK: Palette = Palette {
     attention_halo: 0xb58900,
     unread: 0xa1c1fa,
     running: 0x81b88b,
-    // Cool tint separates user messages from the panel.
-    user_bubble: 0x222e3e,
-    card: 0x202631,
-    card_border: 0x2b3442,
-    strong_border: 0x46556b,
+    // A neutral tint separates user messages from the panel.
+    user_bubble: 0x2b2e31,
+    card: 0x26282b,
+    card_border: 0x343639,
+    strong_border: 0x5b6067,
     mark: 0xb58900,
     mark_alpha: 0.30,
     mark_fg: 0xf0d78c,
@@ -420,7 +425,7 @@ pub const DARK: Palette = Palette {
     glyph_codex: 0xa1c1fa,
     glyph_deepseek: 0xa6a7ed,
     glyph_gemini: 0xd98eaf,
-    glyph_generic: 0xa4afbe,
+    glyph_generic: 0xa2a6ad,
     // VS Code's Solarized Dark `terminal.ansi*`: the bright colors are Solarized's base tones.
     terminal: [
         0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5, 0x586e75,
@@ -428,44 +433,43 @@ pub const DARK: Palette = Palette {
     ],
 };
 
-/// Neutral cool light surfaces, with darkened status colors for contrast.
+/// Softly separated neutral light surfaces, with darkened status colors for contrast.
 pub const LIGHT: Palette = Palette {
-    editor: 0xfbfcfe,
-    panel: 0xf1f4f8,
-    title: 0xe8edf3,
-    tabs: 0xe8edf3,
+    editor: 0xffffff,
+    panel: 0xfcfcfb,
+    title: 0xf0f0ee,
+    tabs: 0xf5f5f3,
     input_bg: 0xffffff,
-    border: 0xd7e0ea,
-    hover: 0xe2e9f2,
-    selected: 0xdce8f8,
-    selected_fg: 0x202a39,
-    active_line: 0xf1f4f8,
-    selection: 0xdce8f8,
-    caret: 0x315fb1,
-    foreground: 0x202a39,
-    muted: 0x536176,
-    accent: 0x315fb1,
-    badge: 0x315fb1,
+    border: 0xe2e3e1,
+    hover: 0xf0f1f0,
+    selected: 0xe6e8e7,
+    selected_fg: 0x242629,
+    active_line: 0xf5f5f3,
+    selection: 0xe6e8e7,
+    caret: 0x282b2f,
+    foreground: 0x242629,
+    muted: 0x60666d,
+    accent: 0x282b2f,
+    badge: 0x282b2f,
     badge_fg: 0xffffff,
-    primary_hover: 0x2a539e,
-    primary_active: 0x24488a,
-    // A shared deep green keeps white text readable in both appearances.
-    commit: 0x326443,
-    commit_fg: 0xffffff,
-    commit_hover: 0x2a5638,
-    keycap: 0xe8edf3,
+    primary_hover: 0x3a3e44,
+    primary_active: 0x202226,
+    commit: 0xe3ebe5,
+    commit_fg: 0x2b5139,
+    commit_hover: 0xd3e1d7,
+    keycap: 0xe6e8e7,
     logo_cursor: 0xbf616a,
     // Nord aurora yellow.
     find_current: 0xebcb8b,
     find_current_alpha: 0.8,
     shadow_alpha: 0.16,
-    indent_guide: 0xd7e0ea,
+    indent_guide: 0xe2e3e1,
     added: 0x3f6b2d,
     modified: 0x8a5226,
     deleted: 0x99353f,
     untracked: 0x3f6b2d,
     conflict: 0x7a4e73,
-    code: 0x202a39,
+    code: 0x242629,
     diff_green: 0xa3be8c,
     diff_red: 0xbf616a,
     diff_line_alpha: 0.26,
@@ -474,19 +478,19 @@ pub const LIGHT: Palette = Palette {
     attention_halo: 0xd08770,
     unread: 0x315fb1,
     running: 0x326443,
-    // Cool tint separates user messages from the panel.
-    user_bubble: 0xe8eff8,
+    // A neutral tint separates user messages from the panel.
+    user_bubble: 0xedf0ed,
     card: 0xffffff,
-    card_border: 0xd7e0ea,
-    strong_border: 0xb7c5d8,
+    card_border: 0xe2e3e1,
+    strong_border: 0xbfc2c4,
     mark: 0xebcb8b,
     mark_alpha: 0.55,
-    mark_fg: 0x202a39,
+    mark_fg: 0x242629,
     glyph_claude: 0x96593a,
     glyph_codex: 0x315fb1,
     glyph_deepseek: 0x81587a,
     glyph_gemini: 0x2f6f6d,
-    glyph_generic: 0x536176,
+    glyph_generic: 0x60666d,
     // Nord with the aurora colors darkened (as for the git decorations) so text in them stays
     // readable on snow storm; white is a light gray, as on any light terminal theme.
     terminal: [

@@ -1,0 +1,557 @@
+<!-- Two complete ZJ workbench directions; host carousel switches between local simulations. -->
+<div id="zj-ui-prototype-20261011" class="viz-carousel" aria-label="ZJ 编辑器设计方案" data-previous-label="上一方案" data-next-label="下一方案">
+  <section data-variant="柔和分区" aria-label="柔和分区">
+    <div class="zj-window zj-soft">
+      <header class="zj-titlebar"><div class="zj-traffic" aria-hidden="true"><span></span><span></span><span></span></div><button class="zj-command cursor-interaction" data-action="quick"><i data-lucide="search" aria-hidden="true"></i><span>ZJ</span><kbd>⌘ P</kbd></button><span class="zj-window-label">workbench</span></header>
+      <div class="zj-workspace">
+        <aside class="zj-sidebar zj-surface" aria-label="工作区侧栏">
+          <nav class="zj-navigation" aria-label="工作区视图"><button class="cursor-interaction" data-view="files" aria-pressed="true" aria-label="文件"><i data-lucide="files" aria-hidden="true"></i><span>文件</span></button><button class="cursor-interaction" data-view="search" aria-pressed="false" aria-label="搜索"><i data-lucide="search" aria-hidden="true"></i><span>搜索</span></button><button class="cursor-interaction" data-view="scm" aria-pressed="false" aria-label="源码管理"><i data-lucide="git-branch" aria-hidden="true"></i><span>源码</span><span class="zj-count">3</span></button></nav>
+          <div class="zj-side-body">
+            <div data-panel="files"><div class="zj-section-title"><span>ZJ</span><span class="zj-secondary">工作区</span></div><div class="zj-tree">
+              <div class="zj-folder"><i data-lucide="chevron-down" aria-hidden="true"></i><i data-lucide="folder" aria-hidden="true"></i>crates</div><div class="zj-folder zj-depth1"><i data-lucide="chevron-down" aria-hidden="true"></i><i data-lucide="folder" aria-hidden="true"></i>app / src</div><div class="zj-folder zj-depth2"><i data-lucide="chevron-down" aria-hidden="true"></i><i data-lucide="folder-open" aria-hidden="true"></i>workbench</div>
+              <button class="zj-file zj-depth3 cursor-interaction" data-file="theme.rs" aria-pressed="true"><i data-lucide="file-code-2" aria-hidden="true"></i><span>theme.rs</span><span class="zj-modified">M</span></button><button class="zj-file zj-depth3 cursor-interaction" data-file="scm.rs" aria-pressed="false"><i data-lucide="file-code-2" aria-hidden="true"></i><span>scm.rs</span><span class="zj-modified">M</span></button><div class="zj-folder zj-depth3"><i data-lucide="chevron-down" aria-hidden="true"></i><span>agent_panel</span></div><button class="zj-file zj-depth4 cursor-interaction" data-file="composer.rs" aria-pressed="false"><i data-lucide="file-code-2" aria-hidden="true"></i><span>composer.rs</span><span class="zj-modified">M</span></button><button class="zj-file zj-depth3 cursor-interaction" data-file="mod.rs" aria-pressed="false"><i data-lucide="file-code-2" aria-hidden="true"></i><span>mod.rs</span></button><div class="zj-folder zj-depth1"><i data-lucide="chevron-right" aria-hidden="true"></i><i data-lucide="folder" aria-hidden="true"></i>editor</div><div class="zj-folder"><i data-lucide="chevron-right" aria-hidden="true"></i><i data-lucide="folder" aria-hidden="true"></i>docs</div><button class="zj-file cursor-interaction" data-file="Cargo.toml" aria-pressed="false"><i data-lucide="file-text" aria-hidden="true"></i><span>Cargo.toml</span></button><div class="zj-folder"><i data-lucide="file-text" aria-hidden="true"></i>README.md</div>
+            </div></div>
+            <div data-panel="search" hidden><div class="zj-section-title">搜索</div><input class="zj-search" aria-label="搜索工作区" placeholder="搜索工作区" value="panel_radius"><div class="zj-search-results"><span class="zj-secondary">2 个匹配 · 2 个文件</span><button class="zj-result cursor-interaction" data-file="theme.rs"><span>theme.rs</span><small>panel_radius: px(12.0)</small></button><button class="zj-result cursor-interaction" data-file="composer.rs"><span>composer.rs</span><small>.rounded(theme.panel_radius)</small></button></div></div>
+            <div data-panel="scm" hidden><div class="zj-section-title"><span>源码管理</span><span class="zj-count" data-scm-count>3</span></div><textarea class="zj-commit-input" aria-label="提交消息" placeholder="提交消息">Polish workbench surfaces</textarea><button class="zj-primary zj-full cursor-interaction" data-action="commit"><i data-lucide="check" aria-hidden="true"></i>提交（模拟）</button><div class="zj-scm-message zj-secondary" aria-live="polite"></div><div class="zj-section-title">更改</div><div class="zj-scm-files"><button class="zj-file cursor-interaction" data-file="theme.rs"><i data-lucide="file-code-2" aria-hidden="true"></i><span>theme.rs</span><span class="zj-modified">M</span></button><button class="zj-file cursor-interaction" data-file="scm.rs"><i data-lucide="file-code-2" aria-hidden="true"></i><span>scm.rs</span><span class="zj-modified">M</span></button><button class="zj-file cursor-interaction" data-file="composer.rs"><i data-lucide="file-code-2" aria-hidden="true"></i><span>composer.rs</span><span class="zj-modified">M</span></button></div></div>
+          </div><footer class="zj-project-footer"><i data-lucide="folder-open" aria-hidden="true"></i><span>~/work/code/ZJ</span></footer>
+        </aside>
+        <main class="zj-editor zj-surface" aria-label="代码编辑器">
+          <div class="zj-tabs" aria-label="打开的文件"><button class="cursor-interaction" data-file="theme.rs" aria-pressed="true"><i data-lucide="file-code-2" aria-hidden="true"></i>theme.rs<span class="zj-tab-dot"></span></button><button class="cursor-interaction" data-file="scm.rs" aria-pressed="false">scm.rs<span class="zj-tab-dot"></span></button><button class="cursor-interaction" data-file="composer.rs" aria-pressed="false">composer.rs<span class="zj-tab-dot"></span></button></div>
+          <div class="zj-breadcrumb"><span>crates</span><span>›</span><span>app</span><span>›</span><span>src</span><span>›</span><span>workbench</span><span>›</span><span data-current-file>theme.rs</span></div>
+          <div class="zj-code" aria-label="Rust 源代码"><div class="zj-code-lines"></div></div><div class="zj-editor-footer"><i data-lucide="check" aria-hidden="true"></i><span>所有更改已保存</span></div>
+        </main>
+        <aside class="zj-agent zj-surface" aria-label="Agent 对话">
+          <header class="zj-agent-header"><span><i data-lucide="sparkles" aria-hidden="true"></i>Agent</span><span class="zj-secondary">本地模拟</span><button class="zj-icon cursor-interaction" data-action="reset" aria-label="重置模拟会话"><i data-lucide="rotate-ccw" aria-hidden="true"></i></button></header>
+          <div class="zj-conversation"><div class="zj-session-title">让工作台更清晰</div><div class="zj-user-message">优化编辑器的分区、标签栏和 Agent 输入区，保留现有交互。</div><details class="zj-process"><summary class="cursor-interaction"><i data-lucide="check" aria-hidden="true"></i><span data-process-label>已完成 · 3 个步骤</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary><div class="zj-process-body"><div><i data-lucide="file-search" aria-hidden="true"></i>阅读工作台布局与主题</div><div><i data-lucide="file-code-2" aria-hidden="true"></i>调整三个文件的界面样式</div><div><i data-lucide="terminal" aria-hidden="true"></i><span data-check-label>cargo check · 已通过（示例）</span></div><div class="zj-run-actions" hidden><button class="cursor-interaction" data-action="finish">模拟结束</button><button class="cursor-interaction" data-action="cancel">取消</button></div></div></details><div class="zj-final-reply" aria-live="polite"><p>已整理工作台的视觉层次。</p><p>文件、代码和 Agent 各自拥有完整表面；输入区保留清晰的附件、模型与发送入口。</p><p class="zj-secondary">可从左侧查看文件，或展开下方更改。</p></div><div class="zj-approval" hidden><div class="zj-approval-title"><i data-lucide="shield-check" aria-hidden="true"></i>请求执行命令</div><pre>cargo check -p zj-app</pre><div class="zj-secondary">工作目录</div><code>/Users/joys/work/code/ZJ</code><div class="zj-approval-actions"><button class="zj-primary cursor-interaction" data-action="approve">允许一次（模拟）</button><button class="cursor-interaction" data-action="deny">拒绝</button></div><div class="zj-approval-result" aria-live="polite"></div></div></div>
+          <div class="zj-agent-bottom"><details class="zj-changes"><summary class="cursor-interaction"><i data-lucide="files" aria-hidden="true"></i><span>修改了 3 个文件</span><span class="zj-diff">+42 −18</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary><div class="zj-changed-files"><button class="cursor-interaction" data-file="theme.rs"><span>theme.rs</span><span class="zj-diff">+18 −6</span></button><button class="cursor-interaction" data-file="scm.rs"><span>scm.rs</span><span class="zj-diff">+9 −4</span></button><button class="cursor-interaction" data-file="composer.rs"><span>composer.rs</span><span class="zj-diff">+15 −8</span></button></div></details><div class="zj-composer"><div class="zj-attachments" hidden></div><textarea aria-label="发送给 Agent" placeholder="继续描述你想调整的地方…"></textarea><div class="zj-composer-tools"><button class="zj-icon cursor-interaction" data-action="attach" aria-label="添加模拟图片附件"><i data-lucide="paperclip" aria-hidden="true"></i></button><div class="zj-model-wrap"><button class="zj-model cursor-interaction" data-action="model" aria-expanded="false"><span data-model-name>GPT-5.4</span><i data-lucide="chevron-down" aria-hidden="true"></i></button><div class="zj-model-menu" hidden><button class="cursor-interaction" data-model="GPT-5.4">GPT-5.4</button><button class="cursor-interaction" data-model="Claude Sonnet 4.6">Claude Sonnet 4.6</button><button class="cursor-interaction" data-model="Gemini 3.1 Pro">Gemini 3.1 Pro</button></div></div><button class="zj-send cursor-interaction" data-action="send" aria-label="发送模拟消息"><i data-lucide="arrow-up" aria-hidden="true"></i></button></div></div><div class="zj-composer-hint" aria-live="polite">仅模拟界面 · 不执行命令</div></div>
+        </aside>
+      </div>
+      <footer class="zj-statusbar"><span><i data-lucide="git-branch" aria-hidden="true"></i>main*</span><span><i data-lucide="circle-check" aria-hidden="true"></i>0 问题</span><span class="zj-status-spacer"></span><span data-position>行 12，列 5</span><span>UTF-8</span><span data-language>Rust</span></footer>
+      <div class="zj-quick-overlay" hidden><div class="zj-quick-dialog" role="dialog" aria-modal="true" aria-label="快速打开"><div class="zj-quick-search"><i data-lucide="search" aria-hidden="true"></i><input aria-label="按名称查找文件" placeholder="按名称查找文件…"><button class="zj-icon cursor-interaction" data-action="close-quick" aria-label="关闭快速打开"><i data-lucide="x" aria-hidden="true"></i></button></div><div class="zj-quick-results"><button class="cursor-interaction" data-file="theme.rs"><span>theme.rs</span><small>crates/app/src/workbench</small></button><button class="cursor-interaction" data-file="scm.rs"><span>scm.rs</span><small>crates/app/src/workbench</small></button><button class="cursor-interaction" data-file="composer.rs"><span>composer.rs</span><small>workbench/agent_panel</small></button><button class="cursor-interaction" data-file="Cargo.toml"><span>Cargo.toml</span><small>ZJ</small></button></div><div class="zj-quick-empty" hidden>没有匹配文件</div><footer>Esc 关闭 · 点击打开</footer></div></div>
+    </div>
+  </section>
+  <section data-variant="紧凑工作台" aria-label="紧凑工作台" hidden>
+    <div class="zj-window zj-compact">
+      <header class="zj-titlebar"><div class="zj-traffic" aria-hidden="true"><span></span><span></span><span></span></div><button class="zj-command cursor-interaction" data-action="quick"><i data-lucide="search" aria-hidden="true"></i><span>ZJ</span><kbd>⌘ P</kbd></button><span class="zj-window-label">workbench</span></header>
+      <div class="zj-workspace">
+        <aside class="zj-sidebar zj-surface" aria-label="工作区侧栏">
+          <nav class="zj-navigation" aria-label="工作区视图"><button class="cursor-interaction" data-view="files" aria-pressed="true" aria-label="文件"><i data-lucide="files" aria-hidden="true"></i><span>文件</span></button><button class="cursor-interaction" data-view="search" aria-pressed="false" aria-label="搜索"><i data-lucide="search" aria-hidden="true"></i><span>搜索</span></button><button class="cursor-interaction" data-view="scm" aria-pressed="false" aria-label="源码管理"><i data-lucide="git-branch" aria-hidden="true"></i><span>源码</span><span class="zj-count">3</span></button></nav>
+          <div class="zj-side-body">
+            <div data-panel="files"><div class="zj-section-title"><span>ZJ</span><span class="zj-secondary">工作区</span></div><div class="zj-tree"><div class="zj-folder"><i data-lucide="chevron-down" aria-hidden="true"></i><i data-lucide="folder" aria-hidden="true"></i>crates</div><div class="zj-folder zj-depth1"><i data-lucide="chevron-down" aria-hidden="true"></i><i data-lucide="folder" aria-hidden="true"></i>app / src</div><div class="zj-folder zj-depth2"><i data-lucide="chevron-down" aria-hidden="true"></i><i data-lucide="folder-open" aria-hidden="true"></i>workbench</div><button class="zj-file zj-depth3 cursor-interaction" data-file="theme.rs" aria-pressed="true"><i data-lucide="file-code-2" aria-hidden="true"></i><span>theme.rs</span><span class="zj-modified">M</span></button><button class="zj-file zj-depth3 cursor-interaction" data-file="scm.rs" aria-pressed="false"><i data-lucide="file-code-2" aria-hidden="true"></i><span>scm.rs</span><span class="zj-modified">M</span></button><div class="zj-folder zj-depth3"><i data-lucide="chevron-down" aria-hidden="true"></i><span>agent_panel</span></div><button class="zj-file zj-depth4 cursor-interaction" data-file="composer.rs" aria-pressed="false"><i data-lucide="file-code-2" aria-hidden="true"></i><span>composer.rs</span><span class="zj-modified">M</span></button><button class="zj-file zj-depth3 cursor-interaction" data-file="mod.rs" aria-pressed="false"><i data-lucide="file-code-2" aria-hidden="true"></i><span>mod.rs</span></button><div class="zj-folder zj-depth1"><i data-lucide="chevron-right" aria-hidden="true"></i><i data-lucide="folder" aria-hidden="true"></i>editor</div><div class="zj-folder"><i data-lucide="chevron-right" aria-hidden="true"></i><i data-lucide="folder" aria-hidden="true"></i>docs</div><button class="zj-file cursor-interaction" data-file="Cargo.toml" aria-pressed="false"><i data-lucide="file-text" aria-hidden="true"></i><span>Cargo.toml</span></button><div class="zj-folder"><i data-lucide="file-text" aria-hidden="true"></i>README.md</div></div></div>
+            <div data-panel="search" hidden><div class="zj-section-title">搜索</div><input class="zj-search" aria-label="搜索工作区" placeholder="搜索工作区" value="panel_radius"><div class="zj-search-results"><span class="zj-secondary">2 个匹配 · 2 个文件</span><button class="zj-result cursor-interaction" data-file="theme.rs"><span>theme.rs</span><small>panel_radius: px(12.0)</small></button><button class="zj-result cursor-interaction" data-file="composer.rs"><span>composer.rs</span><small>.rounded(theme.panel_radius)</small></button></div></div>
+            <div data-panel="scm" hidden><div class="zj-section-title"><span>源码管理</span><span class="zj-count" data-scm-count>3</span></div><textarea class="zj-commit-input" aria-label="提交消息" placeholder="提交消息">Polish workbench surfaces</textarea><button class="zj-primary zj-full cursor-interaction" data-action="commit"><i data-lucide="check" aria-hidden="true"></i>提交（模拟）</button><div class="zj-scm-message zj-secondary" aria-live="polite"></div><div class="zj-section-title">更改</div><div class="zj-scm-files"><button class="zj-file cursor-interaction" data-file="theme.rs"><i data-lucide="file-code-2" aria-hidden="true"></i><span>theme.rs</span><span class="zj-modified">M</span></button><button class="zj-file cursor-interaction" data-file="scm.rs"><i data-lucide="file-code-2" aria-hidden="true"></i><span>scm.rs</span><span class="zj-modified">M</span></button><button class="zj-file cursor-interaction" data-file="composer.rs"><i data-lucide="file-code-2" aria-hidden="true"></i><span>composer.rs</span><span class="zj-modified">M</span></button></div></div>
+          </div><footer class="zj-project-footer"><i data-lucide="folder-open" aria-hidden="true"></i><span>~/work/code/ZJ</span></footer>
+        </aside>
+        <main class="zj-editor zj-surface" aria-label="代码编辑器"><div class="zj-tabs" aria-label="打开的文件"><button class="cursor-interaction" data-file="theme.rs" aria-pressed="true"><i data-lucide="file-code-2" aria-hidden="true"></i>theme.rs<span class="zj-tab-dot"></span></button><button class="cursor-interaction" data-file="scm.rs" aria-pressed="false">scm.rs<span class="zj-tab-dot"></span></button><button class="cursor-interaction" data-file="composer.rs" aria-pressed="false">composer.rs<span class="zj-tab-dot"></span></button></div><div class="zj-breadcrumb"><span>crates</span><span>›</span><span>app</span><span>›</span><span>src</span><span>›</span><span>workbench</span><span>›</span><span data-current-file>theme.rs</span></div><div class="zj-code" aria-label="Rust 源代码"><div class="zj-code-lines"></div></div><div class="zj-editor-footer"><i data-lucide="check" aria-hidden="true"></i><span>所有更改已保存</span></div></main>
+        <aside class="zj-agent zj-surface" aria-label="Agent 对话"><header class="zj-agent-header"><span><i data-lucide="sparkles" aria-hidden="true"></i>Agent</span><span class="zj-secondary">本地模拟</span><button class="zj-icon cursor-interaction" data-action="reset" aria-label="重置模拟会话"><i data-lucide="rotate-ccw" aria-hidden="true"></i></button></header><div class="zj-conversation"><div class="zj-session-title">让工作台更清晰</div><div class="zj-user-message">优化编辑器的分区、标签栏和 Agent 输入区，保留现有交互。</div><details class="zj-process"><summary class="cursor-interaction"><i data-lucide="check" aria-hidden="true"></i><span data-process-label>已完成 · 3 个步骤</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary><div class="zj-process-body"><div><i data-lucide="file-search" aria-hidden="true"></i>阅读工作台布局与主题</div><div><i data-lucide="file-code-2" aria-hidden="true"></i>调整三个文件的界面样式</div><div><i data-lucide="terminal" aria-hidden="true"></i><span data-check-label>cargo check · 已通过（示例）</span></div><div class="zj-run-actions" hidden><button class="cursor-interaction" data-action="finish">模拟结束</button><button class="cursor-interaction" data-action="cancel">取消</button></div></div></details><div class="zj-final-reply" aria-live="polite"><p>已整理工作台的视觉层次。</p><p>文件、代码和 Agent 各自拥有完整表面；输入区保留清晰的附件、模型与发送入口。</p><p class="zj-secondary">可从左侧查看文件，或展开下方更改。</p></div><div class="zj-approval" hidden><div class="zj-approval-title"><i data-lucide="shield-check" aria-hidden="true"></i>请求执行命令</div><pre>cargo check -p zj-app</pre><div class="zj-secondary">工作目录</div><code>/Users/joys/work/code/ZJ</code><div class="zj-approval-actions"><button class="zj-primary cursor-interaction" data-action="approve">允许一次（模拟）</button><button class="cursor-interaction" data-action="deny">拒绝</button></div><div class="zj-approval-result" aria-live="polite"></div></div></div><div class="zj-agent-bottom"><details class="zj-changes"><summary class="cursor-interaction"><i data-lucide="files" aria-hidden="true"></i><span>修改了 3 个文件</span><span class="zj-diff">+42 −18</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary><div class="zj-changed-files"><button class="cursor-interaction" data-file="theme.rs"><span>theme.rs</span><span class="zj-diff">+18 −6</span></button><button class="cursor-interaction" data-file="scm.rs"><span>scm.rs</span><span class="zj-diff">+9 −4</span></button><button class="cursor-interaction" data-file="composer.rs"><span>composer.rs</span><span class="zj-diff">+15 −8</span></button></div></details><div class="zj-composer"><div class="zj-attachments" hidden></div><textarea aria-label="发送给 Agent" placeholder="继续描述你想调整的地方…"></textarea><div class="zj-composer-tools"><button class="zj-icon cursor-interaction" data-action="attach" aria-label="添加模拟图片附件"><i data-lucide="paperclip" aria-hidden="true"></i></button><div class="zj-model-wrap"><button class="zj-model cursor-interaction" data-action="model" aria-expanded="false"><span data-model-name>GPT-5.4</span><i data-lucide="chevron-down" aria-hidden="true"></i></button><div class="zj-model-menu" hidden><button class="cursor-interaction" data-model="GPT-5.4">GPT-5.4</button><button class="cursor-interaction" data-model="Claude Sonnet 4.6">Claude Sonnet 4.6</button><button class="cursor-interaction" data-model="Gemini 3.1 Pro">Gemini 3.1 Pro</button></div></div><button class="zj-send cursor-interaction" data-action="send" aria-label="发送模拟消息"><i data-lucide="arrow-up" aria-hidden="true"></i></button></div></div><div class="zj-composer-hint" aria-live="polite">仅模拟界面 · 不执行命令</div></div></aside>
+      </div>
+      <footer class="zj-statusbar"><span><i data-lucide="git-branch" aria-hidden="true"></i>main*</span><span><i data-lucide="circle-check" aria-hidden="true"></i>0 问题</span><span class="zj-status-spacer"></span><span data-position>行 12，列 5</span><span>UTF-8</span><span data-language>Rust</span></footer>
+      <div class="zj-quick-overlay" hidden><div class="zj-quick-dialog" role="dialog" aria-modal="true" aria-label="快速打开"><div class="zj-quick-search"><i data-lucide="search" aria-hidden="true"></i><input aria-label="按名称查找文件" placeholder="按名称查找文件…"><button class="zj-icon cursor-interaction" data-action="close-quick" aria-label="关闭快速打开"><i data-lucide="x" aria-hidden="true"></i></button></div><div class="zj-quick-results"><button class="cursor-interaction" data-file="theme.rs"><span>theme.rs</span><small>crates/app/src/workbench</small></button><button class="cursor-interaction" data-file="scm.rs"><span>scm.rs</span><small>crates/app/src/workbench</small></button><button class="cursor-interaction" data-file="composer.rs"><span>composer.rs</span><small>workbench/agent_panel</small></button><button class="cursor-interaction" data-file="Cargo.toml"><span>Cargo.toml</span><small>ZJ</small></button></div><div class="zj-quick-empty" hidden>没有匹配文件</div><footer>Esc 关闭 · 点击打开</footer></div></div>
+    </div>
+  </section>
+</div>
+<style>
+#zj-ui-prototype-20261011 { background: transparent; width: 100%; }
+#zj-ui-prototype-20261011 .zj-window { --zj-bg: light-dark(#f0f0ee,#171819); --zj-surface: light-dark(#fcfcfb,#202123); --zj-code-bg: light-dark(#ffffff,#1e1f21); --zj-text: light-dark(#242629,#e8e9eb); --zj-muted: light-dark(#676b70,#a2a6ad); --zj-line: light-dark(#e2e3e1,#343639); --zj-hover: light-dark(#f0f1f0,#2d2f32); --zj-selected: light-dark(#e6e8e7,#34373a); --zj-primary: light-dark(#282b2f,#e2e4e7); --zj-on-primary: light-dark(#ffffff,#202226); --zj-green: light-dark(#397350,#90bb9d); --zj-keyword: light-dark(#925086,#c795c1); --zj-string: light-dark(#627949,#a7bc8a); --zj-type: light-dark(#486b88,#8bb1d1); --zj-shadow: light-dark(#00000020,#00000060); font: 400 14px/1.55 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--zj-text); background: var(--zj-bg); border: 1px solid var(--zj-line); border-radius: 14px; overflow: hidden; position: relative; height: 704px; display: flex; flex-direction: column; min-width: 0; }
+#zj-ui-prototype-20261011 .zj-window * { box-sizing: border-box; }
+#zj-ui-prototype-20261011 .zj-window [hidden] { display: none !important; }
+#zj-ui-prototype-20261011 .zj-window button, #zj-ui-prototype-20261011 .zj-window input, #zj-ui-prototype-20261011 .zj-window textarea { font: inherit; color: inherit; }
+#zj-ui-prototype-20261011 .zj-window button { background: transparent; border: 0; display: inline-flex; align-items: center; gap: 6px; text-align: left; padding: 4px 8px; border-radius: 6px; min-width: 0; }
+#zj-ui-prototype-20261011 .zj-window button:hover { background: var(--zj-hover); }
+#zj-ui-prototype-20261011 .zj-window input, #zj-ui-prototype-20261011 .zj-window textarea { background: var(--zj-code-bg); border: 1px solid var(--zj-line); border-radius: 6px; padding: 8px; min-width: 0; }
+#zj-ui-prototype-20261011 .zj-window textarea { resize: vertical; }
+#zj-ui-prototype-20261011 .zj-window input::placeholder, #zj-ui-prototype-20261011 .zj-window textarea::placeholder { color: var(--zj-muted); opacity: 1; }
+#zj-ui-prototype-20261011 .zj-window svg, #zj-ui-prototype-20261011 .zj-window i[data-lucide] { width: 16px; height: 16px; flex: 0 0 16px; }
+#zj-ui-prototype-20261011 .zj-titlebar { height: 38px; flex: 0 0 38px; display: grid; grid-template-columns: 1fr minmax(160px,340px) 1fr; align-items: center; gap: 12px; padding: 0 14px; }
+#zj-ui-prototype-20261011 .zj-traffic { display: flex; gap: 7px; }
+#zj-ui-prototype-20261011 .zj-traffic span { width: 11px; height: 11px; border-radius: 50%; background: light-dark(#d8857e,#ac6963); }
+#zj-ui-prototype-20261011 .zj-traffic span:nth-child(2) { background: light-dark(#d5b570,#a59161); }
+#zj-ui-prototype-20261011 .zj-traffic span:nth-child(3) { background: light-dark(#8bb691,#6e9274); }
+#zj-ui-prototype-20261011 .zj-window .zj-command { height: 26px; padding: 0 9px; justify-content: center; border: 1px solid var(--zj-line); background: var(--zj-surface); color: var(--zj-muted); font-size: 12px; gap: 8px; }
+#zj-ui-prototype-20261011 .zj-command kbd { font: inherit; margin-left: auto; }
+#zj-ui-prototype-20261011 .zj-command span { margin-right: auto; }
+#zj-ui-prototype-20261011 .zj-window-label { font-size: 12px; color: var(--zj-muted); text-align: right; }
+#zj-ui-prototype-20261011 .zj-workspace { display: grid; grid-template-columns: 192px minmax(0,1fr) 306px; gap: 8px; padding: 0 8px 8px; flex: 1; min-height: 0; }
+#zj-ui-prototype-20261011 .zj-surface { border: 1px solid var(--zj-line); border-radius: 12px; background: var(--zj-surface); min-width: 0; overflow: hidden; }
+#zj-ui-prototype-20261011 .zj-sidebar { display: flex; flex-direction: column; }
+#zj-ui-prototype-20261011 .zj-navigation { display: flex; align-items: center; gap: 1px; padding: 6px; border-bottom: 1px solid var(--zj-line); }
+#zj-ui-prototype-20261011 .zj-navigation button { font-size: 12px; gap: 4px; padding: 5px; flex: 1; justify-content: center; }
+#zj-ui-prototype-20261011 .zj-window button[aria-pressed="true"] { background: var(--zj-selected); }
+#zj-ui-prototype-20261011 .zj-count { color: var(--zj-muted); font-size: 12px; }
+#zj-ui-prototype-20261011 .zj-navigation .zj-count { display: none; }
+#zj-ui-prototype-20261011 .zj-side-body { padding: 8px 6px; flex: 1; overflow: auto; min-height: 0; }
+#zj-ui-prototype-20261011 .zj-section-title { display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 500; padding: 5px 5px 8px; }
+#zj-ui-prototype-20261011 .zj-secondary { color: var(--zj-muted); font-size: 12px; font-weight: 400; }
+#zj-ui-prototype-20261011 .zj-folder, #zj-ui-prototype-20261011 .zj-file { height: 24px; font-size: 12px; display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+#zj-ui-prototype-20261011 .zj-folder { padding: 0 5px; color: var(--zj-muted); }
+#zj-ui-prototype-20261011 .zj-window .zj-file { width: 100%; padding: 0 5px; }
+#zj-ui-prototype-20261011 .zj-file span:first-of-type { overflow: hidden; text-overflow: ellipsis; }
+#zj-ui-prototype-20261011 .zj-window .zj-depth1 { padding-left: 12px; }
+#zj-ui-prototype-20261011 .zj-window .zj-depth2 { padding-left: 20px; }
+#zj-ui-prototype-20261011 .zj-window .zj-depth3 { padding-left: 28px; }
+#zj-ui-prototype-20261011 .zj-window .zj-depth4 { padding-left: 36px; }
+#zj-ui-prototype-20261011 .zj-modified { color: var(--zj-green); font-size: 12px; margin-left: auto; }
+#zj-ui-prototype-20261011 .zj-project-footer { padding: 10px; font-size: 12px; color: var(--zj-muted); display: flex; align-items: center; gap: 5px; border-top: 1px solid var(--zj-line); }
+#zj-ui-prototype-20261011 .zj-project-footer span { overflow-wrap: anywhere; }
+#zj-ui-prototype-20261011 .zj-search, #zj-ui-prototype-20261011 .zj-commit-input { width: 100%; font-size: 12px !important; }
+#zj-ui-prototype-20261011 .zj-commit-input { min-height: 72px; margin-bottom: 6px; }
+#zj-ui-prototype-20261011 .zj-window .zj-primary { background: var(--zj-primary); color: var(--zj-on-primary); justify-content: center; }
+#zj-ui-prototype-20261011 .zj-window .zj-primary:hover { opacity: .9; }
+#zj-ui-prototype-20261011 .zj-full { width: 100%; }
+#zj-ui-prototype-20261011 .zj-scm-message { padding: 6px 0; overflow-wrap: anywhere; }
+#zj-ui-prototype-20261011 .zj-search-results { padding-top: 12px; }
+#zj-ui-prototype-20261011 .zj-window .zj-result { display: flex; width: 100%; flex-direction: column; align-items: flex-start; margin-top: 8px; font-size: 12px; }
+#zj-ui-prototype-20261011 .zj-result small { font-size: 12px; color: var(--zj-muted); overflow-wrap: anywhere; }
+#zj-ui-prototype-20261011 .zj-editor { background: var(--zj-code-bg); display: flex; flex-direction: column; }
+#zj-ui-prototype-20261011 .zj-tabs { min-height: 36px; flex: 0 0 auto; display: flex; flex-wrap: wrap; align-content: flex-start; border-bottom: 1px solid var(--zj-line); background: var(--zj-surface); }
+#zj-ui-prototype-20261011 .zj-tabs button { height: 36px; border-radius: 0; border-right: 1px solid var(--zj-line); font-size: 12px; flex: 0 1 auto; max-width: 100%; padding: 0 10px; overflow-wrap: anywhere; justify-content: flex-start; }
+#zj-ui-prototype-20261011 .zj-tabs button[aria-pressed="true"] { background: var(--zj-code-bg); box-shadow: inset 0 -2px var(--zj-muted); }
+#zj-ui-prototype-20261011 .zj-tab-dot { width: 5px; height: 5px; background: var(--zj-muted); border-radius: 50%; flex: 0 0 5px; }
+#zj-ui-prototype-20261011 .zj-breadcrumb { display: flex; gap: 5px; padding: 8px 14px; font-size: 12px; color: var(--zj-muted); flex-wrap: wrap; }
+#zj-ui-prototype-20261011 .zj-code { flex: 1; min-height: 0; overflow: auto; padding: 8px 0 16px; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 14px; line-height: 1.8; }
+#zj-ui-prototype-20261011 .zj-code-line { display: flex; min-width: 0; padding-right: 12px; }
+#zj-ui-prototype-20261011 .zj-line-number { flex: 0 0 40px; text-align: right; padding-right: 14px; color: var(--zj-muted); font-size: 12px; user-select: none; }
+#zj-ui-prototype-20261011 .zj-source { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+#zj-ui-prototype-20261011 .zj-code-line:nth-child(12) { background: var(--zj-hover); }
+#zj-ui-prototype-20261011 .zj-keyword { color: var(--zj-keyword); }
+#zj-ui-prototype-20261011 .zj-type { color: var(--zj-type); }
+#zj-ui-prototype-20261011 .zj-string { color: var(--zj-string); }
+#zj-ui-prototype-20261011 .zj-comment { color: var(--zj-muted); }
+#zj-ui-prototype-20261011 .zj-editor-footer { color: var(--zj-muted); display: flex; align-items: center; gap: 5px; font-size: 12px; padding: 8px 14px; }
+#zj-ui-prototype-20261011 .zj-agent { display: flex; flex-direction: column; }
+#zj-ui-prototype-20261011 .zj-agent-header { display: flex; align-items: center; padding: 8px 12px; height: 42px; flex: 0 0 42px; border-bottom: 1px solid var(--zj-line); gap: 10px; }
+#zj-ui-prototype-20261011 .zj-agent-header > span:first-child { font-weight: 500; display: flex; align-items: center; gap: 7px; margin-right: auto; }
+#zj-ui-prototype-20261011 .zj-window .zj-icon { padding: 4px; flex: 0 0 26px; width: 26px; height: 26px; justify-content: center; }
+#zj-ui-prototype-20261011 .zj-conversation { flex: 1; min-height: 0; overflow: auto; padding: 18px 14px 12px; }
+#zj-ui-prototype-20261011 .zj-session-title { font-weight: 500; margin-bottom: 14px; }
+#zj-ui-prototype-20261011 .zj-user-message { background: var(--zj-hover); border-radius: 10px; padding: 10px 12px; margin-bottom: 18px; }
+#zj-ui-prototype-20261011 .zj-process { font-size: 12px; color: var(--zj-muted); margin-bottom: 14px; }
+#zj-ui-prototype-20261011 .zj-window summary { list-style: none; display: flex; align-items: center; gap: 6px; min-width: 0; }
+#zj-ui-prototype-20261011 .zj-window summary::-webkit-details-marker { display: none; }
+#zj-ui-prototype-20261011 .zj-window summary > svg:last-child { margin-left: 0; }
+#zj-ui-prototype-20261011 .zj-window details[open] summary > svg:last-child { transform: rotate(180deg); }
+#zj-ui-prototype-20261011 .zj-process-body { margin: 10px 0 0 7px; padding-left: 12px; border-left: 1px solid var(--zj-line); }
+#zj-ui-prototype-20261011 .zj-process-body > div { display: flex; align-items: center; gap: 7px; padding: 5px 0; }
+#zj-ui-prototype-20261011 .zj-run-actions { flex-wrap: wrap; }
+#zj-ui-prototype-20261011 .zj-run-actions button { border: 1px solid var(--zj-line); }
+#zj-ui-prototype-20261011 .zj-final-reply p { margin: 0 0 12px; }
+#zj-ui-prototype-20261011 .zj-approval { border: 1px solid var(--zj-line); border-radius: 10px; padding: 12px; background: var(--zj-code-bg); font-size: 12px; }
+#zj-ui-prototype-20261011 .zj-approval-title { display: flex; align-items: center; gap: 6px; font-weight: 500; }
+#zj-ui-prototype-20261011 .zj-approval pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--zj-hover); padding: 8px; border-radius: 5px; font-size: 12px; }
+#zj-ui-prototype-20261011 .zj-approval code { display: block; overflow-wrap: anywhere; margin: 4px 0 12px; font-size: 12px; }
+#zj-ui-prototype-20261011 .zj-approval-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+#zj-ui-prototype-20261011 .zj-approval-result { margin-top: 6px; color: var(--zj-muted); }
+#zj-ui-prototype-20261011 .zj-agent-bottom { padding: 0 12px 8px; }
+#zj-ui-prototype-20261011 .zj-changes { border: 1px solid var(--zj-line); border-radius: 10px; margin-bottom: 12px; background: var(--zj-code-bg); font-size: 12px; }
+#zj-ui-prototype-20261011 .zj-changes summary { padding: 10px; flex-wrap: wrap; }
+#zj-ui-prototype-20261011 .zj-changes summary > svg:last-child { order: 1; }
+#zj-ui-prototype-20261011 .zj-changes summary .zj-diff { order: 2; }
+#zj-ui-prototype-20261011 .zj-diff { color: var(--zj-green); font-size: 12px; white-space: nowrap; margin-left: auto; }
+#zj-ui-prototype-20261011 .zj-changed-files { padding: 0 5px 5px; }
+#zj-ui-prototype-20261011 .zj-changed-files button { width: 100%; justify-content: space-between; padding: 5px; }
+#zj-ui-prototype-20261011 .zj-composer { border: 1px solid var(--zj-line); border-radius: 12px; background: var(--zj-code-bg); padding: 10px 9px 8px; }
+#zj-ui-prototype-20261011 .zj-composer textarea { width: 100%; border: 0; padding: 0; height: 74px; min-height: 74px; font-size: 14px; resize: none; background: transparent; display: block; }
+#zj-ui-prototype-20261011 .zj-composer-tools { display: flex; align-items: center; gap: 3px; margin-top: 8px; }
+#zj-ui-prototype-20261011 .zj-model-wrap { position: relative; min-width: 0; }
+#zj-ui-prototype-20261011 .zj-model { font-size: 12px !important; padding: 4px !important; max-width: 100%; }
+#zj-ui-prototype-20261011 .zj-model span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#zj-ui-prototype-20261011 .zj-model-wrap { flex: 0 1 auto; }
+#zj-ui-prototype-20261011 .zj-model-menu { position: absolute; bottom: calc(100% + 8px); left: 0; width: max-content; min-width: 140px; max-width: 220px; border: 1px solid var(--zj-line); border-radius: 9px; background: var(--zj-code-bg); padding: 4px; box-shadow: 0 8px 24px var(--zj-shadow); z-index: 4; }
+#zj-ui-prototype-20261011 .zj-model-menu button { display: flex; width: 100%; font-size: 12px; }
+#zj-ui-prototype-20261011 .zj-window .zj-send { margin-left: auto; background: var(--zj-primary); color: var(--zj-on-primary); width: 28px; height: 28px; flex: 0 0 28px; justify-content: center; padding: 0; border-radius: 8px; }
+#zj-ui-prototype-20261011 .zj-window button:disabled { opacity: 1; background: var(--zj-hover); color: var(--zj-muted); cursor: default; }
+#zj-ui-prototype-20261011 .zj-commit-label { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; color: var(--zj-muted); font-size: 12px; }
+#zj-ui-prototype-20261011 .zj-commit-label button { padding: 3px 5px; font-size: 12px; }
+#zj-ui-prototype-20261011 .zj-composer-hint { text-align: center; color: var(--zj-muted); font-size: 12px; padding-top: 7px; }
+#zj-ui-prototype-20261011 .zj-attachments { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+#zj-ui-prototype-20261011 .zj-attachments button { border: 1px solid var(--zj-line); font-size: 12px; }
+#zj-ui-prototype-20261011 .zj-statusbar { height: 24px; flex: 0 0 24px; padding: 0 12px; display: flex; align-items: center; gap: 14px; color: var(--zj-muted); font-size: 12px; }
+#zj-ui-prototype-20261011 .zj-statusbar > span { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+#zj-ui-prototype-20261011 .zj-status-spacer { flex: 1; }
+#zj-ui-prototype-20261011 .zj-quick-overlay { position: absolute; inset: 38px 0 24px; z-index: 10; background: light-dark(#20252c26,#00000060); padding: 16px; display: flex; justify-content: center; align-items: flex-start; }
+#zj-ui-prototype-20261011 .zj-quick-dialog { width: min(460px,100%); border: 1px solid var(--zj-line); border-radius: 12px; background: var(--zj-code-bg); box-shadow: 0 12px 40px var(--zj-shadow); overflow: hidden; }
+#zj-ui-prototype-20261011 .zj-quick-search { display: flex; align-items: center; padding: 9px 10px; gap: 8px; border-bottom: 1px solid var(--zj-line); }
+#zj-ui-prototype-20261011 .zj-quick-search input { border: 0; flex: 1; padding: 0; }
+#zj-ui-prototype-20261011 .zj-quick-results { padding: 5px; }
+#zj-ui-prototype-20261011 .zj-quick-results button { display: flex; flex-direction: column; align-items: flex-start; width: 100%; gap: 0; }
+#zj-ui-prototype-20261011 .zj-quick-results small { color: var(--zj-muted); font-size: 12px; overflow-wrap: anywhere; }
+#zj-ui-prototype-20261011 .zj-quick-dialog footer, #zj-ui-prototype-20261011 .zj-quick-empty { padding: 8px 14px; font-size: 12px; color: var(--zj-muted); }
+#zj-ui-prototype-20261011 .zj-compact { border-radius: 9px; }
+#zj-ui-prototype-20261011 .zj-compact .zj-titlebar { border-bottom: 1px solid var(--zj-line); }
+#zj-ui-prototype-20261011 .zj-compact .zj-workspace { padding: 0; gap: 0; grid-template-columns: 206px minmax(0,1fr) 292px; }
+#zj-ui-prototype-20261011 .zj-compact .zj-surface { border: 0; border-radius: 0; }
+#zj-ui-prototype-20261011 .zj-compact .zj-sidebar { display: grid; grid-template-columns: 38px minmax(0,1fr); grid-template-rows: 1fr auto; border-right: 1px solid var(--zj-line); }
+#zj-ui-prototype-20261011 .zj-compact .zj-navigation { flex-direction: column; padding: 5px 2px; border: 0; border-right: 1px solid var(--zj-line); grid-row: 1 / 3; align-items: stretch; gap: 5px; background: var(--zj-bg); }
+#zj-ui-prototype-20261011 .zj-compact .zj-navigation button { flex: 0 0 32px; justify-content: center; border-radius: 0; }
+#zj-ui-prototype-20261011 .zj-compact .zj-navigation button span { display: none; }
+#zj-ui-prototype-20261011 .zj-compact .zj-navigation button[aria-pressed="true"] { box-shadow: inset 2px 0 var(--zj-muted); }
+#zj-ui-prototype-20261011 .zj-compact .zj-side-body { padding: 5px 4px; }
+#zj-ui-prototype-20261011 .zj-compact .zj-depth3 { padding-left: 22px; }
+#zj-ui-prototype-20261011 .zj-compact .zj-agent { border-left: 1px solid var(--zj-line); }
+#zj-ui-prototype-20261011 .zj-compact .zj-conversation { padding-top: 14px; }
+#zj-ui-prototype-20261011 .zj-compact .zj-statusbar { border-top: 1px solid var(--zj-line); }
+@media (max-width: 900px) and (min-width: 737px) {
+  #zj-ui-prototype-20261011 .zj-workspace { grid-template-columns: 164px minmax(0,1fr) 274px; }
+  #zj-ui-prototype-20261011 .zj-compact .zj-workspace { grid-template-columns: 184px minmax(0,1fr) 274px; }
+  #zj-ui-prototype-20261011 .zj-tabs { height: auto; flex-basis: auto; flex-wrap: wrap; }
+  #zj-ui-prototype-20261011 .zj-tabs button { height: 36px; }
+}
+@media (max-width: 736px) {
+  #zj-ui-prototype-20261011 .zj-window { height: 1230px; }
+  #zj-ui-prototype-20261011 .zj-workspace, #zj-ui-prototype-20261011 .zj-compact .zj-workspace { grid-template-columns: 1fr; grid-template-rows: 240px 400px minmax(0,1fr); }
+  #zj-ui-prototype-20261011 .zj-compact .zj-sidebar { border-right: 0; border-bottom: 1px solid var(--zj-line); }
+  #zj-ui-prototype-20261011 .zj-compact .zj-agent { border-left: 0; border-top: 1px solid var(--zj-line); }
+  #zj-ui-prototype-20261011 .zj-titlebar { grid-template-columns: 48px minmax(0,1fr); gap: 8px; padding: 0 10px; }
+  #zj-ui-prototype-20261011 .zj-window-label { display: none; }
+  #zj-ui-prototype-20261011 .zj-project-footer { padding: 5px 10px; }
+  #zj-ui-prototype-20261011 .zj-side-body { padding-top: 4px; }
+  #zj-ui-prototype-20261011 .zj-window .zj-depth1, #zj-ui-prototype-20261011 .zj-window .zj-depth2, #zj-ui-prototype-20261011 .zj-window .zj-depth3, #zj-ui-prototype-20261011 .zj-window .zj-depth4 { padding-left: 5px; }
+  #zj-ui-prototype-20261011 .zj-statusbar { gap: 8px; padding: 0 8px; }
+  #zj-ui-prototype-20261011 .zj-statusbar > span:nth-child(2) { display: none; }
+  #zj-ui-prototype-20261011 .zj-tabs button { padding: 0 5px; gap: 4px; }
+  #zj-ui-prototype-20261011 .zj-tabs svg { display: none; }
+  #zj-ui-prototype-20261011 .zj-breadcrumb { padding: 7px 10px; }
+  #zj-ui-prototype-20261011 .zj-scm-files { display: flex; flex-wrap: wrap; }
+  #zj-ui-prototype-20261011 .zj-scm-files button { width: auto; flex: 1; }
+  #zj-ui-prototype-20261011 .zj-commit-input { min-height: 50px; height: 50px; }
+  #zj-ui-prototype-20261011 .zj-scm-message { padding: 2px 0; }
+}
+@media (pointer: coarse) {
+  #zj-ui-prototype-20261011 .zj-window { height: 1460px; }
+  #zj-ui-prototype-20261011 .zj-workspace, #zj-ui-prototype-20261011 .zj-compact .zj-workspace { grid-template-columns: 1fr; grid-template-rows: 356px 400px minmax(0,1fr); }
+  #zj-ui-prototype-20261011 .zj-window button, #zj-ui-prototype-20261011 .zj-window summary { min-height: 44px; }
+  #zj-ui-prototype-20261011 .zj-window .zj-icon, #zj-ui-prototype-20261011 .zj-window .zj-send { width: 44px; flex-basis: 44px; }
+  #zj-ui-prototype-20261011 .zj-window .zj-command { min-height: 26px; }
+  #zj-ui-prototype-20261011 .zj-window input, #zj-ui-prototype-20261011 .zj-window textarea { font-size: 16px !important; }
+  #zj-ui-prototype-20261011 .zj-tabs { min-height: 44px; flex-basis: auto; }
+  #zj-ui-prototype-20261011 .zj-tabs button { height: 44px; }
+  #zj-ui-prototype-20261011 .zj-navigation { min-height: 54px; }
+  #zj-ui-prototype-20261011 .zj-agent-header { height: 54px; flex-basis: 54px; }
+}
+</style>
+<script>
+(() => {
+  const root = document.getElementById('zj-ui-prototype-20261011');
+  const settings = { theme: 'system', scene: 'complete' };
+  let lastScene = settings.scene;
+  const files = {
+    'theme.rs': ['use gpui::{px, Hsla, Pixels};', '', '// Shared workbench surfaces', '#[derive(Clone)]', 'pub struct WorkbenchTheme {', '    pub panel_radius: Pixels,', '    pub panel_gap: Pixels,', '    pub background: Hsla,', '}', '', 'impl WorkbenchTheme {', '    pub fn panel_radius() -> Pixels {', '        px(12.0)', '    }', '', '    pub fn panel_gap() -> Pixels {', '        px(8.0)', '    }', '', '    pub fn tab_height() -> Pixels {', '        px(36.0)', '    }', '}'],
+    'scm.rs': ['use gpui::{div, IntoElement};', '', 'impl SourceControlPanel {', '    fn render_commit(&self)', '        -> impl IntoElement', '    {', '        div()', '            .flex()', '            .flex_col()', '            .gap_2()', '            .child(self.message_input())', '            .child(self.commit_button())', '    }', '', '    fn render_changes(&self)', '        -> impl IntoElement', '    {', '        div().children(', '            self.changed_files()', '                .map(render_file)', '        )', '    }', '}'],
+    'composer.rs': ['use gpui::{div, px, IntoElement};', '', 'impl AgentComposer {', '    fn render_input(&self)', '        -> impl IntoElement', '    {', '        let theme = self.theme();', '', '        div()', '            .flex_col()', '            .rounded(theme.panel_radius)', '            .border_1()', '            .p_3()', '            .child(self.attachments())', '            .child(self.message_input())', '            .child(', '                div().flex().gap_2()', '                    .child(self.model_menu())', '                    .child(self.send_button())', '            )', '    }', '}'],
+    'mod.rs': ['mod theme;', 'mod scm;', 'mod agent_panel;', '', 'pub use theme::WorkbenchTheme;', '', 'pub struct Workbench {', '    sidebar: Sidebar,', '    editor: EditorPane,', '    agent: AgentPanel,', '}'],
+    'agent_ui_tests.rs': ['#[test]', 'fn changed_files_start_collapsed() {', '    let panel = AgentPanel::new();', '    assert!(!panel.changes_expanded());', '}', '', '#[test]', 'fn running_output_stays_visible() {', '    let panel = AgentPanel::running();', '    assert!(panel.process_expanded());', '}'],
+    'Cargo.toml': ['[workspace]', 'resolver = "2"', 'members = [', '    "crates/app",', '    "crates/editor",', ']', '', '[workspace.package]', 'edition = "2024"', '', '[workspace.dependencies]', 'gpui = { workspace = true }']
+  };
+  const windows = Array.from(root.querySelectorAll('.zj-window'));
+  function saveState() {
+    const panes = windows.map(win => ({
+      file: win.dataset.file,
+      view: win.querySelector('[data-view][aria-pressed="true"]').dataset.view,
+      model: win.querySelector('[data-model-name]').textContent,
+      scene: win.dataset.scene,
+      processOpen: win.querySelector('.zj-process').open,
+      changesOpen: win.querySelector('.zj-changes').open
+    }));
+    try {
+      globalThis.openai?.setWidgetState?.({
+        modelContent: { preview: 'ZJ workbench', appearance: settings.theme, scene: settings.scene },
+        privateContent: { panes }
+      })?.catch(() => {});
+    } catch (_) {}
+  }
+  function completeReply(win) {
+    const reply = win.querySelector('.zj-final-reply');
+    reply.replaceChildren();
+    ['已整理工作台的视觉层次。', '文件、代码和 Agent 各自拥有完整表面；输入区保留清晰的附件、模型与发送入口。', '可从左侧查看文件，或展开下方更改。'].forEach((text, index) => {
+      const paragraph = document.createElement('p');
+      paragraph.textContent = text;
+      if (index === 2) paragraph.className = 'zj-secondary';
+      reply.append(paragraph);
+    });
+  }
+  function updateCommit(win) {
+    win.querySelector('[data-action="commit"]').disabled =
+      win.querySelector('[data-scm-count]').textContent === '0' ||
+      !win.querySelector('.zj-commit-input').value.trim();
+  }
+  function highlight(line) {
+    const fragment = document.createDocumentFragment();
+    const tokens = line.split(/("[^"\n]*"|\/\/.*|\b(?:pub|use|impl|struct|fn|let|mod|return)\b|\b(?:Pixels|Hsla|WorkbenchTheme|IntoElement|AgentComposer|SourceControlPanel)\b)/g);
+    tokens.forEach(token => {
+      const span = document.createElement('span');
+      span.textContent = token;
+      if (token.startsWith('//')) span.className = 'zj-comment';
+      else if (token.startsWith('"')) span.className = 'zj-string';
+      else if (/^(pub|use|impl|struct|fn|let|mod|return)$/.test(token)) span.className = 'zj-keyword';
+      else if (/^(Pixels|Hsla|WorkbenchTheme|IntoElement|AgentComposer|SourceControlPanel)$/.test(token)) span.className = 'zj-type';
+      fragment.append(span);
+    });
+    return fragment;
+  }
+  function openFile(win, name) {
+    win.dataset.file = name;
+    const holder = win.querySelector('.zj-code-lines');
+    holder.replaceChildren();
+    files[name].forEach((line, index) => {
+      const row = document.createElement('div');
+      row.className = 'zj-code-line';
+      const number = document.createElement('span');
+      number.className = 'zj-line-number';
+      number.textContent = index + 1;
+      const source = document.createElement('span');
+      source.className = 'zj-source';
+      source.append(highlight(line || ' '));
+      row.append(number, source);
+      holder.append(row);
+    });
+    const tabs = win.querySelector('.zj-tabs');
+    if (!Array.from(tabs.querySelectorAll('button')).some(button => button.dataset.file === name)) {
+      const tab = document.createElement('button');
+      tab.className = 'cursor-interaction';
+      tab.dataset.file = name;
+      tab.dataset.tooltip = name;
+      tab.textContent = name;
+      tabs.append(tab);
+    }
+    win.querySelectorAll('.zj-tabs [data-file], .zj-tree [data-file]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.file === name)));
+    const breadcrumb = win.querySelector('.zj-breadcrumb');
+    const path = name === 'Cargo.toml' ? ['ZJ', name] :
+      ['crates', 'app', 'src', 'workbench', ...(name === 'composer.rs' ? ['agent_panel'] : []), name];
+    breadcrumb.replaceChildren();
+    path.forEach((segment, index) => {
+      if (index) {
+        const separator = document.createElement('span');
+        separator.textContent = '›';
+        breadcrumb.append(separator);
+      }
+      const part = document.createElement('span');
+      part.textContent = segment;
+      if (index === path.length - 1) part.dataset.currentFile = '';
+      breadcrumb.append(part);
+    });
+    win.querySelector('[data-language]').textContent = name.endsWith('.rs') ? 'Rust' : 'TOML';
+    win.querySelector('[data-position]').textContent = '行 12，列 5';
+    closeQuick(win);
+  }
+  function closeQuick(win) {
+    const overlay = win.querySelector('.zj-quick-overlay');
+    const wasOpen = !overlay.hidden;
+    overlay.hidden = true;
+    if (wasOpen) win.querySelector('[data-action="quick"]').focus();
+  }
+  function scene(win, value) {
+    win.dataset.scene = value;
+    const running = value === 'running';
+    const approval = value === 'approval';
+    win.querySelector('.zj-process').open = running || approval;
+    win.querySelector('[data-process-label]').textContent = running ? '正在调整工作台…' : approval ? '等待命令审批' : '已完成 · 3 个步骤';
+    win.querySelector('[data-check-label]').textContent = running ? 'cargo check · 等待执行（模拟）' : approval ? 'cargo check · 等待授权（模拟）' : 'cargo check · 已通过（示例）';
+    win.querySelector('.zj-run-actions').hidden = !running;
+    win.querySelector('.zj-final-reply').hidden = running || approval;
+    win.querySelector('.zj-approval').hidden = !approval;
+    win.querySelector('.zj-approval-actions').hidden = false;
+    win.querySelector('.zj-approval-result').textContent = '';
+    win.querySelector('.zj-changes').open = false;
+    if (!running && !approval) completeReply(win);
+    win.querySelector('.zj-composer-hint').textContent = running ? '运行中 · 可模拟结束或取消' : approval ? '等待审批 · 仅本地模拟' : '仅模拟界面 · 不执行命令';
+  }
+  function renderSettings() {
+    windows.forEach(win => {
+      if (settings.theme === 'system') win.style.removeProperty('color-scheme');
+      else win.style.colorScheme = settings.theme;
+      if (settings.scene !== lastScene) scene(win, settings.scene);
+    });
+    lastScene = settings.scene;
+    saveState();
+  }
+  function restoreState(saved) {
+    if (saved?.modelContent?.preview !== 'ZJ workbench') return;
+    const model = saved.modelContent;
+    if (['system', 'light', 'dark'].includes(model.appearance)) settings.theme = model.appearance;
+    if (['complete', 'running', 'approval'].includes(model.scene)) settings.scene = model.scene;
+    lastScene = settings.scene;
+    windows.forEach((win, index) => {
+      if (settings.theme === 'system') win.style.removeProperty('color-scheme');
+      else win.style.colorScheme = settings.theme;
+      const pane = saved.privateContent?.panes?.[index] || {};
+      const restoredScene = ['complete', 'running', 'approval'].includes(pane.scene) ? pane.scene : settings.scene;
+      if (win.dataset.scene !== restoredScene) scene(win, restoredScene);
+      if (Object.prototype.hasOwnProperty.call(files, pane.file) && win.dataset.file !== pane.file) openFile(win, pane.file);
+      if (['files', 'search', 'scm'].includes(pane.view)) {
+        win.querySelectorAll('[data-panel]').forEach(panel => { panel.hidden = panel.dataset.panel !== pane.view; });
+        win.querySelectorAll('[data-view]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.view === pane.view)));
+      }
+      if (['GPT-5.4', 'Claude Sonnet 4.6'].includes(pane.model)) win.querySelector('[data-model-name]').textContent = pane.model;
+      if (typeof pane.processOpen === 'boolean') win.querySelector('.zj-process').open = pane.processOpen;
+      if (typeof pane.changesOpen === 'boolean') win.querySelector('.zj-changes').open = pane.changesOpen;
+    });
+  }
+  windows.forEach(win => {
+    const treeFile = document.createElement('button');
+    treeFile.className = 'zj-file zj-depth3 cursor-interaction';
+    treeFile.dataset.file = 'agent_ui_tests.rs';
+    const fileIcon = document.createElement('i');
+    fileIcon.dataset.lucide = 'file-code-2';
+    fileIcon.setAttribute('aria-hidden', 'true');
+    const fileName = document.createElement('span');
+    fileName.textContent = 'agent_ui_tests.rs';
+    treeFile.append(fileIcon, fileName);
+    treeFile.setAttribute('aria-pressed', 'false');
+    win.querySelector('.zj-tree [data-file="mod.rs"]').before(treeFile);
+    const quickFile = document.createElement('button');
+    quickFile.className = 'cursor-interaction';
+    quickFile.dataset.file = 'agent_ui_tests.rs';
+    const quickName = document.createElement('span');
+    quickName.textContent = 'agent_ui_tests.rs';
+    const quickPath = document.createElement('small');
+    quickPath.textContent = 'crates/app/src/workbench';
+    quickFile.append(quickName, quickPath);
+    win.querySelector('.zj-quick-results').append(quickFile);
+    const scmFiles = win.querySelector('.zj-scm-files');
+    Array.from(scmFiles.children).sort((a, b) => a.dataset.file.localeCompare(b.dataset.file, 'en')).forEach(item => scmFiles.append(item));
+    const commitLabel = document.createElement('div');
+    commitLabel.className = 'zj-commit-label';
+    const label = document.createElement('span');
+    label.textContent = '提交信息';
+    const generate = document.createElement('button');
+    generate.className = 'cursor-interaction';
+    generate.dataset.action = 'generate-commit';
+    generate.setAttribute('aria-label', 'AI 生成提交信息');
+    const sparkle = document.createElement('i');
+    sparkle.dataset.lucide = 'sparkles';
+    sparkle.setAttribute('aria-hidden', 'true');
+    generate.append(sparkle, '生成');
+    commitLabel.append(label, generate);
+    win.querySelector('.zj-commit-input').before(commitLabel);
+    win.querySelector('[data-model="Gemini 3.1 Pro"]').remove();
+    win.querySelectorAll('button[data-file]').forEach(button => { button.dataset.tooltip = button.dataset.file; });
+    win.querySelector('.zj-approval pre').textContent = 'cargo check --workspace';
+    openFile(win, 'theme.rs');
+    scene(win, 'complete');
+    updateCommit(win);
+    win.addEventListener('click', event => {
+      if (event.target.closest('summary')) requestAnimationFrame(saveState);
+      const button = event.target.closest('button');
+      if (!button || !win.contains(button)) {
+        if (event.target === win.querySelector('.zj-quick-overlay')) closeQuick(win);
+        return;
+      }
+      if (button.dataset.file) openFile(win, button.dataset.file);
+      if (button.dataset.view) {
+        win.querySelectorAll('[data-panel]').forEach(panel => { panel.hidden = panel.dataset.panel !== button.dataset.view; });
+        win.querySelectorAll('[data-view]').forEach(item => item.setAttribute('aria-pressed', String(item === button)));
+      }
+      if (button.dataset.model) {
+        win.querySelector('[data-model-name]').textContent = button.dataset.model;
+        win.querySelector('.zj-model-menu').hidden = true;
+        win.querySelector('[data-action="model"]').setAttribute('aria-expanded', 'false');
+      }
+      const action = button.dataset.action;
+      if (action === 'quick') {
+        win.querySelector('.zj-quick-overlay').hidden = false;
+        win.querySelector('.zj-quick-search input').focus();
+      }
+      if (action === 'close-quick') closeQuick(win);
+      if (action === 'model') {
+        const menu = win.querySelector('.zj-model-menu');
+        menu.hidden = !menu.hidden;
+        button.setAttribute('aria-expanded', String(!menu.hidden));
+      }
+      if (action === 'commit') {
+        const text = win.querySelector('.zj-commit-input').value.trim();
+        if (!text) { win.querySelector('.zj-scm-message').textContent = '请输入提交消息。'; return; }
+        const count = win.querySelector('[data-scm-count]');
+        if (count.textContent === '0') { win.querySelector('.zj-scm-message').textContent = '暂无更改可提交（模拟）。'; return; }
+        count.textContent = '0';
+        win.querySelector('.zj-scm-files').hidden = true;
+        win.querySelector('.zj-scm-message').textContent = '已模拟提交 · 未写入 Git。';
+        updateCommit(win);
+      }
+      if (action === 'generate-commit') {
+        win.querySelector('.zj-commit-input').value = 'style: refine workbench panels and agent composer';
+        updateCommit(win);
+      }
+      if (action === 'attach') {
+        const chips = win.querySelector('.zj-attachments');
+        if (chips.children.length >= 2) return;
+        chips.hidden = false;
+        const chip = document.createElement('button');
+        const number = Array.from(chips.children).some(item => item.dataset.image === '1') ? '2' : '1';
+        chip.dataset.image = number;
+        chip.dataset.action = 'remove-attachment';
+        chip.className = 'cursor-interaction';
+        chip.textContent = '图 ' + number + ' ×';
+        chip.setAttribute('aria-label', '删除模拟图片 ' + number);
+        chips.append(chip);
+      }
+      if (action === 'remove-attachment') { button.remove(); win.querySelector('.zj-attachments').hidden = win.querySelector('.zj-attachments').children.length === 0; }
+      if (action === 'send') {
+        const input = win.querySelector('.zj-composer textarea');
+        const text = input.value.trim();
+        if (!text) { win.querySelector('.zj-composer-hint').textContent = '先输入一条消息。'; input.focus(); return; }
+        win.querySelector('.zj-user-message').textContent = text;
+        input.value = '';
+        scene(win, 'running');
+      }
+      if (action === 'finish') scene(win, 'complete');
+      if (action === 'cancel') {
+        scene(win, 'complete');
+        win.querySelector('[data-process-label]').textContent = '已取消 · 模拟运行';
+        win.querySelector('.zj-final-reply').textContent = '模拟运行已取消。你可以修改输入后重新发送。';
+      }
+      if (action === 'approve' || action === 'deny') {
+        win.querySelector('.zj-approval-actions').hidden = true;
+        win.querySelector('.zj-approval-result').textContent = action === 'approve' ? '已模拟允许一次 · 未执行命令。' : '已拒绝 · 命令未执行。';
+        win.querySelector('[data-process-label]').textContent = action === 'approve' ? '已允许（模拟）' : '已拒绝（模拟）';
+      }
+      if (action === 'reset') {
+        win.querySelector('.zj-user-message').textContent = '优化编辑器的分区、标签栏和 Agent 输入区，保留现有交互。';
+        win.querySelector('[data-scm-count]').textContent = '3';
+        win.querySelector('.zj-scm-files').hidden = false;
+        win.querySelector('.zj-scm-message').textContent = '';
+        scene(win, 'complete');
+        updateCommit(win);
+      }
+      saveState();
+    });
+    win.querySelector('.zj-commit-input').addEventListener('input', () => updateCommit(win));
+    win.querySelector('.zj-quick-search input').addEventListener('input', event => {
+      const query = event.target.value.toLowerCase();
+      const results = Array.from(win.querySelectorAll('.zj-quick-results button'));
+      results.forEach(button => { button.hidden = !button.textContent.toLowerCase().includes(query); });
+      win.querySelector('.zj-quick-empty').hidden = results.some(button => !button.hidden);
+    });
+    win.querySelector('.zj-search').addEventListener('input', event => {
+      const query = event.target.value.trim().toLowerCase();
+      const results = Array.from(win.querySelectorAll('.zj-search-results .zj-result'));
+      results.forEach(button => { button.hidden = !button.textContent.toLowerCase().includes(query); });
+      const count = results.filter(button => !button.hidden).length;
+      win.querySelector('.zj-search-results > span').textContent = count + ' 个匹配 · ' + count + ' 个文件';
+    });
+    win.addEventListener('keydown', event => {
+      const overlay = win.querySelector('.zj-quick-overlay');
+      if (event.key === 'Escape') {
+        closeQuick(win);
+        win.querySelector('.zj-model-menu').hidden = true;
+        win.querySelector('[data-action="model"]').setAttribute('aria-expanded', 'false');
+      }
+      if (event.key === 'Tab' && !overlay.hidden) {
+        const controls = Array.from(overlay.querySelectorAll('input, button')).filter(item => item.getClientRects().length);
+        const first = controls[0];
+        const last = controls[controls.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      }
+    });
+  });
+  restoreState(globalThis.openai?.widgetState);
+  window.addEventListener('openai:set_globals', event => {
+    if (event.detail?.globals?.widgetState) restoreState(event.detail.globals.widgetState);
+  });
+  if (globalThis.Tweak) {
+    const tweak = new globalThis.Tweak({ container: root, onChange: renderSettings });
+    tweak.addSelect(settings, 'theme', { label: '外观', options: [{ label: '跟随系统', value: 'system' }, { label: '浅色', value: 'light' }, { label: '深色', value: 'dark' }] });
+    tweak.addSelect(settings, 'scene', { label: '会话状态', options: [{ label: '已完成', value: 'complete' }, { label: '运行中', value: 'running' }, { label: '等待审批', value: 'approval' }] });
+  }
+})();
+</script>

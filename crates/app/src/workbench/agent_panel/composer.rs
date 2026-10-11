@@ -9,7 +9,6 @@ impl Workbench {
         let colors = theme::colors(cx);
         let compact = self.agent.compact();
         let session = self.agent.current();
-        let attached = session.is_some_and(|s| !s.thread.changed_files.is_empty());
         let busy = session.is_some_and(LiveSession::busy);
         let empty = self.agent.composer.read(cx).value().trim().is_empty()
             && self.agent.attachments.is_empty();
@@ -268,13 +267,7 @@ impl Workbench {
                 colors.strong_border
             })
             .bg(colors.input_bg)
-            .map(|c| {
-                if attached {
-                    c.rounded_b(theme::RADIUS_LARGE)
-                } else {
-                    c.rounded(theme::RADIUS_LARGE)
-                }
-            })
+            .rounded(theme::RADIUS_LARGE)
             .capture_action(
                 cx.listener(|this, _: &gpui_kit::component::input::Paste, window, cx| {
                     if this.agent_paste_images(window, cx) {

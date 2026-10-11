@@ -190,6 +190,152 @@ async fn a_clean_repository_keeps_its_commit_controls(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn inactive_commit_button_does_not_keep_the_active_fill(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("inactive-fill", 0);
+    let (window, this) = open(cx, repo.clone());
+    this.update(cx, |p, cx| {
+        p.sidebar = Sidebar::SourceControl;
+        cx.notify();
+    });
+    let check_fill = |cx: &mut TestAppContext, enabled: bool| {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let button = window.find(("scm-repo-commit", 0usize));
+            let center = button.bounds().center().scale(window.scale_factor());
+            let colors = theme::colors(cx);
+            let fill: gpui_kit::Background = if enabled {
+                colors.commit
+            } else {
+                colors.keycap
+            }
+            .into();
+            assert!(
+                window.painted_quads().iter().any(|quad| {
+                    quad.bounds.contains(&center)
+                        && quad.content_mask.bounds.contains(&center)
+                        && (quad.background == fill
+                            || (enabled && quad.background == colors.commit_hover.into()))
+                }),
+                "commit action lost its opaque enabled or disabled fill (enabled={enabled})"
+            );
+            assert_eq!(button.bounds().size.width, theme::ROW_HEIGHT);
+            assert_eq!(button.bounds().size.height, theme::ROW_HEIGHT);
+            assert!(
+                window.find(("scm-repo-graph", 0usize)).bounds().right() <= button.bounds().left()
+            );
+            assert!(window.try_find(("scm-commit", 0usize)).is_none());
+            assert!(window.try_find(("scm-commit-main", 0usize)).is_none());
+            assert!(window.try_find(("scm-generate-message", 0usize)).is_some());
+            if !enabled {
+                window.click(("scm-repo-commit", 0usize), cx);
+            }
+        })
+        .unwrap();
+        if !enabled {
+            cx.run_until_parked();
+            this.read_with(cx, |p, _| {
+                assert!(
+                    p.groups[0].expanded,
+                    "disabled commit toggled its repository"
+                );
+                assert!(p.groups[0].write_message.is_empty());
+            });
+            assert!(!cx.has_pending_prompt());
+        }
+    };
+    check_fill(cx, false);
+
+    std::fs::write(repo.join("a.txt"), "changed\n").unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.refresh(window, cx));
+    })
+    .unwrap();
+    settle(cx, None, |cx| this.read_with(cx, |p, _| !p.loading));
+    check_fill(cx, true);
+
+    this.update(cx, |p, cx| {
+        p.groups[0].write_pending = true;
+        cx.notify();
+    });
+    check_fill(cx, false);
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+#[gpui_kit::test]
+async fn repository_more_menu_keeps_advanced_commit_actions(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("commit-menu", 0);
+    let (window, this) = open(cx, repo.clone());
+    this.update(cx, |p, cx| {
+        p.sidebar = Sidebar::SourceControl;
+        cx.notify();
+    });
+    let check_menu = |cx: &mut TestAppContext, enabled: [bool; 3]| {
+        for (index, label) in ["提交", "提交并推送", "修改上次提交"]
+            .into_iter()
+            .enumerate()
+        {
+            this.update(cx, |p, cx| {
+                p.groups[0].write_message.clear();
+                cx.notify();
+            });
+            cx.update_window(window.into(), |_, window, cx| {
+                window.render_frame(cx);
+                window.click(("scm-repo-more", 0usize), cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(window.into(), |_, window, cx| {
+                window.render_frame(cx);
+                assert_eq!(window.within("popup-menu").find(index).label(), Some(label));
+                window.within("popup-menu").click(index, cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            if index == 2 {
+                assert_eq!(cx.has_pending_prompt(), enabled[index]);
+                if enabled[index] {
+                    cx.simulate_prompt_answer("取消");
+                }
+            } else {
+                // An enabled new commit with no message asks for one; a disabled item is inert.
+                assert_eq!(
+                    this.read_with(cx, |p, _| p.groups[0].write_message == "请输入提交消息"),
+                    enabled[index]
+                );
+                assert!(!cx.has_pending_prompt());
+            }
+            cx.update_window(window.into(), |_, window, cx| {
+                window.press("escape", cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        }
+    };
+    check_menu(cx, [false, false, true]);
+    std::fs::write(repo.join("a.txt"), "changed\n").unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.refresh(window, cx));
+    })
+    .unwrap();
+    settle(cx, None, |cx| this.read_with(cx, |p, _| !p.loading));
+    check_menu(cx, [true, true, true]);
+    this.update(cx, |p, cx| {
+        let status = p.groups[0].status.as_mut().unwrap().as_mut().unwrap();
+        Arc::make_mut(status).upstream = None;
+        cx.notify();
+    });
+    check_menu(cx, [true, false, true]);
+    this.update(cx, |p, cx| {
+        p.groups[0].write_pending = true;
+        cx.notify();
+    });
+    check_menu(cx, [false, false, false]);
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+#[gpui_kit::test]
 async fn the_branch_button_checks_out_and_creates_branches(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let repo = fixture("branches", 0);

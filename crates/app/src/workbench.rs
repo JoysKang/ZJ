@@ -1,6 +1,7 @@
 use crate::files::{self, Entry, PathIndex};
 use crate::theme;
 use gpui_kit::{
+    base::TestSupportExt,
     component::{
         input::{EditorState, InputEvent, TextareaState},
         resizable::{h_resizable, resizable_panel, v_resizable},
@@ -1832,7 +1833,7 @@ impl Workbench {
                                         let commit_input = cx.new(|cx| {
                                             TextareaState::new(window, cx)
                                                 .auto_grow(1, 6)
-                                                .placeholder("消息（⌘Enter 提交）")
+                                                .placeholder("提交信息（⌘Enter）")
                                         });
                                         let subscription = cx.subscribe_in(
                                             &commit_input,
@@ -1876,19 +1877,6 @@ impl Workbench {
                                     if let Some(group) =
                                         this.groups.iter_mut().find(|g| g.repo.id == id)
                                     {
-                                        if let Ok(status) = &status {
-                                            let branch = status
-                                                .branch
-                                                .clone()
-                                                .unwrap_or_else(|| "未知分支".into());
-                                            group.commit_input.update(cx, |input, cx| {
-                                                input.set_placeholder(
-                                                    format!("消息（⌘Enter 在“{branch}”提交）"),
-                                                    window,
-                                                    cx,
-                                                )
-                                            });
-                                        }
                                         group.status = Some(status.map(Arc::new));
                                         group.outgoing = outgoing;
                                         this.refresh_blame(&id, cx);
@@ -2313,6 +2301,29 @@ impl Render for Workbench {
                 )
                 .into_any_element();
         }
+        let editor = div()
+            .id("workbench-editor")
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .rounded(theme::WORKBENCH_RADIUS)
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.editor)
+            .overflow_hidden()
+            .child(editor)
+            .test_support()
+            .into_any_element();
+        // Padding belongs inside each panel, so resizing still measures the whole group.
+        let inset = |content: AnyElement| {
+            div()
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .px(theme::WORKBENCH_INSET)
+                .child(content)
+                .into_any_element()
+        };
         let agent_panel = self.agent.visible.then(|| self.render_agent_panel(cx));
         let workbench = if self.sidebar_visible || agent_panel.is_some() {
             // One layout per combination, so a hidden panel does not leave its size behind.
@@ -2321,39 +2332,65 @@ impl Render for Workbench {
                 (false, true) => "workbench-editor-agent",
                 _ => "workbench-panels",
             };
-            let mut group = h_resizable(id);
+            let mut group = h_resizable(id).with_handle_appearance(Rc::new(|handle, _, cx| {
+                (handle.state() != gpui_kit::base::ResizeHandleState::Idle).then(|| {
+                    div()
+                        .h_full()
+                        .w(theme::INDICATOR)
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .w(theme::INDICATOR)
+                                .h(theme::TAB_HEIGHT)
+                                .rounded_full()
+                                .bg(theme::colors(cx).muted),
+                        )
+                        .into_any_element()
+                })
+            }));
             if self.sidebar_visible {
                 group = group.child(
                     resizable_panel()
                         .size(theme::SIDEBAR_WIDTH)
                         .size_range(theme::SIDEBAR_MIN..theme::SIDEBAR_MAX)
-                        .child(self.render_sidebar(cx)),
+                        .child(inset(self.render_sidebar(cx))),
                 );
             }
             group = group.child(
                 resizable_panel()
-                    .size_range(theme::EDITOR_MIN..theme::EDITOR_MAX)
-                    .child(editor),
+                    .size_range(
+                        if self.sidebar_visible && agent_panel.is_some() {
+                            theme::EDITOR_COMPACT_MIN
+                        } else {
+                            theme::EDITOR_MIN
+                        }..theme::EDITOR_MAX,
+                    )
+                    .child(inset(editor)),
             );
             if let Some(panel) = agent_panel {
                 let weak = cx.weak_entity();
                 group = group
                     .child(
                         resizable_panel()
-                            .size(self.agent.width)
-                            .size_range(theme::AGENT_PANEL_MIN..theme::AGENT_PANEL_MAX)
-                            .child(panel),
+                            .size(self.agent.width + theme::WORKBENCH_INSET * 2.)
+                            .size_range(
+                                (theme::AGENT_PANEL_MIN + theme::WORKBENCH_INSET * 2.)
+                                    ..(theme::AGENT_PANEL_MAX + theme::WORKBENCH_INSET * 2.),
+                            )
+                            .child(inset(panel)),
                     )
                     .on_resize(move |state, window, cx| {
                         let Some(width) = state.read(cx).sizes().last().copied() else {
                             return;
                         };
+                        let width = width - theme::WORKBENCH_INSET * 2.;
                         let _ = weak.update(cx, |this, cx| this.agent_resized(width, window, cx));
                     });
             }
             group.into_any_element()
         } else {
-            editor
+            inset(editor)
         };
         v_flex()
             .size_full()
@@ -2516,10 +2553,18 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &NextApproval, window, cx| {
                 this.agent_next_approval(window, cx)
             }))
-            .bg(colors.editor)
+            .bg(colors.title)
             .text_color(colors.foreground)
             .child(self.render_title_bar(cx))
-            .child(div().flex_1().min_h_0().w_full().child(workbench))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .px(theme::WORKBENCH_INSET)
+                    .pb_2()
+                    .child(workbench),
+            )
             .child(self.render_status_bar(cx))
             .children(self.render_quick_open(cx))
             .children(self.render_agent_search(cx))

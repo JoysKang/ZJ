@@ -6,6 +6,7 @@ use super::{Decoration, DecorationKind, Sidebar, Workbench};
 use crate::{file_icons, theme};
 use gpui_kit::{
     assets::IconName,
+    base::TestSupportExt,
     component::{
         Icon, Sizable,
         button::{Button, ButtonVariants},
@@ -63,10 +64,19 @@ impl Workbench {
     ) -> impl IntoElement {
         let colors = theme::colors(cx);
         let active = self.sidebar == view;
+        let caption = match view {
+            Sidebar::Explorer => "文件",
+            Sidebar::Search => "搜索",
+            Sidebar::SourceControl => "源码",
+        };
         div()
             .id(label)
             .relative()
-            .size(theme::ACTIVITY_ITEM)
+            .h(theme::ACTIVITY_ITEM)
+            .min_w_0()
+            .flex_1()
+            .px_1()
+            .gap_1()
             .flex()
             .items_center()
             .justify_center()
@@ -79,26 +89,20 @@ impl Workbench {
             .active(|item| item.bg(colors.control_active))
             .child(
                 Icon::new(icon)
-                    .size(theme::ICON_SIZE + theme::ROW_INSET)
+                    .size(theme::SMALL_ICON_SIZE)
                     .text_color(if active { colors.accent } else { colors.muted }),
             )
-            .when(active, |item| {
-                item.child(
-                    div()
-                        .absolute()
-                        .bottom_0()
-                        .left(theme::ROW_INSET)
-                        .right(theme::ROW_INSET)
-                        .h(theme::INDICATOR)
-                        .bg(colors.accent),
-                )
-            })
+            .child(
+                div()
+                    .min_w_0()
+                    .text_ellipsis()
+                    .text_size(theme::TEXT_SECTION)
+                    .child(caption),
+            )
             .when(badge > 0, |item| {
                 item.child(
                     div()
-                        .absolute()
-                        .right(theme::BADGE_OFFSET)
-                        .bottom(theme::BADGE_OFFSET)
+                        .flex_shrink_0()
                         .h(theme::BADGE_SIZE)
                         .min_w(theme::BADGE_SIZE)
                         .px_1()
@@ -142,17 +146,22 @@ impl Workbench {
             Sidebar::SourceControl => self.render_scm(cx).into_any_element(),
         };
         v_flex()
+            .id("workbench-sidebar")
             .size_full()
             .min_h_0()
             .bg(colors.panel)
-            .border_r_1()
+            .border_1()
             .border_color(colors.border)
+            .rounded(theme::WORKBENCH_RADIUS)
+            .overflow_hidden()
             .child(
                 h_flex()
                     .h(theme::ACTIVITY_HEIGHT)
                     .flex_shrink_0()
                     .px_1()
                     .gap_1()
+                    .border_b_1()
+                    .border_color(colors.border)
                     .child(self.activity_item(
                         Sidebar::Explorer,
                         IconName::Files,
@@ -202,6 +211,7 @@ impl Workbench {
                     ),
             )
             .child(div().flex_1().min_h_0().child(content))
+            .test_support()
             .into_any_element()
     }
 

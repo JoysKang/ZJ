@@ -379,7 +379,7 @@ impl Workbench {
             .flex_shrink_0()
             .justify_between()
             .overflow_hidden()
-            .bg(colors.panel)
+            .bg(colors.title)
             .border_t_1()
             .border_color(colors.border)
             .text_size(theme::TEXT_CAPTION)

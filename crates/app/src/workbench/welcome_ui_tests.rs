@@ -1,7 +1,7 @@
 //! A double click on the welcome page opens a new untitled file (as in VS Code); a single
 //! click does nothing.
 
-use super::test_support::{empty_store, open_window};
+use super::test_support::{empty_store, install_globals, new_window, open_window};
 use super::*;
 use crate::settings::Settings;
 #[allow(unused_imports)]
@@ -79,4 +79,64 @@ async fn restored_tabs_stay_in_sight_on_the_welcome_page(cx: &mut TestAppContext
     cx.run_until_parked();
     this.read_with(cx, |p, _| assert!(p.documents.is_empty()));
     assert_eq!(state(cx), (true, 2, true));
+}
+
+#[gpui_kit::test]
+async fn workbench_panels_fit_small_windows_with_every_visibility_combination(
+    cx: &mut TestAppContext,
+) {
+    let documents = cx.update(|cx| install_globals(cx, Settings::default(), empty_store()));
+    for width in [760., 1024.] {
+        for (sidebar, agent) in [(true, true), (true, false), (false, true), (false, false)] {
+            let (handle, this) = cx.update(|cx| {
+                let (handle, this) = new_window(
+                    cx,
+                    None,
+                    documents.clone(),
+                    Bounds::new(point(px(0.), px(0.)), size(px(width), px(640.))),
+                );
+                this.update(cx, |p, cx| {
+                    p.sidebar_visible = sidebar;
+                    p.agent.visible = agent;
+                    p.agent.width = theme::AGENT_PANEL_MIN;
+                    cx.notify();
+                });
+                (handle, this)
+            });
+            cx.run_until_parked();
+            cx.update_window(handle, |_, window, cx| {
+                window.render_frame(cx);
+                window.render_frame(cx);
+                let viewport = window.viewport_size();
+                let editor = window.find("workbench-editor").bounds();
+                assert!(editor.size.width > px(0.) && editor.size.height > px(0.));
+                let mut panels = vec![editor];
+                if sidebar {
+                    let bounds = window.find("workbench-sidebar").bounds();
+                    assert!(bounds.right() < editor.left(), "sidebar overlaps editor");
+                    panels.push(bounds);
+                }
+                if agent {
+                    let bounds = window.find("agent-panel").bounds();
+                    assert!(editor.right() < bounds.left(), "editor overlaps Agent");
+                    assert!(
+                        f32::from(bounds.size.width - this.read(cx).agent.width).abs() < 1.,
+                        "stored Agent width differs from its visible panel",
+                    );
+                    panels.push(bounds);
+                }
+                for bounds in panels {
+                    assert!(
+                        bounds.left() >= px(0.) && bounds.right() <= viewport.width,
+                        "panel overflows {width}px window: {bounds:?}"
+                    );
+                    assert!(
+                        bounds.top() >= px(0.) && bounds.bottom() <= viewport.height,
+                        "panel overflows window height: {bounds:?}"
+                    );
+                }
+            })
+            .unwrap();
+        }
+    }
 }

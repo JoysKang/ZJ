@@ -3499,3 +3499,70 @@ async fn user_message_states_release_removed_messages_and_inactive_threads(
         |_| "inactive thread retained its text state".into(),
     );
 }
+
+#[gpui_kit::test]
+async fn separated_agent_cards_keep_complete_borders_and_corners(cx: &mut TestAppContext) {
+    use gpui_kit::component::{Theme, ThemeMode};
+    let (handle, this) = open(cx, None);
+    for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        for busy in [false, true] {
+            for collapsed in [true, false] {
+                cx.update_window(handle.into(), |_, window, cx| {
+                    Theme::change(mode, None, cx);
+                    this.update(cx, |p, cx| {
+                        p.agent_ensure_session(cx);
+                        let key = p.agent.current.unwrap();
+                        let session = p.agent.session_mut(key).unwrap();
+                        session.thread.status = if busy {
+                            agent_thread::Status::Running
+                        } else {
+                            agent_thread::Status::Idle
+                        };
+                        session.changes_collapsed = collapsed;
+                        session.thread.set_file_change(
+                            PathBuf::from("/tmp/zj-card-fixture.txt"),
+                            Some(workspace_editor_agent::thread::FileChange {
+                                added: 1,
+                                removed: 0,
+                                new_file: true,
+                            }),
+                        );
+                        cx.notify();
+                    });
+                    window.render_frame(cx);
+                    let quads = window.painted_quads();
+                    let colors = theme::colors(cx);
+                    let scale = window.scale_factor();
+                    let composer_bounds = window.find("agent-composer").bounds().scale(scale);
+                    let composer = quads.iter().find(|quad| {
+                        quad.bounds == composer_bounds
+                            && quad.background == colors.input_bg.into()
+                    }).expect("composer surface was not painted");
+                    assert!(
+                        composer.corner_radii.top_left > Default::default()
+                            && composer.corner_radii.top_right > Default::default(),
+                        "changed files made the separated composer lose its top corners: busy={busy}, collapsed={collapsed}"
+                    );
+                    let review_center = window.find("agent-review").bounds().center().scale(scale);
+                    let changes = quads.iter().find(|quad| {
+                        quad.bounds.contains(&review_center)
+                            && quad.bounds.size.width == composer_bounds.size.width
+                            && quad.background == colors.card.into()
+                    }).expect("changed-files card was not painted");
+                    assert!(
+                        changes.corner_radii.bottom_left > Default::default()
+                            && changes.corner_radii.bottom_right > Default::default(),
+                        "separated changed-files card has open bottom corners"
+                    );
+                    // GPUI paints backgrounds and borders as separate quads.
+                    assert!(quads.iter().any(|quad| {
+                        quad.bounds == changes.bounds
+                            && quad.border_color == colors.card_border
+                            && quad.border_widths.bottom > Default::default()
+                    }), "separated changed-files card has no bottom border");
+                    assert!(changes.bounds.bottom() < composer_bounds.top());
+                }).unwrap();
+            }
+        }
+    }
+}

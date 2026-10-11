@@ -1,5 +1,5 @@
 //! Source Control view, VS Code's multi-repository layout: every repository is a section with
-//! its branch and actions in the header, its own message box and 提交 button, then its
+//! its branch and actions in the header, its own message box, then its
 //! "暂存的更改" / "更改" groups, then "未推送的提交". Repositories are sorted by name;
 //! clean ones can be hidden. Expanded repositories keep their commit controls even when clean.
 //! File row actions appear on hover; the status letter stays at the right edge.
@@ -13,7 +13,7 @@ use gpui_kit::{
     assets::IconName,
     component::{
         Disableable, Icon, Sizable,
-        button::{Button, ButtonCustomVariant, ButtonVariants, DropdownButton},
+        button::{Button, ButtonCustomVariant, ButtonVariants},
         h_flex,
         input::{Enter, Textarea},
         menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
@@ -105,7 +105,7 @@ impl Workbench {
             })
     }
 
-    /// The "···" menu of a repository: VS Code's 拉取 / 推送 / 签出到… / 抓取, then
+    /// The "···" menu of a repository: commit actions, 拉取 / 推送 / 签出到… / 抓取, then
     /// whole-repository operations.
     fn scm_menu(
         &self,
@@ -128,6 +128,13 @@ impl Workbench {
             .filter(|_| upstream);
         let fetch = self.scm_request(g, WriteOperation::Fetch);
         let idle = !self.groups[g].write_pending;
+        let status = self.groups[g].status.as_ref().and_then(|s| s.as_ref().ok());
+        let can_commit = status.is_some_and(|s| {
+            !s.changes.is_empty() && !s.changes.iter().any(|c| c.kind == ChangeKind::Conflict)
+        });
+        let has_head =
+            status.is_some_and(|s| !matches!(s.oid.as_deref(), None | Some("(initial)")));
+        let commit_idle = idle && self.groups[g].commit_generation.is_none();
         // Items run after the menu opened: find the repository again by id, not by row.
         let repo = self.groups[g].repo.id.clone();
         let refresh = view.clone();
@@ -147,7 +154,23 @@ impl Workbench {
             Some(request) => git_menu_item(label, request, view.clone()),
             None => PopupMenuItem::new(label.to_string()).disabled(true),
         };
-        menu.item(item("拉取", pull))
+        let commit_item = |label: &str, mode: CommitMode, enabled: bool| {
+            PopupMenuItem::new(label.to_string())
+                .disabled(!commit_idle || !enabled)
+                .on_click(on_repo(&view, &repo, move |this, g, window, cx| {
+                    let id = this.groups[g].repo.id.clone();
+                    this.scm_commit(id, mode, window, cx);
+                }))
+        };
+        menu.item(commit_item("提交", CommitMode::Commit, can_commit))
+            .item(commit_item(
+                "提交并推送",
+                CommitMode::CommitAndPush,
+                can_commit && upstream,
+            ))
+            .item(commit_item("修改上次提交", CommitMode::Amend, has_head))
+            .separator()
+            .item(item("拉取", pull))
             .item(item("推送", push))
             .item(
                 PopupMenuItem::new("签出到…")
@@ -345,7 +368,7 @@ impl Workbench {
     }
 
     /// A repository as a section header, VS Code's multi-repository layout: chevron, repository
-    /// icon and name on the left; branch, refresh, commit and "···" on the right. When the
+    /// icon and name on the left; branch, sync, graph, commit and "···" on the right. When the
     /// sidebar is too narrow for one line, the right side moves under the name, and either
     /// part wraps at `/` `-` `_` rather than being cut.
     fn scm_repo_row(
@@ -446,21 +469,21 @@ impl Workbench {
                     .child(title_text),
             );
         let pending = group.write_pending;
+        let commit_disabled = pending || group.commit_generation.is_some() || !can_commit;
+        let commit_bg = if commit_disabled {
+            colors.keycap
+        } else {
+            colors.commit
+        };
+        let commit_fg = if commit_disabled {
+            colors.muted
+        } else {
+            colors.commit_fg
+        };
         let actions = h_flex()
             .flex_shrink_0()
             .h(theme::ROW_HEIGHT)
-            .gap_1()
-            .child(
-                action(("scm-repo-commit", g), IconName::Check, "提交", cx)
-                    .disabled(pending || group.commit_generation.is_some() || !can_commit)
-                    .on_click(cx.listener({
-                        let id = id.clone();
-                        move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.scm_commit(id.clone(), CommitMode::Commit, window, cx)
-                        }
-                    })),
-            )
+            .gap_0()
             .child(
                 action(("scm-repo-graph", g), IconName::GitGraph, "Git 图", cx).on_click(
                     cx.listener({
@@ -473,6 +496,40 @@ impl Workbench {
                         }
                     }),
                 ),
+            )
+            .child(
+                Button::new(("scm-repo-commit", g))
+                    .xsmall()
+                    .w(theme::ROW_HEIGHT)
+                    .h(theme::ROW_HEIGHT)
+                    .p_0()
+                    .rounded(theme::RADIUS)
+                    .custom(
+                        ButtonCustomVariant::new(cx)
+                            .color(commit_bg)
+                            .foreground(commit_fg)
+                            .hover(colors.commit_hover)
+                            .active(colors.commit_hover),
+                    )
+                    .bg(commit_bg)
+                    .border_1()
+                    .border_color(colors.strong_border)
+                    .text_color(commit_fg)
+                    .child(
+                        Icon::new(IconName::Check)
+                            .size(theme::ICON_SIZE)
+                            .text_color(commit_fg),
+                    )
+                    .tooltip("提交（⌘Enter）")
+                    .accessibility_label("提交（⌘Enter）")
+                    .disabled(commit_disabled)
+                    .on_click(cx.listener({
+                        let id = id.clone();
+                        move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.scm_commit(id.clone(), CommitMode::Commit, window, cx)
+                        }
+                    })),
             )
             .child({
                 let menu_repo = id.clone();
@@ -532,7 +589,7 @@ impl Workbench {
             .min_w_0()
             .flex_shrink(1.)
             .items_start()
-            .gap_1()
+            .gap_0()
             .when_some(error, |right, error| {
                 right.child(
                     div()
@@ -589,7 +646,7 @@ impl Workbench {
             .pr_1()
             .flex_wrap()
             .items_start()
-            .gap_x_2()
+            .gap_x_1()
             .rounded(theme::RADIUS)
             .cursor_pointer()
             .hover(|row| row.bg(colors.hover))
@@ -613,8 +670,7 @@ impl Workbench {
             .into_any_element()
     }
 
-    /// The repository's message box and the green 提交 button with its menu (提交 / 提交并推送 /
-    /// 修改上次提交), under the repository header.
+    /// The repository's message box and AI action, under the repository header.
     fn scm_commit_row(&self, g: usize, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
         let group = &self.groups[g];
@@ -624,9 +680,6 @@ impl Workbench {
         let can_commit = status.is_some_and(|s| {
             !s.changes.is_empty() && !s.changes.iter().any(|c| c.kind == ChangeKind::Conflict)
         });
-        let has_upstream = status.is_some_and(|s| s.upstream.is_some());
-        let has_head =
-            status.is_some_and(|s| !matches!(s.oid.as_deref(), None | Some("(initial)")));
         let name = group
             .repo
             .worktree
@@ -634,20 +687,9 @@ impl Workbench {
             .unwrap_or_default()
             .to_string_lossy()
             .replace(SINGLE_LINE, "⏎");
-        let branch = status
-            .and_then(|s| s.branch.as_deref())
-            .unwrap_or("未知分支")
-            .to_string();
         let pending = group.write_pending;
         let generating = group.commit_generation.is_some();
         let generate_id = id.clone();
-        let style = ButtonCustomVariant::new(cx)
-            .color(colors.commit)
-            .foreground(colors.commit_fg)
-            .hover(colors.commit_hover)
-            .active(colors.commit_hover);
-        let weak = cx.weak_entity();
-        let menu_id = id.clone();
         v_flex()
             .w_full()
             .pl(theme::ROW_INSET + theme::ICON_SIZE)
@@ -706,53 +748,6 @@ impl Workbench {
                                 },
                             )),
                         ),
-                    ),
-            )
-            .child(
-                // Kit draws a custom button at rest with 20 % of its color; the solid surface
-                // underneath keeps it the full green, as in VS Code.
-                div()
-                    .w_full()
-                    .rounded(theme::RADIUS)
-                    .bg(colors.commit)
-                    .child(
-                        DropdownButton::new(("scm-commit", g))
-                            .small()
-                            .w_full()
-                            .custom(style)
-                            .disabled(pending || generating)
-                            .button(
-                                Button::new(("scm-commit-main", g))
-                                    .flex_1()
-                                    .icon(IconName::Check)
-                                    .label("提交")
-                                    .tooltip(format!("提交到“{branch}”（{name}）"))
-                                    .disabled(pending || generating || !can_commit)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.scm_commit(id.clone(), CommitMode::Commit, window, cx)
-                                    })),
-                            )
-                            .dropdown_menu(move |menu, _, _| {
-                                let item = |label: &str, mode: CommitMode, enabled: bool| {
-                                    let view = weak.clone();
-                                    let id = menu_id.clone();
-                                    PopupMenuItem::new(label.to_string())
-                                        .disabled(!enabled)
-                                        .on_click(move |_, window, cx| {
-                                            let _ = view.update(cx, |this, cx| {
-                                                this.scm_commit(id.clone(), mode, window, cx)
-                                            });
-                                        })
-                                };
-                                menu.item(item("提交", CommitMode::Commit, can_commit))
-                                    .item(item(
-                                        "提交并推送",
-                                        CommitMode::CommitAndPush,
-                                        can_commit && has_upstream,
-                                    ))
-                                    .separator()
-                                    .item(item("修改上次提交", CommitMode::Amend, has_head))
-                            }),
                     ),
             )
             .when(!group.write_message.is_empty(), |view| {
