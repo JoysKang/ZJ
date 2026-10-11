@@ -137,7 +137,9 @@ impl Workbench {
                             .bg(colors.accent),
                     )
                 } else {
-                    tab.bg(colors.tabs).text_color(colors.muted)
+                    tab.bg(colors.tabs)
+                        .text_color(colors.muted)
+                        .hover(|tab| tab.bg(colors.hover).text_color(colors.foreground))
                 }
             })
             .child(match spec.lucide {

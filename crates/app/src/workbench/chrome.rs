@@ -47,7 +47,6 @@ impl Workbench {
             .h(theme::COMMAND_CENTER_HEIGHT)
             .px_2()
             .gap_2()
-            .justify_center()
             .rounded(theme::RADIUS_LARGE)
             .border_1()
             .border_color(colors.command_border)
@@ -65,7 +64,19 @@ impl Workbench {
                     .size(theme::SMALL_ICON_SIZE)
                     .text_color(colors.muted),
             )
-            .child(self.workspace_name());
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_ellipsis()
+                    .child(self.workspace_name()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(theme::TEXT_SECTION)
+                    .child("⌘P"),
+            );
         let actions = h_flex()
             .flex_1()
             .justify_end()

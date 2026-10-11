@@ -1,8 +1,8 @@
 //! Design tokens: the only place with literal sizes and colors.
 //!
 //! Sizes sit on a 2/4 px grid modelled on VS Code's workbench. Colors are semantic; the dark
-//! palette is Solarized Dark as VS Code's built-in theme maps it, the light palette is Nord
-//! Light. Both are also written into GPUI Kit's theme (and its syntax theme) so Kit components
+//! and light palettes use neutral cool surfaces. Both are also written into GPUI Kit's
+//! theme (with the existing syntax palettes) so Kit components
 //! such as the Editor match.
 
 use gpui_kit::{
@@ -73,8 +73,8 @@ pub const COMMAND_CENTER_WIDTH: Pixels = px(600.);
 pub const QUICK_OPEN_WIDTH: Pixels = px(600.);
 pub const QUICK_OPEN_TOP: Pixels = px(8.);
 pub const QUICK_OPEN_ROWS: usize = 12;
-pub const RADIUS: Pixels = px(4.);
-pub const RADIUS_LARGE: Pixels = px(6.);
+pub const RADIUS: Pixels = px(6.);
+pub const RADIUS_LARGE: Pixels = px(8.);
 /// The editor's floating find / replace widget (VS Code: 419 px wide, inputs about 220 px).
 pub const FIND_WIDTH: Pixels = px(440.);
 pub const FIND_INPUT_WIDTH: Pixels = px(236.);
@@ -249,7 +249,7 @@ pub const AGENT_OVERLAY_FOOTER: Pixels = px(32.);
 pub const AGENT_OVERLAY_INPUT: Pixels = px(44.);
 pub const AGENT_OVERLAY_ROW: Pixels = px(80.);
 pub const AGENT_OVERLAY_ROWS: usize = 7;
-pub const RADIUS_OVERLAY: Pixels = px(8.);
+pub const RADIUS_OVERLAY: Pixels = px(12.);
 pub const TEXT_OVERLAY_INPUT: Pixels = px(15.);
 /// The workspace name flashed when switching between ZJ windows (`workbench/switch_hud.rs`):
 /// gray text on a feathered halo of the editor's color, no box, a little above the middle.
@@ -306,6 +306,8 @@ pub struct Palette {
     pub accent: u32,
     pub badge: u32,
     pub badge_fg: u32,
+    pub primary_hover: u32,
+    pub primary_active: u32,
     /// Source Control's 提交 button (green, as in VS Code's multi-repository view) and its
     /// text; `commit_hover` is the hovered / pressed shade.
     pub commit: u32,
@@ -327,7 +329,7 @@ pub struct Palette {
     pub deleted: u32,
     pub untracked: u32,
     pub conflict: u32,
-    /// Default code color (Solarized base0 / Nord polar night).
+    /// Default code color, used when syntax captures have no style.
     pub code: u32,
     /// Diff hues: Solarized green/red, Nord aurora green/red.
     pub diff_green: u32,
@@ -360,66 +362,65 @@ pub struct Palette {
     pub terminal: [u32; 16],
 }
 
-/// Solarized Dark: deep chrome, recessed panels, the base03 editor and base02 input areas.
-/// List selection and Git decorations follow VS Code's built-in theme; `deleted` is
-/// lightened from #C74E39 to keep 4.5:1.
+/// Neutral cool dark surfaces, with readable Git and Agent status colors.
 pub const DARK: Palette = Palette {
-    editor: 0x002b36,
-    panel: 0x00212b,
-    title: 0x001820,
-    tabs: 0x002630,
-    input_bg: 0x073642,
-    border: 0x073642,
-    hover: 0x003846,
-    selected: 0x005a6f,
-    selected_fg: 0xffffff,
-    active_line: 0x073642,
-    selection: 0x274642,
-    caret: 0xd30102,
-    foreground: 0xcccccc,
-    muted: 0x93a1a1,
-    accent: 0x2aa198,
-    badge: 0x047aa6,
+    editor: 0x171b23,
+    panel: 0x141920,
+    title: 0x10141b,
+    tabs: 0x141920,
+    input_bg: 0x222936,
+    border: 0x2b3442,
+    hover: 0x252e3b,
+    selected: 0x29394f,
+    selected_fg: 0xe2e8f0,
+    active_line: 0x202631,
+    selection: 0x29394f,
+    caret: 0xa1c1fa,
+    foreground: 0xe2e8f0,
+    muted: 0xa4afbe,
+    accent: 0xa1c1fa,
+    badge: 0x315fb1,
     badge_fg: 0xffffff,
-    // A leaf green darkened until white text reaches 4.5:1 (Solarized's #859900 reads as
-    // olive at this size).
-    commit: 0x4e7d1f,
+    primary_hover: 0x2a539e,
+    primary_active: 0x24488a,
+    // A shared deep green keeps white text readable in both appearances.
+    commit: 0x326443,
     commit_fg: 0xffffff,
-    commit_hover: 0x47731b,
-    keycap: 0x103a44,
+    commit_hover: 0x2a5638,
+    keycap: 0x222936,
     logo_cursor: 0xbf616a,
     // Solarized yellow.
     find_current: 0xb58900,
     find_current_alpha: 0.5,
     shadow_alpha: 0.36,
-    indent_guide: 0x0e4250,
+    indent_guide: 0x343f50,
     added: 0x81b88b,
     modified: 0xe2c08d,
     deleted: 0xe8735f,
     untracked: 0x73c991,
     conflict: 0xe4676b,
-    code: 0x839496,
+    code: 0xc5cdd8,
     diff_green: 0x859900,
     diff_red: 0xdc322f,
     diff_line_alpha: 0.16,
     diff_text_alpha: 0.38,
-    attention: 0xb58900,
+    attention: 0xe2c08d,
     attention_halo: 0xb58900,
-    unread: 0x268bd2,
-    running: 0x2aa198,
-    // Solarized blue at 20% over the panel.
-    user_bubble: 0x08364c,
-    card: 0x002b36,
-    card_border: 0x0a3c49,
-    strong_border: 0x0e4250,
+    unread: 0xa1c1fa,
+    running: 0x81b88b,
+    // Cool tint separates user messages from the panel.
+    user_bubble: 0x222e3e,
+    card: 0x202631,
+    card_border: 0x2b3442,
+    strong_border: 0x46556b,
     mark: 0xb58900,
     mark_alpha: 0.30,
     mark_fg: 0xf0d78c,
-    glyph_claude: 0xcb4b16,
-    glyph_codex: 0x268bd2,
-    glyph_deepseek: 0x6c71c4,
-    glyph_gemini: 0xd33682,
-    glyph_generic: 0x93a1a1,
+    glyph_claude: 0xd99573,
+    glyph_codex: 0xa1c1fa,
+    glyph_deepseek: 0xa6a7ed,
+    glyph_gemini: 0xd98eaf,
+    glyph_generic: 0xa4afbe,
     // VS Code's Solarized Dark `terminal.ansi*`: the bright colors are Solarized's base tones.
     terminal: [
         0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5, 0x586e75,
@@ -427,64 +428,65 @@ pub const DARK: Palette = Palette {
     ],
 };
 
-/// Nord Light: snow storm backgrounds, polar night text, frost accents. Aurora colors are
-/// darkened for git decorations so they keep 4.5:1 on the light surfaces.
+/// Neutral cool light surfaces, with darkened status colors for contrast.
 pub const LIGHT: Palette = Palette {
-    editor: 0xf2f4f8,
-    panel: 0xe5e9f0,
-    title: 0xd8dee9,
-    tabs: 0xdde3ec,
-    input_bg: 0xf9fbfe,
-    border: 0xd8dee9,
-    hover: 0xdce2eb,
-    selected: 0xcbd8e8,
-    selected_fg: 0x2e3440,
-    active_line: 0xe5e9f0,
-    selection: 0xd8dee9,
-    caret: 0x5e81ac,
-    foreground: 0x2e3440,
-    muted: 0x4c566a,
-    accent: 0x5e81ac,
-    badge: 0x4c6a94,
+    editor: 0xfbfcfe,
+    panel: 0xf1f4f8,
+    title: 0xe8edf3,
+    tabs: 0xe8edf3,
+    input_bg: 0xffffff,
+    border: 0xd7e0ea,
+    hover: 0xe2e9f2,
+    selected: 0xdce8f8,
+    selected_fg: 0x202a39,
+    active_line: 0xf1f4f8,
+    selection: 0xdce8f8,
+    caret: 0x315fb1,
+    foreground: 0x202a39,
+    muted: 0x536176,
+    accent: 0x315fb1,
+    badge: 0x315fb1,
     badge_fg: 0xffffff,
-    // Nord aurora green with polar night text (white on it would be 2:1).
-    commit: 0xa3be8c,
-    commit_fg: 0x2e3440,
-    commit_hover: 0x97b47e,
-    keycap: 0xd8dee9,
+    primary_hover: 0x2a539e,
+    primary_active: 0x24488a,
+    // A shared deep green keeps white text readable in both appearances.
+    commit: 0x326443,
+    commit_fg: 0xffffff,
+    commit_hover: 0x2a5638,
+    keycap: 0xe8edf3,
     logo_cursor: 0xbf616a,
     // Nord aurora yellow.
     find_current: 0xebcb8b,
     find_current_alpha: 0.8,
     shadow_alpha: 0.16,
-    indent_guide: 0xd0d6e0,
+    indent_guide: 0xd7e0ea,
     added: 0x3f6b2d,
     modified: 0x8a5226,
     deleted: 0x99353f,
     untracked: 0x3f6b2d,
     conflict: 0x7a4e73,
-    code: 0x2e3440,
+    code: 0x202a39,
     diff_green: 0xa3be8c,
     diff_red: 0xbf616a,
     diff_line_alpha: 0.26,
     diff_text_alpha: 0.5,
     attention: 0x8a5226,
     attention_halo: 0xd08770,
-    unread: 0x4c6a94,
-    running: 0x4c6a94,
-    // Nord frost #5E81AC at 20% over the panel.
-    user_bubble: 0xcad4e2,
-    card: 0xeceff4,
-    card_border: 0xd3d9e4,
-    strong_border: 0xc9d1de,
+    unread: 0x315fb1,
+    running: 0x326443,
+    // Cool tint separates user messages from the panel.
+    user_bubble: 0xe8eff8,
+    card: 0xffffff,
+    card_border: 0xd7e0ea,
+    strong_border: 0xb7c5d8,
     mark: 0xebcb8b,
     mark_alpha: 0.55,
-    mark_fg: 0x2e3440,
+    mark_fg: 0x202a39,
     glyph_claude: 0x96593a,
-    glyph_codex: 0x4c6a94,
+    glyph_codex: 0x315fb1,
     glyph_deepseek: 0x81587a,
     glyph_gemini: 0x2f6f6d,
-    glyph_generic: 0x4c566a,
+    glyph_generic: 0x536176,
     // Nord with the aurora colors darkened (as for the git decorations) so text in them stays
     // readable on snow storm; white is a light gray, as on any light terminal theme.
     terminal: [
@@ -626,7 +628,6 @@ pub struct Colors {
     pub deleted: Hsla,
     pub untracked: Hsla,
     pub conflict: Hsla,
-    /// VS Code's command center: foreground at 5 % / 20 % opacity.
     /// VS Code `diffEditor.insertedLineBackground` / `removedLineBackground`.
     pub diff_added: Hsla,
     pub diff_deleted: Hsla,
@@ -726,8 +727,8 @@ impl Palette {
             diff_deleted_text: hsla(self.diff_red).opacity(self.diff_text_alpha),
             diff_filler: hsla(self.foreground).opacity(0.2),
             code: hsla(self.code),
-            command_bg: hsla(self.foreground).opacity(0.05),
-            command_border: hsla(self.foreground).opacity(0.2),
+            command_bg: hsla(self.input_bg),
+            command_border: hsla(self.card_border),
             selection: hsla(self.selection),
             find_match: hsla(self.accent).opacity(0.3),
             find_current: hsla(self.find_current).opacity(self.find_current_alpha),
@@ -821,6 +822,8 @@ pub fn follow_appearance(window: Option<&mut Window>, cx: &mut App) {
         .map_or(crate::settings::EDITOR_FONT_DEFAULT, |s| s.editor_font_size);
     Theme::update(cx, |theme| {
         theme.mono_font_size = px(editor_font);
+        theme.radius = RADIUS;
+        theme.radius_lg = RADIUS_LARGE;
         apply(&palette, &mut theme.colors);
         // The Editor paints from the syntax theme's own style block, not from ThemeColor.
         let style = &mut std::sync::Arc::make_mut(&mut theme.highlight_theme).style;
@@ -850,7 +853,15 @@ fn apply(palette: &Palette, theme: &mut ThemeColor) {
     theme.muted_foreground = c.muted;
     theme.accent = c.hover;
     theme.accent_foreground = c.foreground;
-    theme.secondary = c.hover;
+    theme.button = c.input_bg;
+    theme.button_hover = c.hover;
+    theme.button_active = c.selected;
+    theme.button_foreground = c.foreground;
+    theme.button_secondary = c.card;
+    theme.button_secondary_hover = c.hover;
+    theme.button_secondary_active = c.selected;
+    theme.button_secondary_foreground = c.foreground;
+    theme.secondary = c.card;
     theme.secondary_hover = c.hover;
     theme.secondary_active = c.selected;
     theme.secondary_foreground = c.foreground;
@@ -871,16 +882,18 @@ fn apply(palette: &Palette, theme: &mut ThemeColor) {
     theme.list_hover = c.hover;
     theme.list_active = c.selected;
     theme.list_active_border = c.accent;
-    theme.popover = c.panel;
+    theme.popover = c.card;
     theme.popover_foreground = c.foreground;
+    // Kit derives its input background from this border and transparency in dark mode.
     theme.input = c.border;
+    theme.drag_border = c.accent;
     theme.primary = c.badge;
-    theme.primary_hover = c.badge;
-    theme.primary_active = c.badge;
+    theme.primary_hover = hsla(palette.primary_hover);
+    theme.primary_active = hsla(palette.primary_active);
     theme.primary_foreground = c.badge_fg;
     theme.button_primary = c.badge;
-    theme.button_primary_hover = c.badge;
-    theme.button_primary_active = c.badge;
+    theme.button_primary_hover = hsla(palette.primary_hover);
+    theme.button_primary_active = hsla(palette.primary_active);
     theme.button_primary_foreground = c.badge_fg;
     theme.ring = c.accent;
     theme.link = c.accent;
@@ -998,6 +1011,63 @@ mod tests {
                     let ratio = contrast(color, bg);
                     assert!(ratio >= 4.5, "{name} {status} on {surface}: {ratio:.2}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn kit_controls_meet_wcag_in_every_state() {
+        let hex = |color: Hsla| u32::from(color.to_rgb()) >> 8;
+        for (name, p) in [("dark", DARK), ("light", LIGHT)] {
+            let mut theme = ThemeColor::default();
+            apply(&p, &mut theme);
+            for (control, fg, backgrounds) in [
+                (
+                    "default",
+                    theme.button_foreground,
+                    [theme.button, theme.button_hover, theme.button_active],
+                ),
+                (
+                    "secondary",
+                    theme.button_secondary_foreground,
+                    [
+                        theme.button_secondary,
+                        theme.button_secondary_hover,
+                        theme.button_secondary_active,
+                    ],
+                ),
+                (
+                    "primary",
+                    theme.button_primary_foreground,
+                    [
+                        theme.button_primary,
+                        theme.button_primary_hover,
+                        theme.button_primary_active,
+                    ],
+                ),
+                (
+                    "generic secondary",
+                    theme.secondary_foreground,
+                    [
+                        theme.secondary,
+                        theme.secondary_hover,
+                        theme.secondary_active,
+                    ],
+                ),
+                (
+                    "generic primary",
+                    theme.primary_foreground,
+                    [theme.primary, theme.primary_hover, theme.primary_active],
+                ),
+            ] {
+                for (state, bg) in ["normal", "hover", "active"].into_iter().zip(backgrounds) {
+                    let ratio = contrast(hex(fg), hex(bg));
+                    assert!(ratio >= 4.5, "{name} {control} {state}: {ratio:.2}");
+                }
+            }
+            for fg in [theme.popover_foreground, theme.muted_foreground] {
+                let ratio = contrast(hex(fg), hex(theme.popover));
+                assert!(ratio >= 4.5, "{name} popover: {ratio:.2}");
             }
         }
     }

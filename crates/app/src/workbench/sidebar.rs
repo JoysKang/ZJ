@@ -74,17 +74,25 @@ impl Workbench {
             .cursor_pointer()
             .role(Role::Tab)
             .aria_label(label)
-            .when(active, |item| item.bg(colors.hover))
-            .hover(|item| item.bg(colors.hover))
+            .when(active, |item| item.bg(colors.chip_on))
+            .hover(|item| item.bg(if active { colors.chip_on } else { colors.hover }))
+            .active(|item| item.bg(colors.control_active))
             .child(
                 Icon::new(icon)
                     .size(theme::ICON_SIZE + theme::ROW_INSET)
-                    .text_color(if active {
-                        colors.foreground
-                    } else {
-                        colors.muted
-                    }),
+                    .text_color(if active { colors.accent } else { colors.muted }),
             )
+            .when(active, |item| {
+                item.child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .left(theme::ROW_INSET)
+                        .right(theme::ROW_INSET)
+                        .h(theme::INDICATOR)
+                        .bg(colors.accent),
+                )
+            })
             .when(badge > 0, |item| {
                 item.child(
                     div()
