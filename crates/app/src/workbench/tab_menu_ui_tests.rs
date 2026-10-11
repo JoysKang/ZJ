@@ -77,6 +77,136 @@ const COPY_RELATIVE_PATH: usize = 5;
 const REVEAL_IN_EXPLORER: usize = 8;
 
 #[gpui_kit::test]
+async fn narrow_tabs_wrap_and_keep_their_close_behavior_in_both_themes(cx: &mut TestAppContext) {
+    use super::test_support::{empty_store, install_globals, loaded, new_window};
+    use gpui_kit::component::{Theme, ThemeMode};
+
+    cx.executor().allow_parking();
+    let root = fixture("wrapped");
+    let (window, this) = cx.update(|cx| {
+        let documents = install_globals(cx, crate::settings::Settings::default(), empty_store());
+        let (handle, this) = new_window(
+            cx,
+            Some(root.clone()),
+            documents,
+            Bounds::new(point(px(0.), px(0.)), size(px(480.), px(640.))),
+        );
+        this.update(cx, |p, cx| {
+            p.sidebar_visible = false;
+            p.agent.visible = false;
+            cx.notify();
+        });
+        (handle.downcast::<Root>().unwrap(), this)
+    });
+    settle(cx, None, |cx| loaded(cx, &this));
+    open_files(cx, window, &this, &root);
+    let long_name = format!("{}.txt", "long-file-name-".repeat(14));
+    for name in (0..5)
+        .map(|index| format!("additional-file-{index}.txt"))
+        .chain(std::iter::once(long_name))
+    {
+        let path = root.join(name);
+        std::fs::write(&path, "text\n").unwrap();
+        let count = this.read_with(cx, |p, _| p.documents.len());
+        cx.update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.open_file(path, Some(root.clone()), window, cx)
+            });
+        })
+        .unwrap();
+        settle(cx, None, |cx| {
+            this.read_with(cx, |p, _| p.documents.len() == count + 1)
+        });
+    }
+    this.update(cx, |p, cx| {
+        p.documents[1].dirty = true;
+        cx.notify();
+    });
+    let count = this.read_with(cx, |p, _| p.documents.len());
+    let active = this.read_with(cx, |p, _| p.active);
+    for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        cx.update_window(window.into(), |_, window, cx| {
+            Theme::change(mode, Some(window), cx);
+            window.render_frame(cx);
+            window.render_frame(cx);
+            let strip = window.find("tab-strip").bounds();
+            let first = window.find(("tab", 0usize)).bounds();
+            assert!(strip.size.height > px(36.), "tabs did not wrap");
+            let mut wrapped = false;
+            for index in 0..count {
+                let tab = window.find(("tab", index)).bounds();
+                let close = window.find(("tab-close", index)).bounds();
+                let label = window.find(("tab-label", index)).bounds();
+                assert_eq!(tab.size.height, px(36.));
+                assert_eq!(close.size, size(px(20.), px(20.)));
+                assert!(
+                    tab.left() >= strip.left()
+                        && tab.right() <= strip.right()
+                        && tab.top() >= strip.top()
+                        && tab.bottom() <= strip.bottom(),
+                    "tab {index} overflows its strip: {tab:?}, {strip:?}"
+                );
+                assert!(close.left() >= tab.left() && close.right() <= tab.right());
+                assert!(close.top() >= tab.top() && close.bottom() <= tab.bottom());
+                assert!(label.right() <= close.left(), "label covers close slot");
+                wrapped |= tab.top() > first.top();
+            }
+            assert!(wrapped);
+            let active_bounds = window
+                .find(("tab", count - 1))
+                .bounds()
+                .scale(window.scale_factor());
+            let colors = theme::colors(cx);
+            assert!(window.painted_quads().iter().any(|quad| {
+                quad.bounds == active_bounds && quad.background == colors.input_bg.into()
+            }));
+            assert!(window.painted_quads().iter().any(|quad| {
+                quad.background == colors.accent.into()
+                    && quad.bounds.size == size(px(24.), px(2.)).scale(window.scale_factor())
+                    && active_bounds.contains(&quad.bounds.center())
+                    && quad.content_mask.bounds.contains(&quad.bounds.center())
+            }));
+        })
+        .unwrap();
+    }
+
+    let click_close = |cx: &mut TestAppContext, index| {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click(("tab-close", index), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    let dirty = this.read_with(cx, |p, _| p.documents[1].id);
+    click_close(cx, 0usize);
+    this.read_with(cx, |p, _| assert_eq!(p.active, active));
+    assert_eq!(names(cx, &this).len(), count - 1);
+    assert!(!names(cx, &this).contains(&"a.txt".to_string()));
+    click_close(cx, 0usize);
+    assert!(cx.has_pending_prompt());
+    // Closing a dirty file selects it so the save prompt has visible context.
+    this.read_with(cx, |p, _| assert_eq!(p.active, Pane::Document(dirty)));
+    cx.simulate_prompt_answer("取消");
+    cx.run_until_parked();
+    assert_eq!(names(cx, &this).len(), count - 1);
+    assert_eq!(names(cx, &this)[0], "b.txt");
+    this.read_with(cx, |p, _| assert_eq!(p.active, Pane::Document(dirty)));
+    click_close(cx, 0usize);
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("不保存");
+    cx.run_until_parked();
+    assert_eq!(names(cx, &this).len(), count - 2);
+    assert!(!names(cx, &this).contains(&"b.txt".to_string()));
+    this.read_with(cx, |p, _| assert_eq!(p.active, active));
+    assert_eq!(
+        std::fs::read_to_string(root.join("b.txt")).unwrap(),
+        "b.txt\n"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[gpui_kit::test]
 async fn the_tab_menu_closes_copies_and_reveals_the_clicked_tab(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = fixture("menu");

@@ -47,7 +47,7 @@ impl Workbench {
             .h(theme::COMMAND_CENTER_HEIGHT)
             .px_2()
             .gap_2()
-            .rounded(theme::RADIUS_LARGE)
+            .rounded_full()
             .border_1()
             .border_color(colors.command_border)
             .bg(colors.command_bg)
@@ -69,6 +69,8 @@ impl Workbench {
                     .flex_1()
                     .min_w_0()
                     .text_ellipsis()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(colors.foreground)
                     .child(self.workspace_name()),
             )
             .child(

@@ -3138,8 +3138,12 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 // Paint the current line background
                 if is_active {
                     if let Some(bg_color) = active_line_color {
+                        // ZJ patch: cover the right frame padding beneath the overlay scrollbar.
                         window.paint_quad(fill(
-                            Bounds::new(p, size(bounds.size.width, height)),
+                            Bounds::new(
+                                p,
+                                size(input_bounds.size.width + editor_paddings.right, height),
+                            ),
                             bg_color,
                         ));
                     }

@@ -743,7 +743,7 @@ impl Workbench {
             .border_1()
             .border_color(colors.card_border)
             .bg(colors.card)
-            .shadow_lg()
+            .shadow(vec![theme::overlay_shadow(colors.shadow)])
             .occlude()
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {

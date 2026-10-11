@@ -59,6 +59,10 @@ and its debug-only screenshot configuration alongside ZJ's shared atlas and draw
 
 `gpui-base` (GPUI Kit 0.7.1, the input and editor engine):
 
+- `src/input/base/element.rs`: current-line backgrounds extend through the editor
+  frame's right padding beneath the overlay scrollbar. The existing background quad
+  uses the fixed viewport width plus right padding; the gutter covers the left side.
+
 - `src/text/style.rs`, `src/text/node.rs`: opt-in `with_code_block_header(true)`
   pins custom code-block actions to the full-width top edge. The default preserves
   upstream's top-right action slot; callers reserve body padding for the header.

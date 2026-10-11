@@ -688,18 +688,12 @@ impl Workbench {
                 .p_1()
                 .gap_1()
                 .items_start()
-                .bg(colors.panel)
+                .bg(colors.card)
                 .border_1()
                 .border_t_0()
-                .border_color(colors.border)
+                .border_color(colors.card_border)
                 .rounded_b(theme::RADIUS)
-                .shadow(vec![BoxShadow {
-                    color: colors.shadow,
-                    offset: point(Pixels::ZERO, theme::FIND_SHADOW_Y),
-                    blur_radius: theme::FIND_SHADOW_BLUR,
-                    spread_radius: Pixels::ZERO,
-                    inset: false,
-                }])
+                .shadow(vec![theme::overlay_shadow(colors.shadow)])
                 .text_color(colors.foreground)
                 .on_action(cx.listener(|this, action: &Enter, window, cx| {
                     let in_replace = this

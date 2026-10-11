@@ -517,7 +517,7 @@ impl Workbench {
                     )
                     .bg(commit_bg)
                     .border_1()
-                    .border_color(colors.strong_border)
+                    .border_color(colors.card_border)
                     .text_color(commit_fg)
                     .child(
                         Icon::new(IconName::Check)

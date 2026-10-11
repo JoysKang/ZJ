@@ -6,9 +6,9 @@
 //! Editor match.
 
 use gpui_kit::{
-    App, Hsla, Pixels, Rems, Window, WindowAppearance,
+    App, BoxShadow, Hsla, Pixels, Rems, Window, WindowAppearance,
     component::{Theme, ThemeColor, ThemeMode},
-    px, rems, rgb,
+    point, px, rems, rgb,
 };
 use serde_json::{Value, json};
 
@@ -25,6 +25,9 @@ pub const BLAME_MAX_WIDTH: Pixels = px(640.);
 pub const SCM_LIST_OVERDRAW: Pixels = px(200.);
 pub const TAB_HEIGHT: Pixels = px(36.);
 pub const TAB_CLOSE: Pixels = px(20.);
+pub const TAB_INDICATOR_WIDTH: Pixels = px(24.);
+pub const TAB_INDICATOR_INSET: Pixels = px(12.);
+pub const TAB_ACTIVE_INDICATOR_HEIGHT: Pixels = px(2.);
 pub const DIRTY_DOT: Pixels = px(8.);
 pub const KEYCAP: Pixels = px(20.);
 pub const WELCOME_WIDTH: Pixels = px(340.);
@@ -41,7 +44,6 @@ pub const LOGO_CURSOR_RADIUS: Pixels = px(3.25);
 pub const TITLE_HEIGHT: Pixels = px(38.);
 pub const ACTIVITY_HEIGHT: Pixels = px(36.);
 pub const ACTIVITY_ITEM: Pixels = px(28.);
-pub const SIDEBAR_TITLE_HEIGHT: Pixels = px(36.);
 pub const SECTION_HEIGHT: Pixels = px(24.);
 /// Explorer tree geometry, measured from the owner's VS Code screenshot.
 pub const TREE_BASE: Pixels = px(12.);
@@ -99,10 +101,10 @@ pub const FIND_COUNT_WIDTH: Pixels = px(112.);
 /// Buttons are 22 px with 16 px icons; the toggles inside the inputs 20 px.
 pub const FIND_BUTTON: Pixels = px(22.);
 pub const FIND_TOGGLE: Pixels = px(20.);
-pub const FIND_SHADOW_BLUR: Pixels = px(8.);
+pub const OVERLAY_SHADOW_BLUR: Pixels = px(16.);
 /// Strikethrough on replaced text in the Search view's previews.
 pub const STRIKE: Pixels = px(1.);
-pub const FIND_SHADOW_Y: Pixels = px(2.);
+pub const OVERLAY_SHADOW_Y: Pixels = px(4.);
 pub const STATUS_HEIGHT: Pixels = px(24.);
 /// Active tab indicator thickness (VS Code's tab.activeBorderTop).
 pub const INDICATOR: Pixels = px(1.);
@@ -226,7 +228,7 @@ pub const AGENT_CARD_HEAD: Pixels = px(32.);
 pub const AGENT_FILE_ROW: Pixels = px(26.);
 pub const AGENT_FILE_INDENT: Pixels = px(24.);
 pub const AGENT_CHIP: Pixels = px(20.);
-pub const AGENT_COMPOSER_BAR: Pixels = px(34.);
+pub const AGENT_COMPOSER_BAR: Pixels = px(28.);
 pub const AGENT_SELECTOR_MAX: Pixels = px(120.);
 /// Four editable lines plus the textarea padding; the composer grows through eight lines.
 pub const AGENT_COMPOSER_MIN: Pixels = px(96.);
@@ -297,11 +299,11 @@ pub const TRAFFIC_LIGHT_Y: Pixels = px(12.);
 /// Semantic colors as 0xRRGGBB.
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
-    /// Editor, active tab, welcome page.
+    /// Editor and welcome page.
     pub editor: u32,
-    /// Sidebar and status bar.
+    /// Sidebar and Agent panel.
     pub panel: u32,
-    /// Title bar and workbench shell.
+    /// Title/status bars and workbench shell.
     pub title: u32,
     /// Tab strip and inactive tabs.
     pub tabs: u32,
@@ -408,13 +410,13 @@ pub const DARK: Palette = Palette {
     // Solarized yellow.
     find_current: 0xb58900,
     find_current_alpha: 0.5,
-    shadow_alpha: 0.36,
+    shadow_alpha: 0.18,
     indent_guide: 0x3b3e43,
     added: 0x81b88b,
     modified: 0xe2c08d,
     deleted: 0xe8735f,
     untracked: 0x73c991,
-    conflict: 0xe4676b,
+    conflict: 0xf58588,
     code: 0xcfd2d6,
     diff_green: 0x859900,
     diff_red: 0xdc322f,
@@ -473,7 +475,7 @@ pub const LIGHT: Palette = Palette {
     // Nord aurora yellow.
     find_current: 0xebcb8b,
     find_current_alpha: 0.8,
-    shadow_alpha: 0.16,
+    shadow_alpha: 0.10,
     indent_guide: 0xe2e3e1,
     added: 0x3f6b2d,
     modified: 0x8a5226,
@@ -708,6 +710,17 @@ fn hsla(hex: u32) -> Hsla {
     rgb(hex).into()
 }
 
+/// Native overlays share a quiet shadow; the shell relies on surface colors and thin borders.
+pub fn overlay_shadow(color: Hsla) -> BoxShadow {
+    BoxShadow {
+        color,
+        offset: point(Pixels::ZERO, OVERLAY_SHADOW_Y),
+        blur_radius: OVERLAY_SHADOW_BLUR,
+        spread_radius: Pixels::ZERO,
+        inset: false,
+    }
+}
+
 impl Palette {
     fn colors(&self) -> Colors {
         Colors {
@@ -759,11 +772,11 @@ impl Palette {
             strong_border: hsla(self.strong_border),
             mark_bg: hsla(self.mark).opacity(self.mark_alpha),
             mark_fg: hsla(self.mark_fg),
-            chip_on: hsla(self.accent).opacity(0.16),
+            chip_on: hsla(self.accent).opacity(0.1),
             selected_muted: hsla(self.selected_fg).opacity(0.82),
             selected_chip: hsla(self.selected_fg).opacity(0.14),
             switch_halo: hsla(self.editor).opacity(0.85),
-            text_selection: hsla(self.accent).opacity(0.3),
+            text_selection: hsla(self.accent).opacity(0.12),
             focus_border: hsla(self.accent).opacity(0.7),
             control_hover: hsla(self.foreground).opacity(0.12),
             control_active: hsla(self.foreground).opacity(0.2),
@@ -890,7 +903,7 @@ fn apply(palette: &Palette, theme: &mut ThemeColor) {
     theme.tab_active = c.editor;
     theme.tab_foreground = c.muted;
     theme.tab_active_foreground = c.foreground;
-    theme.status_bar = c.panel;
+    theme.status_bar = c.title;
     theme.status_bar_border = c.border;
     theme.list = c.panel;
     theme.list_head = c.panel;
@@ -1022,7 +1035,8 @@ mod tests {
                 ("untracked", p.untracked),
                 ("conflict", p.conflict),
             ] {
-                for (surface, bg) in [("panel", p.panel), ("editor", p.editor)] {
+                for (surface, bg) in [("panel", p.panel), ("editor", p.editor), ("hover", p.hover)]
+                {
                     let ratio = contrast(color, bg);
                     assert!(ratio >= 4.5, "{name} {status} on {surface}: {ratio:.2}");
                 }
@@ -1084,6 +1098,45 @@ mod tests {
                 let ratio = contrast(hex(fg), hex(theme.popover));
                 assert!(ratio >= 4.5, "{name} popover: {ratio:.2}");
             }
+        }
+    }
+
+    #[test]
+    fn accent_and_translucent_states_remain_readable() {
+        let composite =
+            |color: Hsla, background: u32| u32::from(rgb(background).blend(color.to_rgb())) >> 8;
+        for (name, p) in [("dark", DARK), ("light", LIGHT)] {
+            let colors = p.colors();
+            for (surface, bg) in [
+                ("editor", p.editor),
+                ("panel", p.panel),
+                ("input", p.input_bg),
+                ("card", p.card),
+                ("user bubble", p.user_bubble),
+            ] {
+                let accent = contrast(p.accent, bg);
+                assert!(accent >= 4.5, "{name} accent on {surface}: {accent:.2}");
+                // TextView paints selection over both the glyphs and their surface.
+                let selection = contrast(
+                    composite(colors.text_selection, p.foreground),
+                    composite(colors.text_selection, bg),
+                );
+                assert!(
+                    selection >= 7.0,
+                    "{name} selected text on {surface}: {selection:.2}"
+                );
+            }
+            let chip = composite(colors.chip_on, p.panel);
+            assert!(
+                contrast(p.foreground, chip) >= 7.0,
+                "{name} active chip text"
+            );
+            assert!(
+                contrast(p.muted, chip) >= 4.5,
+                "{name} active chip secondary text"
+            );
+            let focus = contrast(composite(colors.focus_border, p.input_bg), p.input_bg);
+            assert!(focus >= 3.0, "{name} input focus border: {focus:.2}");
         }
     }
 

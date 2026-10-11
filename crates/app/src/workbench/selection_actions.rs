@@ -279,7 +279,7 @@ impl Workbench {
                 .border_1()
                 .border_color(colors.card_border)
                 .rounded(theme::RADIUS_LARGE)
-                .shadow_lg()
+                .shadow(vec![theme::overlay_shadow(colors.shadow)])
                 .occlude()
                 .track_focus(&tools.focus)
                 .key_context("SelectionActions")

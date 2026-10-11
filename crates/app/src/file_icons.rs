@@ -3,8 +3,6 @@
 use crate::theme;
 use gpui_kit::{IntoElement, Styled, img};
 
-pub const FOLDER: &str = "file-icons/default_folder.svg";
-pub const FOLDER_OPEN: &str = "file-icons/default_folder_opened.svg";
 pub const FILE: &str = "file-icons/default_file.svg";
 
 /// Exact file names first, then extensions (case-insensitive).
@@ -121,7 +119,7 @@ mod tests {
     #[test]
     fn every_icon_is_embedded() {
         let embedded = |path: &str| crate::assets::EXTRA.iter().any(|(name, _)| *name == path);
-        for path in [FOLDER, FOLDER_OPEN, FILE]
+        for path in [FILE]
             .into_iter()
             .chain(ASSETS.iter().map(|(_, path)| *path))
         {
@@ -130,8 +128,7 @@ mod tests {
         for (name, _) in crate::assets::EXTRA {
             if name.starts_with("file-icons/") {
                 assert!(
-                    [FOLDER, FOLDER_OPEN, FILE].contains(name)
-                        || ASSETS.iter().any(|(_, path)| path == name),
+                    *name == FILE || ASSETS.iter().any(|(_, path)| path == name),
                     "{name} is embedded but unused"
                 );
             }

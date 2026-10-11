@@ -323,3 +323,108 @@ async fn failed_cut_restores_the_clipboard_after_its_window_closes(cx: &mut Test
     assert!(cx.read(|cx| cx.global::<explorer_ops::FileClipboard>().cut));
     fs::remove_dir_all(base).unwrap();
 }
+
+/// Renders the production sidebar in a native window at its minimum width.
+struct NarrowSidebar(Entity<Workbench>);
+
+impl Render for NarrowSidebar {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.0.update(cx, |p, cx| p.render_sidebar(cx))
+    }
+}
+
+#[gpui_kit::test]
+async fn narrow_sidebar_keeps_navigation_badge_actions_and_search_focus(cx: &mut TestAppContext) {
+    use gpui_kit::component::{Theme, ThemeMode};
+    cx.executor().allow_parking();
+    let base = fixture("narrow-navigation");
+    let root = base.join("workspace");
+    let output = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .arg(&root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for index in 0..100 {
+        fs::write(root.join(format!("change-{index}.txt")), "change").unwrap();
+    }
+    let (handle, this) = cx.update(|cx| {
+        let documents = super::test_support::install_globals(
+            cx,
+            crate::settings::Settings::default(),
+            super::test_support::empty_store(),
+        );
+        let service = GitService::new(1, Duration::from_secs(5)).unwrap();
+        let mut this = None;
+        let (handle, _) = gpui_kit::open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                    point(px(0.), px(0.)),
+                    size(theme::SIDEBAR_MIN, px(640.)),
+                ))),
+                ..Default::default()
+            },
+            cx,
+            |window, cx| {
+                let workbench =
+                    cx.new(|cx| Workbench::new(Some(root), service, documents, 1, window, cx));
+                this = Some(workbench.clone());
+                cx.new(|_| NarrowSidebar(workbench))
+            },
+        )
+        .unwrap();
+        (handle, this.unwrap())
+    });
+    settle(cx, None, |cx| super::test_support::loaded(cx, &this));
+    assert!(this.read_with(cx, |p, _| p.change_count()) > 99);
+    let mut visual = VisualTestContext::from_window(handle, cx);
+    for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        visual.update(|window, cx| {
+            Theme::change(mode, Some(window), cx);
+            window.render_frame(cx);
+            let sidebar = window.find("workbench-sidebar").bounds();
+            assert_eq!(sidebar.size.width, theme::SIDEBAR_MIN);
+            let mut previous = sidebar.left();
+            for label in ["资源管理器", "搜索", "源代码管理"] {
+                let tab = window.find(label);
+                let bounds = tab.bounds();
+                assert!(tab.visible() && bounds.size.width > px(0.));
+                assert!(bounds.left() >= previous && bounds.right() <= sidebar.right());
+                previous = bounds.right();
+            }
+            let source = window.find("源代码管理").bounds();
+            let badge = window.find("activity-source-badge");
+            let bounds = badge.bounds();
+            assert_eq!(badge.label(), Some("99+"));
+            assert!(badge.visible() && source.contains(&bounds.origin));
+            assert!(bounds.right() <= source.right() && bounds.bottom() <= source.bottom());
+        });
+        let search = visual.update(|window, _| window.find("搜索").bounds().center());
+        visual.simulate_click(search, Modifiers::default());
+        visual.update(|window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("搜索").selected(), Some(true));
+            let p = this.read(cx);
+            assert!(p.sidebar == Sidebar::Search);
+            assert!(p.search.query.read(cx).focus_handle(cx).is_focused(window));
+        });
+        let source = visual.update(|window, _| window.find("源代码管理").bounds().center());
+        visual.simulate_click(source, Modifiers::default());
+        visual.update(|window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.find("源代码管理").selected(), Some(true));
+            let sidebar = window.find("workbench-sidebar").bounds();
+            for id in ["refresh-git", "scm-more-button"] {
+                let button = window.find(id);
+                let bounds = button.bounds();
+                assert!(button.visible() && bounds.size.width > px(0.));
+                assert!(sidebar.contains(&bounds.origin) && bounds.right() <= sidebar.right());
+            }
+        });
+    }
+    let _ = fs::remove_dir_all(base);
+}

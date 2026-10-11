@@ -48,6 +48,7 @@ impl Workbench {
         let group: SharedString = format!("tab-{}", spec.key).into();
         let close = div()
             .id(("tab-close", spec.key))
+            .test_support()
             .size(theme::TAB_CLOSE)
             .flex_shrink_0()
             .flex()
@@ -110,6 +111,7 @@ impl Workbench {
             }));
         h_flex()
             .id(("tab", spec.key))
+            .test_support()
             .group(group.clone())
             .flex_shrink_0()
             .max_w_full()
@@ -119,21 +121,22 @@ impl Workbench {
             .pr_1()
             .gap_1()
             .relative()
-            .border_r_1()
-            .border_color(colors.border)
+            .rounded_t(theme::RADIUS)
             .text_size(theme::TEXT_BODY)
             .cursor_pointer()
             .role(Role::Tab)
             .aria_label(spec.tooltip.clone())
+            .aria_selected(active)
             .map(|tab| {
                 if active {
-                    tab.bg(colors.editor).text_color(colors.foreground).child(
+                    tab.bg(colors.input_bg).text_color(colors.foreground).child(
                         div()
                             .absolute()
-                            .bottom_0()
-                            .left_0()
-                            .right_0()
-                            .h(theme::INDICATOR)
+                            .top_0()
+                            .left(theme::TAB_INDICATOR_INSET)
+                            .w(theme::TAB_INDICATOR_WIDTH)
+                            .h(theme::TAB_ACTIVE_INDICATOR_HEIGHT)
+                            .rounded_full()
                             .bg(colors.accent),
                     )
                 } else {
@@ -158,6 +161,7 @@ impl Workbench {
                     .id(("tab-label", spec.key))
                     .min_w_0()
                     .text_ellipsis()
+                    .when(active, |label| label.font_weight(FontWeight::SEMIBOLD))
                     .when(spec.deleted, |label| label.line_through())
                     .child(spec.label)
                     .test_support(),
@@ -319,6 +323,7 @@ impl Workbench {
         let tabs: Vec<AnyElement> = specs.into_iter().map(|spec| self.tab(spec, cx)).collect();
         let strip = h_flex()
             .id("tab-strip")
+            .test_support()
             .flex_1()
             .min_w_0()
             .flex_wrap()

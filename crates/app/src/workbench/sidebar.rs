@@ -84,8 +84,16 @@ impl Workbench {
             .cursor_pointer()
             .role(Role::Tab)
             .aria_label(label)
-            .when(active, |item| item.bg(colors.chip_on))
-            .hover(|item| item.bg(if active { colors.chip_on } else { colors.hover }))
+            .aria_selected(active)
+            .test_support()
+            .when(active, |item| item.bg(colors.input_bg))
+            .hover(|item| {
+                item.bg(if active {
+                    colors.input_bg
+                } else {
+                    colors.hover
+                })
+            })
             .active(|item| item.bg(colors.control_active))
             .child(
                 Icon::new(icon)
@@ -97,11 +105,25 @@ impl Workbench {
                     .min_w_0()
                     .text_ellipsis()
                     .text_size(theme::TEXT_SECTION)
+                    .text_color(if active {
+                        colors.foreground
+                    } else {
+                        colors.muted
+                    })
+                    .when(active, |caption| caption.font_weight(FontWeight::SEMIBOLD))
                     .child(caption),
             )
             .when(badge > 0, |item| {
+                let text = if badge > 99 {
+                    "99+".to_string()
+                } else {
+                    badge.to_string()
+                };
                 item.child(
                     div()
+                        .id("activity-source-badge")
+                        .aria_label(text.clone())
+                        .test_support()
                         .flex_shrink_0()
                         .h(theme::BADGE_SIZE)
                         .min_w(theme::BADGE_SIZE)
@@ -114,11 +136,7 @@ impl Workbench {
                         .text_color(colors.badge_fg)
                         .text_size(theme::TEXT_BADGE)
                         .font_weight(FontWeight::BOLD)
-                        .child(if badge > 99 {
-                            "99+".to_string()
-                        } else {
-                            badge.to_string()
-                        }),
+                        .child(text),
                 )
             })
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -135,11 +153,6 @@ impl Workbench {
     pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
         let changes = self.change_count();
-        let title = match self.sidebar {
-            Sidebar::Explorer => "资源管理器",
-            Sidebar::Search => "搜索",
-            Sidebar::SourceControl => "源代码管理",
-        };
         let content = match self.sidebar {
             Sidebar::Explorer => self.render_explorer(cx).into_any_element(),
             Sidebar::Search => self.render_search(cx).into_any_element(),
@@ -160,41 +173,53 @@ impl Workbench {
                     .flex_shrink_0()
                     .px_1()
                     .gap_1()
-                    .border_b_1()
-                    .border_color(colors.border)
-                    .child(self.activity_item(
-                        Sidebar::Explorer,
-                        IconName::Files,
-                        "资源管理器",
-                        0,
-                        cx,
-                    ))
-                    .child(self.activity_item(Sidebar::Search, IconName::Search, "搜索", 0, cx))
-                    .child(self.activity_item(
-                        Sidebar::SourceControl,
-                        IconName::GitBranch,
-                        "源代码管理",
-                        changes,
-                        cx,
-                    )),
-            )
-            .child(
-                h_flex()
-                    .id("sidebar-title")
-                    .group("sidebar-title")
-                    .h(theme::SIDEBAR_TITLE_HEIGHT)
-                    .flex_shrink_0()
-                    .pl(theme::TREE_BASE)
-                    .pr_2()
-                    .justify_between()
-                    .text_size(theme::TEXT_SECTION)
-                    .text_color(colors.muted)
-                    .child(title)
                     .child(
                         h_flex()
+                            .w_full()
+                            .p_1()
                             .gap_1()
-                            .when(self.sidebar == Sidebar::SourceControl, |actions| {
-                                actions.child(
+                            .rounded(theme::RADIUS_LARGE)
+                            .bg(colors.tabs)
+                            .child(self.activity_item(
+                                Sidebar::Explorer,
+                                IconName::Files,
+                                "资源管理器",
+                                0,
+                                cx,
+                            ))
+                            .child(self.activity_item(
+                                Sidebar::Search,
+                                IconName::Search,
+                                "搜索",
+                                0,
+                                cx,
+                            ))
+                            .child(self.activity_item(
+                                Sidebar::SourceControl,
+                                IconName::GitBranch,
+                                "源代码管理",
+                                changes,
+                                cx,
+                            )),
+                    ),
+            )
+            .when(self.sidebar == Sidebar::SourceControl, |sidebar| {
+                sidebar.child(
+                    h_flex()
+                        .id("sidebar-title")
+                        .group("sidebar-title")
+                        .h(theme::SECTION_HEIGHT)
+                        .flex_shrink_0()
+                        .pl(theme::TREE_BASE)
+                        .pr_2()
+                        .justify_between()
+                        .text_size(theme::TEXT_SECTION)
+                        .text_color(colors.muted)
+                        .child("仓库")
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(
                                     Button::new("refresh-git")
                                         .xsmall()
                                         .ghost()
@@ -204,12 +229,10 @@ impl Workbench {
                                             this.refresh(window, cx)
                                         })),
                                 )
-                            })
-                            .when(self.sidebar == Sidebar::SourceControl, |actions| {
-                                actions.child(self.scm_more(cx))
-                            }),
-                    ),
-            )
+                                .child(self.scm_more(cx)),
+                        ),
+                )
+            })
             .child(div().flex_1().min_h_0().child(content))
             .test_support()
             .into_any_element()
@@ -429,16 +452,14 @@ impl Workbench {
                     .rounded(theme::RADIUS)
                     .bg(colors.hover)
                     .child(div().w(theme::TWISTY_WIDTH).flex_shrink_0())
-                    .child(
-                        div()
-                            .pl_1()
-                            .pr(theme::ROW_INSET * 3.)
-                            .child(file_icons::icon(if folder {
-                                file_icons::FOLDER
-                            } else {
-                                file_icons::for_file("")
-                            })),
-                    )
+                    .child(div().pl_1().pr(theme::ROW_INSET * 3.).child(if folder {
+                        Icon::new(IconName::Folder)
+                            .size(theme::FILE_ICON_SIZE)
+                            .text_color(colors.muted)
+                            .into_any_element()
+                    } else {
+                        file_icons::icon(file_icons::for_file("")).into_any_element()
+                    }))
                     .child(div().flex_1().min_w_0().child(self.edit_field(cx))),
             )
             .into_any_element()
@@ -560,21 +581,22 @@ impl Workbench {
                         ))
                     }),
             )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .pl_1()
-                    .pr_2()
-                    .child(file_icons::icon(if directory {
-                        if expanded {
-                            file_icons::FOLDER_OPEN
-                        } else {
-                            file_icons::FOLDER
-                        }
-                    } else {
-                        file_icons::for_file(&name)
-                    })),
-            )
+            .child(div().flex_shrink_0().pl_1().pr_2().child(if directory {
+                Icon::new(if expanded {
+                    IconName::FolderOpen
+                } else {
+                    IconName::Folder
+                })
+                .size(theme::FILE_ICON_SIZE)
+                .text_color(if selected {
+                    colors.selected_fg
+                } else {
+                    colors.muted
+                })
+                .into_any_element()
+            } else {
+                file_icons::icon(file_icons::for_file(&name)).into_any_element()
+            }))
             .child(if editing {
                 div()
                     .flex_1()

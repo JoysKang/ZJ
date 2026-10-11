@@ -455,11 +455,14 @@ async fn quota_hover_and_click_query_now_and_anchor_to_the_button(cx: &mut TestA
 async fn composer_controls_stay_inside_the_panel_with_quota_and_model_options(
     cx: &mut TestAppContext,
 ) {
+    use gpui_kit::component::{Theme, ThemeMode};
     use workspace_editor_agent::{ConfigOption, Modes};
     let (handle, this) = open(cx, None);
-    for width in [420., 360., 300., 900.] {
-        for busy in [true, false] {
-            cx.update_window(handle.into(), |_, window, cx| {
+    for theme_mode in [ThemeMode::Light, ThemeMode::Dark] {
+        for width in [420., 360., 300., 900.] {
+            for busy in [true, false] {
+                cx.update_window(handle.into(), |_, window, cx| {
+                Theme::change(theme_mode, Some(window), cx);
                 this.update(cx, |p, cx| {
                     p.agent.width = px(width);
                     if let Some(preset) = p.agent.presets.iter_mut().find(|preset| preset.id == "codex") {
@@ -518,6 +521,7 @@ async fn composer_controls_stay_inside_the_panel_with_quota_and_model_options(
                         "model selector stretches into empty space without a mode picker: {config:?}, composer={composer:?}");
                 }
             }).unwrap();
+            }
         }
     }
 }
@@ -668,6 +672,82 @@ async fn agent_completion_and_pending_approvals_send_notifications_once_without_
         });
     })
     .unwrap();
+}
+
+#[gpui_kit::test]
+async fn the_agent_composer_keeps_its_editing_height_and_focus_border_in_both_themes(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::component::{Theme, ThemeMode};
+    let (handle, this) = open(cx, None);
+    // GPUI emits input focus events only for an active window.
+    cx.update_window(handle.into(), |_, window, _| window.activate_window())
+        .unwrap();
+    cx.run_until_parked();
+    for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        for focused in [false, true] {
+            cx.update_window(handle.into(), |_, window, cx| {
+                Theme::change(mode, Some(window), cx);
+                this.update(cx, |p, cx| {
+                    p.agent.width = px(300.);
+                    if focused {
+                        p.agent_focus_composer(window, cx);
+                    } else {
+                        window.blur(cx);
+                    }
+                    cx.notify();
+                });
+                window.render_frame(cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.render_frame(cx);
+                assert!(window.is_window_active());
+                assert_eq!(
+                    this.read(cx)
+                        .agent
+                        .composer
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window),
+                    focused,
+                );
+                assert_eq!(this.read(cx).agent.composer_focused, focused);
+                let bounds = window.find("agent-composer").bounds();
+                let colors = theme::colors(cx);
+                let border = if focused {
+                    colors.focus_border
+                } else {
+                    colors.card_border
+                };
+                let painted_bounds = bounds.scale(window.scale_factor());
+                assert!(
+                    window.painted_quads().iter().any(|quad| {
+                        quad.bounds == painted_bounds
+                            && quad.border_color == border
+                            && quad.border_widths.top > Default::default()
+                    }),
+                    "composer focus border missing in {mode:?}, focused={focused}"
+                );
+                let input = this.read(cx).agent.composer.read(cx);
+                let input_bounds = input.input_bounds();
+                let padding = gpui_kit::component::Size::Medium.input_py() * 2.;
+                assert!(input_bounds.size.height >= theme::AGENT_COMPOSER_MIN - padding);
+                assert!(input_bounds.bottom() <= window.find("agent-send").bounds().top());
+                for id in [
+                    "agent-add-image",
+                    "agent-attach",
+                    "agent-mention",
+                    "agent-send",
+                ] {
+                    let control = window.find(id).bounds();
+                    assert!(control.left() >= bounds.left() && control.right() <= bounds.right());
+                }
+            })
+            .unwrap();
+        }
+    }
 }
 
 #[gpui_kit::test]

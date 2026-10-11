@@ -103,6 +103,7 @@ impl Workbench {
             compact_dropdown("agent-picker", label)
                 .ghost()
                 .xsmall()
+                .text_color(colors.muted)
                 .max_w(theme::AGENT_SELECTOR_MAX)
                 .tooltip("选择 Agent（换 Agent 会开新会话）")
                 .dropdown_menu(move |menu, _, _| {
@@ -134,6 +135,7 @@ impl Workbench {
             compact_dropdown("agent-mode", label)
                 .ghost()
                 .xsmall()
+                .text_color(colors.muted)
                 .max_w(theme::AGENT_SELECTOR_MAX)
                 .icon(IconName::ShieldCheck)
                 .tooltip("会话模式（跳过审批的模式不提供）")
@@ -162,6 +164,7 @@ impl Workbench {
                 compact_dropdown("agent-config", agent_model::config_label(&configs))
                     .ghost()
                     .xsmall()
+                    .text_color(colors.muted)
                     .max_w_full()
                     .tooltip("模型与思考强度")
                     .dropdown_menu(move |menu, _, _| {
@@ -259,10 +262,10 @@ impl Workbench {
             .border_color(if self.agent.composer_focused {
                 colors.focus_border
             } else {
-                colors.strong_border
+                colors.card_border
             })
             .bg(colors.input_bg)
-            .rounded(theme::RADIUS_LARGE)
+            .rounded(theme::RADIUS_OVERLAY)
             .capture_action(
                 cx.listener(|this, _: &gpui_kit::component::input::Paste, window, cx| {
                     if this.agent_paste_images(window, cx) {
@@ -342,8 +345,8 @@ impl Workbench {
                                     .gap_1()
                                     .rounded(theme::RADIUS)
                                     .border_1()
-                                    .border_dashed()
-                                    .border_color(colors.strong_border)
+                                    .border_color(colors.card_border)
+                                    .bg(colors.tabs)
                                     .text_size(theme::TEXT_SECTION)
                                     .text_color(colors.muted)
                                     .cursor_pointer()
@@ -541,11 +544,18 @@ impl Workbench {
                                 row.hover(|row| row.bg(colors.hover))
                             }
                         })
-                        .child(file_icons::icon(if entry.directory {
-                            file_icons::FOLDER
+                        .child(if entry.directory {
+                            Icon::new(IconName::Folder)
+                                .size(theme::FILE_ICON_SIZE)
+                                .text_color(if selected {
+                                    colors.selected_fg
+                                } else {
+                                    colors.muted
+                                })
+                                .into_any_element()
                         } else {
-                            file_icons::for_file(&name)
-                        }))
+                            file_icons::icon(file_icons::for_file(&name)).into_any_element()
+                        })
                         .child(div().flex_shrink_0().child(name))
                         .child(
                             div()
@@ -579,8 +589,8 @@ impl Workbench {
                 .rounded(theme::RADIUS_LARGE)
                 .border_1()
                 .border_color(colors.strong_border)
-                .bg(colors.panel)
-                .shadow_lg()
+                .bg(colors.card)
+                .shadow(vec![theme::overlay_shadow(colors.shadow)])
                 .occlude()
                 .children(rows)
                 .into_any_element(),
@@ -672,8 +682,8 @@ impl Workbench {
                 .rounded(theme::RADIUS_LARGE)
                 .border_1()
                 .border_color(colors.strong_border)
-                .bg(colors.panel)
-                .shadow_lg()
+                .bg(colors.card)
+                .shadow(vec![theme::overlay_shadow(colors.shadow)])
                 .occlude()
                 .children(rows)
                 .into_any_element(),
@@ -753,8 +763,8 @@ impl Workbench {
                 .rounded(theme::RADIUS_LARGE)
                 .border_1()
                 .border_color(colors.strong_border)
-                .bg(colors.panel)
-                .shadow_lg()
+                .bg(colors.card)
+                .shadow(vec![theme::overlay_shadow(colors.shadow)])
                 .occlude()
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.agent.quota_open = false;

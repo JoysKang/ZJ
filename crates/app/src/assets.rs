@@ -75,8 +75,6 @@ pub const EXTRA: &[(&str, &[u8])] = &[
     // at this size. 2× of the 160×150 display size keeps each decoded bitmap at ~0.4 MB.
     embed!("logo/zj-sprig.png"),
     embed!("logo/zj-sprig-dark.png"),
-    embed!("file-icons/default_folder.svg"),
-    embed!("file-icons/default_folder_opened.svg"),
     embed!("file-icons/default_file.svg"),
     embed!("file-icons/file_type_rust.svg"),
     embed!("file-icons/file_type_markdown.svg"),
@@ -159,6 +157,8 @@ mod tests {
             "icons/arrow-up.svg",
             "icons/arrow-down.svg",
             "icons/file.svg",
+            "icons/folder.svg",
+            "icons/folder-open.svg",
             "icons/check.svg",
             "icons/undo-2.svg",
             "icons/minus.svg",
