@@ -39,7 +39,7 @@ impl Workbench {
             .unwrap_or(path)
     }
 
-    fn tab(&self, spec: TabSpec, cx: &mut Context<Self>) -> AnyElement {
+    fn tab(&self, spec: TabSpec, first: bool, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
         let active = spec.pending.is_none() && self.active == spec.pane;
         let pane = spec.pane;
@@ -123,6 +123,7 @@ impl Workbench {
             .gap_1()
             .relative()
             .rounded_t(theme::RADIUS)
+            .when(first, |tab| tab.rounded_t(theme::WORKBENCH_RADIUS))
             .text_size(theme::TEXT_BODY)
             .cursor_pointer()
             .role(Role::Tab)
@@ -322,7 +323,11 @@ impl Workbench {
                 pending: Some(path.clone()),
             });
         }
-        let tabs: Vec<AnyElement> = specs.into_iter().map(|spec| self.tab(spec, cx)).collect();
+        let tabs: Vec<AnyElement> = specs
+            .into_iter()
+            .enumerate()
+            .map(|(index, spec)| self.tab(spec, index == 0, cx))
+            .collect();
         let strip = h_flex()
             .id("tab-strip")
             .test_support()
@@ -342,6 +347,7 @@ impl Workbench {
             .w_full()
             .flex_shrink_0()
             .items_start()
+            .rounded_t(theme::WORKBENCH_RADIUS)
             .bg(colors.tabs)
             .child(strip)
             .child(
@@ -416,7 +422,6 @@ impl Workbench {
             .items_center()
             .justify_center()
             .gap_4()
-            .bg(colors.editor)
             .child(
                 div()
                     .relative()
@@ -492,7 +497,6 @@ impl Workbench {
     }
 
     pub(super) fn render_editor_area(&self, cx: &mut Context<Self>) -> AnyElement {
-        let colors = theme::colors(cx);
         if !self.shows_tab_bar() {
             return self.render_welcome(cx);
         }
@@ -527,7 +531,7 @@ impl Workbench {
             .size_full()
             .min_w_0()
             .min_h_0()
-            .bg(colors.editor)
+            // The shell paints the surface; rectangular child fills leak past its corners.
             .child(self.render_tabs(cx))
             .when(self.active == Pane::Diff, |area| {
                 area.children(self.render_agent_review_bar(cx))

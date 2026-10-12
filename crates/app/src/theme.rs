@@ -1,7 +1,7 @@
 //! Design tokens: the only place with literal sizes and colors.
 //!
 //! Sizes sit on a 2/4 px grid modelled on VS Code's workbench. Colors are semantic; the dark
-//! and light palettes use softly separated neutral surfaces. Both are also written into
+//! palette uses Solarized Dark and the light palette uses neutral surfaces. Both are written into
 //! GPUI Kit's theme (with the existing syntax palettes) so Kit components such as the
 //! Editor match.
 
@@ -41,7 +41,8 @@ pub const LOGO_CURSOR_TOP: Pixels = px(90.5);
 pub const LOGO_CURSOR_WIDTH: Pixels = px(6.5);
 pub const LOGO_CURSOR_HEIGHT: Pixels = px(47.5);
 pub const LOGO_CURSOR_RADIUS: Pixels = px(3.25);
-pub const TITLE_HEIGHT: Pixels = px(38.);
+/// Preserve the 28 px command center with 2.5 px above and below it.
+pub const TITLE_HEIGHT: Pixels = px(33.);
 pub const ACTIVITY_HEIGHT: Pixels = px(36.);
 pub const ACTIVITY_ITEM: Pixels = px(28.);
 pub const SECTION_HEIGHT: Pixels = px(24.);
@@ -90,8 +91,8 @@ pub const RADIUS: Pixels = px(6.);
 pub const RADIUS_LARGE: Pixels = px(8.);
 /// Rounded surfaces inside the workbench shell.
 pub const WORKBENCH_RADIUS: Pixels = px(12.);
-/// Each panel contributes 4 px to the 8 px gap between surfaces.
-pub const WORKBENCH_INSET: Pixels = px(4.);
+/// Each panel contributes 2 px to the 4 px gap between surfaces.
+pub const WORKBENCH_INSET: Pixels = px(2.);
 /// The editor's floating find / replace widget (VS Code: 419 px wide, inputs about 220 px).
 pub const FIND_WIDTH: Pixels = px(440.);
 pub const FIND_INPUT_WIDTH: Pixels = px(236.);
@@ -294,7 +295,8 @@ pub const WINDOW_MIN_HEIGHT: Pixels = px(480.);
 pub const WINDOW_ORIGIN: Pixels = px(60.);
 pub const WINDOW_CASCADE: Pixels = px(28.);
 pub const TRAFFIC_LIGHT_X: Pixels = px(12.);
-pub const TRAFFIC_LIGHT_Y: Pixels = px(12.);
+/// Center the 14 px native buttons in the compact title bar.
+pub const TRAFFIC_LIGHT_Y: Pixels = px(9.5);
 
 /// Semantic colors as 0xRRGGBB.
 #[derive(Clone, Copy, Debug)]
@@ -381,64 +383,67 @@ pub struct Palette {
     pub terminal: [u32; 16],
 }
 
-/// Softly separated neutral dark surfaces, with readable Git and Agent status colors.
+/// Solarized Dark: deep chrome, recessed panels, the base03 editor and base02 input areas.
+/// Foreground and accent are brighter to keep selection text and focus indicators readable.
 pub const DARK: Palette = Palette {
-    editor: 0x1e1f21,
-    panel: 0x202123,
-    title: 0x171819,
-    tabs: 0x202123,
-    input_bg: 0x1e1f21,
-    border: 0x343639,
-    hover: 0x2d2f32,
-    selected: 0x34373a,
-    selected_fg: 0xe8e9eb,
-    active_line: 0x26282b,
-    selection: 0x34373a,
-    caret: 0xe2e4e7,
+    editor: 0x002b36,
+    panel: 0x00212b,
+    title: 0x001820,
+    tabs: 0x002630,
+    input_bg: 0x073642,
+    border: 0x073642,
+    hover: 0x003846,
+    selected: 0x005a6f,
+    selected_fg: 0xffffff,
+    active_line: 0x073642,
+    selection: 0x274642,
+    caret: 0xd30102,
     foreground: 0xe8e9eb,
-    muted: 0xa2a6ad,
-    accent: 0xe2e4e7,
-    badge: 0xe2e4e7,
-    badge_fg: 0x202226,
-    primary_hover: 0xd2d5d9,
-    primary_active: 0xc3c7cd,
-    commit: 0x333f38,
-    commit_fg: 0xd3ead9,
-    commit_hover: 0x3e4f43,
-    keycap: 0x2d2f32,
+    muted: 0x93a1a1,
+    accent: 0x34ada4,
+    badge: 0x047aa6,
+    badge_fg: 0xffffff,
+    primary_hover: 0x036c93,
+    primary_active: 0x035e80,
+    // A leaf green darkened until white text reaches 4.5:1 (Solarized's #859900 reads as
+    // olive at this size).
+    commit: 0x4e7d1f,
+    commit_fg: 0xffffff,
+    commit_hover: 0x47731b,
+    keycap: 0x103a44,
     logo_cursor: 0xbf616a,
     // Solarized yellow.
     find_current: 0xb58900,
     find_current_alpha: 0.5,
     shadow_alpha: 0.18,
-    indent_guide: 0x3b3e43,
+    indent_guide: 0x0e4250,
     added: 0x81b88b,
     modified: 0xe2c08d,
-    deleted: 0xe8735f,
+    deleted: 0xee7965,
     untracked: 0x73c991,
     conflict: 0xf58588,
-    code: 0xcfd2d6,
+    code: 0x839496,
     diff_green: 0x859900,
     diff_red: 0xdc322f,
     diff_line_alpha: 0.16,
     diff_text_alpha: 0.38,
-    attention: 0xe2c08d,
+    attention: 0xb58900,
     attention_halo: 0xb58900,
-    unread: 0xa1c1fa,
-    running: 0x81b88b,
-    // A neutral tint separates user messages from the panel.
-    user_bubble: 0x2b2e31,
-    card: 0x26282b,
-    card_border: 0x343639,
-    strong_border: 0x5b6067,
+    unread: 0x268bd2,
+    running: 0x2aa198,
+    // Solarized blue at 20% over the panel.
+    user_bubble: 0x08364c,
+    card: 0x002b36,
+    card_border: 0x0a3c49,
+    strong_border: 0x0e4250,
     mark: 0xb58900,
     mark_alpha: 0.30,
     mark_fg: 0xf0d78c,
-    glyph_claude: 0xd99573,
-    glyph_codex: 0xa1c1fa,
-    glyph_deepseek: 0xa6a7ed,
-    glyph_gemini: 0xd98eaf,
-    glyph_generic: 0xa2a6ad,
+    glyph_claude: 0xcb4b16,
+    glyph_codex: 0x268bd2,
+    glyph_deepseek: 0x6c71c4,
+    glyph_gemini: 0xd33682,
+    glyph_generic: 0x93a1a1,
     // VS Code's Solarized Dark `terminal.ansi*`: the bright colors are Solarized's base tones.
     terminal: [
         0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5, 0x586e75,

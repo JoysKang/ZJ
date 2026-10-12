@@ -143,7 +143,7 @@ impl Workbench {
             .when(cfg!(target_os = "macos"), |bar| bar.pl_0())
             .h(theme::TITLE_HEIGHT)
             .bg(colors.title)
-            .border_color(colors.border)
+            .border_b_0()
             .child(
                 h_flex()
                     .size_full()

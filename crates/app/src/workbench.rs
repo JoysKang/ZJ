@@ -7,6 +7,7 @@ use gpui_kit::{
         resizable::{h_resizable, resizable_panel, v_resizable},
         v_flex,
     },
+    prelude::FluentBuilder as _,
     *,
 };
 use std::{
@@ -2342,21 +2343,27 @@ impl Render for Workbench {
                 _ => "workbench-panels",
             };
             let mut group = h_resizable(id).with_handle_appearance(Rc::new(|handle, _, cx| {
-                (handle.state() != gpui_kit::base::ResizeHandleState::Idle).then(|| {
+                // None restores Kit's full divider; an empty element keeps it quiet.
+                Some(
                     div()
                         .h_full()
                         .w(theme::INDICATOR)
                         .flex()
                         .items_center()
-                        .child(
-                            div()
-                                .w(theme::INDICATOR)
-                                .h(theme::TAB_HEIGHT)
-                                .rounded_full()
-                                .bg(theme::colors(cx).muted),
+                        .when(
+                            handle.state() != gpui_kit::base::ResizeHandleState::Idle,
+                            |divider| {
+                                divider.child(
+                                    div()
+                                        .w(theme::INDICATOR)
+                                        .h(theme::TAB_HEIGHT)
+                                        .rounded_full()
+                                        .bg(theme::colors(cx).muted),
+                                )
+                            },
                         )
-                        .into_any_element()
-                })
+                        .into_any_element(),
+                )
             }));
             if self.sidebar_visible {
                 group = group.child(
@@ -2573,8 +2580,7 @@ impl Render for Workbench {
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .px(theme::WORKBENCH_INSET)
-                    .pb_2()
+                    .pb_1()
                     .child(workbench),
             )
             .child(self.render_status_bar(cx))
