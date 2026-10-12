@@ -82,11 +82,19 @@ impl Workbench {
         }
     }
 
-    pub(super) fn tab_menu(&self, pane: Pane, menu: PopupMenu, view: Entity<Self>) -> PopupMenu {
+    pub(super) fn tab_menu(
+        &self,
+        pane: Pane,
+        pending: Option<PathBuf>,
+        menu: PopupMenu,
+        view: Entity<Self>,
+    ) -> PopupMenu {
         let path = self.pane_path(pane);
         let tabs = self.documents.len()
+            + self.pending_tabs.len()
             + usize::from(self.diff.tab.is_some())
-            + usize::from(self.graph.is_some());
+            + usize::from(self.graph.is_some())
+            + usize::from(self.large.is_some());
         let in_tree = matches!(pane, Pane::Document(_))
             && path
                 .as_ref()
@@ -101,18 +109,32 @@ impl Workbench {
                 })
         };
         menu.action_context(self.focus_handle.clone())
-            .item(item(
-                "关闭",
-                Box::new(super::CloseEditor),
-                |this, pane, window, cx| this.close_pane(pane, window, cx),
-            ))
             .item(
-                item(
-                    "关闭其他",
-                    Box::new(CloseOtherEditors),
-                    Workbench::close_other_panes,
-                )
-                .disabled(tabs < 2),
+                PopupMenuItem::new("关闭")
+                    .action(Box::new(super::CloseEditor))
+                    .on_click({
+                        let view = view.clone();
+                        let pending = pending.clone();
+                        move |_, window, cx| {
+                            view.update(cx, |this, cx| match &pending {
+                                Some(path) => this.drop_pending_tab(path, window, cx),
+                                None => this.close_pane(pane, window, cx),
+                            });
+                        }
+                    }),
+            )
+            .item(
+                PopupMenuItem::new("关闭其他")
+                    .action(Box::new(CloseOtherEditors))
+                    .disabled(tabs < 2)
+                    .on_click({
+                        let view = view.clone();
+                        move |_, window, cx| {
+                            view.update(cx, |this, cx| {
+                                this.close_panes_except(pane, pending.clone(), window, cx);
+                            });
+                        }
+                    }),
             )
             .item(item(
                 "全部关闭",
@@ -175,42 +197,68 @@ impl Workbench {
         if keep == Pane::Welcome {
             return;
         }
-        if self.active != keep {
+        self.close_panes_except(keep, None, window, cx);
+    }
+
+    pub(super) fn close_all_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_panes_except(Pane::Welcome, None, window, cx);
+    }
+
+    fn close_panes_except(
+        &mut self,
+        keep: Pane,
+        keep_pending: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if keep != Pane::Welcome && self.active != keep {
             self.select_pane(keep, window, cx);
         }
-        if keep != Pane::Diff && self.diff.tab.is_some() {
-            self.close_preview(window, cx);
-        }
-        if keep != Pane::Graph && self.graph.is_some() {
-            self.close_graph(window, cx);
-        }
-        if keep != Pane::Large && self.large.is_some() {
-            self.close_large(window, cx);
-        }
-        let others: Vec<_> = self
+        let others = self
             .documents
             .iter()
             .map(|doc| doc.id)
             .filter(|id| Pane::Document(*id) != keep)
             .collect();
+        let pending: Vec<_> = self
+            .pending_tabs
+            .iter()
+            .filter(|path| Some(*path) != keep_pending.as_ref())
+            .cloned()
+            .collect();
         let close = self.confirm_close(others, true, window, cx);
         cx.spawn_in(window, async move |this, cx| {
             if close.await {
-                let _ = this.update_in(cx, |this, window, cx| this.select_pane(keep, window, cx));
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if keep != Pane::Diff && this.diff.tab.is_some() {
+                        this.close_preview(window, cx);
+                    }
+                    if keep != Pane::Graph && this.graph.is_some() {
+                        this.close_graph(window, cx);
+                    }
+                    if keep != Pane::Large && this.large.is_some() {
+                        this.close_large(window, cx);
+                    }
+                    this.pending_tabs.retain(|path| !pending.contains(path));
+                    if let Some(path) = keep_pending {
+                        this.open_pending_tab(path, window, cx);
+                    } else {
+                        this.select_pane(
+                            if keep == Pane::Welcome {
+                                this.active
+                            } else {
+                                keep
+                            },
+                            window,
+                            cx,
+                        );
+                    }
+                    this.remember_tabs(true, window, cx);
+                    cx.notify();
+                });
             }
         })
         .detach();
-    }
-
-    pub(super) fn close_all_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.diff.tab.is_some() {
-            self.close_preview(window, cx);
-        }
-        if self.graph.is_some() {
-            self.close_graph(window, cx);
-        }
-        let all = self.documents.iter().map(|doc| doc.id).collect();
-        self.confirm_close(all, true, window, cx).detach();
     }
 
     pub(super) fn copy_pane_path(&mut self, pane: Pane, relative: bool, cx: &mut Context<Self>) {

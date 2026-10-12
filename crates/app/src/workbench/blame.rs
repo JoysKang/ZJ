@@ -16,8 +16,20 @@ const BLAME_DELAY: Duration = Duration::from_millis(400);
 /// Edited buffers larger than this are not sent to Git for each blame.
 const MAX_BLAME_TEXT: usize = 2 * 1024 * 1024;
 
-/// The document, line (0-based) and edit version a blame is for.
-type BlameKey = (DocumentId, u32, u64);
+/// The file, logical line (0-based) and edit version a blame is for.
+#[derive(Clone, PartialEq, Eq)]
+struct BlameKey {
+    document: DocumentId,
+    line: u32,
+    version: u64,
+    path: PathBuf,
+}
+
+impl BlameKey {
+    fn same_line(&self, other: &Self) -> bool {
+        self.document == other.document && self.line == other.line && self.path == other.path
+    }
+}
 
 #[derive(Default)]
 pub(super) struct BlameState {
@@ -28,37 +40,53 @@ pub(super) struct BlameState {
 }
 
 impl Workbench {
+    fn clear_blame(&mut self, cx: &mut Context<Self>) {
+        if self.blame.shown.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// The cursor moved or the buffer changed: blame the line once things rest.
     pub(super) fn schedule_blame(&mut self, cx: &mut Context<Self>) {
         let key = match (self.active, self.cursor) {
             (Pane::Document(id), Some((line, _))) => self
                 .document(id)
                 .filter(|doc| !doc.untitled)
-                .map(|doc| (id, line, doc.version)),
+                .map(|doc| BlameKey {
+                    document: id,
+                    line,
+                    version: doc.version,
+                    path: doc.path.clone(),
+                }),
             _ => None,
         };
         if key == self.blame.key {
             return;
         }
         // A different line: what was shown no longer applies.
-        if key.map(|k| (k.0, k.1)) != self.blame.key.map(|k| (k.0, k.1)) {
+        if !key
+            .as_ref()
+            .zip(self.blame.key.as_ref())
+            .is_some_and(|(new, old)| new.same_line(old))
+        {
             self.blame.shown = None;
         }
-        self.blame.key = key;
+        self.blame.key = key.clone();
         self.blame.cancel.store(true, Ordering::Relaxed);
         self.blame.task = None;
         let Some(key) = key else {
             return;
         };
         let weak = cx.weak_entity();
-        if let Some(doc) = self.document(key.0) {
+        if let Some(doc) = self.document(key.document) {
+            let annotation_key = key.clone();
             doc.editor.update(cx, |editor, cx| {
                 editor.set_line_end_annotation(
-                    key.1 as usize,
+                    key.line as usize,
                     theme::BLAME_GAP,
                     move |_, cx| {
                         weak.update(cx, |this, cx| {
-                            (this.blame.key == Some(key))
+                            (this.blame.key.as_ref() == Some(&annotation_key))
                                 .then(|| this.render_blame(cx))
                                 .flatten()
                         })
@@ -86,16 +114,21 @@ impl Workbench {
         if !in_repo {
             return;
         }
-        let (shown, line) = (self.blame.shown.take(), self.blame.key.map(|k| (k.0, k.1)));
-        self.blame.key = None;
+        let (shown, previous) = (self.blame.shown.take(), self.blame.key.take());
         self.schedule_blame(cx);
-        if self.blame.key.map(|k| (k.0, k.1)) == line {
+        if self
+            .blame
+            .key
+            .as_ref()
+            .zip(previous.as_ref())
+            .is_some_and(|(new, old)| new.same_line(old))
+        {
             self.blame.shown = shown;
         }
     }
 
     fn run_blame(&mut self, key: BlameKey, cx: &mut Context<Self>) {
-        let (id, line, _) = key;
+        let (id, line) = (key.document, key.line);
         let Some(doc) = self.document(id) else {
             return;
         };
@@ -107,8 +140,7 @@ impl Workbench {
             line as usize + 1 >= lines && text.line_len(line as usize) == 0
         };
         if empty_tail {
-            self.blame.shown = None;
-            cx.notify();
+            self.clear_blame(cx);
             return;
         }
         let Some(group) = self
@@ -117,9 +149,11 @@ impl Workbench {
             .filter(|g| doc.path.starts_with(&g.repo.worktree))
             .max_by_key(|g| g.repo.worktree.as_os_str().len())
         else {
+            self.clear_blame(cx);
             return;
         };
         let Ok(relative) = doc.path.strip_prefix(&group.repo.worktree) else {
+            self.clear_blame(cx);
             return;
         };
         // New, renamed and untracked files have no history under this name yet.
@@ -132,6 +166,7 @@ impl Workbench {
                 matches!(c.kind, ChangeKind::Untracked | ChangeKind::Renamed) || c.index == b'A'
             });
         if new {
+            self.clear_blame(cx);
             return;
         }
         let contents = doc
@@ -139,6 +174,7 @@ impl Workbench {
             .then(|| doc.editor.read(cx).text().to_string())
             .filter(|text| text.len() <= MAX_BLAME_TEXT);
         if doc.dirty && contents.is_none() {
+            self.clear_blame(cx);
             return;
         }
         let (repo, relative) = (group.repo.clone(), relative.to_path_buf());
@@ -160,7 +196,7 @@ impl Workbench {
         self.blame.task = Some(cx.spawn(async move |this, cx| {
             let result = job.await;
             let _ = this.update(cx, |this, cx| {
-                if this.blame.key == Some(key) {
+                if this.blame.key.as_ref() == Some(&key) {
                     this.blame.shown = Some(result);
                     cx.notify();
                 }

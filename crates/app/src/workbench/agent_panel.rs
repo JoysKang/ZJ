@@ -34,6 +34,10 @@ use workspace_editor_agent::{
     thread::{Item, LoginCard, LoginState, PermissionCard, PermissionState, ToolCard},
 };
 
+fn leading_icon(icon: impl IntoElement) -> Div {
+    h_flex().h(theme::AGENT_LINE).flex_shrink_0().child(icon)
+}
+
 /// The agent's monochrome Lucide glyph on its tinted tile.
 pub(super) fn glyph_tile(glyph: Glyph, size: Pixels, colors: theme::Colors) -> Div {
     let (fg, bg) = colors.glyphs[agent_model::glyph_index(glyph)];
@@ -605,9 +609,21 @@ impl Workbench {
                         .gap_2()
                         .items_start()
                         .text_size(theme::TEXT_CAPTION)
+                        .line_height(theme::AGENT_LINE)
                         .text_color(colors.deleted)
-                        .child(Icon::new(IconName::TriangleAlert).size(theme::SMALL_ICON_SIZE))
-                        .child(div().flex_1().min_w_0().child(message)),
+                        .child(leading_icon(
+                            div().id("agent-unavailable-icon").test_support().child(
+                                Icon::new(IconName::TriangleAlert).size(theme::SMALL_ICON_SIZE),
+                            ),
+                        ))
+                        .child(
+                            div()
+                                .id("agent-unavailable-text")
+                                .test_support()
+                                .flex_1()
+                                .min_w_0()
+                                .child(message),
+                        ),
                 )
             })
             .when(self.root.is_none(), |view| {

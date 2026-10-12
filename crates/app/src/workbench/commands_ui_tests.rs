@@ -184,3 +184,57 @@ async fn command_results_and_footer_stay_visible_in_a_low_window(cx: &mut TestAp
     })
     .unwrap();
 }
+
+#[gpui_kit::test]
+async fn the_command_center_is_centered_in_the_window_and_still_opens_search(
+    cx: &mut TestAppContext,
+) {
+    use super::test_support::{empty_store, install_globals, new_window};
+    use gpui_kit::component::{Theme, ThemeMode};
+    for width in [760., 1400., 1728.] {
+        let (handle, this) = cx.update(|cx| {
+            let documents =
+                install_globals(cx, crate::settings::Settings::default(), empty_store());
+            let bounds = Bounds::new(point(px(120.), px(80.)), size(px(width), px(900.)));
+            let (window, this) = new_window(cx, None, documents, bounds);
+            (window.downcast::<Root>().unwrap(), this)
+        });
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            for fullscreen in [false, true] {
+                cx.update_window(handle.into(), |_, window, cx| {
+                    Theme::change(mode, Some(window), cx);
+                    if window.is_fullscreen() != fullscreen {
+                        window.toggle_fullscreen();
+                    }
+                    assert_eq!(window.is_fullscreen(), fullscreen);
+                    for visible in [true, false] {
+                        this.update(cx, |p, cx| {
+                            p.sidebar_visible = visible;
+                            p.agent.visible = visible;
+                            cx.notify();
+                        });
+                        window.render_frame(cx);
+                        let center = window.find("command-center").bounds();
+                        let midpoint = window.viewport_size().width / 2.;
+                        assert!((center.center().x - midpoint).abs() <= px(0.5),
+                            "search is not centered: width={width}, fullscreen={fullscreen}, visible={visible}, bounds={center:?}, midpoint={midpoint:?}");
+                        for id in ["new-window", "toggle-sidebar", "toggle-terminal", "toggle-agent"] {
+                            let control = window.find(id).bounds();
+                            assert!(control.left() >= center.right(), "{id} overlaps search");
+                            assert!(control.right() <= window.viewport_size().width);
+                        }
+                    }
+                }).unwrap();
+            }
+        }
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("command-center", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(
+            this.read_with(cx, |p, _| p.quick_open.is_some()),
+            "search button stopped opening quick open"
+        );
+    }
+}

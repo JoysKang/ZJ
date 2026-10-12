@@ -144,16 +144,26 @@ impl Workbench {
                 .gap_2()
                 .items_start()
                 .text_size(theme::TEXT_CAPTION)
+                .line_height(theme::AGENT_LINE)
                 .text_color(if *error { colors.deleted } else { colors.muted })
+                .child(leading_icon(
+                    div().id(("agent-notice-icon", i)).test_support().child(
+                        Icon::new(if *error {
+                            IconName::TriangleAlert
+                        } else {
+                            IconName::Info
+                        })
+                        .size(theme::SMALL_ICON_SIZE),
+                    ),
+                ))
                 .child(
-                    Icon::new(if *error {
-                        IconName::TriangleAlert
-                    } else {
-                        IconName::Info
-                    })
-                    .size(theme::SMALL_ICON_SIZE),
+                    div()
+                        .id(("agent-notice-text", i))
+                        .test_support()
+                        .flex_1()
+                        .min_w_0()
+                        .child(text.clone()),
                 )
-                .child(div().flex_1().min_w_0().child(text.clone()))
                 .into_any_element(),
         };
         // Consecutive tool calls share one card: no gap between them.

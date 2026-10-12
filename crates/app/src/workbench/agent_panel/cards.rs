@@ -295,7 +295,8 @@ impl Workbench {
                 .gap_2()
                 .py_1()
                 .text_size(theme::TEXT_CAPTION)
-                .child(div().pt(theme::ROW_INSET).child(icon))
+                .line_height(theme::AGENT_LINE)
+                .child(leading_icon(icon))
                 .child(
                     div()
                         .flex_1()

@@ -2567,7 +2567,7 @@ impl Render for Workbench {
             }))
             .bg(colors.title)
             .text_color(colors.foreground)
-            .child(self.render_title_bar(cx))
+            .child(self.render_title_bar(window, cx))
             .child(
                 div()
                     .flex_1()

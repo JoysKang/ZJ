@@ -1,5 +1,5 @@
 //! Explorer file operations, VS Code style: a right-click menu on every row (and on the
-//! workspace header) plus keyboard shortcuts on the focused tree. Names are edited inline in
+//! workspace header and blank space) plus keyboard shortcuts on the focused tree. Names are edited inline in
 //! the row; deletion moves to the Trash after a confirmation. The filesystem work runs in the
 //! background (`file_ops`); file watching then refreshes Git status and the quick-open index,
 //! and the affected folders are listed again right away.
@@ -156,7 +156,7 @@ impl Workbench {
         )
     }
 
-    /// The right-click menu for `path` (a row, or the workspace root for the header).
+    /// The right-click menu for a row, or the workspace root for the header and blank space.
     pub(super) fn explorer_menu(&self, path: &Path, can_paste: bool, menu: PopupMenu) -> PopupMenu {
         let root = self.root.as_deref() == Some(path);
         let folder = root
@@ -347,7 +347,7 @@ impl Workbench {
                     Ok(path) => {
                         match &kind {
                             EditKind::Rename(old) => {
-                                this.follow_move(old, &path);
+                                this.follow_move(old, &path, cx);
                                 if let Some(parent) = old.parent() {
                                     this.relist(parent.to_path_buf(), window, cx);
                                 }
@@ -381,7 +381,7 @@ impl Workbench {
     }
 
     /// Open tabs, the diff tab and the selection follow a renamed or moved entry.
-    fn follow_move(&mut self, old: &Path, new: &Path) {
+    fn follow_move(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
         let moved = |path: &Path| {
             path.strip_prefix(old).ok().map(|rest| {
                 if rest.as_os_str().is_empty() {
@@ -399,6 +399,7 @@ impl Workbench {
                 document.path = path;
             }
         }
+        self.schedule_blame(cx);
         self.explorer.selected = self
             .explorer
             .selected
@@ -630,7 +631,7 @@ impl Workbench {
                     match result {
                         Ok(target) => {
                             if cut {
-                                this.follow_move(&source, &target);
+                                this.follow_move(&source, &target, cx);
                                 if let Some(parent) = source.parent() {
                                     directories.insert(parent.to_path_buf());
                                 }

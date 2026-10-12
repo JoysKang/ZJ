@@ -12,7 +12,7 @@ use gpui_kit::{
         button::{Button, ButtonVariants},
         h_flex,
         input::Input,
-        menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
+        menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
         v_flex,
     },
     prelude::FluentBuilder,
@@ -356,7 +356,7 @@ impl Workbench {
             );
         let weak = cx.weak_entity();
         let root_path = root.entry.path.clone();
-        let header = header.context_menu(move |menu, _, cx| {
+        let root_menu = move |menu: PopupMenu, _: &mut Window, cx: &mut Context<PopupMenu>| {
             let can_paste = cx
                 .try_global::<FileClipboard>()
                 .is_some_and(|c| !c.paths.is_empty());
@@ -364,7 +364,8 @@ impl Workbench {
                 Some(this) => this.read(cx).explorer_menu(&root_path, can_paste, menu),
                 None => menu,
             }
-        });
+        };
+        let header = header.context_menu(root_menu.clone());
         let explorer = v_flex()
             .size_full()
             .min_h_0()
@@ -402,10 +403,29 @@ impl Workbench {
                         }),
                     )
                     .track_scroll(&self.explorer.scroll)
-                    .flex_1()
+                    .h(theme::ROW_HEIGHT * self.explorer.rows.len().saturating_sub(1) as f32)
+                    .min_h_0()
                     .w_full(),
                 )
             })
+            .child(
+                div()
+                    .id("explorer-blank")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, _, window, cx| {
+                            this.explorer
+                                .set_selected(this.root.clone().into_iter().collect());
+                            this.explorer.focus.focus(window, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .test_support()
+                    .context_menu(root_menu),
+            )
             .into_any_element()
     }
 

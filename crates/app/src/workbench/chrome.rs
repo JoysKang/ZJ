@@ -5,6 +5,7 @@ use crate::indent::Indent;
 use crate::theme;
 use gpui_kit::{
     assets::IconName,
+    base::TestSupportExt,
     component::{
         Icon, Sizable, TitleBar,
         button::{Button, ButtonCustomVariant, ButtonVariants},
@@ -38,7 +39,11 @@ impl Workbench {
             .unwrap_or_else(|| "ZJ".into())
     }
 
-    pub(super) fn render_title_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_title_bar(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let colors = theme::colors(cx);
         let command_center = h_flex()
             .id("command-center")
@@ -78,7 +83,8 @@ impl Workbench {
                     .flex_shrink_0()
                     .text_size(theme::TEXT_SECTION)
                     .child("⌘P"),
-            );
+            )
+            .test_support();
         let actions = h_flex()
             .flex_1()
             .justify_end()
@@ -132,7 +138,9 @@ impl Workbench {
                         cx.listener(|this, _, window, cx| this.toggle_agent_panel(window, cx)),
                     ),
             );
+        // Center against the whole window, including the traffic-light area.
         TitleBar::new()
+            .when(cfg!(target_os = "macos"), |bar| bar.pl_0())
             .h(theme::TITLE_HEIGHT)
             .bg(colors.title)
             .border_color(colors.border)
@@ -140,7 +148,11 @@ impl Workbench {
                 h_flex()
                     .size_full()
                     .items_center()
-                    .child(div().flex_1())
+                    // Kit adds a left inset to its inner bar in fullscreen.
+                    .when(cfg!(target_os = "macos") && window.is_fullscreen(), |bar| {
+                        bar.pr_3()
+                    })
+                    .child(div().flex_1().pl_2())
                     .child(command_center)
                     .child(actions),
             )

@@ -1,7 +1,7 @@
 //! The agent panel in a headless window with the fake ACP agent: sending from the composer,
 //! permissions and 始终允许 rules, reviewing and rejecting a change, reopening a stored session.
 
-use super::super::test_support::{empty_store, new_window, open_window, wait};
+use super::super::test_support::{empty_store, install_globals, new_window, open_window, wait};
 use super::*;
 // `super::*` brings in GPUI's `test` macro through `gpui_kit::*`; `#[gpui_kit::test]` expands
 // to the built-in one.
@@ -3811,5 +3811,71 @@ async fn tool_code_headers_copy_full_output_in_both_themes(cx: &mut TestAppConte
             );
         })
         .unwrap();
+    }
+}
+
+#[gpui_kit::test]
+async fn agent_notice_icons_align_with_the_first_text_line(cx: &mut TestAppContext) {
+    use gpui_kit::component::{Theme, ThemeMode};
+    for width in [300., 900.] {
+        let mut settings = crate::settings::Settings::default();
+        settings.agent.panel_visible = true;
+        settings.agent.panel_width = width;
+        let (handle, this) = cx.update(|cx| {
+            let documents = install_globals(cx, settings, empty_store());
+            let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1700.), px(900.)));
+            let (window, this) = new_window(cx, None, documents, bounds);
+            (window.downcast::<Root>().unwrap(), this)
+        });
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            for kind in ["info", "error", "unavailable"] {
+                let mut line_height = px(0.);
+                for (index, message) in [
+                    "操作已完成".to_string(),
+                    "这是需要自动换行的中文提示，请检查本地安装和当前设置后再次尝试。".repeat(8),
+                    "第一行提示\n第二行说明\n第三行详情".to_string(),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    cx.update_window(handle.into(), |_, window, cx| {
+                        Theme::change(mode, None, cx);
+                        this.update(cx, |p, cx| {
+                            p.agent.visible = true;
+                            p.agent_ensure_session(cx);
+                            let key = p.agent.current.unwrap();
+                            let session = p.agent.session_mut(key).unwrap();
+                            session.thread.load(Vec::new(), 0);
+                            let preset = session.preset.id.clone();
+                            if kind == "unavailable" {
+                                p.agent.unavailable.insert(preset, message.clone());
+                            } else {
+                                session.thread.push_notice(message.clone(), kind == "error");
+                            }
+                            p.agent.expanded_processes.insert((key, 0));
+                            p.agent_sync_list(false);
+                            cx.notify();
+                        });
+                        window.render_frame(cx);
+                        window.render_frame(cx);
+                        let icon = if kind == "unavailable" { window.find("agent-unavailable-icon") } else { window.find(("agent-notice-icon", 0usize)) }.bounds();
+                        let text = if kind == "unavailable" { window.find("agent-unavailable-text") } else { window.find(("agent-notice-text", 0usize)) }.bounds();
+                        if index == 0 {
+                            line_height = text.size.height;
+                        } else {
+                            assert!(text.size.height > line_height, "fixture did not wrap: {kind} {width} {text:?}");
+                        }
+                        let first_line_center = text.top() + line_height / 2.;
+                        let panel = window.find("agent-panel").bounds();
+                        assert!((panel.size.width - px(width)).abs() <= px(1.),
+                            "panel width was not applied: expected={width}, actual={panel:?}");
+                        assert_eq!(icon.size.width, theme::SMALL_ICON_SIZE, "icon was compressed");
+                        assert_eq!(icon.size.height, theme::SMALL_ICON_SIZE);
+                        assert!((f32::from(icon.center().y - first_line_center)).abs() <= 0.5,
+                            "icon does not align with first text line: {kind} {width}: {icon:?} {text:?}");
+                    }).unwrap();
+                }
+            }
+        }
     }
 }

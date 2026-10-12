@@ -848,6 +848,74 @@ async fn the_line_end_blames_the_cursor_line(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn saving_as_another_path_never_keeps_the_old_files_blame(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("blame-path", 0);
+    let base = repo.parent().unwrap().to_path_buf();
+    let original = repo.join("a.txt");
+    let (handle, this) = open(cx, repo.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(original.clone(), Some(repo.clone()), window, cx)
+        });
+    })
+    .unwrap();
+    let committed = |cx: &mut TestAppContext| {
+        this.read_with(cx, |p, _| {
+            matches!(
+                &p.blame.shown,
+                Some(Ok(blame)) if !blame.uncommitted && blame.author == "Fixture"
+            )
+        })
+    };
+    settle(cx, Some(handle), committed);
+    let id = this.read_with(cx, |p, _| p.active_document_id().unwrap());
+
+    for target in [base.join("outside.txt"), repo.join("new.txt")] {
+        let task = cx
+            .update_window(handle.into(), |_, window, cx| {
+                this.update(cx, |p, cx| p.write_as(id, target.clone(), window, cx))
+            })
+            .unwrap();
+        assert!(task.await);
+        assert!(
+            this.read_with(cx, |p, _| p.blame.shown.is_none()),
+            "old file blame survived Save As to {}",
+            target.display()
+        );
+        settle(cx, Some(handle), |cx| this.read_with(cx, |p, _| !p.loading));
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(
+            this.read_with(cx, |p, _| p.blame.shown.is_none()),
+            "file without history retained old blame"
+        );
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.try_find("line-blame").is_none());
+        })
+        .unwrap();
+
+        let task = cx
+            .update_window(handle.into(), |_, window, cx| {
+                this.update(cx, |p, cx| p.write_as(id, original.clone(), window, cx))
+            })
+            .unwrap();
+        assert!(task.await);
+        settle(cx, Some(handle), committed);
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("line-blame").is_some(),
+                "tracked file did not recover its annotation"
+            );
+        })
+        .unwrap();
+    }
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[gpui_kit::test]
 async fn merge_conflicts_are_resolved_from_the_bar_and_marked_resolved(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let repo = fixture("conflict", 0);

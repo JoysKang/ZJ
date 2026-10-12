@@ -77,6 +77,170 @@ const COPY_RELATIVE_PATH: usize = 5;
 const REVEAL_IN_EXPLORER: usize = 8;
 
 #[gpui_kit::test]
+async fn close_others_removes_restored_tabs_that_have_not_been_opened(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = fixture("restored-others");
+    let (window, this) = open(cx, root.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.restore_tabs(
+                ["a.txt", "b.txt", "sub/c.txt"]
+                    .map(|name| root.join(name))
+                    .to_vec(),
+                Some(root.join("a.txt")),
+                window,
+                cx,
+            );
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| names(cx, &this) == ["a.txt"]);
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_pending_tab(root.join("b.txt"), window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| names(cx, &this) == ["a.txt", "b.txt"]);
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.pending_tabs, [root.join("sub/c.txt")]);
+    });
+
+    this.update(cx, |p, _| p.documents[1].dirty = true);
+    menu_click(cx, window, &this, 0, CLOSE_OTHERS);
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("取消");
+    cx.run_until_parked();
+    assert_eq!(names(cx, &this), ["a.txt", "b.txt"]);
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.pending_tabs, [root.join("sub/c.txt")]);
+    });
+
+    // Discard authorizes only the version shown in the prompt.
+    menu_click(cx, window, &this, 0, CLOSE_OTHERS);
+    this.update(cx, |p, _| p.documents[1].version += 1);
+    cx.simulate_prompt_answer("不保存");
+    cx.run_until_parked();
+    assert_eq!(names(cx, &this), ["a.txt", "b.txt"]);
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.pending_tabs, [root.join("sub/c.txt")]);
+    });
+
+    menu_click(cx, window, &this, 0, CLOSE_OTHERS);
+    cx.simulate_prompt_answer("不保存");
+    cx.run_until_parked();
+    assert_eq!(names(cx, &this), ["a.txt"]);
+    this.read_with(cx, |p, _| {
+        assert!(
+            p.pending_tabs.is_empty(),
+            "close others left restored tabs: {:?}",
+            p.pending_tabs
+        );
+        assert_eq!(p.active, Pane::Document(p.documents[0].id));
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn restored_tab_menus_close_and_keep_the_clicked_unloaded_tab(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = fixture("restored-menu");
+    let (window, this) = open(cx, root.clone());
+    let restore = |cx: &mut TestAppContext, active: Option<PathBuf>| {
+        cx.update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.restore_tabs(
+                    ["a.txt", "b.txt", "sub/c.txt"]
+                        .map(|name| root.join(name))
+                        .to_vec(),
+                    active,
+                    window,
+                    cx,
+                );
+            });
+        })
+        .unwrap();
+    };
+    restore(cx, Some(root.join("a.txt")));
+    settle(cx, None, |cx| names(cx, &this) == ["a.txt"]);
+    // The item must be enabled even when every other tab is still unloaded.
+    menu_click(cx, window, &this, 0, CLOSE_OTHERS);
+    this.read_with(cx, |p, _| assert!(p.pending_tabs.is_empty()));
+    menu_click(cx, window, &this, 0, CLOSE_ALL);
+    assert!(names(cx, &this).is_empty());
+
+    restore(cx, None);
+    let pending_key = usize::MAX / 2;
+    menu_click(cx, window, &this, pending_key, CLOSE);
+    this.read_with(cx, |p, _| {
+        assert!(p.documents.is_empty());
+        assert_eq!(p.pending_tabs, [root.join("b.txt"), root.join("sub/c.txt")]);
+    });
+    menu_click(cx, window, &this, pending_key + 1, CLOSE_OTHERS);
+    settle(cx, None, |cx| names(cx, &this) == ["c.txt"]);
+    this.read_with(cx, |p, _| {
+        assert!(p.pending_tabs.is_empty());
+        assert_eq!(p.active, Pane::Document(p.documents[0].id));
+    });
+    menu_click(cx, window, &this, 0, CLOSE_ALL);
+    assert!(names(cx, &this).is_empty());
+
+    restore(cx, None);
+    menu_click(cx, window, &this, pending_key, CLOSE_ALL);
+    this.read_with(cx, |p, _| {
+        assert!(p.documents.is_empty());
+        assert!(p.pending_tabs.is_empty());
+        assert_eq!(p.active, Pane::Welcome);
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn batch_close_preserves_readonly_and_restored_tabs_on_cancel(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = fixture("batch-close");
+    let path = root.join("long-line.txt");
+    std::fs::write(&path, "x".repeat(256 * 1024 + 1)).unwrap();
+    let (window, this) = open(cx, root.clone());
+    open_files(cx, window, &this, &root);
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(path, Some(root.clone()), window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| this.read_with(cx, |p, _| p.large.is_some()));
+    this.update(cx, |p, cx| {
+        p.documents[0].dirty = true;
+        p.pending_tabs.push(root.join("unread.txt"));
+        cx.notify();
+    });
+    menu_click(cx, window, &this, 1, CLOSE_ALL);
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("取消");
+    cx.run_until_parked();
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.documents.len(), 3);
+        assert!(p.large.is_some());
+        assert_eq!(p.pending_tabs, [root.join("unread.txt")]);
+    });
+    menu_click(cx, window, &this, 1, CLOSE_ALL);
+    cx.simulate_prompt_answer("不保存");
+    cx.run_until_parked();
+    this.read_with(cx, |p, _| {
+        assert!(p.documents.is_empty());
+        assert!(p.large.is_none());
+        assert!(p.pending_tabs.is_empty());
+        assert_eq!(p.active, Pane::Welcome);
+    });
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "a.txt\n"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
 async fn narrow_tabs_wrap_and_keep_their_close_behavior_in_both_themes(cx: &mut TestAppContext) {
     use super::test_support::{empty_store, install_globals, loaded, new_window};
     use gpui_kit::component::{Theme, ThemeMode};
@@ -203,6 +367,12 @@ async fn narrow_tabs_wrap_and_keep_their_close_behavior_in_both_themes(cx: &mut 
         std::fs::read_to_string(root.join("b.txt")).unwrap(),
         "b.txt\n"
     );
+    let keep_name = names(cx, &this)[0].clone();
+    menu_click(cx, window, &this, 0, CLOSE_OTHERS);
+    assert_eq!(names(cx, &this), [keep_name]);
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.active, Pane::Document(p.documents[0].id));
+    });
     let _ = std::fs::remove_dir_all(&root);
 }
 

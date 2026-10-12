@@ -151,6 +151,114 @@ async fn explorer_clicks_select_ranges_and_batch_commands_use_the_whole_selectio
 }
 
 #[gpui_kit::test]
+async fn explorer_blank_space_opens_the_root_menu_without_reusing_the_selected_folder(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let base = fixture("blank-menu");
+    for (root, rows) in [(base.join("workspace"), 6), (base.join("finder"), 1)] {
+        let (handle, this) = open(cx, root.clone());
+        settle(cx, Some(handle), |cx| {
+            this.read_with(cx, |p, _| p.explorer.rows.len() == rows)
+        });
+        let mut visual = VisualTestContext::from_window(handle.into(), cx);
+        for collapsed in [false, true] {
+            let position = visual.update(|window, cx| {
+                this.update(cx, |p, cx| {
+                    p.explorer.collapsed = collapsed;
+                    p.select_tree_path(root.join("dest"), window, cx);
+                });
+                window.render_frame(cx);
+                let sidebar = window.find("workbench-sidebar").bounds();
+                point(sidebar.center().x, sidebar.bottom() - theme::ROW_HEIGHT)
+            });
+            visual.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
+            visual.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
+            cx.run_until_parked();
+            visual.update(|window, cx| {
+                window.render_frame(cx);
+                assert!(
+                    window.try_find("popup-menu").is_some(),
+                    "blank right-click did not open a menu, collapsed={collapsed}"
+                );
+                assert_eq!(
+                    this.read(cx).explorer.selected,
+                    BTreeSet::from([root.clone()])
+                );
+                window.within("popup-menu").click(0usize, cx);
+            });
+            cx.run_until_parked();
+            this.read_with(cx, |p, _| {
+                assert!(
+                    matches!(p.explorer.edit.as_ref().map(|edit| &edit.kind),
+                Some(explorer_ops::EditKind::NewFile(dir)) if dir == &root),
+                    "blank menu created a file inside the previously selected folder"
+                );
+            });
+            this.update(cx, |p, cx| p.cancel_tree_edit(cx));
+            cx.run_until_parked();
+        }
+    }
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[gpui_kit::test]
+async fn the_explorer_blank_menu_does_not_take_space_from_a_scrolling_tree(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let base = fixture("blank-menu-scroll");
+    let root = base.join("workspace");
+    for index in 0..80 {
+        fs::write(root.join(format!("z{index:03}.txt")), "test").unwrap();
+    }
+    let (handle, this) = open(cx, root.clone());
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.explorer.rows.len() == 86)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        this.update(cx, |p, cx| {
+            p.explorer.scroll.scroll_to_bottom();
+            cx.notify();
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let position = row_position(cx, handle, &this, &root.join("z079.txt"));
+    cx.update_window(handle.into(), |_, window, _| {
+        let sidebar = window.find("workbench-sidebar").bounds();
+        assert!(
+            sidebar.contains(&position),
+            "last row is outside the sidebar"
+        );
+        assert!(
+            window.find("explorer-blank").bounds().size.height <= px(1.),
+            "blank menu took space from the scrolling tree"
+        );
+    })
+    .unwrap();
+    let mut visual = VisualTestContext::from_window(handle.into(), cx);
+    visual.simulate_mouse_down(position, MouseButton::Right, Modifiers::default());
+    visual.simulate_mouse_up(position, MouseButton::Right, Modifiers::default());
+    cx.run_until_parked();
+    visual.update(|window, cx| {
+        window.render_frame(cx);
+        window.within("popup-menu").click(5usize, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(selected(cx, &this), [root.join("z079.txt")]);
+    cx.update(|cx| {
+        assert_eq!(
+            cx.global::<explorer_ops::FileClipboard>().paths,
+            [root.join("z079.txt")]
+        );
+    });
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[gpui_kit::test]
 async fn finder_drops_copy_into_folder_file_parent_and_blank_space(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let base = fixture("drop");

@@ -45,6 +45,7 @@ impl Workbench {
         let pane = spec.pane;
         let pending = spec.pending.clone();
         let close_pending = spec.pending.clone();
+        let menu_pending = spec.pending.clone();
         let group: SharedString = format!("tab-{}", spec.key).into();
         let close = div()
             .id(("tab-close", spec.key))
@@ -214,6 +215,7 @@ impl Workbench {
                         view.update(cx, |this, _| this.tab_menu_focus = Some(focus));
                         view.read(cx).tab_menu(
                             pane,
+                            menu_pending.clone(),
                             super::menu_style::compact_menu(menu),
                             view.clone(),
                         )
