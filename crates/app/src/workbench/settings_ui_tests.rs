@@ -34,8 +34,26 @@ async fn the_settings_file_opens_and_applies_when_saved(cx: &mut TestAppContext)
         })
         .unwrap()
     };
-    assert!(save(cx, r#"{ "editor_font_size": 19 }"#).await);
+    // A parallel UI test may persist its own settings while this editor is open.
+    let other_path = std::thread::spawn(|| {
+        let path = Settings::path().unwrap();
+        Settings {
+            editor_font_size: 11.,
+            ..Settings::default()
+        }
+        .save_to(&path)
+        .unwrap();
+        path
+    })
+    .join()
+    .unwrap();
+    let saved = save(cx, r#"{ "editor_font_size": 19 }"#);
     cx.run_until_parked();
+    assert!(
+        !cx.has_pending_prompt(),
+        "another test's settings write caused an unexpected save-conflict prompt"
+    );
+    assert!(saved.await);
     cx.read(|cx| assert_eq!(cx.global::<Settings>().editor_font_size, 19.));
     this.read_with(cx, |p, _| assert_eq!(p.message, "设置已生效"));
 
@@ -46,7 +64,18 @@ async fn the_settings_file_opens_and_applies_when_saved(cx: &mut TestAppContext)
     this.read_with(cx, |p, _| {
         assert!(p.message.contains("不是有效的 JSON"), "{}", p.message)
     });
+    // Changes to this test's own file still require a save-conflict decision.
+    let external = r#"{ "editor_font_size": 14 }"#;
+    std::fs::write(&path, external).unwrap();
+    let saved = save(cx, r#"{ "editor_font_size": 20 }"#);
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("取消");
+    assert!(!saved.await);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
+    cx.read(|cx| assert_eq!(cx.global::<Settings>().editor_font_size, 19.));
     cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
         .unwrap();
     let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(other_path);
 }

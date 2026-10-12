@@ -201,10 +201,16 @@ impl gpui_kit::Global for Settings {}
 
 impl Settings {
     pub fn path() -> Option<PathBuf> {
-        // Tests change settings through the UI; they must never write the user's file.
+        // Parallel UI tests need separate settings, recovery and session files.
         if cfg!(test) {
             return Some(
-                std::env::temp_dir().join(format!("zj-test-settings-{}.json", std::process::id())),
+                std::env::temp_dir()
+                    .join(format!(
+                        "zj-test-settings-{}-{:?}",
+                        std::process::id(),
+                        std::thread::current().id()
+                    ))
+                    .join("settings.json"),
             );
         }
         if let Some(path) = std::env::var_os("ZJ_SETTINGS") {
@@ -354,7 +360,12 @@ impl Settings {
 /// Orders background writes: each change takes a number, and a write that finds a newer one
 /// already on disk is skipped, so rapid changes (⌘= ⌘= ⌘=) never leave an older value behind.
 static NEXT_WRITE: AtomicU64 = AtomicU64::new(1);
+#[cfg(not(test))]
 static WRITTEN: Mutex<u64> = Mutex::new(0);
+#[cfg(test)]
+std::thread_local! {
+    static TEST_WRITTEN: std::sync::Arc<Mutex<u64>> = std::sync::Arc::new(Mutex::new(0));
+}
 
 fn save_in_order(
     written: &Mutex<u64>,
@@ -392,9 +403,19 @@ pub fn update(
     cx.set_global(settings.clone());
     cx.refresh_windows();
     let write = NEXT_WRITE.fetch_add(1, Ordering::Relaxed);
+    // Capture the caller's test namespace before dispatching to the background executor.
+    let path = Settings::path();
+    #[cfg(test)]
+    let written = TEST_WRITTEN.with(Clone::clone);
     cx.background_spawn(async move {
-        match Settings::path() {
-            Some(path) => save_in_order(&WRITTEN, &settings, &path, write),
+        match path {
+            Some(path) => {
+                #[cfg(test)]
+                let written = written.as_ref();
+                #[cfg(not(test))]
+                let written = &WRITTEN;
+                save_in_order(written, &settings, &path, write)
+            }
             None => Err(io::Error::other("找不到设置目录（HOME 未设置）")),
         }
     })
@@ -417,6 +438,37 @@ mod tests {
     fn tests_never_touch_the_users_settings_file() {
         let path = Settings::path().unwrap();
         assert!(path.starts_with(std::env::temp_dir()), "{}", path.display());
+    }
+
+    #[test]
+    fn parallel_test_settings_keep_independent_write_order() {
+        let path = Settings::path().unwrap();
+        let written = TEST_WRITTEN.with(Clone::clone);
+        let write = NEXT_WRITE.fetch_add(1, Ordering::Relaxed);
+        let settings = Settings {
+            editor_font_size: 19.,
+            ..Settings::default()
+        };
+        let peer_path = std::thread::spawn(|| {
+            let path = Settings::path().unwrap();
+            let written = TEST_WRITTEN.with(Clone::clone);
+            let write = NEXT_WRITE.fetch_add(1, Ordering::Relaxed);
+            let settings = Settings {
+                editor_font_size: 11.,
+                ..Settings::default()
+            };
+            save_in_order(&written, &settings, &path, write).unwrap();
+            path
+        })
+        .join()
+        .unwrap();
+        // A newer write in another test must not suppress this test's earlier write.
+        save_in_order(&written, &settings, &path, write).unwrap();
+        assert_ne!(path, peer_path);
+        assert_eq!(Settings::load_from(&path), settings);
+        assert_eq!(Settings::load_from(&peer_path).editor_font_size, 11.);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        fs::remove_dir_all(peer_path.parent().unwrap()).unwrap();
     }
 
     #[test]
