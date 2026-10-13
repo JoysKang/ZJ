@@ -253,6 +253,11 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if count == 0 && self.agent.images_loading == 0 && self.agent.next_image_reference > 0 {
+            self.agent.next_image_reference = 0;
+            // Keep a fresh identity when restarting numbers, including after undo.
+            self.agent.image_generation += 1;
+        }
         // Reserve the insertion point before decoding, so later typing cannot move the image.
         let ordinal = self.agent.next_image_reference + 1;
         let reference = format!("image-reference:{}:{ordinal}", self.agent.image_generation);

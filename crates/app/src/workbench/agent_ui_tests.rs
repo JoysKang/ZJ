@@ -190,9 +190,11 @@ async fn pasted_images_preview_remove_and_send_as_image_only(cx: &mut TestAppCon
         });
     };
     paste(cx, false);
-    this.read_with(cx, |p, cx| {
-        assert_eq!(p.agent.composer.read(cx).value().as_ref(), "[图 1]");
+    let previous_reference = this.read_with(cx, |p, cx| {
+        let input = p.agent.composer.read(cx);
+        assert_eq!(input.value().as_ref(), "[图 1]");
         assert_eq!(p.agent.image_previews.len(), 1);
+        input.tokens()[0].token().id().clone()
     });
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
@@ -226,7 +228,9 @@ async fn pasted_images_preview_remove_and_send_as_image_only(cx: &mut TestAppCon
     });
     paste(cx, true);
     this.read_with(cx, |p, cx| {
-        assert_eq!(p.agent.composer.read(cx).value().as_ref(), "[图 2]");
+        let input = p.agent.composer.read(cx);
+        assert_eq!(input.value().as_ref(), "[图 1]");
+        assert_ne!(input.tokens()[0].token().id(), &previous_reference);
         assert_eq!(p.agent.attachments[0].path(), Some(&file));
     });
     cx.update_window(handle.into(), |_, window, cx| {
@@ -240,7 +244,7 @@ async fn pasted_images_preview_remove_and_send_as_image_only(cx: &mut TestAppCon
         assert!(p.agent.attachments.is_empty());
         assert!(p.agent.image_previews.is_empty());
         assert!(p.agent.current().unwrap().thread.items.iter().any(|item| {
-            matches!(item, Item::User { attachments, .. } if attachments == &["图 2".to_string()])
+            matches!(item, Item::User { attachments, .. } if attachments == &["图 1".to_string()])
         }));
     });
     until(cx, &this, "history id", |p| {
@@ -252,7 +256,7 @@ async fn pasted_images_preview_remove_and_send_as_image_only(cx: &mut TestAppCon
     assert!(
         messages
             .iter()
-            .any(|m| m.role == workspace_editor_agent_history::Role::User && m.text == "[图 2]")
+            .any(|m| m.role == workspace_editor_agent_history::Role::User && m.text == "[图 1]")
     );
     let _ = std::fs::remove_dir_all(root);
 }
@@ -3327,6 +3331,31 @@ async fn image_references_keep_their_images_when_editing_and_removing(cx: &mut T
         assert_eq!(
             p.agent.image_references.get(reference.as_ref()),
             Some(&Some(*id))
+        );
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_remove_attachment(0, window, cx);
+            // Other context remains attached while a new image sequence starts.
+            p.agent
+                .attachments
+                .push(Attachment::File(root.join("context.rs")));
+            p.agent_attach_images(vec![root.join("first.png")], window, cx);
+        });
+    })
+    .unwrap();
+    until(cx, &this, "replacement inline image loaded", |p| {
+        p.agent.images_loading == 0
+    });
+    this.read_with(cx, |p, cx| {
+        let input = p.agent.composer.read(cx);
+        assert_eq!(input.value().as_ref(), "第一段；第二段补充[图 1]");
+        assert_eq!(input.tokens().len(), 1);
+        assert_eq!(input.tokens()[0].token().label().as_ref(), "图 1");
+        assert_ne!(input.tokens()[0].token().id(), &reference);
+        assert_eq!(
+            agent_model::attachment_labels(&p.agent.attachments),
+            ["context.rs", "图 1"]
         );
     });
     let _ = std::fs::remove_dir_all(root);

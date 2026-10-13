@@ -1022,3 +1022,13 @@ Agent 输入区复用 Kit 的 Textarea 原生行内标签，在光标处插入�
 本轮不升级 GPUI Kit，不引入 Fast；Cargo.toml、Cargo.lock、vendor 和 theme.rs 无变更。测试仅在临时裸仓库及克隆中进行，未拉取或推送真实项目远端；代码保留在本地，尚未提交。
 
 标准 `sh tools/package.sh` 在沙箱外打包成功，`target/ZJ.app` 已更新。ARM64 二进制 29,661,536 字节，比上一构建增加 16 字节，低于 32,000,000 字节预算；包内程序与 dist 产物哈希一致，Info.plist 和图标校验通过。当前应用未重启，尚未进行新构建的实机截图。打包日志为 `/private/tmp/zj-incoming-20261013-package.log`，产物校验为 `/private/tmp/zj-incoming-20261013-package-verification.json`。
+
+## 同日追加：紧凑远端计数与图片编号重置
+
+按用户截图，将待拉取按钮改为循环箭头加「7↓ 0↑」式提交计数，使用既有中性色及悬停、按下颜色，悬停提示「从 origin/master 拉取 7 个提交」。待拉取时仍只执行 Pull；没有待拉取提交时保留原同步行为，忙碌保护和远端检查失败详情保留。README 同步当前样式。
+
+图片全部删除后，下一张重新从「图 1」编号；保留其他文件或选区附件也不影响重置。仍有图片或解码任务时保留已有编号，避免正文引用错位和连续粘贴的编号冲突。重置时换用新的引用 generation，防止撤销恢复的旧标签关联到同号的新图片。
+
+删除后重新粘贴的既有界面回归在修复前明确复现「图 2」而非「图 1」；修改后连同预览／删除／发送／历史、正文光标位置、保留图片编号、其他上下文附件、撤销与命令补全，以及源码管理窄布局／忙碌／无上游／实际拉取，共 9 项定向回归通过。日志为 `/private/tmp/zj-image-number-reset-red.log` 和 `/private/tmp/zj-scm-style-image-reset-tests.log`。本轮改动较小，完成差异和相关调用链自查，保留前一轮远端检查实现。
+
+工作区全部目标 Clippy（`-D warnings`）、fmt 和差异检查通过，Clippy 日志为 `/private/tmp/zj-scm-style-image-reset-clippy.log`。标准 `sh tools/package.sh` 在沙箱外打包成功，`target/ZJ.app` 已更新；ARM64 二进制 29,661,536 字节，与上一构建体积相同，包内程序与 dist 产物哈希一致，Info.plist 和图标校验通过。打包日志为 `/private/tmp/zj-scm-style-image-reset-package.log`，校验为 `/private/tmp/zj-scm-style-image-reset-package-verification.json`。未重复全量测试，未重启当前应用或进行新包实机截图，代码尚未提交。
