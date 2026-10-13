@@ -108,7 +108,7 @@ impl Workbench {
                         IconName::PanelLeftOpen
                     })
                     .tooltip("切换侧栏（⌘B）")
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
             )
             .child(
                 Button::new("toggle-terminal")

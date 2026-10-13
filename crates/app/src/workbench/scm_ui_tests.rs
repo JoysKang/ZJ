@@ -57,6 +57,518 @@ fn fixture(name: &str, ahead: usize) -> PathBuf {
     std::fs::canonicalize(repo).unwrap()
 }
 
+/// Advance only the temporary bare remote, then load its tracking ref in the local clone.
+fn incoming_fixture(name: &str, ahead: usize) -> PathBuf {
+    let repo = fixture(name, ahead);
+    let base = repo.parent().unwrap();
+    let writer = base.join("writer");
+    git(base, &["clone", "-q", "-b", "main", "remote.git", "writer"]);
+    git(&writer, &["config", "user.name", "Fixture"]);
+    git(
+        &writer,
+        &["config", "user.email", "fixture@example.invalid"],
+    );
+    git(&writer, &["config", "commit.gpgsign", "false"]);
+    git(
+        &writer,
+        &["commit", "-q", "--allow-empty", "-m", "incoming"],
+    );
+    git(&writer, &["push", "-q", "origin", "main"]);
+    git(&repo, &["fetch", "-q", "origin"]);
+    git(&repo, &["config", "pull.rebase", "true"]);
+    repo
+}
+
+#[gpui_kit::test]
+async fn incoming_commits_have_an_explicit_pull_action(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = incoming_fixture("incoming-pull", 0);
+    let (window, this) = open(cx, repo.clone());
+    this.update(cx, |p, cx| {
+        p.sidebar = Sidebar::SourceControl;
+        p.hide_clean_repos = true;
+        p.rebuild_rows();
+        cx.notify();
+    });
+    assert_eq!(rows(cx, &this), ["repo", "message"]);
+    this.read_with(cx, |p, _| {
+        let status = p.groups[0].status.as_ref().unwrap().as_ref().unwrap();
+        assert!(status.changes.is_empty());
+        assert_eq!((status.behind, status.ahead), (1, 0));
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find(("scm-repo-pull", 0usize)).is_some(),
+            "incoming commits need an explicit pull action"
+        );
+        assert!(window.try_find(("scm-repo-sync", 0usize)).is_none());
+        let pull = window.find(("scm-repo-pull", 0usize));
+        assert!(pull.visible());
+        assert_eq!(pull.role(), Some(Role::Button));
+        assert_eq!(pull.label(), Some("从 origin/main 拉取 1 个提交"));
+        window.click(("scm-repo-pull", 0usize), cx);
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| {
+            !p.groups[0].write_pending
+                && p.groups[0]
+                    .status
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .behind
+                    == 0
+        })
+    });
+    assert_eq!(
+        git_out(&repo, &["rev-parse", "HEAD"]),
+        git_out(&repo, &["rev-parse", "origin/main"])
+    );
+    assert!(
+        rows(cx, &this).is_empty(),
+        "fully synced clean repository should hide again"
+    );
+    this.update(cx, |p, cx| {
+        p.hide_clean_repos = false;
+        p.rebuild_rows();
+        cx.notify();
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find(("scm-repo-pull", 0usize)).is_none());
+        assert!(window.try_find(("scm-repo-sync", 0usize)).is_some());
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+#[gpui_kit::test]
+async fn incoming_pull_keeps_local_commits_without_pushing(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = incoming_fixture("incoming-diverged", 1);
+    let remote = repo.parent().unwrap().join("remote.git");
+    let remote_tip = git_out(&remote, &["rev-parse", "main"]);
+    let (window, this) = open(cx, repo.clone());
+    this.update(cx, |p, cx| {
+        p.sidebar = Sidebar::SourceControl;
+        cx.notify();
+    });
+    this.read_with(cx, |p, _| {
+        let status = p.groups[0].status.as_ref().unwrap().as_ref().unwrap();
+        assert_eq!((status.behind, status.ahead), (1, 1));
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("scm-repo-pull", 0usize), cx);
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| {
+            let status = p.groups[0].status.as_ref().unwrap().as_ref().unwrap();
+            !p.groups[0].write_pending && (status.behind, status.ahead) == (0, 1)
+        })
+    });
+    assert_eq!(git_out(&remote, &["rev-parse", "main"]), remote_tip);
+    assert_eq!(git_out(&repo, &["log", "-1", "--format=%s"]), "local 1");
+    assert_eq!(
+        git_out(&repo, &["rev-list", "--count", "HEAD..origin/main"]),
+        "0"
+    );
+    assert_eq!(
+        git_out(&repo, &["rev-list", "--count", "origin/main..HEAD"]),
+        "1"
+    );
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+/// Render the production SCM panel at the sidebar's minimum width.
+struct NarrowScm(Entity<Workbench>);
+
+impl Render for NarrowScm {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.0.update(cx, |p, cx| p.render_scm(cx))
+    }
+}
+
+#[gpui_kit::test]
+async fn incoming_pull_stays_visible_when_narrow_and_respects_busy_and_upstream(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let repo = incoming_fixture("incoming-narrow", 0);
+    let (handle, this) = cx.update(|cx| {
+        let documents = super::super::test_support::install_globals(
+            cx,
+            crate::settings::Settings::default(),
+            super::super::test_support::empty_store(),
+        );
+        let service = GitService::new(1, Duration::from_secs(5)).unwrap();
+        let mut this = None;
+        let (handle, _) = gpui_kit::open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                    point(px(0.), px(0.)),
+                    size(theme::SIDEBAR_MIN, px(640.)),
+                ))),
+                ..Default::default()
+            },
+            cx,
+            |window, cx| {
+                let workbench = cx.new(|cx| {
+                    Workbench::new(Some(repo.clone()), service, documents, 1, window, cx)
+                });
+                this = Some(workbench.clone());
+                cx.new(|_| NarrowScm(workbench))
+            },
+        )
+        .unwrap();
+        (handle, this.unwrap())
+    });
+    settle(cx, None, |cx| super::super::test_support::loaded(cx, &this));
+    for busy in [false, true] {
+        this.update(cx, |p, cx| {
+            p.groups[0].write_pending = busy;
+            cx.notify();
+        });
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            let pull = window.find(("scm-repo-pull", 0usize));
+            assert!(pull.visible());
+            assert!(pull.bounds().left() >= px(0.));
+            assert!(pull.bounds().right() <= window.viewport_size().width);
+            assert!(pull.bounds().size.width > px(0.));
+            assert_eq!(pull.label(), Some("从 origin/main 拉取 1 个提交"));
+            if busy {
+                window.click(("scm-repo-pull", 0usize), cx);
+            }
+        })
+        .unwrap();
+    }
+    cx.run_until_parked();
+    this.read_with(cx, |p, _| {
+        assert!(p.groups[0].expanded, "disabled pull toggled its repository");
+        assert_eq!(p.write_generation, 0, "busy pull started a write");
+        assert!(p.groups[0].write_task.is_none());
+        assert_eq!(
+            p.groups[0]
+                .status
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .behind,
+            1
+        );
+    });
+    assert_eq!(
+        git_out(&repo, &["rev-list", "--count", "HEAD..origin/main"]),
+        "1"
+    );
+    assert!(!cx.has_pending_prompt());
+    this.update(cx, |p, cx| {
+        p.groups[0].write_pending = false;
+        let status = p.groups[0].status.as_mut().unwrap().as_mut().unwrap();
+        Arc::make_mut(status).upstream = None;
+        cx.notify();
+    });
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find(("scm-repo-pull", 0usize)).is_none());
+        assert!(window.try_find(("scm-repo-sync", 0usize)).is_none());
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+#[gpui_kit::test]
+async fn remote_check_discovers_incoming_and_does_not_fetch_from_watch_refresh(
+    cx: &mut TestAppContext,
+) {
+    use std::os::unix::fs::PermissionsExt;
+    cx.executor().allow_parking();
+    let repo = incoming_fixture("remote-check", 0);
+    git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let head = git_out(&repo, &["rev-parse", "HEAD"]);
+    let contents = std::fs::read(repo.join("a.txt")).unwrap();
+    let base = repo.parent().unwrap();
+    let calls = base.join("fetch-calls");
+    let upload = base.join("upload-pack");
+    std::fs::write(
+        &upload,
+        format!(
+            "#!/bin/sh\nprintf 'fetch\\n' >> '{}'\nexec /usr/bin/git-upload-pack \"$@\"\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&upload, std::fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &repo,
+        &[
+            "config",
+            "remote.origin.uploadpack",
+            upload.to_str().unwrap(),
+        ],
+    );
+    let (window, this) = open(cx, repo.clone());
+    this.read_with(cx, |p, _| {
+        assert_eq!(
+            p.groups[0]
+                .status
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .behind,
+            0
+        )
+    });
+    cx.update_window(window.into(), |_, window, _| window.activate_window())
+        .unwrap();
+    cx.run_until_parked();
+    settle(cx, Some(window), |cx| this.read_with(cx, |p, _| !p.loading));
+    cx.update_window(window.into(), |_, window, cx| {
+        assert!(window.is_window_active());
+        window.render_frame(cx);
+        window.click("源代码管理", cx);
+        this.update(cx, |p, cx| {
+            let generation = p.generation;
+            p.request_remote_check(false, window, cx);
+            assert_eq!(
+                generation, p.generation,
+                "duplicate remote check restarted the job"
+            );
+        });
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| !p.loading && !p.watch.remote_pending)
+    });
+    this.read_with(cx, |p, _| {
+        assert_eq!(
+            p.groups[0]
+                .status
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .behind,
+            1
+        );
+        assert!(!p.watch.remote_active);
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find(("scm-repo-pull", 0usize)).visible());
+        this.update(cx, |p, cx| {
+            p.request_remote_check(false, window, cx);
+            p.refresh_on_activation(window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| this.read_with(cx, |p, _| !p.loading));
+    assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 1);
+    assert_eq!(git_out(&repo, &["rev-parse", "HEAD"]), head);
+    assert_eq!(std::fs::read(repo.join("a.txt")).unwrap(), contents);
+    let _ = std::fs::remove_dir_all(base);
+}
+
+/// Make Fetch observable and slow enough to exercise interruption and window release.
+fn slow_upload_pack(repo: &std::path::Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let base = repo.parent().unwrap();
+    let pids = base.join("fetch-pids");
+    let upload = base.join("slow-upload-pack");
+    std::fs::write(
+        &upload,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" >> '{}'\nsleep 2\nexec /usr/bin/git-upload-pack \"$@\"\n",
+            pids.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&upload, std::fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        repo,
+        &[
+            "config",
+            "remote.origin.uploadpack",
+            upload.to_str().unwrap(),
+        ],
+    );
+    pids
+}
+
+#[gpui_kit::test]
+async fn remote_check_survives_an_ordinary_refresh(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = incoming_fixture("remote-interrupted", 0);
+    git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let head = git_out(&repo, &["rev-parse", "HEAD"]);
+    let pids = slow_upload_pack(&repo);
+    let (window, this) = open(cx, repo.clone());
+    std::fs::write(repo.join("a.txt"), "local edit\n").unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.sidebar = Sidebar::SourceControl;
+            p.request_remote_check(true, window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        pids.exists()
+            && this.read_with(cx, |p, _| {
+                p.watch.remote_active
+                    && p.groups[0]
+                        .status
+                        .as_ref()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .changes
+                        .len()
+                        == 1
+            })
+    });
+    let cancelled = this.read_with(cx, |p, _| p.cancel.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            // This is also called by file saves and completed Git writes.
+            p.refresh(window, cx);
+            assert!(p.watch.remote_pending);
+            assert!(p.watch.remote_manual);
+            assert!(p.watch.last_remote_check.is_none());
+        });
+    })
+    .unwrap();
+    assert!(cancelled.load(Ordering::Relaxed));
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| !p.loading && !p.watch.remote_pending)
+    });
+    this.read_with(cx, |p, _| {
+        let status = p.groups[0].status.as_ref().unwrap().as_ref().unwrap();
+        assert_eq!(status.behind, 1, "interrupted remote check was lost");
+        assert_eq!(status.changes.len(), 1);
+        assert!(!p.watch.remote_active);
+        assert!(!p.watch.remote_manual);
+        assert!(p.watch.last_remote_check.is_some());
+    });
+    assert_eq!(std::fs::read_to_string(&pids).unwrap().lines().count(), 2);
+    assert_eq!(git_out(&repo, &["rev-parse", "HEAD"]), head);
+    assert_eq!(
+        std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+        "local edit\n"
+    );
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+#[gpui_kit::test]
+async fn remote_check_is_cancelled_and_reaped_when_the_window_closes(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("remote-close", 0);
+    let pids = slow_upload_pack(&repo);
+    let (window, this) = open(cx, repo.clone());
+    std::fs::write(repo.join("a.txt"), "local edit\n").unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.request_remote_check(true, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        pids.exists()
+            && this.read_with(cx, |p, _| {
+                p.watch.remote_active
+                    && p.groups[0]
+                        .status
+                        .as_ref()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .changes
+                        .len()
+                        == 1
+            })
+    });
+    let pid: i32 = std::fs::read_to_string(&pids)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let cancel = this.read_with(cx, |p, _| p.cancel.clone());
+    cx.update_window(window.into(), |_, window, _| window.remove_window())
+        .unwrap();
+    drop(this);
+    // Process the release of the test's last entity owner before waiting on plain atomics.
+    cx.update(|_| {});
+    settle(cx, None, |_| {
+        // SAFETY: signal 0 only checks the known temporary helper's pid.
+        cancel.load(Ordering::Relaxed) && unsafe { libc::kill(pid, 0) } == -1
+    });
+    assert!(
+        !cx.has_pending_prompt(),
+        "closed window received a late error"
+    );
+    assert_eq!(std::fs::read_to_string(&pids).unwrap().lines().count(), 1);
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+#[gpui_kit::test]
+async fn remote_check_failure_keeps_local_changes_and_reports_the_error(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("remote-failure", 0);
+    git(
+        &repo,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            repo.parent().unwrap().join("missing.git").to_str().unwrap(),
+        ],
+    );
+    std::fs::write(repo.join("a.txt"), "local edit\n").unwrap();
+    let (window, this) = open(cx, repo.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.sidebar = Sidebar::SourceControl;
+            p.hide_clean_repos = true;
+            p.request_remote_check(true, window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| !p.loading && p.groups[0].remote_error.is_some())
+    });
+    this.read_with(cx, |p, _| {
+        assert_eq!(
+            p.groups[0]
+                .status
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .changes
+                .len(),
+            1
+        );
+        assert!(
+            p.issues.is_empty(),
+            "remote failure invalidated repository discovery"
+        );
+        assert!(p.message.starts_with("远端检查失败"));
+        assert!(!p.groups[0].clean());
+    });
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("确定");
+    cx.run_until_parked();
+    assert_eq!(
+        std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+        "local edit\n"
+    );
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
 fn rows(cx: &mut TestAppContext, this: &Entity<Workbench>) -> Vec<String> {
     this.read_with(cx, |p, _| {
         p.rows

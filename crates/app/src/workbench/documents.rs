@@ -601,7 +601,7 @@ impl Workbench {
             .map(|group| group.repo.id.clone())
             .collect();
         if !repos.is_empty() {
-            self.refresh_repos(Some(repos), window, cx);
+            self.refresh_repos(Some(repos), false, window, cx);
         }
         if was_deleted && let Some(parent) = path.parent() {
             self.relist_folder(parent.to_path_buf(), window, cx);

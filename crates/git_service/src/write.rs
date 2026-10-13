@@ -135,7 +135,36 @@ pub(super) fn worktree_version(repo: &Repository, status: &Status, index: u64) -
 }
 
 impl GitService {
+    /// Refresh remote-tracking refs for the editor's background check, without changing HEAD.
+    pub fn fetch(
+        &self,
+        repo: &Repository,
+        generation: u64,
+        cancel: &AtomicBool,
+    ) -> io::Result<Reply> {
+        let expected = self.status(repo, generation, cancel)?.into();
+        self.write_with_timeout(
+            &WriteRequest {
+                repo: repo.clone(),
+                generation,
+                expected,
+                operation: WriteOperation::Fetch,
+            },
+            cancel,
+            Duration::from_secs(20),
+        )
+    }
+
     pub fn write(&self, request: &WriteRequest, cancel: &AtomicBool) -> io::Result<Reply> {
+        self.write_with_timeout(request, cancel, Duration::from_secs(120))
+    }
+
+    fn write_with_timeout(
+        &self,
+        request: &WriteRequest,
+        cancel: &AtomicBool,
+        timeout: Duration,
+    ) -> io::Result<Reply> {
         // Linked worktrees share refs and the stash reflog. Lock the canonical common
         // directory first so validating stash@{n} and mutating it stay one operation.
         let common = self.repo_lock(&RepoId(request.repo.common_dir.clone()));
@@ -167,7 +196,7 @@ impl GitService {
         // Hooks, signatures and network authentication need more time than status queries.
         let writer = Self {
             shared: self.shared.clone(),
-            timeout: Duration::from_secs(120),
+            timeout,
             grace: Duration::from_secs(1),
         };
         let mut tag_push = None;

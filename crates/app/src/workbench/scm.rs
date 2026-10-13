@@ -216,7 +216,7 @@ impl Workbench {
             })
             .separator()
             .item(PopupMenuItem::new("刷新").on_click(move |_, window, cx| {
-                let _ = refresh.update(cx, |this, cx| this.refresh(window, cx));
+                let _ = refresh.update(cx, |this, cx| this.request_remote_check(true, window, cx));
             }))
             .when(extra, |menu| {
                 menu.item(
@@ -259,7 +259,8 @@ impl Workbench {
                         });
                     }))
                     .item(PopupMenuItem::new("刷新").on_click(move |_, window, cx| {
-                        let _ = refresh.update(cx, |this, cx| this.refresh(window, cx));
+                        let _ = refresh
+                            .update(cx, |this, cx| this.request_remote_check(true, window, cx));
                     }))
                     .item(
                         PopupMenuItem::new("添加仓库…")
@@ -397,7 +398,7 @@ impl Workbench {
             .map(|path| path.to_string_lossy().replace(SINGLE_LINE, "⏎"))
             .filter(|path| !path.is_empty());
         // VS Code's two status items: the branch (opens 签出到…) and, with an upstream,
-        // 同步更改 with ↓M ↑N; or the error.
+        // 拉取 incoming commits or 同步更改 with ↓M ↑N; or the error.
         let status = group.status.as_ref().and_then(|s| s.as_ref().ok());
         let error = match &group.status {
             Some(Err(error)) => Some(format!("错误：{error}")),
@@ -408,7 +409,7 @@ impl Workbench {
             .and_then(|s| Some((s.upstream.clone()?, s.behind, s.ahead)))
             .map(|(upstream, behind, ahead)| {
                 let counts = (behind > 0 || ahead > 0).then(|| format!("{behind}↓ {ahead}↑"));
-                (upstream, counts)
+                (upstream, behind, counts)
             });
         let can_commit = matches!(&group.status, Some(Ok(status))
             if !status.changes.is_empty()
@@ -417,7 +418,7 @@ impl Workbench {
             "仓库 {name} · {}{}",
             error.as_deref().or(branch.as_deref()).unwrap_or_default(),
             sync.as_ref()
-                .and_then(|(_, counts)| counts.as_ref())
+                .and_then(|(_, _, counts)| counts.as_ref())
                 .map(|counts| format!(" · {counts}"))
                 .unwrap_or_default()
         );
@@ -622,20 +623,43 @@ impl Workbench {
                         })),
                 )
             })
-            .when_some(sync, |right, (upstream, counts)| {
-                let tooltip = match &counts {
-                    Some(counts) => format!("同步更改 {counts}（{upstream}）"),
-                    None => format!("同步更改（{upstream}）"),
+            .when_some(sync, |right, (upstream, behind, counts)| {
+                let pull = behind > 0;
+                let mut tooltip = if pull {
+                    format!("从 {upstream} 拉取 {behind} 个提交")
+                } else {
+                    match &counts {
+                        Some(counts) => format!("同步更改 {counts}（{upstream}）"),
+                        None => format!("同步更改（{upstream}）"),
+                    }
+                };
+                if let Some(error) = &group.remote_error {
+                    tooltip.push_str(&format!("\n远端检查失败，提交数可能尚未更新：{error}"));
+                }
+                let (id, operation) = if pull {
+                    ("scm-repo-pull", WriteOperation::Pull)
+                } else {
+                    ("scm-repo-sync", WriteOperation::Sync)
                 };
                 right.child(
-                    item(("scm-repo-sync", g), IconName::RefreshCw, counts)
-                        .tooltip(move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(tooltip.clone())
-                                .build(window, cx)
-                        })
+                    Button::new((id, g))
+                        .xsmall()
+                        .custom(
+                            ButtonCustomVariant::new(cx)
+                                .foreground(colors.muted)
+                                .hover(colors.control_hover)
+                                .active(colors.control_active),
+                        )
+                        .icon(IconName::RefreshCw)
+                        .when_some(counts, |button, counts| button.label(counts))
+                        .h(theme::SCM_DETAIL_LINE)
+                        .my(theme::SCM_LINE_PAD)
+                        .disabled(pending)
+                        .accessibility_label(tooltip.clone())
+                        .tooltip(tooltip)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
-                            if let Some(request) = this.scm_request(g, WriteOperation::Sync) {
+                            if let Some(request) = this.scm_request(g, operation.clone()) {
                                 this.request_git_write(request, window, cx);
                             }
                         })),

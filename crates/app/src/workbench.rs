@@ -302,11 +302,13 @@ struct Group {
     /// Commits the upstream does not have, loaded with the status (empty when none).
     outgoing: Result<Vec<Commit>, String>,
     outgoing_collapsed: bool,
+    remote_error: Option<String>,
 }
 impl Group {
-    /// A repository whose loaded status has no file changes; used by the hide-clean filter.
+    /// Hide unchanged repositories unless there are incoming commits or remote-check errors.
     fn clean(&self) -> bool {
-        matches!(&self.status, Some(Ok(status)) if status.changes.is_empty())
+        matches!(&self.status, Some(Ok(status)) if status.changes.is_empty() && status.behind == 0)
+            && self.remote_error.is_none()
     }
 
     /// Commits ahead of the upstream (0 without one).
@@ -390,6 +392,7 @@ enum Row {
 enum Event {
     Repo(Repository),
     Status(RepoId, Result<Status, String>, Result<Vec<Commit>, String>),
+    RemoteChecked(RepoId, Option<String>),
     Issue(String),
     /// A repository added by hand that cannot be opened: shown like an issue, but it says
     /// nothing about discovery, so it does not keep vanished repositories listed.
@@ -543,6 +546,7 @@ impl Workbench {
                 this.check_disk(None, window, cx);
                 if this.root.is_some() {
                     this.refresh_on_activation(window, cx);
+                    this.request_remote_check(false, window, cx);
                 }
             } else {
                 this.auto_save_on_focus_change(None, window, cx);
@@ -703,6 +707,10 @@ impl Workbench {
                 refresh_pending: false,
                 pending_plan: None,
                 ignore_cache: Default::default(),
+                remote_pending: false,
+                remote_active: false,
+                remote_manual: false,
+                last_remote_check: None,
             },
             agent,
             _subscriptions: vec![appearance, activation, settings, deletions, frame],
@@ -1049,8 +1057,11 @@ impl Workbench {
         cx.notify();
     }
 
-    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+    fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_visible = !self.sidebar_visible;
+        if self.sidebar_visible {
+            self.request_remote_check(false, window, cx);
+        }
         cx.notify();
     }
 
@@ -1667,7 +1678,7 @@ impl Workbench {
     }
 
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.refresh_repos(None, window, cx);
+        self.refresh_repos(None, false, window, cx);
     }
 
     /// `targets` limits the refresh to a status query of these known repositories (file
@@ -1675,6 +1686,7 @@ impl Workbench {
     fn refresh_repos(
         &mut self,
         targets: Option<HashSet<RepoId>>,
+        check_remotes: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1693,6 +1705,11 @@ impl Workbench {
         if known.as_ref().is_some_and(Vec::is_empty) {
             return;
         }
+        if self.watch.remote_active && !check_remotes {
+            // Saving or completing a write may replace this job. Keep the remote request,
+            // including its manual error reporting, until the local refresh has finished.
+            self.watch.remote_pending = true;
+        }
         self.cancel.store(true, Ordering::Relaxed);
         self.cancel = Arc::new(AtomicBool::new(false));
         self.generation += 1;
@@ -1702,6 +1719,7 @@ impl Workbench {
         let watch = self.watch.subscription.clone();
         let (sender, receiver) = mpsc::sync_channel(64);
         self.loading = true;
+        self.watch.remote_active = check_remotes;
         self.excluded = 0;
         self.diff.stale = self.diff.tab.as_ref().is_some_and(|diff| {
             diff.request().is_some_and(|request| {
@@ -1768,11 +1786,29 @@ impl Workbench {
             }
             let count = repos.len();
             let queue = Mutex::new(repos.into_iter());
+            let remote_repos = Mutex::new(Vec::new());
+            let read_status = |repo: &Repository| {
+                let result = service
+                    .status(repo, generation, &cancel)
+                    .map_err(|e| e.to_string());
+                let upstream = result.as_ref().is_ok_and(|s| s.upstream.is_some());
+                let outgoing = match &result {
+                    Ok(status) if status.upstream.is_some() && status.ahead > 0 => service
+                        .outgoing(repo, OUTGOING_LIMIT, &cancel)
+                        .map_err(|e| e.to_string()),
+                    _ => Ok(Vec::new()),
+                };
+                sender
+                    .send(Event::Status(repo.id.clone(), result, outgoing))
+                    .is_ok()
+                    && upstream
+            };
+            // Publish every local status before a slow remote can occupy either worker.
             std::thread::scope(|scope| {
                 for _ in 0..2 {
                     let queue = &queue;
-                    let service = &service;
-                    let sender = &sender;
+                    let remote_repos = &remote_repos;
+                    let read_status = &read_status;
                     let cancel = &cancel;
                     scope.spawn(move || {
                         loop {
@@ -1782,27 +1818,45 @@ impl Workbench {
                             let Some(repo) = queue.lock().unwrap().next() else {
                                 break;
                             };
-                            let result = service
-                                .status(&repo, generation, cancel)
-                                .map_err(|e| e.to_string());
-                            let outgoing = match &result {
-                                Ok(status) if status.upstream.is_some() && status.ahead > 0 => {
-                                    service
-                                        .outgoing(&repo, OUTGOING_LIMIT, cancel)
-                                        .map_err(|e| e.to_string())
-                                }
-                                _ => Ok(Vec::new()),
-                            };
-                            if sender
-                                .send(Event::Status(repo.id, result, outgoing))
-                                .is_err()
-                            {
-                                break;
+                            if read_status(&repo) && check_remotes {
+                                remote_repos.lock().unwrap().push(repo);
                             }
                         }
                     });
                 }
             });
+            if check_remotes {
+                let remote_queue = Mutex::new(remote_repos.into_inner().unwrap().into_iter());
+                std::thread::scope(|scope| {
+                    for _ in 0..2 {
+                        let queue = &remote_queue;
+                        let service = &service;
+                        let sender = &sender;
+                        let read_status = &read_status;
+                        let cancel = &cancel;
+                        scope.spawn(move || {
+                            loop {
+                                if cancel.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                let Some(repo) = queue.lock().unwrap().next() else {
+                                    break;
+                                };
+                                let error = service
+                                    .fetch(&repo, generation, cancel)
+                                    .err()
+                                    .map(|e| e.to_string());
+                                if cancel.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                // Fetch --all can update some refs even when another remote fails.
+                                read_status(&repo);
+                                let _ = sender.send(Event::RemoteChecked(repo.id, error));
+                            }
+                        });
+                    }
+                });
+            }
             let _ = sender.send(Event::Done);
             eprintln!(
                 "event=refresh_finished generation={generation} full={full} repos={count} seconds={:.3}",
@@ -1829,6 +1883,7 @@ impl Workbench {
                         Err(mpsc::TryRecvError::Empty) => None,
                     })
                     .collect();
+                let changed = !events.is_empty();
                 if this
                     .update_in(cx, |this, window, cx| {
                         if this.generation != generation {
@@ -1880,6 +1935,7 @@ impl Workbench {
                                             write_message: String::new(),
                                             outgoing: Ok(Vec::new()),
                                             outgoing_collapsed: false,
+                                            remote_error: None,
                                         });
                                     }
                                 }
@@ -1888,10 +1944,22 @@ impl Workbench {
                                         this.groups.iter_mut().find(|g| g.repo.id == id)
                                     {
                                         group.status = Some(status.map(Arc::new));
+                                        if group.status.as_ref().is_some_and(|s| {
+                                            s.as_ref().is_ok_and(|s| s.upstream.is_none())
+                                        }) {
+                                            group.remote_error = None;
+                                        }
                                         group.outgoing = outgoing;
                                         this.refresh_blame(&id, cx);
                                         this.graph_follow_head(&id, window, cx);
                                         this.scan_conflicts(cx);
+                                    }
+                                }
+                                Event::RemoteChecked(id, error) => {
+                                    if let Some(group) =
+                                        this.groups.iter_mut().find(|g| g.repo.id == id)
+                                    {
+                                        group.remote_error = error;
                                     }
                                 }
                                 Event::Issue(issue) => {
@@ -1925,15 +1993,23 @@ impl Workbench {
                             }
                             this.loading = false;
                             this.refresh_completed = true;
+                            if check_remotes {
+                                this.watch.remote_active = false;
+                                this.finish_remote_check(window, cx);
+                            }
                         }
-                        this.rebuild_rows();
+                        if changed || done {
+                            this.rebuild_rows();
+                        }
                         if done {
                             this.flush_workspace_refresh(window, cx);
                             if this.diff.stale && !this.loading {
                                 this.load_diff(window, cx);
                             }
                         }
-                        cx.notify();
+                        if changed || done {
+                            cx.notify();
+                        }
                     })
                     .is_err()
                     || done
@@ -2505,7 +2581,7 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &ShowAllCommands, window, cx| {
                 this.open_quick_open_with(">", window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| this.toggle_sidebar(window, cx)))
             .on_action(cx.listener(|this, _: &ZoomIn, window, cx| this.zoom(Some(1.), window, cx)))
             .on_action(
                 cx.listener(|this, _: &ZoomOut, window, cx| this.zoom(Some(-1.), window, cx)),

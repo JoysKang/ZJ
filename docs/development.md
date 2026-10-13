@@ -1004,3 +1004,21 @@ Agent 输入区复用 Kit 的 Textarea 原生行内标签，在光标处插入�
 主题配色及 Kit 主题映射的源码哈希与本轮前一致，保留 Solarized Dark 和现有浅色配色；Cargo.toml、Cargo.lock 与 vendor 没有新增改动，不引入 Fast。
 
 标准 `sh tools/package.sh` 在沙箱外打包成功，`target/ZJ.app` 已更新。ARM64 二进制 29,661,520 字节，与上一构建体积相同，低于 32,000,000 字节预算；包内程序与 dist 产物一致，Info.plist 与图标校验通过。当前应用未重启，尚未进行新构建的实机截图；代码未提交或推送。打包日志为 `/private/tmp/zj-tight-spacing-20261012-package.log`，产物校验为 `/private/tmp/zj-tight-spacing-20261013-package-verification.json`。
+
+## 同日追加：待拉取提交提示与按事件检查远端
+
+有待拉取提交时，源码管理的仓库标题显示向下箭头和「拉取 N」按钮；点击后只执行拉取。纯落后的仓库在「隐藏无变更的仓库」开启时仍显示，拉取完成后按原过滤规则处理。没有待拉取提交时保留原同步入口，仓库名称排序、提交输入区和主题配色保持原样。
+
+打开或重新显示源码管理、切回活动窗口时按事件检查远端，自动检查要求源码管理可见且窗口活动，完成后冷却 60 秒。顶部、仓库菜单和更多菜单的「刷新」均可发起手动检查，绕过冷却；同一窗口的重复请求合并。空闲时没有新增联网定时器，保存和文件监听只刷新本地状态。
+
+先发布全部本地状态，再由两个后台工作线程检查远端并重新读取提交数。检查只执行 Fetch，不更新 HEAD 或工作树；实际 Pull 沿用原有校验和 Git 写操作流程，不隐式 Push。远端错误独立于本地状态和仓库发现：自动失败在状态栏及悬停提示说明，手动失败弹出一次聚合详情。后台 Fetch 复用共享仓库锁、并发限制、输出上限和取消机制，Git 子进程运行超时为 20 秒；前置状态查询、锁和并发许可等待不计入这 20 秒。普通刷新替换正在检查的任务时，保留待重试请求和手动错误提示意图；关闭窗口取消并回收任务。
+
+新增七项临时仓库界面回归，覆盖显式拉取入口、隐藏过滤、拉取后的提示消失、分叉时保留本地提交且不推送、窄面板与忙碌状态、无上游、未提前 Fetch 的远端更新发现、重复请求与冷却、本地刷新不联网、检查失败保留改动、普通刷新中断后重试，以及关窗取消和 helper 回收。旧实现已复现缺少拉取按钮。关窗测试在释放最后一个 Entity 后显式处理 GPUI 的释放效应，避免仅等待 Atomic 状态而不触发实体回收。
+
+验证：源码管理 24 项、Git 服务 34 项、刷新计划／文件监听／保存／空闲定时器相关 19 项通过；两项依赖 macOS 原生文件事件的测试在沙箱内未收到事件，沙箱外复跑通过。Git deadline 的超时、父进程退出和取消三种场景均通过。工作区全部目标 Clippy（`-D warnings`）、fmt 和差异检查通过；本轮未重复完整工作区测试。日志分别为 `/private/tmp/zj-scm-incoming-suite.log`、`/private/tmp/zj-incoming-git-tests.log`、`/private/tmp/zj-incoming-refresh-tests.log`、`/private/tmp/zj-incoming-native-refresh-tests.log`、`/private/tmp/zj-incoming-clippy.log`。
+
+按项目要求完成两阶段审查。第一阶段 ponytail-review 发现普通刷新丢失远端检查、两个菜单刷新未检查远端，修复并补充中断与关窗回归后复核通过。第二阶段 code-review 的 Spec 轴通过；Standards 轴发现 README 仍称不支持 Fetch／Pull／Sync，已同步实际行为并复核通过。单一 `check_remotes` 参数保留现有刷新流程，未新增抽象或依赖。
+
+本轮不升级 GPUI Kit，不引入 Fast；Cargo.toml、Cargo.lock、vendor 和 theme.rs 无变更。测试仅在临时裸仓库及克隆中进行，未拉取或推送真实项目远端；代码保留在本地，尚未提交。
+
+标准 `sh tools/package.sh` 在沙箱外打包成功，`target/ZJ.app` 已更新。ARM64 二进制 29,661,536 字节，比上一构建增加 16 字节，低于 32,000,000 字节预算；包内程序与 dist 产物哈希一致，Info.plist 和图标校验通过。当前应用未重启，尚未进行新构建的实机截图。打包日志为 `/private/tmp/zj-incoming-20261013-package.log`，产物校验为 `/private/tmp/zj-incoming-20261013-package-verification.json`。

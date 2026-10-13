@@ -4,7 +4,7 @@
 //! [`Plan`] off the UI thread, and applied as narrowly as possible: a status query for the
 //! repositories they touch, a re-listing of changed explorer directories, and an incremental
 //! update of the quick-open index. Git-ignored output (target/, node_modules) is dropped.
-use super::Workbench;
+use super::{Sidebar, Workbench};
 use crate::{
     files::PathIndex,
     refresh_plan::{self, Plan, RepoRoots},
@@ -19,6 +19,7 @@ use std::{
 
 const QUIET_PERIOD: Duration = Duration::from_millis(300);
 const MAX_MERGE: Duration = Duration::from_secs(1);
+const REMOTE_CHECK_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// A computed plan plus the index snapshot it was computed against.
 struct Computed {
@@ -28,6 +29,75 @@ struct Computed {
 }
 
 impl Workbench {
+    pub(super) fn request_remote_check(
+        &mut self,
+        manual: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.root.is_none() {
+            return;
+        }
+        if !manual
+            && (!self.sidebar_visible
+                || self.sidebar != Sidebar::SourceControl
+                || !window.is_window_active())
+        {
+            return;
+        }
+        if self.watch.remote_pending || self.watch.remote_active {
+            self.watch.remote_manual |= manual;
+            return;
+        }
+        if !manual
+            && self
+                .watch
+                .last_remote_check
+                .is_some_and(|last| last.elapsed() < REMOTE_CHECK_COOLDOWN)
+        {
+            return;
+        }
+        self.watch.remote_pending = true;
+        self.watch.remote_manual = manual;
+        self.flush_workspace_refresh(window, cx);
+    }
+
+    pub(super) fn finish_remote_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.watch.last_remote_check = Some(Instant::now());
+        let errors: Vec<_> = self
+            .groups
+            .iter()
+            .filter_map(|group| {
+                group
+                    .remote_error
+                    .as_ref()
+                    .map(|error| format!("{}：{error}", group.repo.worktree.display()))
+            })
+            .take(100)
+            .collect();
+        let manual = std::mem::take(&mut self.watch.remote_manual);
+        if errors.is_empty() {
+            if self.message.starts_with("远端检查失败") {
+                self.message.clear();
+            }
+            return;
+        }
+        self.message = format!("远端检查失败（{} 个仓库），点击刷新重试", errors.len());
+        if manual {
+            let detail = format!(
+                "本地改动仍可使用；远端提交数可能尚未更新。\n\n{}",
+                errors.join("\n\n")
+            );
+            let _answer = window.prompt(
+                PromptLevel::Critical,
+                "远端检查失败",
+                Some(&detail),
+                &crate::workbench::prompt_buttons(&["确定"]),
+                cx,
+            );
+        }
+    }
+
     fn repo_roots(&self) -> Vec<RepoRoots> {
         self.groups
             .iter()
@@ -221,6 +291,18 @@ impl Workbench {
         {
             return;
         }
+        if self.watch.remote_pending {
+            self.watch.remote_pending = false;
+            if self.watch.remote_manual
+                || (self.sidebar_visible
+                    && self.sidebar == Sidebar::SourceControl
+                    && window.is_window_active())
+            {
+                self.refresh_repos(None, true, window, cx);
+                return;
+            }
+            self.watch.remote_manual = false;
+        }
         if self.watch.refresh_pending {
             self.watch.refresh_pending = false;
             self.watch.pending_plan = None;
@@ -256,7 +338,7 @@ impl Workbench {
             {
                 self.invalidate_preview(cx);
             }
-            self.refresh_repos(Some(plan.repos), window, cx);
+            self.refresh_repos(Some(plan.repos), false, window, cx);
         }
         cx.notify();
     }
@@ -292,4 +374,8 @@ pub(super) struct WatchState {
     /// Partial refresh from file watching, applied when the window is not busy.
     pub(super) pending_plan: Option<crate::refresh_plan::Plan>,
     pub(super) ignore_cache: Arc<std::sync::Mutex<crate::refresh_plan::IgnoreCache>>,
+    pub(super) remote_pending: bool,
+    pub(super) remote_active: bool,
+    pub(super) remote_manual: bool,
+    pub(super) last_remote_check: Option<Instant>,
 }

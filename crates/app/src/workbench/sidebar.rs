@@ -141,6 +141,9 @@ impl Workbench {
             })
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.sidebar = view;
+                if view == Sidebar::SourceControl {
+                    this.request_remote_check(false, window, cx);
+                }
                 if view == Sidebar::Search {
                     this.search
                         .query
@@ -226,7 +229,7 @@ impl Workbench {
                                         .icon(IconName::RefreshCw)
                                         .tooltip("刷新")
                                         .on_click(cx.listener(|this, _, window, cx| {
-                                            this.refresh(window, cx)
+                                            this.request_remote_check(true, window, cx)
                                         })),
                                 )
                                 .child(self.scm_more(cx)),
