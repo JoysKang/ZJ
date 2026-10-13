@@ -59,6 +59,11 @@ and its debug-only screenshot configuration alongside ZJ's shared atlas and draw
 
 `gpui-base` (GPUI Kit 0.7.1, the input and editor engine):
 
+- `src/input/base/state.rs`: `insert_text_at_preserving_selections` adds settings
+  fields as one undoable insertion while keeping every cursor, selection direction,
+  and line-end affinity. It refuses incomplete IME input and insertion points that
+  would replace an inline token. Ordinary typing and replacement keep upstream behavior.
+
 - `src/input/base/element.rs`: current-line backgrounds extend through the editor
   frame's right padding beneath the overlay scrollbar. The existing background quad
   uses the fixed viewport width plus right padding; the gutter covers the left side.

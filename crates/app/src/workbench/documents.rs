@@ -292,7 +292,11 @@ impl Workbench {
             return;
         }
         doc.dirty = true;
-        if auto_save == AutoSave::AfterDelay && !doc.untitled {
+        let completion = doc.settings_completion_version == Some(doc.version);
+        if !completion {
+            doc.settings_completion_version = None;
+        }
+        if !completion && auto_save == AutoSave::AfterDelay && !doc.untitled {
             let ticket = doc.auto_save.poke();
             doc.auto_save_task = Some(cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(save::AUTO_SAVE_DELAY).await;
@@ -324,6 +328,7 @@ impl Workbench {
             .iter()
             // A file deleted on disk is only recreated by an explicit save.
             .filter(|doc| doc.dirty && !doc.untitled && !doc.saving && !doc.deleted)
+            .filter(|doc| doc.settings_completion_version != Some(doc.version))
             .filter(|doc| only.is_none_or(|id| doc.id == id))
             .map(|doc| doc.id)
             .collect();
@@ -583,6 +588,9 @@ impl Workbench {
             doc.deleted = false;
             // Edits made while the write was running keep the tab edited.
             doc.dirty = doc.version != version;
+            if !doc.dirty {
+                doc.settings_completion_version = None;
+            }
         }
         if self.document(id).is_some_and(|doc| !doc.dirty) {
             self.forget_snapshot(id, cx);
@@ -1532,6 +1540,7 @@ impl Document {
             agent_read: None,
             auto_save: Default::default(),
             auto_save_task: None,
+            settings_completion_version: None,
             untitled_key: None,
             snapshot: Default::default(),
             snapshot_task: None,

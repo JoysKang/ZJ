@@ -1,5 +1,5 @@
 //! Bounded, read-only filesystem work. Display strings never become paths.
-use crate::fuzzy;
+use crate::{fuzzy, hidden_files::HiddenFiles};
 use std::{
     fs::{self, OpenOptions},
     io::{self, Read},
@@ -29,41 +29,13 @@ pub struct Entry {
     pub symlink: bool,
 }
 
-/// Dot files and folders that stay visible while hidden files are hidden: project
-/// configuration people edit, as opposed to tool state (`.venv`, `.pytest_cache`, `.claude`).
-const VISIBLE_DOT_NAMES: &[&str] = &[
-    ".github",
-    ".gitlab",
-    ".cargo",
-    ".gitignore",
-    ".gitattributes",
-    ".gitmodules",
-    ".gitlab-ci.yml",
-    ".editorconfig",
-    ".dockerignore",
-];
-const VISIBLE_DOT_PREFIXES: &[&str] = &[".env", ".prettierrc", ".eslintrc"];
-
-/// Whether a file or folder name is hidden unless the user shows hidden files.
-pub fn hidden_by_default(name: &std::ffi::OsStr) -> bool {
-    let name = name.as_bytes();
-    name.first() == Some(&b'.')
-        && !VISIBLE_DOT_NAMES.iter().any(|v| name == v.as_bytes())
-        && !VISIBLE_DOT_PREFIXES
-            .iter()
-            .any(|prefix| name.starts_with(prefix.as_bytes()))
-}
-
-/// Whether any component of a relative path is hidden by default.
-pub fn path_hidden_by_default(relative: &Path) -> bool {
-    relative
-        .components()
-        .any(|c| hidden_by_default(c.as_os_str()))
-}
-
-/// Lists a directory for the Explorer: folders first, then files, by name. Hidden dot
-/// entries are left out unless `show_hidden`; the second value counts them.
-pub fn directory(path: &Path, show_hidden: bool) -> io::Result<(Vec<Entry>, usize)> {
+/// Lists a directory for the Explorer: folders first, then files, by name. Entries matching
+/// the hidden rules are left out unless `show_hidden`; the second value counts them.
+pub fn directory(
+    path: &Path,
+    show_hidden: bool,
+    hidden_files: &HiddenFiles,
+) -> io::Result<(Vec<Entry>, usize)> {
     let mut entries = Vec::new();
     let mut hidden = 0;
     for item in fs::read_dir(path)? {
@@ -71,7 +43,7 @@ pub fn directory(path: &Path, show_hidden: bool) -> io::Result<(Vec<Entry>, usiz
         if item.file_name() == ".git" {
             continue;
         }
-        if !show_hidden && hidden_by_default(&item.file_name()) {
+        if !show_hidden && hidden_files.name_hidden(&item.file_name()) {
             hidden += 1;
             continue;
         }
@@ -289,8 +261,13 @@ impl PathIndex {
     }
 
     /// Ranks all entries against `query` and returns the best [`MAX_RESULTS`] as absolute paths.
-    /// Paths through hidden dot folders are skipped unless `show_hidden`.
-    pub fn search(&self, query: &str, show_hidden: bool) -> SearchResults {
+    /// Paths through hidden folders are skipped unless `show_hidden`.
+    pub fn search(
+        &self,
+        query: &str,
+        show_hidden: bool,
+        hidden_files: &HiddenFiles,
+    ) -> SearchResults {
         let query = fuzzy::query_chars(query);
         let mut result = SearchResults {
             incomplete: self.incomplete,
@@ -303,7 +280,7 @@ impl PathIndex {
             .filter_map(|i| {
                 let (key, name_start) = self.key(i);
                 fuzzy::score(&query, key, name_start)
-                    .filter(|_| show_hidden || !path_hidden_by_default(self.relative(i)))
+                    .filter(|_| show_hidden || !hidden_files.path_hidden(self.relative(i)))
                     .map(|s| (s, i))
             })
             .collect();
@@ -326,13 +303,18 @@ impl PathIndex {
 
     /// Agent context: indexed files and their folders. Also list the query's parent so
     /// empty folders can be referenced by path, without walking the workspace again.
-    pub fn mention_entries(&self, query: &str, show_hidden: bool) -> io::Result<Vec<Entry>> {
+    pub fn mention_entries(
+        &self,
+        query: &str,
+        show_hidden: bool,
+        hidden_files: &HiddenFiles,
+    ) -> io::Result<Vec<Entry>> {
         let query = query.strip_prefix("./").unwrap_or(query);
         let query = if query == "." { "" } else { query };
         let chars = fuzzy::query_chars(query);
         let mut scored = Vec::new();
         let mut add = |relative: &Path, directory: bool| {
-            if (!show_hidden && path_hidden_by_default(relative))
+            if (!show_hidden && hidden_files.path_hidden(relative))
                 || relative
                     .components()
                     .any(|c| is_excluded_dir(c.as_os_str()))
@@ -364,7 +346,7 @@ impl PathIndex {
                 ));
             }
         };
-        for path in self.search(query, show_hidden).paths {
+        for path in self.search(query, show_hidden, hidden_files).paths {
             if let Ok(relative) = path.strip_prefix(&self.root) {
                 add(relative, false);
             }
@@ -399,7 +381,7 @@ impl PathIndex {
             match fs::canonicalize(self.root.join(parent)) {
                 Ok(path) if path.starts_with(fs::canonicalize(&self.root)?) && path.is_dir() => {
                     add(parent, true);
-                    for entry in directory(&self.root.join(parent), show_hidden)?.0 {
+                    for entry in directory(&self.root.join(parent), show_hidden, hidden_files)?.0 {
                         if entry.directory
                             && !is_excluded_dir(entry.path.file_name().unwrap_or_default())
                             && let Ok(relative) = entry.path.strip_prefix(&self.root)
@@ -718,7 +700,7 @@ mod tests {
         fs::write(root.join("binary"), [0, 1, 2]).unwrap();
         std::os::unix::fs::symlink("src", root.join("alias")).unwrap();
         std::os::unix::fs::symlink("/etc/hosts", root.join("outside")).unwrap();
-        let (entries, _) = directory(&root, true).unwrap();
+        let (entries, _) = directory(&root, true, &HiddenFiles::default()).unwrap();
         assert!(entries[0].directory);
         assert!(
             !entries
@@ -727,7 +709,7 @@ mod tests {
         );
         let not_git = |_: &Path, _: &AtomicBool| Err(io::Error::other("not a worktree"));
         let index = PathIndex::build(&root, &AtomicBool::new(false), &not_git);
-        let result = index.search("MAIN.RS", true);
+        let result = index.search("MAIN.RS", true, &HiddenFiles::default());
         assert_eq!(result.paths, vec![path.clone()]);
         assert!(!result.incomplete);
         assert!(PathIndex::build(&root, &AtomicBool::new(true), &not_git).incomplete);
@@ -831,7 +813,10 @@ mod tests {
             ".DS_Store",
             ".ruff_cache",
         ] {
-            assert!(hidden_by_default(OsStr::new(hidden)), "{hidden}");
+            assert!(
+                HiddenFiles::default().name_hidden(OsStr::new(hidden)),
+                "{hidden}"
+            );
         }
         for shown in [
             ".github",
@@ -842,12 +827,13 @@ mod tests {
             ".cargo",
             "src",
         ] {
-            assert!(!hidden_by_default(OsStr::new(shown)), "{shown}");
+            assert!(
+                !HiddenFiles::default().name_hidden(OsStr::new(shown)),
+                "{shown}"
+            );
         }
-        assert!(path_hidden_by_default(Path::new("a/.claude/settings.json")));
-        assert!(!path_hidden_by_default(Path::new(
-            ".github/workflows/ci.yml"
-        )));
+        assert!(HiddenFiles::default().path_hidden(Path::new("a/.claude/settings.json")));
+        assert!(!HiddenFiles::default().path_hidden(Path::new(".github/workflows/ci.yml")));
         let root = std::env::temp_dir().join(format!("zj-hidden-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         for dir in [".venv", ".github", "src"] {
@@ -856,7 +842,7 @@ mod tests {
         fs::write(root.join(".gitignore"), "").unwrap();
         fs::write(root.join(".DS_Store"), "").unwrap();
         let names = |show| {
-            let (entries, hidden) = directory(&root, show).unwrap();
+            let (entries, hidden) = directory(&root, show, &HiddenFiles::default()).unwrap();
             let names: Vec<String> = entries
                 .iter()
                 .map(|e| e.path.file_name().unwrap().to_string_lossy().into_owned())
@@ -875,10 +861,88 @@ mod tests {
             0,
         );
         assert_eq!(
-            index.search("site", false).paths,
+            index.search("site", false, &HiddenFiles::default()).paths,
             vec![root.join("src/site.py")]
         );
-        assert_eq!(index.search("site", true).paths.len(), 2);
+        assert_eq!(
+            index
+                .search("site", true, &HiddenFiles::default())
+                .paths
+                .len(),
+            2
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn configured_rules_filter_tree_search_and_mentions_without_rebuilding_the_index() {
+        let root = std::env::temp_dir().join(format!("zj-custom-hidden-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for name in ["cache", "src", ".secret", ".git"] {
+            fs::create_dir_all(root.join(name)).unwrap();
+        }
+        for name in [
+            "cache/keep.log",
+            "src/debug.log",
+            "src/keep.log",
+            ".secret/plain.txt",
+        ] {
+            fs::write(root.join(name), "x").unwrap();
+        }
+        let rules =
+            HiddenFiles::new(vec!["cache".into(), "*.log".into(), "!keep.log".into()]).unwrap();
+        let index = PathIndex::pack(
+            root.clone(),
+            vec![
+                "cache/keep.log".into(),
+                "src/debug.log".into(),
+                "src/keep.log".into(),
+                ".secret/plain.txt".into(),
+            ],
+            false,
+            0,
+        );
+        let (entries, hidden) = directory(&root, false, &rules).unwrap();
+        assert_eq!(hidden, 1);
+        assert!(
+            !entries
+                .iter()
+                .any(|e| e.path == root.join("cache") || e.path == root.join(".git"))
+        );
+        assert!(entries.iter().any(|e| e.path == root.join(".secret")));
+        let (entries, hidden) = directory(&root.join("src"), false, &rules).unwrap();
+        assert_eq!(hidden, 1);
+        assert_eq!(
+            entries.iter().map(|e| &e.path).collect::<Vec<_>>(),
+            [&root.join("src/keep.log")]
+        );
+        assert_eq!(
+            index.search("log", false, &rules).paths,
+            [root.join("src/keep.log")]
+        );
+        assert!(
+            index
+                .mention_entries("cache/", false, &rules)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            index
+                .mention_entries("cache/", true, &rules)
+                .unwrap()
+                .iter()
+                .any(|e| e.path == root.join("cache"))
+        );
+        assert_eq!(index.search("log", true, &rules).paths.len(), 3);
+        let visible = HiddenFiles::new(Vec::new()).unwrap();
+        assert_eq!(index.search("log", false, &visible).paths.len(), 3);
+        assert!(
+            directory(&root, false, &visible)
+                .unwrap()
+                .0
+                .iter()
+                .all(|e| e.path != root.join(".git"))
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -909,7 +973,7 @@ mod tests {
         );
         let folders = |query: &str, show_hidden| {
             index
-                .mention_entries(query, show_hidden)
+                .mention_entries(query, show_hidden, &HiddenFiles::default())
                 .unwrap()
                 .into_iter()
                 .filter(|entry| entry.directory)
@@ -933,12 +997,19 @@ mod tests {
         assert_eq!(folders("./src/empty", false), [root.join("src/empty")]);
         assert!(folders("", false).contains(&root));
         assert_eq!(
-            index.search("deep", false).paths.len(),
+            index
+                .search("deep", false, &HiddenFiles::default())
+                .paths
+                .len(),
             2,
             "quick open stays file-only"
         );
         let next = index.with_changes(&[], &[root.join("src/deep")]);
-        assert!(next.mention_entries("deep", false).unwrap().is_empty());
+        assert!(
+            next.mention_entries("deep", false, &HiddenFiles::default())
+                .unwrap()
+                .is_empty()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -953,7 +1024,7 @@ mod tests {
         // Lowercase paths share their bytes with the key: ~23 bytes + 12 per entry.
         assert!(index.heap_bytes() < 1003 * 40, "{}", index.heap_bytes());
         assert_eq!(
-            index.search("readme", true).paths,
+            index.search("readme", true, &HiddenFiles::default()).paths,
             vec![PathBuf::from("/w/Docs/README.md")]
         );
         assert_eq!(index.key(0).0, "Docs/README.md".to_lowercase());
@@ -1012,7 +1083,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            index.search("main", true).paths,
+            index.search("main", true, &HiddenFiles::default()).paths,
             vec![root.join("outer/src/main.rs")]
         );
         fs::remove_dir_all(root).unwrap();

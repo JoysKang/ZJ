@@ -413,6 +413,8 @@ impl Workbench {
         let generation = self.agent.mention_generation;
         let index = self.index.clone();
         let show_hidden = self.explorer.show_hidden;
+        let hidden_files = self.explorer.hidden_files.clone();
+        let root = self.root.clone();
         let recent: Vec<PathBuf> = self
             .documents
             .iter()
@@ -424,7 +426,8 @@ impl Workbench {
             let results: std::io::Result<Vec<files::Entry>> = match index {
                 Some(index) => {
                     cx.background_spawn(async move {
-                        let mut results = index.mention_entries(&query, show_hidden)?;
+                        let mut results =
+                            index.mention_entries(&query, show_hidden, &hidden_files)?;
                         if query.is_empty() {
                             results.splice(
                                 0..0,
@@ -445,6 +448,19 @@ impl Workbench {
                     Ok(recent
                         .into_iter()
                         .filter(|path| agent_model::file_name(path).to_lowercase().contains(&query))
+                        .filter(|path| {
+                            query.is_empty()
+                                || show_hidden
+                                || !hidden_files.path_hidden(
+                                    root.as_deref()
+                                        .and_then(|root| path.strip_prefix(root).ok())
+                                        .unwrap_or_else(|| {
+                                            std::path::Path::new(
+                                                path.file_name().unwrap_or_default(),
+                                            )
+                                        }),
+                                )
+                        })
                         .map(|path| files::Entry {
                             path,
                             directory: false,

@@ -3,6 +3,7 @@
 //! dependency folders) unless turned off. Runs on background threads, streams results, stops
 //! on cancellation, and skips binaries and files over [`MAX_FILE_BYTES`].
 
+use crate::hidden_files::HiddenFiles;
 use regex::bytes::{Regex, RegexBuilder};
 use std::{
     fs,
@@ -42,6 +43,7 @@ pub struct Options {
     /// skip are in `exclude`, where the user sees and edits them.
     pub use_excludes: bool,
     pub show_hidden: bool,
+    pub hidden_files: HiddenFiles,
 }
 
 #[derive(Clone, Debug)]
@@ -220,6 +222,7 @@ pub struct Matcher {
     exclude: Globs,
     use_excludes: bool,
     show_hidden: bool,
+    hidden_files: HiddenFiles,
 }
 
 impl Matcher {
@@ -240,6 +243,7 @@ impl Matcher {
             exclude: Globs::parse(&options.exclude)?,
             use_excludes: options.use_excludes,
             show_hidden: options.show_hidden,
+            hidden_files: options.hidden_files.clone(),
         })
     }
 
@@ -252,8 +256,7 @@ impl Matcher {
         if self.exclude.matches(&text) {
             return false;
         }
-        if self.use_excludes && !self.show_hidden && crate::files::path_hidden_by_default(relative)
-        {
+        if self.use_excludes && !self.show_hidden && self.hidden_files.path_hidden(relative) {
             return false;
         }
         true
@@ -815,6 +818,37 @@ mod tests {
             ),
             vec![PathBuf::from("a/x.js")]
         );
+    }
+
+    #[test]
+    fn configured_hidden_rules_and_visibility_overrides_apply_to_text_search() {
+        let opts = Options {
+            hidden_files: HiddenFiles::new(vec![
+                "cache".into(),
+                "*.log".into(),
+                "!keep.log".into(),
+            ])
+            .unwrap(),
+            ..options("x")
+        };
+        let matcher = Matcher::new(&opts).unwrap();
+        assert!(!matcher.wants(Path::new("src/debug.log")));
+        assert!(!matcher.wants(Path::new("cache/keep.log")));
+        assert!(matcher.wants(Path::new("src/keep.log")));
+        assert!(matcher.wants(Path::new(".secret/plain.txt")));
+        for override_options in [
+            Options {
+                show_hidden: true,
+                ..opts.clone()
+            },
+            Options {
+                use_excludes: false,
+                ..opts
+            },
+        ] {
+            let matcher = Matcher::new(&override_options).unwrap();
+            assert!(matcher.wants(Path::new("cache/debug.log")));
+        }
     }
 
     /// `ZJ_SEARCH_BENCH=/path cargo test --release bench_text_search -- --ignored --nocapture`

@@ -3690,6 +3690,59 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.silent_replace_text = false;
     }
 
+    // ZJ patch: adding settings fields must preserve user selections and atomic undo/redo.
+    /// Insert at a UTF-8 byte offset while preserving every selection and its direction.
+    /// Returns false when the insertion cannot be applied atomically.
+    pub fn insert_text_at_preserving_selections(
+        &mut self,
+        at: usize,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.is_editable()
+            || text.is_empty()
+            || at > self.text.len()
+            || !self.text.is_char_boundary(at)
+            || self.ime_marked_range.is_some()
+            || !self.mask_pattern.is_none()
+            || self.normalize_token_range(at..at) != (at..at)
+        {
+            return false;
+        }
+        let before: Vec<CursorSelection> = self.selections.iter().copied().collect();
+        let affinity = self.cursor_line_end_affinity;
+        let old_len = self.text.len();
+        self.undo_manager.begin_transaction();
+        // Capture before replacement removes additional cursors or collapses the selection.
+        self.undo_manager
+            .record_selections(before.clone(), before.clone());
+        let range = self.range_to_utf16(&(at..at));
+        self.replace_text_in_range_silent(Some(range), text, window, cx);
+        let inserted_len = self.text.len().saturating_sub(old_len);
+        let after: Vec<CursorSelection> = before
+            .iter()
+            .copied()
+            .map(|mut selection| {
+                if selection.start >= at {
+                    selection.start += inserted_len;
+                }
+                if selection.end >= at {
+                    selection.end += inserted_len;
+                }
+                selection
+            })
+            .collect();
+        self.selections.replace_all(after.clone());
+        self.cursor_line_end_affinity = affinity;
+        self.undo_manager.record_selections(before, after);
+        self.undo_manager.commit_transaction();
+        if inserted_len > 0 {
+            cx.notify();
+        }
+        inserted_len > 0
+    }
+
     /// Apply a batch of edits as one atomic history transaction.
     ///
     /// `edits` are `(byte range in the current pre-edit document, replacement)`
@@ -9901,6 +9954,65 @@ mod tests {
                 // A distinct offset adds a cursor.
                 state.add_cursor_at(4, cx);
                 assert_eq!(state.selections.len(), 2);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn test_insert_at_preserves_reversed_and_extra_selections_through_undo_redo(
+        cx: &mut TestAppContext,
+    ) {
+        let view = multi_line(cx);
+        let mut cx = VisualTestContext::from_window(view.window_handle.into(), cx);
+        let input = view.input;
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                let original = "ab中cd\nef\ngh";
+                state.set_value(original, window, cx);
+                let mut primary = CursorSelection::new(state.selections.generate_id(), 1, 5);
+                primary.reversed = true;
+                primary.column_anchor = Some((px(8.), 1));
+                let at_insertion = CursorSelection::new(state.selections.generate_id(), 7, 7);
+                let after_insertion = CursorSelection::new(state.selections.generate_id(), 12, 12);
+                let before = vec![primary, at_insertion, after_insertion];
+                state.selections.replace_all(before.clone());
+                state.cursor_line_end_affinity = true;
+
+                assert!(!state.insert_text_at_preserving_selections(3, "x", window, cx));
+                assert!(!state.insert_text_at_preserving_selections(
+                    original.len() + 1,
+                    "x",
+                    window,
+                    cx
+                ));
+                assert!(!state.insert_text_at_preserving_selections(7, "", window, cx));
+                assert_eq!(state.value(), original);
+                assert_eq!(state.selections.iter().copied().collect::<Vec<_>>(), before);
+
+                state.ime_marked_range = Some(primary);
+                assert!(!state.insert_text_at_preserving_selections(7, "x", window, cx));
+                assert_eq!(state.value(), original);
+                assert_eq!(state.selections.iter().copied().collect::<Vec<_>>(), before);
+                state.ime_marked_range = None;
+
+                let insertion = "\n新增";
+                assert!(state.insert_text_at_preserving_selections(7, insertion, window, cx));
+                assert_eq!(state.value(), "ab中cd\n新增\nef\ngh");
+                let mut after = before.clone();
+                for selection in &mut after[1..] {
+                    selection.start += insertion.len();
+                    selection.end += insertion.len();
+                }
+                assert_eq!(state.selections.iter().copied().collect::<Vec<_>>(), after);
+                assert!(state.cursor_line_end_affinity);
+
+                state.undo(&Undo, window, cx);
+                assert_eq!(state.value(), original);
+                assert_eq!(state.selections.iter().copied().collect::<Vec<_>>(), before);
+                state.redo(&Redo, window, cx);
+                assert_eq!(state.value(), "ab中cd\n新增\nef\ngh");
+                assert_eq!(state.selections.iter().copied().collect::<Vec<_>>(), after);
             });
         });
     }

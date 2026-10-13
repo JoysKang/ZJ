@@ -111,7 +111,7 @@ pub(super) struct QuickOpen {
     command_keys: Vec<Vec<String>>,
     /// What had focus when the panel opened; a command is dispatched with it restored.
     previous_focus: Option<FocusHandle>,
-    results: Vec<PathBuf>,
+    pub(super) results: Vec<PathBuf>,
     /// `Some` for a symbol / location / command list: the items and the matching indexes.
     pub(super) items: Option<(Vec<PickItem>, Vec<usize>)>,
     empty_note: &'static str,
@@ -415,6 +415,7 @@ impl Workbench {
             .collect();
         let index = self.index.clone();
         let show_hidden = self.explorer.show_hidden;
+        let hidden_files = self.explorer.hidden_files.clone();
         let Some(quick) = self.quick_open.as_mut() else {
             return;
         };
@@ -439,7 +440,7 @@ impl Workbench {
                 .timer(Duration::from_millis(16))
                 .await;
             let result = cx
-                .background_spawn(async move { index.search(&query, show_hidden) })
+                .background_spawn(async move { index.search(&query, show_hidden, &hidden_files) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if let Some(quick) = this.quick_open.as_mut()

@@ -751,6 +751,7 @@ pub(super) struct Explorer {
     pub(super) scroll: UniformListScrollHandle,
     /// The Explorer and quick open show dot entries hidden by default (settings, ⌘⇧.).
     pub(super) show_hidden: bool,
+    pub(super) hidden_files: crate::hidden_files::HiddenFiles,
     /// The Explorer row file operations act on (clicked or right-clicked).
     pub(super) selection: Option<PathBuf>,
     pub(super) selected: BTreeSet<PathBuf>,

@@ -6,6 +6,7 @@
 //! write failure (including refusing to overwrite a file that is not valid JSON) is reported in
 //! the window that made the change.
 
+use crate::hidden_files::HiddenFiles;
 use gpui_kit::AppContext as _;
 use serde_json::{Value, json};
 use std::{
@@ -148,8 +149,10 @@ pub const EDITOR_FONT_MAX: f32 = 24.;
 pub struct Settings {
     /// Code editor and diff editor font size in pixels (⌘= / ⌘- / ⌘0).
     pub editor_font_size: f32,
-    /// Show dot files and folders that are hidden by default (⌘⇧.).
+    /// Show files and folders matching the hidden rules (⌘⇧.).
     pub show_hidden: bool,
+    /// Ordered name patterns: matching rules hide names, `!` rules keep them visible.
+    pub hidden_files: HiddenFiles,
     /// The diff editor opens inline (top / bottom) instead of side by side.
     pub diff_inline: bool,
     /// Source Control lists only repositories with changes.
@@ -184,6 +187,7 @@ impl Default for Settings {
         Self {
             editor_font_size: EDITOR_FONT_DEFAULT,
             show_hidden: false,
+            hidden_files: HiddenFiles::default(),
             diff_inline: true,
             hide_clean_repos: false,
             search_use_excludes: true,
@@ -264,6 +268,11 @@ impl Settings {
                 .map(|size| (size as f32).clamp(EDITOR_FONT_MIN, EDITOR_FONT_MAX))
                 .unwrap_or(defaults.editor_font_size),
             show_hidden: flag("show_hidden", defaults.show_hidden),
+            hidden_files: value
+                .get("hidden_files")
+                .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
+                .and_then(|patterns| HiddenFiles::new(patterns).ok())
+                .unwrap_or(defaults.hidden_files),
             diff_inline: flag("diff_inline", defaults.diff_inline),
             hide_clean_repos: flag("hide_clean_repos", defaults.hide_clean_repos),
             search_use_excludes: flag("search_use_excludes", defaults.search_use_excludes),
@@ -305,6 +314,7 @@ impl Settings {
         json!({
             "editor_font_size": self.editor_font_size,
             "show_hidden": self.show_hidden,
+            "hidden_files": self.hidden_files.patterns(),
             "diff_inline": self.diff_inline,
             "hide_clean_repos": self.hide_clean_repos,
             "search_use_excludes": self.search_use_excludes,
@@ -321,10 +331,38 @@ impl Settings {
     /// not parse is an error, so a typo never puts the defaults into effect.
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         match serde_json::from_slice::<Value>(bytes) {
-            Ok(value @ Value::Object(_)) => Ok(Self::from_json(&value)),
+            Ok(value @ Value::Object(_)) => {
+                let mut settings = Self::from_json(&value);
+                if let Some(value) = value.get("hidden_files") {
+                    let patterns =
+                        serde_json::from_value::<Vec<String>>(value.clone()).map_err(|_| {
+                            "hidden_files 必须是文件或文件夹名称模式的字符串数组".to_string()
+                        })?;
+                    settings.hidden_files = HiddenFiles::new(patterns)?;
+                }
+                Ok(settings)
+            }
             Ok(_) => Err("设置文件不是 JSON 对象".into()),
             Err(error) => Err(format!("设置文件不是有效的 JSON：{error}")),
         }
+    }
+
+    /// Adds the editable rule list without replacing existing text or unknown settings.
+    /// The returned offset is a UTF-8 byte index for a reversible buffer insertion.
+    pub fn hidden_files_insertion(&self, text: &str) -> Option<(usize, String)> {
+        let value: Value = serde_json::from_str(text).ok()?;
+        let object = value.as_object()?;
+        if object.contains_key("hidden_files") {
+            return None;
+        }
+        let offset = text.rfind('}')?;
+        let comma = if object.is_empty() { "" } else { "," };
+        let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+        let patterns = serde_json::to_string(self.hidden_files.patterns()).ok()?;
+        Some((
+            offset,
+            format!("{comma}{newline}  \"hidden_files\": {patterns}{newline}"),
+        ))
     }
 
     /// Writes through a temporary file and a rename, so a crash never leaves half a file. Keys
@@ -435,6 +473,95 @@ mod tests {
     }
 
     #[test]
+    fn hidden_file_settings_defaults_and_round_trip() {
+        for value in [
+            json!({}),
+            json!({"hidden_files": false}),
+            json!({"hidden_files": [1]}),
+        ] {
+            assert_eq!(
+                Settings::from_json(&value).hidden_files,
+                HiddenFiles::default()
+            );
+        }
+        for value in [
+            json!({"hidden_files": false}),
+            json!({"hidden_files": "*.log"}),
+            json!({"hidden_files": ["*.log", 1]}),
+        ] {
+            assert_eq!(
+                Settings::from_json(&value).hidden_files,
+                HiddenFiles::default()
+            );
+            let error = Settings::parse(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+            assert!(error.contains("hidden_files"), "{error}");
+        }
+        for patterns in [vec!["*.log", "!keep.log"], vec![]] {
+            let value = json!({"hidden_files": patterns});
+            let settings = Settings::from_json(&value);
+            assert_eq!(settings.to_json()["hidden_files"], value["hidden_files"]);
+            assert_eq!(
+                Settings::parse(&serde_json::to_vec(&value).unwrap()).unwrap(),
+                settings
+            );
+        }
+        for pattern in ["src/cache", "!", "[z-a]"] {
+            let value = json!({"hidden_files": [pattern]});
+            let error = Settings::parse(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+            assert!(error.contains("hidden_files"), "{error}");
+            assert_eq!(
+                Settings::from_json(&value).hidden_files,
+                HiddenFiles::default()
+            );
+        }
+    }
+
+    #[test]
+    fn hidden_file_insertion_preserves_the_original_buffer() {
+        let settings = Settings {
+            hidden_files: HiddenFiles::new(vec!["*.log".into(), "!keep.log".into()]).unwrap(),
+            ..Settings::default()
+        };
+        for text in [
+            "{}",
+            "{  }\n",
+            "{\n  \"future_key\": {\"名字\": [1, 2]},\n  \"show_hidden\": true\n}\n",
+            "{\r\n  \"future_key\": 1\r\n}\r\n",
+        ] {
+            let (offset, insertion) = settings.hidden_files_insertion(text).unwrap();
+            assert_eq!(offset, text.rfind('}').unwrap());
+            let result = format!("{}{}{}", &text[..offset], insertion, &text[offset..]);
+            assert!(result.starts_with(&text[..offset]));
+            assert!(result.ends_with(&text[offset..]));
+            let before: Value = serde_json::from_str(text).unwrap();
+            let after: Value = serde_json::from_str(&result).unwrap();
+            for (key, value) in before.as_object().unwrap() {
+                assert_eq!(&after[key], value);
+            }
+            assert_eq!(
+                after["hidden_files"],
+                json!(settings.hidden_files.patterns())
+            );
+        }
+        let (offset, insertion) = Settings::default().hidden_files_insertion("{}").unwrap();
+        let result = format!("{{{insertion}}}");
+        assert_eq!(offset, 1);
+        assert_eq!(
+            Settings::parse(result.as_bytes()).unwrap(),
+            Settings::default()
+        );
+        for text in [
+            r#"{"hidden_files": []}"#,
+            r#"{"hidden_files": false}"#,
+            "[]",
+            "{",
+            "",
+        ] {
+            assert!(settings.hidden_files_insertion(text).is_none(), "{text}");
+        }
+    }
+
+    #[test]
     fn tests_never_touch_the_users_settings_file() {
         let path = Settings::path().unwrap();
         assert!(path.starts_with(std::env::temp_dir()), "{}", path.display());
@@ -480,6 +607,7 @@ mod tests {
         let changed = Settings {
             editor_font_size: 16.,
             show_hidden: true,
+            hidden_files: HiddenFiles::new(vec!["*.log".into(), "!keep.log".into()]).unwrap(),
             diff_inline: false,
             hide_clean_repos: true,
             search_use_excludes: false,

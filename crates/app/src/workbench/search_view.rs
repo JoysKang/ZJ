@@ -236,6 +236,10 @@ impl Workbench {
             exclude: search.exclude.read(cx).value().to_string(),
             use_excludes: cx.global::<crate::settings::Settings>().search_use_excludes,
             show_hidden: self.explorer.show_hidden,
+            hidden_files: cx
+                .global::<crate::settings::Settings>()
+                .hidden_files
+                .clone(),
         }
     }
 

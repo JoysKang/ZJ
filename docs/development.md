@@ -1032,3 +1032,20 @@ Agent 输入区复用 Kit 的 Textarea 原生行内标签，在光标处插入�
 删除后重新粘贴的既有界面回归在修复前明确复现「图 2」而非「图 1」；修改后连同预览／删除／发送／历史、正文光标位置、保留图片编号、其他上下文附件、撤销与命令补全，以及源码管理窄布局／忙碌／无上游／实际拉取，共 9 项定向回归通过。日志为 `/private/tmp/zj-image-number-reset-red.log` 和 `/private/tmp/zj-scm-style-image-reset-tests.log`。本轮改动较小，完成差异和相关调用链自查，保留前一轮远端检查实现。
 
 工作区全部目标 Clippy（`-D warnings`）、fmt 和差异检查通过，Clippy 日志为 `/private/tmp/zj-scm-style-image-reset-clippy.log`。标准 `sh tools/package.sh` 在沙箱外打包成功，`target/ZJ.app` 已更新；ARM64 二进制 29,661,536 字节，与上一构建体积相同，包内程序与 dist 产物哈希一致，Info.plist 和图标校验通过。打包日志为 `/private/tmp/zj-scm-style-image-reset-package.log`，校验为 `/private/tmp/zj-scm-style-image-reset-package-verification.json`。未重复全量测试，未重启当前应用或进行新包实机截图，代码尚未提交。
+
+
+## 同日追加：可编辑的隐藏文件规则
+
+设置文件（`⌘,`）增加 `hidden_files` 数组，完整列出原来的点文件默认策略及 `.github`、`.gitignore`、`.env*` 等显示例外。每条规则匹配文件或文件夹名称，复用全文搜索的 glob 解析；按列表顺序最后命中生效，`!` 开头表示显示。可隐藏普通名称及 `*.log` 等模式；父目录隐藏后，其子项不能仅凭显示例外越过。空数组 `[]` 关闭这些隐藏规则，显示隐藏文件开关仍可临时绕过规则。
+
+保存后，规则变更与显示开关都能触发所有窗口的文件树、全文搜索、快速打开和活动 Agent `@` 候选刷新。无索引时的非空 `@` 查询也按工作区相对路径过滤，无工作区或外部文件按文件名过滤；索引就绪时刷新活动候选。空快速打开和空 `@` 仍保留最近显式打开的文件，全文搜索关闭排除时仍按原行为绕过隐藏过滤。`.git` 始终不出现在树中，路径索引的 Git 忽略及 `core::EXCLUDED_DIRS` 资源限制保留。规则修改不重建索引；默认规则用 `LazyLock` 编译一次，自定义规则编译后以 `Arc` 共享，没有新增依赖、feature 或常驻刷新。
+
+旧设置文件缺少此字段时，只向当前编辑缓冲区补齐；不重写原文，保留未知键、未保存内容及跨窗口文档归属。新增一个局部 vendor 插入接口，保留全部光标、反向选区及行末 affinity，按原子事务记录撤销和重做；输入法组合未完成时延后补齐。补齐产生的版本抑制延迟及失焦自动保存，继续编辑后恢复原自动保存设置，显式保存仅在写入当前版本时解除标记。手动保存错误的规则类型或模式会显示错误并继续使用原设置，启动加载仍沿用容错默认。
+
+验证：全工作区 550 项通过、4 项忽略；沙箱内四项 Unix socket／原生文件事件测试受限，沙箱外全量复跑通过。第二阶段边界修复后，设置相关 12 项与 mention 相关 6 项定向回归通过。覆盖默认可见性、名称规则顺序、父目录隐藏、空数组、树／文件名搜索／全文／目录候选一致性、普通隐藏目录显式定位，以及旧配置未知键与草稿保留、跨窗口空数组保留、实际键盘反向多光标补齐及 Undo／Redo、两种自动保存的抑制和恢复、两个窗口的活动列表 2→1→2 刷新、无索引候选和错误类型保存。vendor 的私有选择状态单测未单独执行（非工作区成员不能通过 `cargo test -p` 带开发依赖运行），插入接口的实际使用路径由主应用 GPUI 集成回归验收。Git deadline 三种场景、工作区 fmt、vendor 文件 rustfmt、全部目标 Clippy（`-D warnings`）与差异检查通过。测试仅使用临时文件和模拟 Agent，没有调用真实模型服务或真实项目远端。
+
+审查按项目要求分两阶段：第一阶段 ponytail-review 发现补齐触发自动保存、反向选区与额外光标丢失，两项修复并复核通过。第二阶段 code-review 的 Standards 轴无发现；Spec 轴发现错误类型静默回退和无索引非空候选绕过规则，两项修复、回归验证并定向复核通过，最终两轴均无残留发现。
+
+日志为 `/private/tmp/zj-hidden-settings-tests.log`、`/private/tmp/zj-hidden-settings-tests-unsandboxed.log`、`/private/tmp/zj-hidden-settings-focused.log`、`/private/tmp/zj-hidden-settings-mentions.log` 和 `/private/tmp/zj-hidden-settings-clippy.log`。本轮保留此前源码管理与图片编号的未提交改动及腾讯调研记录，代码未提交或推送；未重启当前应用，未进行新构建的实机截图或内存采样。
+
+标准 `sh tools/package.sh` 在沙箱外打包成功，`target/ZJ.app` 已更新。ARM64 二进制 29,678,064 字节，比上一构建增加 16,528 字节，低于 30 MB 目标及 32 MB 上限；包内程序与 dist 产物哈希一致，Info.plist 与图标校验通过。Cargo.toml、Cargo.lock 与 theme.rs 无变更。打包日志为 `/private/tmp/zj-hidden-settings-package.log`，产物校验为 `/private/tmp/zj-hidden-settings-package-verification.json`。

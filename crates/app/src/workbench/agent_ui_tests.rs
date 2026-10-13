@@ -2644,6 +2644,83 @@ async fn files_written_one_after_another_all_get_their_line_counts(cx: &mut Test
 }
 
 #[gpui_kit::test]
+async fn unindexed_mentions_apply_hidden_rules_but_keep_empty_recent_queries(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let root = temp_root("unindexed-hidden-mention");
+    let file = root.join("debug.log");
+    std::fs::write(&file, "log").unwrap();
+    let (handle, this) = open(cx, None);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(file.clone(), None, window, cx));
+    })
+    .unwrap();
+    until(cx, &this, "file opened without an index", |p| {
+        p.documents.len() == 1 && p.index.is_none()
+    });
+    let query = |cx: &mut TestAppContext, text: &str| {
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.agent.composer.update(cx, |input, cx| {
+                    input.set_value(text, window, cx);
+                    input.set_selected_range(text.len()..text.len(), cx);
+                });
+                p.agent_composer_changed(window, cx);
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    query(cx, "@debug");
+    until(cx, &this, "recent file matched", |p| {
+        p.agent
+            .mention
+            .as_ref()
+            .is_some_and(|m| m.results.len() == 1)
+    });
+    // Updating rules refreshes a currently open picker, even with no workspace index.
+    cx.update(|cx| {
+        let mut settings = cx.global::<crate::settings::Settings>().clone();
+        settings.hidden_files =
+            crate::hidden_files::HiddenFiles::new(vec!["*.log".into()]).unwrap();
+        crate::settings::apply(settings, cx);
+    });
+    until(cx, &this, "recent match hidden", |p| {
+        p.agent
+            .mention
+            .as_ref()
+            .is_some_and(|m| m.query == "debug" && m.results.is_empty())
+    });
+    query(cx, "@");
+    until(cx, &this, "empty recent query preserved", |p| {
+        p.agent
+            .mention
+            .as_ref()
+            .is_some_and(|m| m.query.is_empty() && m.results.iter().any(|e| e.path == file))
+    });
+    query(cx, "@debug");
+    until(cx, &this, "nonempty recent query hidden", |p| {
+        p.agent
+            .mention
+            .as_ref()
+            .is_some_and(|m| m.query == "debug" && m.results.is_empty())
+    });
+    cx.update(|cx| {
+        let mut settings = cx.global::<crate::settings::Settings>().clone();
+        settings.show_hidden = true;
+        crate::settings::apply(settings, cx);
+    });
+    until(cx, &this, "show-hidden override applied", |p| {
+        p.agent
+            .mention
+            .as_ref()
+            .is_some_and(|m| m.results.len() == 1 && m.results[0].path == file)
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
 async fn folder_mentions_attach_deduplicate_remove_and_send_as_links(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = temp_root("mention-folder");
@@ -2849,6 +2926,40 @@ async fn a_directory_link_reveals_nested_folder_without_moving_the_editor(cx: &m
     this.read_with(cx, |p, cx| {
         assert!(p.explorer.show_hidden);
         assert_eq!(p.explorer.selection.as_ref(), Some(&hidden));
+        assert_eq!(
+            (p.active, p.active_document().unwrap().1.read(cx).cursor()),
+            before
+        );
+    });
+    let custom = root.join("generated-output");
+    std::fs::create_dir_all(&custom).unwrap();
+    std::fs::write(custom.join("result.txt"), "result").unwrap();
+    cx.update(|cx| {
+        let mut settings = cx.global::<crate::settings::Settings>().clone();
+        settings.show_hidden = false;
+        let mut patterns = settings.hidden_files.patterns().to_vec();
+        patterns.push("generated-output".into());
+        settings.hidden_files = crate::hidden_files::HiddenFiles::new(patterns).unwrap();
+        crate::settings::apply(settings, cx);
+    });
+    until(cx, &this, "custom folder hidden", |p| {
+        !p.explorer.show_hidden && !p.explorer.rows.iter().any(|r| r.entry.path == custom)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent_open_link("generated-output", window, cx)
+        });
+    })
+    .unwrap();
+    until(cx, &this, "custom hidden folder revealed", |p| {
+        p.explorer
+            .rows
+            .iter()
+            .any(|r| r.entry.path == custom.join("result.txt"))
+    });
+    this.read_with(cx, |p, cx| {
+        assert!(p.explorer.show_hidden);
+        assert_eq!(p.explorer.selection.as_ref(), Some(&custom));
         assert_eq!(
             (p.active, p.active_document().unwrap().1.read(cx).cursor()),
             before

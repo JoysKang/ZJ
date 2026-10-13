@@ -229,6 +229,8 @@ struct Document {
     agent_read: Option<u64>,
     auto_save: crate::save::Debounce,
     auto_save_task: Option<Task<()>>,
+    /// Automatic settings completion stays unsaved until a user edit or explicit save.
+    settings_completion_version: Option<u64>,
     /// The recovery snapshot key of an untitled buffer (made on its first snapshot, or kept
     /// from the snapshot it was restored from).
     untitled_key: Option<String>,
@@ -521,14 +523,22 @@ impl Workbench {
                     this.rebuild_rows();
                     cx.notify();
                 }
-                let show_hidden = cx.global::<crate::settings::Settings>().show_hidden;
-                if show_hidden != this.explorer.show_hidden {
+                let settings = cx.global::<crate::settings::Settings>();
+                let show_hidden = settings.show_hidden;
+                let hidden_files = settings.hidden_files.clone();
+                if show_hidden != this.explorer.show_hidden
+                    || hidden_files != this.explorer.hidden_files
+                {
                     this.explorer.show_hidden = show_hidden;
+                    this.explorer.hidden_files = hidden_files;
                     this.reload_tree(window, cx);
                     if !this.search.query.read(cx).value().is_empty() {
                         this.schedule_search(Duration::ZERO, window, cx);
                     }
                     this.update_quick_open(window, cx);
+                    if this.agent.mention.is_some() {
+                        this.agent_composer_changed(window, cx);
+                    }
                 }
                 this.agent_follow_settings(cx);
             });
@@ -619,6 +629,10 @@ impl Workbench {
                 decorations: HashMap::new(),
                 scroll: UniformListScrollHandle::new(),
                 show_hidden: cx.global::<crate::settings::Settings>().show_hidden,
+                hidden_files: cx
+                    .global::<crate::settings::Settings>()
+                    .hidden_files
+                    .clone(),
                 selection: None,
                 selected: Default::default(),
                 anchor: None,
@@ -774,7 +788,11 @@ impl Workbench {
         let generation = self.explorer.generation;
         let directory = path.clone();
         let show_hidden = self.explorer.show_hidden;
-        let job = cx.background_spawn(async move { files::directory(&directory, show_hidden) });
+        let hidden_files = self.explorer.hidden_files.clone();
+        let job =
+            cx.background_spawn(
+                async move { files::directory(&directory, show_hidden, &hidden_files) },
+            );
         let key = path.clone();
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = job.await;
@@ -954,6 +972,9 @@ impl Workbench {
                 }
                 this.resume_search(window, cx);
                 this.update_quick_open(window, cx);
+                if this.agent.mention.is_some() {
+                    this.agent_composer_changed(window, cx);
+                }
                 this.flush_workspace_refresh(window, cx);
             });
         }));
@@ -1008,6 +1029,40 @@ impl Workbench {
         .detach();
     }
 
+    /// Expose newly added rules in an old settings buffer through an undoable edit.
+    fn complete_settings_file(
+        &mut self,
+        id: DocumentId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(doc) = self.document(id).filter(|doc| !doc.readonly) else {
+            return;
+        };
+        let editor = doc.editor.clone();
+        let text = editor.read(cx).text().to_string();
+        let Some((at, insertion)) = cx
+            .global::<crate::settings::Settings>()
+            .hidden_files_insertion(&text)
+        else {
+            return;
+        };
+        let inserted = editor.update(cx, |input, cx| {
+            input.insert_text_at_preserving_selections(at, &insertion, window, cx)
+        });
+        if inserted {
+            if let Some(doc) = self.document_mut(id) {
+                doc.settings_completion_version = Some(doc.version + 1);
+                doc.auto_save_task = None;
+                doc.auto_save.poke();
+            }
+            self.message = "已补充隐藏规则，保存后生效".into();
+        } else {
+            self.message = "请先完成输入，再重新打开设置补齐隐藏规则".into();
+        }
+        cx.notify();
+    }
+
     /// A saved buffer that is the settings file: its text goes into effect in every window,
     /// or the status bar says why not.
     pub(super) fn apply_saved_settings(&mut self, id: DocumentId, cx: &mut Context<Self>) {
@@ -1031,14 +1086,14 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Shows or hides dot files in every window's Explorer and quick open (⌘⇧.).
+    /// Shows or hides configured entries in every window's Explorer and quick open (⌘⇧.).
     fn toggle_hidden_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let show = !self.explorer.show_hidden;
         self.change_settings(window, cx, |settings| settings.show_hidden = show);
         self.message = if show {
             "已显示隐藏文件".into()
         } else {
-            "已隐藏点文件和点文件夹".into()
+            "已隐藏设置中匹配的文件和文件夹".into()
         };
         cx.notify();
     }
@@ -1267,11 +1322,7 @@ impl Workbench {
                 .root
                 .as_ref()
                 .and_then(|root| path.strip_prefix(root).ok())
-                .is_some_and(|relative| {
-                    relative
-                        .components()
-                        .any(|part| part.as_os_str().to_string_lossy().starts_with('.'))
-                })
+                .is_some_and(|relative| self.explorer.hidden_files.path_hidden(relative))
         {
             self.explorer.show_hidden = true;
             self.refresh_tree(window, cx);
@@ -1368,6 +1419,7 @@ impl Workbench {
     ) {
         self.file_generation += 1;
         let generation = self.file_generation;
+        let complete_settings = crate::settings::Settings::path().is_some_and(|p| p == path);
         self.message = format!("正在打开 {}", path.display());
         let requested = path.clone();
         let job = cx.background_spawn(async move {
@@ -1394,7 +1446,10 @@ impl Workbench {
                         return;
                     }
                 };
-                if this.install_loaded(loaded, indent, window, cx).is_some() {
+                if this
+                    .install_loaded(loaded, indent, complete_settings, window, cx)
+                    .is_some()
+                {
                     this.apply_pending_place(window, cx);
                 }
             });
@@ -1435,7 +1490,7 @@ impl Workbench {
                         let (id, path) = (loaded.id, loaded.path.clone());
                         // Opened meanwhile (a restored tab and a crash snapshot of the same
                         // file at launch): the callers want that tab.
-                        this.install_loaded(loaded, indent, window, cx)
+                        this.install_loaded(loaded, indent, false, window, cx)
                             .or_else(|| {
                                 this.documents
                                     .iter()
@@ -1549,6 +1604,7 @@ impl Workbench {
         &mut self,
         loaded: files::TextFile,
         indent: crate::indent::Indent,
+        complete_settings: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<DocumentId> {
@@ -1576,6 +1632,9 @@ impl Workbench {
             this.select_pane(Pane::Document(existing), window, cx);
             this.message = "已定位到打开的标签；保留缓冲区内容".into();
             this.apply_pending_place(window, cx);
+            if complete_settings {
+                this.complete_settings_file(existing, window, cx);
+            }
             return None;
         }
         let owner = this
@@ -1590,7 +1649,10 @@ impl Workbench {
                     owner
                         .view
                         .update(cx, |this, cx| {
-                            this.select_pane(Pane::Document(existing), window, cx)
+                            this.select_pane(Pane::Document(existing), window, cx);
+                            if complete_settings {
+                                this.complete_settings_file(existing, window, cx);
+                            }
                         })
                         .map(|_| window.activate_window())
                 })
@@ -1642,6 +1704,9 @@ impl Workbench {
         eprintln!("event=document_opened");
         this.show_pane(Pane::Document(id), window, cx);
         this.remember_tabs(true, window, cx);
+        if complete_settings {
+            this.complete_settings_file(id, window, cx);
+        }
         Some(id)
     }
 
