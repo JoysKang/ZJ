@@ -2275,13 +2275,17 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let timing = crate::perf::DiffTiming::start("open");
         let Some(g) = self.groups.get(group) else {
+            timing.mark("skipped");
             return;
         };
         let Some(Ok(status)) = &g.status else {
+            timing.mark("skipped");
             return;
         };
         let Some(change) = status.changes.get(index) else {
+            timing.mark("skipped");
             return;
         };
         let request = Request {
@@ -2321,15 +2325,26 @@ impl Workbench {
         self.diff.tab = Some(diff_tab);
         self.active = Pane::Diff;
         self.focus_handle.focus(window, cx);
-        self.load_diff(window, cx);
+        self.load_diff_timed(window, cx, timing);
     }
 
     /// Requery the selected comparison without discarding its last completed view.
     fn load_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.load_diff_timed(window, cx, crate::perf::DiffTiming::start("refresh"));
+    }
+
+    fn load_diff_timed(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        timing: crate::perf::DiffTiming,
+    ) {
         let Some(diff) = &self.diff.tab else {
+            timing.mark("skipped");
             return;
         };
         if diff.agent().is_some() {
+            timing.mark("agent");
             self.load_agent_diff(None, window, cx);
             return;
         }
@@ -2361,10 +2376,14 @@ impl Workbench {
             "plain" => None,
             language => Some(language),
         };
+        timing.mark("queued");
         let job = cx.background_spawn(async move {
+            timing.mark("background");
             let text: Arc<str> = match source {
                 DiffSource::Git(request) => {
-                    let reply = service.execute(&request, &cancel)?;
+                    let reply = service.execute(&request, &cancel);
+                    timing.mark("git");
+                    let reply = reply?;
                     if reply.repo != request.repo.id || reply.generation != request.generation {
                         return Err(std::io::Error::other("Diff 结果的仓库或版本不匹配"));
                     }
@@ -2372,11 +2391,15 @@ impl Workbench {
                         .map_err(std::io::Error::other)?
                         .into()
                 }
-                DiffSource::Local(patch) => patch,
+                DiffSource::Local(patch) => {
+                    timing.mark("local");
+                    patch
+                }
                 // Agent reviews load in `load_agent_diff`.
                 DiffSource::Agent(_) => return Err(std::io::Error::other("Agent 审阅不经过 Git")),
             };
             if cancel.load(Ordering::Relaxed) {
+                timing.mark("cancelled");
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
                     "操作已取消",
@@ -2387,17 +2410,20 @@ impl Workbench {
                 .as_ref()
                 .is_some_and(|(old, was_dark)| *old == text && *was_dark == dark)
             {
+                timing.mark("cache");
                 return Ok((text, None, None));
             }
             let doc = crate::diff_doc::DiffDoc::parse(&text, language, &highlight, change_colors)
                 .map(Arc::new);
             if cancel.load(Ordering::Relaxed) {
+                timing.mark("cancelled");
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
                     "操作已取消",
                 ));
             }
             let raw = crate::partial_patch::parse(&text).map(Arc::new);
+            timing.mark("parsed");
             Ok::<_, std::io::Error>((text, doc, raw))
         });
         self.diff.task =
@@ -2406,6 +2432,7 @@ impl Workbench {
                 let _ =
                     this.update_in(cx, |this, window, cx| {
                         if this.diff.generation != version {
+                            timing.mark("superseded");
                             return;
                         }
                         this.diff.loading = false;
@@ -2431,6 +2458,9 @@ impl Workbench {
                                 }) {
                                     this.diff.title = title;
                                     cx.notify();
+                                    timing.mark("reused");
+                                    timing.mark("applied");
+                                    timing.frame_upper(window);
                                     return;
                                 }
                                 let fresh = this.diff.source.is_none();
@@ -2458,6 +2488,11 @@ impl Workbench {
                                 }
                             }
                             Err(e) => {
+                                timing.mark(if e.kind() == std::io::ErrorKind::Interrupted {
+                                    "cancelled"
+                                } else {
+                                    "error"
+                                });
                                 this.diff.fallback = None;
                                 this.diff.doc = None;
                                 this.diff.source = None;
@@ -2471,6 +2506,8 @@ impl Workbench {
                             }
                         }
                         cx.notify();
+                        timing.mark("applied");
+                        timing.frame_upper(window);
                     });
             }));
         cx.notify();

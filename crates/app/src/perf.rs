@@ -4,11 +4,14 @@
 //!   to the end of the frame that follows it (drawn and handed to the GPU; the display's own
 //!   scan-out is not included).
 //!
+//! - `event=diff_timing` (only with `ZJ_DIFF_TIMING_LOG=1`): cumulative Diff load stages;
+//!   `frame_upper` includes a frame interval after draw/present, not GPU completion or scan-out.
+//!
 //! Off by default apart from the one first-frame line; nothing here runs on a timer.
 
 use std::sync::{
     OnceLock,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::Instant;
 
@@ -45,4 +48,45 @@ pub fn watch_key_latency(cx: &mut gpui_kit::App) {
         });
     })
     .detach();
+}
+
+/// Optional, process-wide IDs keep concurrent windows' Diff timings distinct.
+#[derive(Clone, Copy)]
+pub(crate) struct DiffTiming {
+    started: Option<(u64, Instant)>,
+    reason: &'static str,
+}
+
+impl DiffTiming {
+    pub(crate) fn start(reason: &'static str) -> Self {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let started = ENABLED
+            .get_or_init(|| std::env::var_os("ZJ_DIFF_TIMING_LOG").is_some_and(|v| v == "1"))
+            .then(|| (NEXT_ID.fetch_add(1, Ordering::Relaxed), Instant::now()));
+        let timing = Self { started, reason };
+        timing.mark("start");
+        timing
+    }
+
+    pub(crate) fn mark(self, stage: &'static str) {
+        if let Some((id, start)) = self.started {
+            eprintln!(
+                "event=diff_timing id={id} reason={} stage={stage} ms={}",
+                self.reason,
+                start.elapsed().as_millis()
+            );
+        }
+    }
+
+    pub(crate) fn frame_upper(self, window: &gpui_kit::Window) {
+        if self.started.is_none() {
+            return;
+        }
+        // GPUI runs callbacks before draw/present; the following callback is an upper bound.
+        window.on_next_frame(move |window, _| {
+            window.on_next_frame(move |_, _| self.mark("frame_upper"));
+            window.refresh();
+        });
+    }
 }
