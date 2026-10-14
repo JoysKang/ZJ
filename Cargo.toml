@@ -16,7 +16,20 @@ workspace-editor-git = { path = "crates/git_service" }
 workspace-editor-agent = { path = "crates/agent_client" }
 workspace-editor-agent-history = { path = "crates/agent_history" }
 workspace-editor-agent-bridge = { path = "crates/agent_bridge" }
-gpui-kit = { version = "=0.7.1", features = ["tree-sitter-rust", "tree-sitter-diff", "tree-sitter-markdown", "tree-sitter-python", "tree-sitter-toml", "tree-sitter-yaml", "tree-sitter-bash", "tree-sitter-javascript", "tree-sitter-typescript", "tree-sitter-tsx", "tree-sitter-go", "tree-sitter-html", "tree-sitter-css", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-java", "tree-sitter-sql"] }
+gpui-kit = { version = "=0.7.1", features = [
+    # 首批（ADR 0001）：Rust、Markdown、Diff、Python、TOML、YAML、Bash、JS/TS/TSX、Go、HTML、CSS，
+    # 以及批次 4 的 C / C++ / Java / SQL。
+    "tree-sitter-rust", "tree-sitter-diff", "tree-sitter-markdown", "tree-sitter-python",
+    "tree-sitter-toml", "tree-sitter-yaml", "tree-sitter-bash", "tree-sitter-javascript",
+    "tree-sitter-typescript", "tree-sitter-tsx", "tree-sitter-go", "tree-sitter-html",
+    "tree-sitter-css", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-java", "tree-sitter-sql",
+    # 批次 5（ADR 0001 补充）：常见语言与构建文件。
+    "tree-sitter-ruby", "tree-sitter-php", "tree-sitter-zig", "tree-sitter-make",
+    # 批次 6（ADR 0001 补充）：Kit 给 Swift / C# / CMake / Proto 的是空高亮查询，ZJ 自己注册
+    # 语法 crate 自带的查询（`languages::register`）；Kotlin / Lua 用 Kit 自带的查询。
+    "tree-sitter-csharp", "tree-sitter-swift", "tree-sitter-kotlin", "tree-sitter-lua",
+    "tree-sitter-cmake", "tree-sitter-proto",
+] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

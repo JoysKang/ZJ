@@ -216,6 +216,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         cx.set_global(watch::WatchService::default());
         workbench::init_agent_store(cx);
         diff_syntax::register();
+        languages::register();
         platform::DockBlink::apply(cx);
         cx.observe_global::<settings::Settings>(platform::DockBlink::apply)
             .detach();

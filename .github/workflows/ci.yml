@@ -12,9 +12,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # stripped aarch64 --profile dist 二进制体积上限（字节）。
-  # 2026-10-06 macOS 实测约 28.5 MB，上限取约 +12%，让体积上涨尽早暴露。
+  # 2026-10-13 macOS 实测 49.4 MB（批次 5 + 6 的语法，Kotlin / C# / Swift 三个占了大头）。
   # 要超过它，先按 CLAUDE.md 的依赖准入写明增量（超过 200 KB 单独写决策记录），再调这里。
-  BINARY_BUDGET_BYTES: "32000000"
+  # 想压回去看 docs/adr/0001「补充（批次 6）」里的实测清单（opt-level = "z" 一项就省 4.14 MB）。
+  BINARY_BUDGET_BYTES: "52000000"
 
 jobs:
   macos:

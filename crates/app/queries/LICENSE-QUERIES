@@ -1,4 +1,7 @@
 The *-tags.scm files and javascript-locals.scm / typescript-locals.scm are copied unchanged
 from the tree-sitter grammar crates (tree-sitter-rust, -python, -go, -c, -cpp, -java,
 -javascript, -typescript), all released under the MIT license by their authors.
+proto-highlights.scm is copied unchanged from tree-sitter-proto 0.2.0 (MIT), whose Rust binding
+does not re-export its query. Swift / C# / CMake / Kotlin / Lua highlight queries are not copied
+here: they come straight from the grammar crates (see `languages::register`).
 Files whose first line says "ZJ" were written for this project.

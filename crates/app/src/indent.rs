@@ -133,7 +133,8 @@ pub fn language_default(path: &Path) -> Indent {
     }
     match crate::languages::for_path(path).0 {
         "go" => Indent::tabs(4),
-        "python" | "rust" | "java" | "c" | "cpp" => Indent::spaces(4),
+        "python" | "rust" | "java" | "c" | "cpp" | "csharp" | "kotlin" | "swift" | "php"
+        | "zig" => Indent::spaces(4),
         _ => Indent::spaces(2),
     }
 }
@@ -368,6 +369,12 @@ mod tests {
         assert_eq!(of("A.java"), Indent::spaces(4));
         assert_eq!(of("a.hpp"), Indent::spaces(4));
         assert_eq!(of("a.ts"), Indent::spaces(2));
+        assert_eq!(of("a.zig"), Indent::spaces(4));
+        assert_eq!(of("a.cs"), Indent::spaces(4));
+        assert_eq!(of("a.kt"), Indent::spaces(4));
+        assert_eq!(of("a.swift"), Indent::spaces(4));
+        assert_eq!(of("a.rb"), Indent::spaces(2));
+        assert_eq!(of("a.lua"), Indent::spaces(2));
         assert_eq!(of("README"), Indent::spaces(2));
     }
 

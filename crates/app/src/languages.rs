@@ -2,7 +2,45 @@
 //! `gpui-kit` features) are returned; everything else is plain text with a display name.
 
 use crate::editing::Comment;
+use gpui_kit::component::highlighter::{LanguageConfig, LanguageRegistry};
 use std::path::Path;
+
+/// tree-sitter-proto does not re-export its query; see `queries/LICENSE-QUERIES`.
+const PROTO_HIGHLIGHTS: &str = include_str!("../queries/proto-highlights.scm");
+
+/// Registers the highlight query for grammars Kit ships without one.
+///
+/// Kit 0.7.1 gives Swift, C#, CMake and Proto an empty query (`(language, "", "", "")`), so the
+/// editor shows them as plain text even though the grammar is linked in. This registers the query
+/// the grammar crate itself ships, under Kit's own language name, the way `diff_syntax` already
+/// re-registers the diff grammar. Kotlin and Lua need nothing here: Kit bundles their queries.
+pub fn register() {
+    let registry = LanguageRegistry::singleton();
+    let extras = [
+        (
+            "csharp",
+            tree_sitter_c_sharp::LANGUAGE,
+            tree_sitter_c_sharp::HIGHLIGHTS_QUERY,
+        ),
+        (
+            "swift",
+            tree_sitter_swift::LANGUAGE,
+            tree_sitter_swift::HIGHLIGHTS_QUERY,
+        ),
+        (
+            "cmake",
+            tree_sitter_cmake::LANGUAGE,
+            tree_sitter_cmake::HIGHLIGHTS_QUERY,
+        ),
+        ("proto", tree_sitter_proto::LANGUAGE, PROTO_HIGHLIGHTS),
+    ];
+    for (name, language, highlights) in extras {
+        registry.register(
+            name,
+            &LanguageConfig::new(name, language.into(), vec![], highlights, "", ""),
+        );
+    }
+}
 
 /// (Kit highlighter language, status bar display name).
 pub fn for_path(path: &Path) -> (&'static str, &'static str) {
@@ -20,6 +58,9 @@ pub fn for_path(path: &Path) -> (&'static str, &'static str) {
         "tsconfig.json" | "jsconfig.json" | ".eslintrc" | ".babelrc" => {
             return ("json", "JSON with Comments");
         }
+        "makefile" | "gnumakefile" => return ("make", "Makefile"),
+        "cmakelists.txt" => return ("cmake", "CMake"),
+        "rakefile" | "gemfile" => return ("ruby", "Ruby"),
         _ => {}
     }
     let extension = name
@@ -47,6 +88,16 @@ pub fn for_path(path: &Path) -> (&'static str, &'static str) {
         "cpp" | "cc" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "ipp" | "inl" => ("cpp", "C++"),
         "java" => ("java", "Java"),
         "sql" => ("sql", "SQL"),
+        "rb" | "rake" | "gemspec" | "ru" => ("ruby", "Ruby"),
+        "php" | "phtml" | "php5" => ("php", "PHP"),
+        "zig" => ("zig", "Zig"),
+        "mk" => ("make", "Makefile"),
+        "cs" | "csx" => ("csharp", "C#"),
+        "swift" => ("swift", "Swift"),
+        "kt" | "kts" => ("kotlin", "Kotlin"),
+        "lua" => ("lua", "Lua"),
+        "cmake" => ("cmake", "CMake"),
+        "proto" => ("proto", "Protocol Buffers"),
         _ => ("plain", "纯文本"),
     }
 }
@@ -63,11 +114,12 @@ pub fn comment_for(path: &Path) -> Option<Comment> {
         return Some(Comment::Line("#"));
     }
     Some(match for_path(path).0 {
-        "rust" | "javascript" | "typescript" | "tsx" | "go" | "c" | "cpp" | "java" | "json" => {
-            Comment::Line("//")
+        "rust" | "javascript" | "typescript" | "tsx" | "go" | "c" | "cpp" | "java" | "json"
+        | "zig" | "csharp" | "swift" | "kotlin" | "proto" => Comment::Line("//"),
+        "python" | "bash" | "yaml" | "toml" | "ruby" | "php" | "make" | "cmake" => {
+            Comment::Line("#")
         }
-        "python" | "bash" | "yaml" | "toml" => Comment::Line("#"),
-        "sql" => Comment::Line("--"),
+        "sql" | "lua" => Comment::Line("--"),
         "css" => Comment::Block("/*", "*/"),
         "html" | "markdown" => Comment::Block("<!--", "-->"),
         _ => return None,
@@ -133,6 +185,43 @@ pub const SAMPLES: &[(&str, &str)] = &[
         "markdown",
         "# Title\n\n- item\n\n```rust\nfn main() {}\n```\n",
     ),
+    (
+        "ruby",
+        "# doc\nclass Greeter\n  def hello(name)\n    \"hi #{name}\"\n  end\nend\n",
+    ),
+    (
+        "php",
+        "<?php\n// doc\nfunction greet(string $name): string { return \"hi $name\"; }\n",
+    ),
+    (
+        "zig",
+        "//! doc\npub fn greet(name: []const u8) []const u8 { return name; }\n",
+    ),
+    ("make", "# doc\nall: build\nbuild:\n\t@echo \"done\"\n"),
+    (
+        "csharp",
+        "// doc\npublic class App { static string Greet(string n) => \"hi \" + n; }\n",
+    ),
+    (
+        "swift",
+        "// doc\nfunc greet(_ name: String) -> String { return \"hi \\(name)\" }\n",
+    ),
+    (
+        "kotlin",
+        "// doc\nfun greet(name: String): String = \"hi $name\"\n",
+    ),
+    (
+        "lua",
+        "-- doc\nlocal function greet(name) return \"hi \" .. name end\n",
+    ),
+    (
+        "cmake",
+        "# doc\nproject(demo LANGUAGES C)\nset(NAME \"demo\")\n",
+    ),
+    (
+        "proto",
+        "// doc\nsyntax = \"proto3\";\nmessage User { string name = 1; }\n",
+    ),
 ];
 
 #[cfg(test)]
@@ -161,6 +250,12 @@ mod tests {
         assert_eq!(lang("x.cc"), "cpp");
         assert_eq!(lang("App.java"), "java");
         assert_eq!(lang("q.sql"), "sql");
+        assert_eq!(lang("x.cs"), "csharp");
+        assert_eq!(lang("x.kt"), "kotlin");
+        assert_eq!(lang("a.swift"), "swift");
+        assert_eq!(lang("a.lua"), "lua");
+        assert_eq!(lang("CMakeLists.txt"), "cmake");
+        assert_eq!(lang("a.proto"), "proto");
         assert_eq!(lang("README"), "plain");
     }
 
@@ -174,6 +269,11 @@ mod tests {
         assert_eq!(comment("Cargo.lock"), Some(Comment::Line("#")));
         assert_eq!(comment("q.sql"), Some(Comment::Line("--")));
         assert_eq!(comment("a.css"), Some(Comment::Block("/*", "*/")));
+        assert_eq!(comment("a.cs"), Some(Comment::Line("//")));
+        assert_eq!(comment("a.swift"), Some(Comment::Line("//")));
+        assert_eq!(comment("a.lua"), Some(Comment::Line("--")));
+        assert_eq!(comment("CMakeLists.txt"), Some(Comment::Line("#")));
+        assert_eq!(comment("a.proto"), Some(Comment::Line("//")));
         assert_eq!(comment("README.md"), Some(Comment::Block("<!--", "-->")));
         assert_eq!(comment("notes.txt"), None);
         assert_eq!(comment("x.diff"), None);
@@ -183,6 +283,8 @@ mod tests {
     /// captures that the app's own syntax themes (dark and light) give a non-default color.
     #[test]
     fn every_grammar_highlights_with_app_themes() {
+        // `main` registers these before any window opens; the test process needs the same.
+        register();
         for dark in [true, false] {
             let theme = crate::theme::highlight_theme_for_tests(dark);
             for (language, sample) in SAMPLES {

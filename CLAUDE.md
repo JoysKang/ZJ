@@ -14,7 +14,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 | 指标 | 目标 | 上限 |
 | --- | --- | --- |
-| 二进制体积（aarch64，stripped）| ≤ 30 MB | 32 MB（CI 会检查，2026-10-08 实测 29.6 MB；语法占用见 docs/adr/0001，Agent 面板见 docs/adr/0004，Agent 桥接见 docs/adr/0009）|
+| 二进制体积（aarch64，stripped）| ≤ 50 MB | 52 MB（CI 会检查，2026-10-13 实测 49.4 MB；各语法的边际增量与压缩选项见 docs/adr/0001，Agent 面板见 docs/adr/0004，Agent 桥接见 docs/adr/0009）|
 | 冷启动到首帧 | ≤ 250 ms | 400 ms |
 | 空闲 footprint，1 个窗口 | ≤ 70 MB | 100 MB |
 | 3 个窗口 + 20 个文档 | ≤ 220 MB | 300 MB |
@@ -69,7 +69,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `refresh_plan.rs`：把一批变更路径算成最小刷新（只刷受影响仓库的状态、只重列变化的目录、增量更新索引）；被 Git 忽略的路径（target/、node_modules）按目录缓存判定后丢弃，构建期间不刷新。
   - `workbench.rs`：工作台的状态和逻辑（成组的状态放在各自模块的子结构体里：`sidebar::Explorer`、`diff_view::DiffPane`、`navigation::NavState`、`workspace_refresh::WatchState`）；`workbench/` 下是各区域的渲染（`chrome` 标题栏与状态栏、`sidebar` 侧栏与资源管理器、`scm`、`editor_area`、`quick_open`、`commands` 命令面板的命令表），以及 `workspace_refresh` 的事件刷新编排。
   - `diff_syntax.rs`：重新注册 diff 语法，让新增 / 删除有独立的颜色。
-  - `languages.rs`：文件名 / 扩展名到语法的映射；新增语法要同时打开 Kit 的 feature 并在 `SAMPLES` 里加样例。
+  - `languages.rs`：文件名 / 扩展名到语法的映射，以及 `register()`：Kit 0.7.1 给 Swift / C# / CMake / Proto 配的是空高亮查询（注册了语法也不会有颜色），启动时按 Kit 自己的语言名注册语法 crate 自带的查询（proto 的查询复制在 `queries/proto-highlights.scm`，来源见 LICENSE-QUERIES）；Kotlin / Lua 用 Kit 自带的查询，GraphQL 的语法 crate 不带任何查询，暂不支持。新增语法要同时打开 Kit 的 feature、必要时补 `register()` 条目，并在 `SAMPLES` 里加样例。
   - `editing.rs`：行编辑命令的纯逻辑（⌘/ 行注释、⌥↑↓ 移动行、⇧⌥↑↓ 复制行、⌘D 选词和下一个匹配，按 VS Code 规则），不依赖 GPUI；`workbench/edit_commands.rs` 接到文档编辑器上（`DocumentEditor > Input` 键上下文，只用 Kit 公开的主选区）。
   - `indent.rs`：每个文件的缩进（`.editorconfig` > 按内容猜测 > 语言默认），不依赖 GPUI；`.editorconfig` 在后台打开文件时一起读，状态栏的缩进菜单只改当前文档。
   - `diff_doc.rs`：在后台把全上下文补丁还原成两侧全文，做行对齐、语法高亮和字符级差异；`workbench/diff_view.rs`：只切片现成数据的虚拟化左右 / 内联 Diff 编辑器；`workbench/diff_ops.rs`：行选择、复制、概览标尺和块 / 行级暂存；`partial_patch.rs`：从全上下文补丁生成只含所选行的补丁。
