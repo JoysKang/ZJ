@@ -1049,3 +1049,121 @@ Agent 输入区复用 Kit 的 Textarea 原生行内标签，在光标处插入�
 日志为 `/private/tmp/zj-hidden-settings-tests.log`、`/private/tmp/zj-hidden-settings-tests-unsandboxed.log`、`/private/tmp/zj-hidden-settings-focused.log`、`/private/tmp/zj-hidden-settings-mentions.log` 和 `/private/tmp/zj-hidden-settings-clippy.log`。本轮保留此前源码管理与图片编号的未提交改动及腾讯调研记录，代码未提交或推送；未重启当前应用，未进行新构建的实机截图或内存采样。
 
 标准 `sh tools/package.sh` 在沙箱外打包成功，`target/ZJ.app` 已更新。ARM64 二进制 29,678,064 字节，比上一构建增加 16,528 字节，低于 30 MB 目标及 32 MB 上限；包内程序与 dist 产物哈希一致，Info.plist 与图标校验通过。Cargo.toml、Cargo.lock 与 theme.rs 无变更。打包日志为 `/private/tmp/zj-hidden-settings-package.log`，产物校验为 `/private/tmp/zj-hidden-settings-package-verification.json`。
+
+
+## 同日追加：源码管理目录树与 Diff 加载优化
+
+源码管理的「暂存的更改」与「更改」按目录层级展示，目录默认展开，可独立折叠；刷新保留状态，并移除已经消失的目录记录。树直接使用 Git 状态，文件叶子保留原始变更索引，暂存、取消暂存、放弃、打开文件和 Diff 的操作保持原目标；不扫描文件系统或应用 Explorer 隐藏规则。文件行显示名称，悬停提供完整绝对路径。Diff 顶栏将原来分开的文件名和父目录合成完整绝对路径，截断时可悬停查看。
+
+Diff 的水平滚动条改为代码视口下方的独立区域，垂直滚动条仍使用代码区高度；左右两栏继续共用滚动状态。回归在修改前复现水平滑块遮住可见代码，修改后覆盖浅色、深色、内联、左右对比、中间位置和末尾；两栏末行完整落在代码区内。
+
+性能测量发现两类等待。真实临时仓库中，远端 Fetch 被受控 helper 挂起时，本地 Diff 即使还有并发名额也会等待仓库锁；此回归修改前失败，修改后通过。仓库锁现在区分共享引用与工作树，所有非 Fetch 写操作仍按引用锁、工作树锁的顺序取得；Fetch 只取得引用锁。自动 Fetch 在共享 Git 服务中串行，默认两个并发名额保留一个供本地查询，多窗口共用服务时也生效。身份、状态、stash 校验和取消、超时、输出上限保留，Fetch 完成后仍重新读取远端提交数。
+
+高亮复用同一语法树增量解析新版本，UTF-8 编辑边界及字节列按 tree-sitter 规则计算。1 万行 Python 本机 Release 基准中，两次独立高亮为 140 至 163 ms，复用为 122 至 125 ms；对应无头窗口可见帧约 1 至 2 ms。基准为合成输入，不代表所有文件或实机 GPU 绘制时间。刷新补丁和亮暗模式不变时跳过重复解析，过期请求在 Git 返回及文档解析后检查取消，不再继续后续处理。没有增加依赖、Git 并发、常驻刷新或跨文件缓存；Solarized Dark 和既有浅色配色保留。
+
+定向验证：源码管理 27 项、Git 服务 35 项、Diff 文档 5 项及水平滚动条回归通过。新增覆盖目录层级、同名文件、双侧改动、折叠刷新与正确文件动作，两个共享服务实例的慢 Fetch、linked worktree Diff，以及提交期间的查询排队和取消；高亮按两种主题对照独立解析，包含中文、跨行语法、空文本增删和 Markdown 注入。两阶段审查依次完成 ponytail-review、code-review，最终 Standards 与 Spec 均无残留发现。沙箱外全工作区 556 项通过、4 项忽略；工作区全部目标 Clippy（`-D warnings`）、fmt 和差异检查通过。 Git deadline 的超时、父进程退出及取消三项检查通过，测试 helper 均已回收；沙箱内 `ps` 被拒绝后在沙箱外复跑，日志为 `/private/tmp/zj-diff-git-deadlines.log`。日志为 `/private/tmp/zj-diff-scm-workspace-tests.log`、`/private/tmp/zj-diff-scm-clippy.log`、`/private/tmp/zj-diff-scm-ui-tests.log` 和 `/private/tmp/zj-diff-git-tests.log`。临时计时探针已经删除，基准日志保留在 `/private/tmp/zj-diff-incremental-compare.log` 和 `/private/tmp/zj-diff-frames-before.log`。
+
+
+标准 `sh tools/package.sh` 在沙箱外打包成功，`target/ZJ.app` 已更新。ARM64 二进制 29,678,096 字节，比上一构建增加 32 字节，低于 30 MB 目标和 32 MB 上限；包内程序与 dist 产物 SHA256 一致，Info.plist 和图标校验通过。产物 SHA256 为 `170967bbbad4d3a4976626ac62476d577e75b693130b3adc1f56815e5cd44a94`，校验记录为 `/private/tmp/zj-diff-scm-package-verification.json`，构建日志为 `/private/tmp/zj-diff-scm-package.log`。本轮修改尚未提交或推送，当前应用未重启；未做新包实机截图或内存采样。
+
+
+## 2026-10-13：合并源码管理目录、Diff 跳转与字号／主题对齐
+
+源码管理将无直接变更文件且仅有一个子目录的目录链合并，例如 `crates/app/src/workbench`；在分叉或直接变更文件处停止。视觉缩进按合并后的层级计算，操作仍保留原 Git 状态索引与暂存／工作树侧。合并链内原有折叠键继续生效，展开清除链内折叠键，刷新时仅修剪已不存在的真实目录。
+
+Diff 支持 ⌘点击／F12 转到定义及 ⌃G 行／列。点击采用实际文本布局命中，列号按原文字符计算并映射 Tab 与 UTF-8；解析仅在请求期间后台还原原补丁。旧侧语言优先读取重命名前的路径。同文件与多候选目标留在对应 Diff 版本，删除文件不误开磁盘；跨文件沿用当前磁盘符号索引。请求与候选列表校验代次及文档身份，导航历史按弱文档身份保留未改变补丁的刷新并跳过失效记录。定位同时根据真实字体宽度调整横向滚动，使长行中的目标列可见。
+
+正文、普通输入和默认编辑器字号设为 13，Markdown 源码编辑仍尊重编辑器的自定义字号。Kit 将字号用作 rem 基准，因此单独保留 16 px 的间距基准和 Agent 输入区 20 px 行高，避免原有留白及实际可输入高度随字号缩小。本用户设置中此前保存的 `editor_font_size: 14` 已单独原子更新为 13；保留其余设置与原格式，不给其他用户的显式字号做自动迁移。
+
+依据本机 VS Code 的 `huytd.nord-light-0.1.1` 和内置 Solarized Dark 对齐主表面及代码高亮。浅色编辑区恢复 `#ECEFF4`，侧栏／标题栏／标签栏使用 `#E5E9F0`；深色标题栏、标签栏和输入区恢复对应源色，代码背景及 Solarized 语法色保留。Nord 的通用 capture 按更具体 TextMate scope 优先及同优先级后序覆盖映射，去除源主题已清除的注释斜体与关键字粗体。低对比 token 仅按需要调深；原有 UI 7:1、次要文字／浅色语法 4.5:1 和图标 3:1 门槛未放宽。Tree-sitter 与 TextMate 的语法分类不同，不宣称逐 token 完全一致。
+
+验证：全工作区 572 项通过、4 项忽略；补充横向定位及最后字号修正后，最终编辑器全部 397 项通过、3 项忽略，结合未变化的其他包结果共覆盖 573 项通过、4 项忽略。导航专项 12 项涵盖新旧侧、真实 gutter 点击、Tab／中文、无 raw 补丁、删除／改扩展名重命名、多候选、过期回复、跨文件返回、刷新历史及双栏／行内的屏外列与真实鼠标命中。主题对比度、目录链／分叉／折叠刷新、输入高度及原有 4 px 留白回归通过。最终全目标 Clippy（`-D warnings`）、fmt、差异检查及 Git deadline 超时／父进程退出／取消检查通过。按 ponytail-review → code-review 两阶段审查，修复后复查 Standards 与 Spec 无残留发现。
+
+标准 `sh tools/package.sh` 打包完成，`target/ZJ.app` 的 ARM64 程序为 29,711,168 字节，比前一构建增加 33,072 字节，低于 30 MB 目标；包内程序与 dist 产物 SHA256 一致，Info.plist 与图标校验通过。SHA256 为 `43d8ce57e94571c0ce4bf7c94070d3f79a5beccddbf84b60efa3ddb2dd5e2c06`。验证记录与日志在 `/private/tmp/zj-compact-navigation-package-verification.json`、`zj-compact-navigation-package.log`、`zj-compact-navigation-workspace-tests.log`、`zj-compact-navigation-final-app-tests.log`、`zj-compact-nav-focused.log`、`zj-compact-navigation-clippy.log` 与 `zj-compact-navigation-git-deadlines.log`。没有新增依赖、常驻计时器或额外源码缓存；未重新测量实机内存／CPU，未做新包实机截图，当前应用未重启。修改尚未提交或推送。
+
+## 2026-10-13：import 参与跳转排序、局部变量着色与批次 5 语法
+
+跨文件跳转不再只看源码里是否出现过候选文件名。新增 `crates/app/src/imports.rs`：按语言读 import 语句（`use` / `mod` / `import` / `from` / `#include` / `source` / `require(`，跨行语句按行尾是开括号或逗号续行）得到模块名与符号名；`symbol_index::rank` 据此排序（import 到的模块、引用本身的符号名优先于「源码里提过这个名字」），`workbench/navigation.rs` 在原有的「限定名唯一」之外新增一条：import 的模块名唯一命中一个候选时直接决定跳转，不再弹列表。引用自身的限定名仍优先于文件里的 import——`mod db; mod net;` 的文件里 `net::connect` 必须仍然唯一，既有回归 `qualifiers_pick_the_named_module` 就是这一条。文件名到模块名的换算统一到 `symbol_index::module_name`（`mod.rs` / `index.ts` / `__init__.py` 取目录名）。不新增依赖，不改 tags 查询。
+
+局部变量着色：`symbols::bindings` 复用同一套 `locals` 查询和「最内层作用域、离引用最近」规则把定义与引用配对（定义自身也会被 `(identifier)` 捕获为引用，跳过）；`workbench/local_vars.rs` 用 Kit 的 `TextDecorationCollection` 给每个绑定着一色（`theme::Colors::bindings` 四色，取自 git 状态色，两种主题都加了「对编辑器背景 4.5:1、四色互异」的测试）。只在打字停顿 250 ms 后、为当前可见文档在后台重算，切标签时补算；上限 1 MiB 文件、512 个绑定、8192 个着色区间，超出部分留归语法色。着色是装饰层，不改文本、选区、换行和撤销。为本项目自写的 7 份 locals 查询补了 `local.reference` 捕获（Rust / Python / Go / C / C++ / Java 用 `(identifier)`，Bash 用 `(variable_name)`）；JS / TS 原本就有。
+
+批次 5 语法（docs/adr/0001 补充）：Ruby、PHP、Zig、Make。`--profile dist` 从 29,727,760 字节 / 615 个包到 33,740,656 字节 / 619 个包，**+4.01 MB（+13.5%）**；边际增量 Make 0.13、Zig 0.69、Ruby 2.11、PHP 1.07 MB，可逐个取舍（只留 PHP + Zig + Make 是 31.6 MB）。Elixir 实测边际 +1.44 MB，按用户要求去掉，其文件名 / 扩展名映射与样例一并删除。Swift / C# / CMake / Proto / GraphQL 在 Kit 0.7.1 里是空查询，Kotlin / Lua 的语法 crate 本机离线取不到，都没有加。CI 预算改为 36,000,000 字节，`CLAUDE.md` 的目标 / 上限改为 34 MB / 36 MB。
+
+验证：全工作区 581 项通过、4 项忽略（其中编辑器 405 项、含新增的 `imports` 3 项、`symbols::bindings` 2 项、`theme::binding_tints_read_on_the_editor` 1 项与 `workbench::local_vars_ui_tests` 2 项，另扩展了 `indent`、`languages`、`navigation` 的断言）。`cargo fmt --all --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo build --profile dist --locked` 与 `cargo test --workspace --locked` 全部通过。沙箱内运行时终端测试因 PTY 被拒失败（`terminal_spawn_failed Operation not permitted`），沙箱外复跑该项通过，放宽权限后的全量运行也通过。本批依赖只从本机 cargo 缓存引入（7 个语法 crate 从 `~/.cargo` 复制进 `target/cargo-home`），没有联网下载；许可为 MIT / Apache-2.0，都在 `deny.toml` 允许列表内，但 `cargo-deny` 本轮未在本地执行。
+
+未重新测量实机内存 / CPU / 空闲 footprint：批次 5 的语法只在打开对应文件时解析（同 ADR 0001 的结论），局部变量着色只在打字停顿后为可见文档算一次，空闲时没有常驻定时器。需要实机确认时用 `python3 tools/measure_budget.py`，并注意 `TextDecorationCollection` 的区间数受上面两个上限约束。当前应用未重启，修改尚未提交或推送。
+
+标准 `sh tools/package.sh` 打包完成，`target/ZJ.app` 的 ARM64 程序为 33,740,656 字节（比本批基线 29,727,760 字节增加 4,012,896 字节），包内程序与 dist 产物 SHA256 一致（`9ff69d36fd09270bd406267d7f359b4b58c380569b00bb040b1eb1b44cd9be38`），Info.plist 与图标校验通过。本批没有新增长驻计时器或跨文件缓存。
+
+## 2026-10-13（续）：补齐 Swift / C# / CMake / Proto / Kotlin / Lua，并给出体积清单
+
+上一轮没做到的两处，一处做了、一处经评估不做。
+
+**语言（做了）**：`languages::register()` 按 Kit 自己的语言名，为 Swift / C# / CMake / Proto 注册语法 crate 自带的 `HIGHLIGHTS_QUERY`——Kit 0.7.1 给这四个配的是空查询，语法编进来也只显示纯文本。proto 的 crate 不导出查询，它的 `queries/highlights.scm` 复制为 `crates/app/queries/proto-highlights.scm`（MIT，来源写进该目录的 LICENSE-QUERIES）。Kotlin / Lua 只需打开 feature，Kit 自带查询。Kotlin / Lua 的语法 crate 本机缓存里没有（`tree-sitter-kotlin-sg` 缺失、`tree-sitter-lua` 只有 0.5.0 而 Kit 要 `^0.4.1`），从 static.crates.io 取回：CDN 很慢，kotlin 的包第一次下载被截断，用断点续传补齐并校验 tarball 后才用。扩展名 / 文件名映射、`comment_for`、`SAMPLES`、`indent.rs` 的语言默认一并补齐。GraphQL 没有加：tree-sitter-graphql 0.1.0 既不带 `queries/` 也不导出查询常量，要支持得自己写一份 `highlights.scm`。
+
+**复用 highlighter 的 tree（不做）**：gpui-base 的 `InputHighlighter` trait 只有 `styles` / `fold_ranges` / `language` / `update`，读不到内部那棵树。要拿到只有两条路：把 vendor 补丁扩到 gpui-component（等于 vendor 一整个 UI kit），或者用公开的 `set_highlighter_factory` 把 Kit 的 `SyntaxHighlighter` 包一层、从自己持有的 `Rc` 读 `tree()`。后者可行，但一致性只能靠长度校验（同长度编辑会漏过），而收益是省掉跳转时的一次全量解析：按 ADR 0002 自己记的索引数据（5,140 个文件 / 58.7 MB、4 线程 3.4 s）折算，单文件解析加查询约 1–3 ms，且跑在后台线程上。用"可能跳到错误位置"换后台毫秒级开销不划算，因此只保留上一轮已做的 Parser 复用（线程本地）。
+
+**体积**：批次 6 的六个语法把 `--profile dist` 从 33,740,656 字节 / 619 包推到 49,361,968 字节 / 629 包，**+15.61 MB**。逐项实测：去掉 Kotlin −5.85 MB、去掉 SQL −2.46 MB、`opt-level` 从 `"s"` 改 `"z"` −4.14 MB、只留 TSX（去掉 TypeScript 语法）−1.44 MB；C# 与 Swift 未单独测，按编译产物（kotlin-sg 22.2 MB、c-sharp 20.4 MB、swift 16.2 MB 的 `.o`）与 Kotlin 同量级。完整清单与叠加方案写在 docs/adr/0001「补充（批次 6）」。CI 预算调到 52,000,000 字节，`CLAUDE.md` 的目标 / 上限调到 50 MB / 52 MB，按"全部保留"记；要不要按清单砍由用户定。
+
+验证：全工作区 581 项通过、4 项忽略；`languages::tests::every_grammar_highlights_with_app_themes` 现在覆盖 28 种语法（含新增六个，两种主题各至少 3 个上色 span），新增的扩展名与注释映射断言通过。`cargo fmt --all --check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo build --profile dist --locked` 与 `cargo test --workspace --locked` 全部通过；`sh tools/package.sh` 打包成功，`target/ZJ.app` 程序与 dist 产物同为 49,361,968 字节、SHA256 一致（`80da359374bf80c0fb63d83b6bab42c939760ccc233db0e563d456edb73890f6`）。本轮没有新增长驻定时器或跨文件缓存；`languages::register()` 只在启动时注册 4 条查询，开销可忽略。`cargo-deny` 本地未跑；实机内存 / CPU 未重测（新语法仍是打开对应文件时才解析）。
+
+
+## 2026-10-13：文件树内部拖拽移动
+
+文件树支持拖动文件、文件夹和多选项：拖到目录进入该目录，拖到文件使用其父目录，拖到工作区标题或空白区域移回根目录。项目预览只在真正起拖时捕获选择，不在每行渲染时复制整组选中路径；沿用主题和可见行布局。根目录、编辑状态、自身／后代目录和全部已在目标目录的拖动不接受，落点高亮只用于有效目标。当前范围限同一 Workbench 的文件树内部拖动，Finder 拖入仍为复制。
+
+移动复用 `file_ops::move_into` 的同名不覆盖、原子 rename 与规范路径检查；父子多选按最上层目录去重。`FileTransfer` 区分复制、剪切粘贴和拖动移动，只有剪切失败恢复共享剪贴板。成功移动在 App 完成阶段同步所有活跃窗口的缓冲区路径，发起窗口关闭也不会遗漏其他 owner；保留未保存文字并更新恢复快照。保存等待正在移动的来源路径，已在保存或另存为的来源拒绝移动，旧路径的后台磁盘检查不能把新路径文档误标删除。Move/Cut 串行到路径同步结束，防止另一项移动提前搬走目标目录。只读大文件视图也跟随路径，取消旧读取／查找并重建索引，保留滚动位置和选择。
+
+验证：最初真实 GPUI 手势测试以“未启动内部拖拽”失败；另一个窗口 dirty buffer 的旧路径也跑出失败，修复后转绿。全工作区 590 项通过、4 项忽略；最后补充连续移动与双窗口 8.4 MB 只读文件目录拖动后，最终编辑器全部 416 项通过、3 项忽略，结合未变化的其他包共覆盖 592 项通过、4 项忽略。覆盖多选去重、文件／目录移动、文件父目录和根落点、同名保留、未保存内容与 owner、新旧路径保存重叠、发起窗口关闭、旧磁盘检查、跨窗口落点拒绝及原 Finder／剪切重试。全目标 Clippy（`-D warnings`）、fmt、Git deadline／子进程回收检查通过。按 ponytail-review → code-review 审查；Spec 提出的并发目标目录和 LargeView 两项已修复并复查，最终 Standards／Spec 均无残留发现。
+
+标准 `sh tools/package.sh` 打包完成，ARM64 程序 49,378,560 字节，比本次修改前构建增加 16,592 字节，低于现有 52 MB 上限；与 dist 产物 SHA256 一致：`e42c4181c2216ce50d85ba4f88164aaa75a5d73d707f1c62b8147883019466cb`。Info.plist、图标、可执行权限及构建期间源码指纹校验通过。证据在 `/private/tmp/zj-explorer-drag-4jyvgyr2/package-verification.json`，测试／Clippy／打包日志在 `/private/tmp/zj-explorer-drag-*.log`。没有新增依赖、常驻计时器或索引缓存；未测实机 CPU／footprint，未做原生鼠标验收，当前应用未重启，修改尚未提交或推送。
+
+
+## 2026-10-14：原位释放拖拽立即清理预览
+
+复现原位释放后浮动预览停留的问题：GPUI 0.3.8 的 typed drop 先清除 active drag，`can_drop` 为 false 时不调用 drop handler，也不请求重绘；窗口末尾的取消兜底此时已看不到 active drag。旧回归在松手后强制 render，掩盖了这条路径。现在 `internal_drop_target` 接收识别出的内部 drop，原位／无效释放以无操作结束，让 GPUI 正常重绘并停止冒泡；有效高亮和实际移动仍核对编辑状态、来源 Workbench 及原路径规则。Finder 复制逻辑不变，未修改文件移动后端。
+
+真实输入分发红测试在修复前失败，修复后通过。新回归覆盖文件／目录放回自身、同目录文件、空白区域和标题的 8 个落点，释放后不强制重画，核对输入已处理、拖拽状态清理、树 generation 与选择保持不变、没有意外预览或文件副本。全部编辑器 417 项通过、3 项忽略；专项 18 项通过；全目标 Clippy（`-D warnings`）、fmt 和差异检查通过。按低影响改动完成自查：三个落点入口统一处理，实际文件操作的保护条件保留。
+
+标准 `sh tools/package.sh` 打包成功，程序 49,378,560 字节，较上一构建体积不变，SHA256 `45d4b1d6295b8b5c0b00a1937d4aadce51a188620cf5c164f3fb4c56856840ad` 与 dist 一致；Info.plist、图标与可执行权限校验通过。证据在 `/private/tmp/zj-drag-return-2cjbyvzx/verification.json`，日志 `/private/tmp/zj-drag-return-*.log`。曾在独立设置／会话与临时文件夹中启动测试副本，但界面控制工具返回 `Computer Use was not approved to use ZJ Drag Verify`，因此未完成实机鼠标验收；测试副本已停止，当前用户应用未重启。没有新增依赖、常驻计时器或缓存，未重新测量实机资源占用。
+
+
+## 2026-10-14：外部文件夹复制粘贴
+
+复现从 Finder 剪贴板粘贴外部文件夹后没有变化：资源管理器原先只读取 ZJ 的全局 `FileClipboard`，没有读取系统剪贴板。现在粘贴与两处右键菜单共用读取入口；原生 `ExternalPaths` 优先按复制处理，不把普通文本路径当作文件。空白处左键点击与标题点击会选择工作区根目录并聚焦树，随后 `⌘V` 粘贴到根目录。文件操作仍在后台执行，沿用同名生成副本、源目录保留、目录自复制检查和符号链接规则，没有修改文件操作后端或原生平台依赖。
+
+内部复制／剪切同时写入带独立操作标识的系统 item，只有当前 item 匹配时才使用内部路径；标识包含时间、进程与单调序号，避免剪贴板历史把旧复制重放成新剪切。消费剪切时清空路径并保留 item／revision，失败恢复继续核对这两项与当前系统 item，不覆盖后来复制的内容。移动互斥、保存保护、跨窗口 owner 和只读视图跟随保持原实现。复制／移动开始立即显示状态，完成显示结果；成功只更新仍属于该次操作的进度文案，避免覆盖并发操作的失败提示。
+
+最初真实 GPUI 粘贴回归明确失败；首次实现后又复现旧 Copy item 触发新 Cut、并发 Copy 成功覆盖 Cut 失败两项，修复后全部转绿。文件栏专项 21 项通过，覆盖真实 `⌘V`、中文／空格名称的嵌套文件夹、编辑器焦点返回空白处粘贴、Finder 覆盖旧剪切、文本与空剪贴板、历史重放、剪切单次消费与失败重试、窗口关闭后的恢复、并发错误保留、目录拖入同名不覆盖与不重复冒泡。全工作区 596 项通过、4 项按原配置忽略；全目标 Clippy（`-D warnings`）、fmt、差异检查及 Git 超时／取消／子进程回收检查通过，全部文件写入测试只使用临时夹具。
+
+审查按 ponytail-review → code-review 顺序完成。第一阶段两项具体问题已复现、修复并验收；第二阶段 Standards 没有文档规则违反，提出一项标题／空白点击逻辑的低风险重复判断，保留简短的局部处理以适应各自编辑与折叠行为，不阻塞；Spec 无发现。没有新增依赖、常驻计时器或持续增长的记录。证据在 `/private/tmp/zj-external-folder-x7iine92/`；红测试、专项、全量、Clippy 与 Git 检查日志为 `/private/tmp/zj-external-folder-*.log`。
+
+标准 `sh tools/package.sh` 打包完成，ARM64 程序 49,378,592 字节，较上一构建增加 32 字节，低于 50 MB 目标与 52 MB 上限；包内程序与 dist SHA256 一致：`0b5c0b06e830f11cc8be7ee7437dcd21f0964adf0ffdfbd7d96efd43941c5e93`。Info.plist、图标、可执行权限及构建期间源码指纹校验通过，产物为 `target/ZJ.app`，完整校验在上述证据目录的 `verification.json`。未重启用户当前应用，未进行新包的实机 Finder 粘贴／原生鼠标验收，未重新测量 CPU／footprint；代码尚未提交或推送。
+
+
+## 2026-10-14：运行状态圆圈的视觉对齐
+
+按截图，将 Agent 输入区上方运行状态的圆圈下移 1 px，通过 `theme::AGENT_RUNNING_ICON_OFFSET` 与现有外层容器的相对位置做视觉校准。保留原行布局与图标旋转中心，未修改共享 spinner 或动画刷新逻辑。改动只涉及该状态行和对应尺寸 token。
+
+现有主题／间距／对比度 10 项检查通过，全目标 Clippy（`-D warnings`）、fmt 和差异检查通过。此项为可逆的局部视觉调整，完成增量与调用位置自查，没有新增测试或重复全工作区测试。证据为 `/private/tmp/zj-running-icon-61cz2xh8/`，日志为 `/private/tmp/zj-running-icon-*.log`。
+
+标准 `sh tools/package.sh` 打包完成，程序 49,378,592 字节，体积变化 +0 字节；包内程序与 dist SHA256 一致：`563b7d00c49296289d95f2a5a09183832eb0aba5194a232613fa9a25730f3259`。Info.plist、图标、执行权限与构建期间源码指纹校验通过。当前应用未重启，未做新包实机视觉对照。
+
+
+## 2026-10-14：首次打开 Diff 的分段计时与待复现问题
+
+用户反馈首次点击源码管理文件打开 Diff 超过 2 秒，随后切换其他 Diff 正常。当前尚未复现该耗时，原因未确定，本次不记为性能修复。
+
+测量使用临时 Git 仓库、独立设置／会话／历史库和原生 macOS 窗口：无头实际 `open_diff` 路径的首个 Markdown 数据就绪约 75 ms，后续约 72–74 ms，单次可见视口绘制约 10 ms；原生合成 Markdown 首次绘制提交上界约 48 ms，第二次约 46 ms。截图文件的只读本地副本（192 行、18,580 字节）首次绘制提交上界约 51 ms，第二次约 45 ms，Git 阶段约 26 ms、解析约 7–9 ms。实际仓库中对应的只读 Git 命令合计首次约 15 ms、后续约 13 ms，没有配置 clean filter。这些结果只描述各自的测试环境，不能否定用户实例的卡顿或推断其原因。
+
+GPUI 的 `on_next_frame` 回调发生在 draw／present 之前，因此原生提交上界使用两次嵌套回调，包含额外帧间隔，不代表 GPU 完成或屏幕扫描完成。当前界面控制接口启动失败，本轮检查时没有找到运行中的 ZJ，未能抓到真实慢实例。临时自动打开／退出 helper 和文档副本已删除，探针补丁仅保存在证据目录，不随应用构建。
+
+新增默认关闭的 `ZJ_DIFF_TIMING_LOG=1`：在 `perf.rs` 和 `workbench.rs` 记录 `event=diff_timing`，用进程唯一 ID 区分并发请求，累计记录准备、后台排队、Git／本地补丁、解析、界面应用与 `frame_upper`；Git 阶段包含服务内现有限流等待。缓存复用、过期回复、取消和错误保留原有逻辑。日志不包含文件名、路径、文件内容、Git 输出或凭据。关闭时不读时钟、不分配追踪 ID、不注册帧回调、不额外刷新，也没有新增缓存、依赖或常驻定时器。Agent 审阅转入原有加载路径，不做此处 Git Diff 分段计时。
+
+主会话复核：启用计时的 Diff 专项 25 项通过，日志确认后台、Git、解析与界面应用阶段；默认关闭的源码管理 26 项通过且无 `diff_timing` 输出。全目标 Clippy（`-D warnings`）通过，仅原有 `block v0.1.6` future incompatibility 提示。现有无头测试没有覆盖原生 `frame_upper` 输出，本轮未采集真实慢请求。
+
+证据与基线在 `/private/tmp/zj-first-diff-amp3fcdt/`；此前测量日志为 `/private/tmp/zj-first-diff-probe-before.log`、`zj-first-diff-native-before.log`、`zj-first-diff-native-actual-payload.log`。本地 `capture.sh` 按 HITL 模板启动新包并提示用户点击两个 Diff，只保存计时事件与两次耗时观察，日志权限 0600；脚本拒绝在已有 ZJ 进程时启动，不自动点击或退出应用。支持传入工作区参数，无参数沿用正常会话恢复。脚本已通过语法检查，尚未执行用户复现流程。后续需要从该流程抓到一次真实超过 2 秒的请求，再按耗时阶段定位、修复和验证。
+
+标准 `CARGO_NET_OFFLINE=true sh tools/package.sh` 打包完成，`target/ZJ.app` 的 ARM64 程序为 49,378,608 字节，比上一包增加 16 字节，低于 50 MB 目标及 52 MB 上限；与 dist 产物 SHA256 一致：`fadfddf2477adcf35dca85a5e7cd696d5dcf3a8d641de34305af66a183187aa7`。Info.plist、图标、可执行权限、CLI 帮助及 553 个构建输入指纹校验通过。含临时原生探针的旧 release 可执行文件已确认并回收，新包不含自动打开／退出 helper。格式与差异检查通过。本次为低影响诊断改动，按预先快照完成增量与连接位置自查；未重新测试实机内存／CPU，未运行实际用户的采集流程，没有认定或修复两秒卡顿。测试、Clippy、打包与产物校验保存在上述证据目录；未安装、启动或退出用户应用，代码未提交或推送。
+
+用户确认当前无法复现，首次 Diff 卡顿排查暂缓；保留默认关闭的计时开关，等待后续再次出现时使用，不作为性能修复。
