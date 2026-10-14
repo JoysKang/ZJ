@@ -487,3 +487,27 @@ async fn closing_the_last_open_tab_shows_the_next_restored_one(cx: &mut TestAppC
     });
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[gpui_kit::test]
+async fn restored_tabs_keep_their_saved_order(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = fixture("order");
+    let (window, this) = open(cx, root.clone());
+    let saved = ["a.txt", "b.txt", "sub/c.txt"]
+        .map(|name| root.join(name))
+        .to_vec();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.restore_tabs(saved.clone(), Some(root.join("b.txt")), window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| names(cx, &this) == ["b.txt"]);
+    this.read_with(cx, |p, _| {
+        let mut shown: Vec<_> = p.documents.iter().map(|d| d.path.clone()).collect();
+        shown.extend(p.pending_tabs.iter().cloned());
+        shown.sort_by_key(|path| p.tab_rank(path));
+        assert_eq!(shown, saved);
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}

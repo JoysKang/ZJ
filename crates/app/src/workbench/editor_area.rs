@@ -323,6 +323,15 @@ impl Workbench {
                 pending: Some(path.clone()),
             });
         }
+        // Restored tabs return to their saved places (stable: the rest keep their order).
+        let rank = |spec: &TabSpec| match (&spec.pending, spec.pane) {
+            (Some(path), _) => self.tab_rank(path),
+            (None, Pane::Document(id)) => self
+                .document(id)
+                .map_or(usize::MAX, |doc| self.tab_rank(&doc.path)),
+            _ => usize::MAX,
+        };
+        specs.sort_by_key(rank);
         let tabs: Vec<AnyElement> = specs
             .into_iter()
             .enumerate()

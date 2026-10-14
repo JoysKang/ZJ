@@ -478,6 +478,9 @@ pub struct Workbench {
     /// Tabs restored from the last session that have not been opened yet: shown in the tab
     /// bar, read only when chosen (开发说明: clean tabs load on demand).
     pending_tabs: Vec<PathBuf>,
+    /// The last session's tab order: restored tabs keep their places although only some of
+    /// them are open yet. Files opened since follow the restored ones.
+    tab_order: Vec<PathBuf>,
     /// The workspace name flashed when coming from another ZJ window.
     switch_hud: switch_hud::SwitchHud,
     terminals: terminal_panel::Terminals,
@@ -720,6 +723,7 @@ impl Workbench {
             tab_menu_focus: None,
             closed_tabs: Default::default(),
             pending_tabs: Vec::new(),
+            tab_order: Vec::new(),
             switch_hud: Default::default(),
             terminals: Default::default(),
             generation: 0,
@@ -1538,6 +1542,7 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.tab_order = tabs.clone();
         self.pending_tabs = tabs
             .into_iter()
             .filter(|tab| Some(tab) != active.as_ref())
@@ -1588,8 +1593,17 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         self.pending_tabs.retain(|tab| tab != path);
+        self.tab_order.retain(|tab| tab != path);
         self.remember_tabs(true, window, cx);
         cx.notify();
+    }
+
+    /// Where a file's tab sits among the restored ones; files opened since come last.
+    pub(super) fn tab_rank(&self, path: &std::path::Path) -> usize {
+        self.tab_order
+            .iter()
+            .position(|tab| tab == path)
+            .unwrap_or(usize::MAX)
     }
 
     /// Updates the session record of this window's tabs (written when `persist`).
@@ -1605,6 +1619,7 @@ impl Workbench {
                 tabs.push(pending.clone());
             }
         }
+        tabs.sort_by_key(|path| self.tab_rank(path));
         let active = match self.active {
             Pane::Document(id) => self
                 .document(id)
@@ -1733,6 +1748,7 @@ impl Workbench {
         if let Some(doc) = self.documents.iter().find(|doc| doc.id == id)
             && !doc.untitled
         {
+            self.tab_order.retain(|tab| *tab != doc.path);
             let offset = doc.editor.read(cx).cursor();
             self.closed_tabs.push(tab_menu::ClosedTab {
                 path: doc.path.clone(),

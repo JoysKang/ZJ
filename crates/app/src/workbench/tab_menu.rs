@@ -240,6 +240,7 @@ impl Workbench {
                         this.close_large(window, cx);
                     }
                     this.pending_tabs.retain(|path| !pending.contains(path));
+                    this.tab_order.retain(|path| !pending.contains(path));
                     if let Some(path) = keep_pending {
                         this.open_pending_tab(path, window, cx);
                     } else {
