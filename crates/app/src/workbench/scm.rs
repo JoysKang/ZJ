@@ -654,6 +654,8 @@ impl Workbench {
                                 .active(colors.control_active),
                         )
                         .icon(IconName::RefreshCw)
+                        .loading_icon(IconName::RefreshCw)
+                        .loading(pending)
                         .when_some(counts, |button, counts| button.label(counts))
                         .h(theme::SCM_DETAIL_LINE)
                         .my(theme::SCM_LINE_PAD)

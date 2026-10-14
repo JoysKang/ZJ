@@ -1167,3 +1167,12 @@ GPUI 的 `on_next_frame` 回调发生在 draw／present 之前，因此原生提
 标准 `CARGO_NET_OFFLINE=true sh tools/package.sh` 打包完成，`target/ZJ.app` 的 ARM64 程序为 49,378,608 字节，比上一包增加 16 字节，低于 50 MB 目标及 52 MB 上限；与 dist 产物 SHA256 一致：`fadfddf2477adcf35dca85a5e7cd696d5dcf3a8d641de34305af66a183187aa7`。Info.plist、图标、可执行权限、CLI 帮助及 553 个构建输入指纹校验通过。含临时原生探针的旧 release 可执行文件已确认并回收，新包不含自动打开／退出 helper。格式与差异检查通过。本次为低影响诊断改动，按预先快照完成增量与连接位置自查；未重新测试实机内存／CPU，未运行实际用户的采集流程，没有认定或修复两秒卡顿。测试、Clippy、打包与产物校验保存在上述证据目录；未安装、启动或退出用户应用，代码未提交或推送。
 
 用户确认当前无法复现，首次 Diff 卡顿排查暂缓；保留默认关闭的计时开关，等待后续再次出现时使用，不作为性能修复。
+
+
+## 同日追加：源码管理同步箭头旋转
+
+源码管理的拉取／同步按钮复用仓库现有 `write_pending` 忙碌状态，通过 GPUI Kit `Button::loading` 与 `loading_icon(RefreshCw)` 旋转原有同步箭头。按钮的提交数、布局和操作入口保留；忙碌期间仍禁止重复操作，成功或失败统一清除已有状态，图标随之恢复静止。没有新增依赖、状态字段或常驻定时器，也没有改动 Git 请求、确认和错误弹窗。
+
+源码管理专项 26 项通过，覆盖既有忙碌点击保护、拉取成功与失败恢复；没有为两行组件接线添加镜像测试。全工作区全部目标 Clippy（`-D warnings`）、格式与差异检查通过。此项为可逆、低影响的 UI 接线，完成增量与所用 Kit 组件自查；没有完成原生界面逐帧动画验收，没有重新测量实机 CPU／footprint。证据保存在 `target/task-evidence/scm-sync-motion/`。
+
+标准 `CARGO_NET_OFFLINE=true sh tools/package.sh` 打包完成，ARM64 程序 49,378,608 字节，比上一包增加 0 字节，低于 50 MB 目标及 52 MB 上限；包内程序与 dist SHA256 一致：`64f5b9d13b862558b562607a16b29ca60d78ad20a9e36b668d8e72c029a97539`。Info.plist、图标、可执行权限、CLI 帮助与构建输入指纹校验通过，校验记录为上述证据目录的 `verification.json`。当前用户应用没有重启。
