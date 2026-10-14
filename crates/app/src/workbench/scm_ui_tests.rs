@@ -573,11 +573,12 @@ fn rows(cx: &mut TestAppContext, this: &Entity<Workbench>) -> Vec<String> {
     this.read_with(cx, |p, _| {
         p.rows
             .iter()
-            .map(|row| match *row {
+            .map(|row| match row.clone() {
                 Row::Group(_) => "repo".to_string(),
                 Row::Commit(_) => "message".to_string(),
                 Row::Heading(_, _, n) => format!("changes {n}"),
                 Row::File(..) => "file".to_string(),
+                Row::Folder(_, path, _) => format!("folder {}", path.path.display()),
                 Row::Outgoing(_) => "outgoing".to_string(),
                 Row::OutgoingCommit(g, i) => {
                     format!(
@@ -1802,5 +1803,247 @@ async fn hidden_file_actions_keep_their_slot_and_do_not_stage(cx: &mut TestAppCo
                     .is_some_and(|s| s.changes.iter().any(|c| c.index != b'.'))
         })
     });
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+fn change_tree_fixture(name: &str) -> PathBuf {
+    let repo = fixture(name, 0);
+    for directory in ["alpha/nested", "beta"] {
+        std::fs::create_dir_all(repo.join(directory)).unwrap();
+    }
+    for path in ["alpha/nested/same.txt", "beta/same.txt"] {
+        std::fs::write(repo.join(path), "base\n").unwrap();
+    }
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "tree fixture"]);
+    std::fs::write(repo.join("alpha/nested/same.txt"), "staged\n").unwrap();
+    git(&repo, &["add", "alpha/nested/same.txt"]);
+    for path in ["alpha/nested/same.txt", "beta/same.txt", "a.txt"] {
+        std::fs::write(repo.join(path), "worktree\n").unwrap();
+    }
+    repo
+}
+
+fn change_tree_rows(cx: &mut TestAppContext, this: &Entity<Workbench>) -> Vec<String> {
+    this.read_with(cx, |p, _| {
+        p.rows
+            .iter()
+            .filter_map(|row| {
+                let (kind, path, side) = match row {
+                    Row::Folder(_, folder, side) => ("folder", &folder.path, side),
+                    Row::File(g, i, side, _) => (
+                        "file",
+                        &p.groups[*g]
+                            .status
+                            .as_ref()
+                            .unwrap()
+                            .as_ref()
+                            .unwrap()
+                            .changes[*i]
+                            .path,
+                        side,
+                    ),
+                    _ => return None,
+                };
+                Some(format!(
+                    "{} {kind} {}",
+                    match side {
+                        DiffSide::Staged => "staged",
+                        DiffSide::Worktree => "worktree",
+                    },
+                    path.display()
+                ))
+            })
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+async fn change_tree_folders_are_independent_and_survive_refresh(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = change_tree_fixture("change-tree");
+    let (handle, this) = open(cx, repo.clone());
+    this.update(cx, |p, cx| {
+        p.sidebar = Sidebar::SourceControl;
+        cx.notify();
+    });
+    let expanded = vec![
+        "staged folder alpha/nested",
+        "staged file alpha/nested/same.txt",
+        "worktree folder alpha/nested",
+        "worktree file alpha/nested/same.txt",
+        "worktree folder beta",
+        "worktree file beta/same.txt",
+        "worktree file a.txt",
+    ];
+    assert_eq!(change_tree_rows(cx, &this), expanded);
+    // A fold saved before compaction still controls the merged row; expanding clears it.
+    this.update(cx, |p, cx| {
+        p.groups[0]
+            .changes_folders_collapsed
+            .insert(PathBuf::from("alpha"));
+        p.rebuild_rows();
+        cx.notify();
+    });
+    let legacy_folder = this.read_with(cx, |p, _| p.rows.iter().position(|row| {
+        matches!(row, Row::Folder(_, folder, DiffSide::Worktree) if folder.path == std::path::Path::new("alpha/nested"))
+    }).unwrap());
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("scm-row", legacy_folder)).expanded(),
+            Some(false)
+        );
+        window.click(("scm-row", legacy_folder), cx);
+    })
+    .unwrap();
+    this.read_with(cx, |p, _| {
+        assert!(p.groups[0].changes_folders_collapsed.is_empty())
+    });
+    assert_eq!(change_tree_rows(cx, &this), expanded);
+    let folder = this.read_with(cx, |p, _| p.rows.iter().position(|row| {
+        matches!(row, Row::Folder(_, folder, DiffSide::Worktree) if folder.path == std::path::Path::new("alpha/nested"))
+    }).unwrap());
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let item = window.find(("scm-row", folder));
+        assert_eq!(item.role(), Some(Role::TreeItem));
+        assert_eq!(item.expanded(), Some(true));
+        assert!(
+            item.label()
+                .unwrap()
+                .contains(repo.join("alpha/nested").to_str().unwrap())
+        );
+        window.click(("scm-row", folder), cx);
+    })
+    .unwrap();
+    let collapsed = vec![
+        "staged folder alpha/nested",
+        "staged file alpha/nested/same.txt",
+        "worktree folder alpha/nested",
+        "worktree folder beta",
+        "worktree file beta/same.txt",
+        "worktree file a.txt",
+    ];
+    assert_eq!(change_tree_rows(cx, &this), collapsed);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find(("scm-row", folder)).expanded(), Some(false));
+    })
+    .unwrap();
+    // A real status refresh adds a leaf while retaining this side's collapsed parent.
+    std::fs::write(repo.join("beta/new.txt"), "new\n").unwrap();
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.refresh(window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            !p.loading
+                && p.groups[0]
+                    .status
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .changes
+                    .iter()
+                    .any(|c| c.path == std::path::Path::new("beta/new.txt"))
+        })
+    });
+    let mut refreshed = collapsed.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    refreshed.insert(4, "worktree file beta/new.txt".into());
+    assert_eq!(change_tree_rows(cx, &this), refreshed);
+    this.read_with(cx, |p, _| {
+        assert!(p.groups[0].staged_folders_collapsed.is_empty());
+        assert!(
+            p.groups[0]
+                .changes_folders_collapsed
+                .contains(std::path::Path::new("alpha/nested"))
+        );
+    });
+    git(
+        &repo,
+        &[
+            "restore",
+            "--source=HEAD",
+            "--staged",
+            "--worktree",
+            "alpha",
+        ],
+    );
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.refresh(window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            !p.loading
+                && !p.groups[0]
+                    .status
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .changes
+                    .iter()
+                    .any(|c| c.path.starts_with("alpha"))
+        })
+    });
+    this.read_with(cx, |p, _| {
+        assert!(p.groups[0].changes_folders_collapsed.is_empty())
+    });
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+#[gpui_kit::test]
+async fn change_tree_file_actions_keep_original_status_indices(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = change_tree_fixture("change-tree-actions");
+    let (handle, this) = open(cx, repo.clone());
+    this.update(cx, |p, cx| {
+        p.sidebar = Sidebar::SourceControl;
+        cx.notify();
+    });
+    let index = this.read_with(cx, |p, _| {
+        p.rows
+            .iter()
+            .position(|row| {
+                matches!(row, Row::File(g, i, DiffSide::Worktree, _)
+            if p.groups[*g].status.as_ref().unwrap().as_ref().unwrap().changes[*i].path
+                == std::path::Path::new("alpha/nested/same.txt"))
+            })
+            .unwrap()
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.hover(("scm-row-bounds", index), cx);
+        window.click(("scm-stage", index), cx);
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            !p.groups[0].write_pending
+                && p.groups[0]
+                    .status
+                    .as_ref()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .changes
+                    .iter()
+                    .any(|c| {
+                        c.path == std::path::Path::new("alpha/nested/same.txt")
+                            && c.staged()
+                            && !c.unstaged()
+                    })
+        })
+    });
+    assert_eq!(git_out(&repo, &["show", ":beta/same.txt"]), "base");
+    assert_eq!(
+        git_out(&repo, &["show", ":alpha/nested/same.txt"]),
+        "worktree"
+    );
+    assert_eq!(git_out(&repo, &["show", ":a.txt"]), "a");
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }

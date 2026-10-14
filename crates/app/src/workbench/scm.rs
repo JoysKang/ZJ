@@ -319,12 +319,12 @@ impl Workbench {
         let colors = theme::colors(cx);
         let hover: SharedString = format!("scm-row-{index}").into();
         // The list can ask for a row while `rows` is being rebuilt.
-        let Some(&row) = self.rows.get(index) else {
+        let Some(row) = self.rows.get(index).cloned() else {
             return div().into_any_element();
         };
-        let special = match row {
-            Row::Group(g) => Some(self.scm_repo_row(index, g, hover.clone(), cx)),
-            Row::Commit(g) => Some(self.scm_commit_row(g, cx)),
+        let special = match &row {
+            Row::Group(g) => Some(self.scm_repo_row(index, *g, hover.clone(), cx)),
+            Row::Commit(g) => Some(self.scm_commit_row(*g, cx)),
             _ => None,
         };
         if let Some(element) = special {
@@ -351,7 +351,10 @@ impl Workbench {
         let row = match row {
             Row::Group(_) | Row::Commit(_) => unreachable!("handled above"),
             Row::Heading(g, side, count) => self.scm_heading_row(g, side, count, base, hover, cx),
-            Row::File(g, i, side) => self.scm_file_row(index, g, i, side, base, hover, cx),
+            Row::Folder(g, folder, side) => self.scm_folder_row(g, folder, side, base, cx),
+            Row::File(g, i, side, depth) => {
+                self.scm_file_row(index, g, i, side, depth, base, hover, cx)
+            }
             Row::Outgoing(g) => self.scm_outgoing_row(g, base, cx),
             Row::OutgoingCommit(g, i) => self.scm_outgoing_commit_row(g, i, base, cx),
             Row::OutgoingNote(g) => self.scm_outgoing_note_row(g, base, cx),
@@ -1028,6 +1031,90 @@ impl Workbench {
             .into_any_element()
     }
 
+    fn scm_folder_row(
+        &self,
+        g: usize,
+        folder: super::scm_tree::FolderRow,
+        side: DiffSide,
+        base: Stateful<Div>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = theme::colors(cx);
+        let collapsed = match side {
+            DiffSide::Staged => &self.groups[g].staged_folders_collapsed,
+            DiffSide::Worktree => &self.groups[g].changes_folders_collapsed,
+        };
+        let expanded = !folder.is_collapsed(collapsed);
+        let name = folder.label.to_string_lossy().replace(SINGLE_LINE, "⏎");
+        let tooltip = self.groups[g]
+            .repo
+            .worktree
+            .join(&folder.path)
+            .display()
+            .to_string();
+        base.pl(theme::TREE_BASE + theme::TREE_STEP * (folder.depth + 1) as f32)
+            .role(Role::TreeItem)
+            .aria_label(format!(
+                "{} · {}",
+                match side {
+                    DiffSide::Staged => "暂存的更改",
+                    DiffSide::Worktree => "更改",
+                },
+                tooltip
+            ))
+            .aria_expanded(expanded)
+            .child(chevron(expanded, colors.muted))
+            .child(
+                Icon::new(if expanded {
+                    IconName::FolderOpen
+                } else {
+                    IconName::Folder
+                })
+                .size(theme::FILE_ICON_SIZE)
+                .text_color(colors.muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .pl_1()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(name),
+            )
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let Some(group) = this.groups.get_mut(g) else {
+                    return;
+                };
+                let collapsed = match side {
+                    DiffSide::Staged => &mut group.staged_folders_collapsed,
+                    DiffSide::Worktree => &mut group.changes_folders_collapsed,
+                };
+                if folder.is_collapsed(collapsed) {
+                    for path in folder.paths() {
+                        collapsed.remove(path);
+                    }
+                } else {
+                    collapsed.insert(folder.path.clone());
+                }
+                this.rebuild_rows();
+                cx.notify();
+            }))
+            .map(|row| {
+                #[cfg(test)]
+                let row = {
+                    use gpui_kit::test::TestSupportExt;
+                    row.test_support()
+                };
+                row
+            })
+            .into_any_element()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn scm_file_row(
         &self,
@@ -1035,6 +1122,7 @@ impl Workbench {
         g: usize,
         i: usize,
         side: DiffSide,
+        depth: usize,
         base: Stateful<Div>,
         hover: SharedString,
         cx: &mut Context<Self>,
@@ -1066,11 +1154,7 @@ impl Workbench {
             .unwrap_or_default()
             .to_string_lossy()
             .replace(SINGLE_LINE, "⏎");
-        let directory = change
-            .path
-            .parent()
-            .map(|parent| parent.to_string_lossy().replace(SINGLE_LINE, "⏎"))
-            .unwrap_or_default();
+        let tooltip = file_path.display().to_string();
         // The row whose diff is open is selected, as in VS Code.
         let selected = self.diff.tab.as_ref().is_some_and(|diff| {
             diff.path == file_path
@@ -1101,7 +1185,8 @@ impl Workbench {
         let context_toggle = toggle.clone();
         let context_discard = discard.clone();
         let open_file = file_path.clone();
-        base.pl(theme::TREE_BASE + theme::TREE_STEP + theme::TWISTY_WIDTH)
+        base.pl(theme::TREE_BASE + theme::TREE_STEP * (depth + 1) as f32)
+            .child(div().w(theme::TWISTY_WIDTH).flex_shrink_0())
             .role(Role::Button)
             .aria_label(format!(
                 "{} · {} · {}",
@@ -1125,6 +1210,7 @@ impl Workbench {
             .child(file_icons::icon(file_icons::for_file(&name)))
             .child(
                 div()
+                    .flex_1()
                     .min_w_0()
                     .pl_1()
                     .overflow_hidden()
@@ -1133,22 +1219,6 @@ impl Workbench {
                     .text_color(if selected { colors.selected_fg } else { color })
                     .when(deleted, |name| name.line_through())
                     .child(name),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .pl_1()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(theme::TEXT_CAPTION)
-                    .text_color(if selected {
-                        colors.selected_fg
-                    } else {
-                        colors.muted
-                    })
-                    .child(directory),
             )
             .child(
                 hover_actions(hover)
@@ -1208,6 +1278,9 @@ impl Workbench {
                     .text_color(if selected { colors.selected_fg } else { color })
                     .child(decoration.letter.to_string()),
             )
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+            })
             .on_click(
                 cx.listener(move |this, _, window, cx| this.open_diff(g, i, side, window, cx)),
             )

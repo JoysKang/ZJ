@@ -101,6 +101,7 @@ mod reopen_ui_tests;
 mod scm;
 mod scm_actions;
 mod scm_message;
+mod scm_tree;
 mod search_replace;
 mod search_view;
 mod selection_actions;
@@ -298,6 +299,8 @@ struct Group {
     /// Collapsed resource groups ("暂存的更改" / "更改"), as in VS Code.
     staged_collapsed: bool,
     changes_collapsed: bool,
+    staged_folders_collapsed: HashSet<PathBuf>,
+    changes_folders_collapsed: HashSet<PathBuf>,
     commit_input: Entity<TextareaState>,
     commit_generation: Option<scm_message::Generation>,
     _commit_subscription: Subscription,
@@ -381,13 +384,14 @@ fn decoration(change: &workspace_editor_git::Change) -> Decoration {
     Decoration { kind, letter }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Row {
     Group(usize),
     /// The repository's commit message box and 提交 button.
     Commit(usize),
     Heading(usize, DiffSide, usize),
-    File(usize, usize, DiffSide),
+    File(usize, usize, DiffSide, usize),
+    Folder(usize, scm_tree::FolderRow, DiffSide),
     /// "未推送的提交" with the push button.
     Outgoing(usize),
     OutgoingCommit(usize, usize),
@@ -1995,6 +1999,8 @@ impl Workbench {
                                             expanded: true,
                                             staged_collapsed: false,
                                             changes_collapsed: false,
+                                            staged_folders_collapsed: HashSet::new(),
+                                            changes_folders_collapsed: HashSet::new(),
                                             commit_input,
                                             commit_generation: None,
                                             _commit_subscription: subscription,
@@ -2111,7 +2117,7 @@ impl Workbench {
             (path.file_name().unwrap_or(path.as_os_str()), path)
         });
         for g in order {
-            let group = &self.groups[g];
+            let group = &mut self.groups[g];
             self.rows.push(Row::Group(g));
             if !group.expanded {
                 continue;
@@ -2136,9 +2142,13 @@ impl Workbench {
                         DiffSide::Staged => group.staged_collapsed,
                         DiffSide::Worktree => group.changes_collapsed,
                     };
+                    let folders = match side {
+                        DiffSide::Staged => &mut group.staged_folders_collapsed,
+                        DiffSide::Worktree => &mut group.changes_folders_collapsed,
+                    };
+                    let tree = scm_tree::ChangeTree::new(status, &changes, folders);
                     if !collapsed {
-                        self.rows
-                            .extend(changes.into_iter().map(|i| Row::File(g, i, side)));
+                        tree.append_rows(g, side, folders, &mut self.rows);
                     }
                 }
             }
