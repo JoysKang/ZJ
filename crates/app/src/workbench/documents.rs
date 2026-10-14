@@ -285,6 +285,7 @@ impl Workbench {
         // The cursor observer may have run before this edit was counted.
         self.schedule_blame(cx);
         self.scan_conflicts(cx);
+        self.tint_locals(cx);
         let Some(doc) = self.document_mut(id) else {
             return;
         };
@@ -1548,6 +1549,7 @@ impl Document {
             recovered: false,
             markdown: None,
             conflicts: Default::default(),
+            locals: Default::default(),
             _subscription: subscription,
         }
     }

@@ -7,3 +7,7 @@
 (assignment left: (identifier) @local.definition)
 (for_statement left: (identifier) @local.definition)
 (for_in_clause left: (identifier) @local.definition)
+
+; References
+;-----------
+(identifier) @local.reference

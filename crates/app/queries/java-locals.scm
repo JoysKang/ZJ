@@ -5,3 +5,7 @@
 (enhanced_for_statement name: (identifier) @local.definition)
 (lambda_expression parameters: (identifier) @local.definition)
 (catch_formal_parameter name: (identifier) @local.definition)
+
+; References
+;-----------
+(identifier) @local.reference

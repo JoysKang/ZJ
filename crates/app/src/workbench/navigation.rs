@@ -5,6 +5,7 @@
 use super::quick_open::{Pick, PickIcon, PickItem};
 use super::{Pane, Workbench};
 use crate::{
+    imports,
     symbol_index::{self, Location, SymbolIndex},
     symbols::{self, Kind, Local},
     theme,
@@ -162,21 +163,30 @@ pub(super) fn resolve(
     others.retain(|l| {
         symbol_index::language(&l.path).is_some_and(|other| same_family(other, language))
     });
-    symbol_index::rank(path, text, &mut others);
-    // `db::connect` / `net.connect`: a qualifier naming one candidate's module decides it.
-    if let Some(qualifier) = qualifier(text, here.start) {
-        let module = |location: &Location| {
-            let stem = location.path.file_stem().and_then(|s| s.to_str());
-            let dir = location
-                .path
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|s| s.to_str());
-            stem == Some(qualifier) || (stem == Some("mod") && dir == Some(qualifier))
-        };
-        let matching: Vec<&Location> = others.iter().filter(|l| module(l)).collect();
-        if matching.len() == 1 && same_file.is_empty() {
-            others = vec![matching[0].clone()];
+    symbol_index::rank(path, text, &name, &mut others);
+    // `db::connect` / `net.connect`, or an import naming exactly one candidate's module: when
+    // the source names one candidate, it decides the jump instead of a list. The reference's own
+    // qualifier wins over the file's imports, which are the weaker, collective signal.
+    let imported = imports::names(language, text);
+    let named: Vec<&str> = qualifier(text, here.start)
+        .into_iter()
+        .chain(imported.iter().map(String::as_str))
+        .collect();
+    let unique = |others: &[Location], names: &[&str]| -> Option<Location> {
+        let matching: Vec<&Location> = others
+            .iter()
+            .filter(|location| {
+                symbol_index::module_name(location).is_some_and(|module| names.contains(&module))
+            })
+            .collect();
+        (matching.len() == 1).then(|| matching[0].clone())
+    };
+    if same_file.is_empty() {
+        let chosen = qualifier(text, here.start)
+            .and_then(|name| unique(&others, &[name]))
+            .or_else(|| unique(&others, &named));
+        if let Some(location) = chosen {
+            others = vec![location];
         }
     }
     let mut targets: Vec<Target> = same_file

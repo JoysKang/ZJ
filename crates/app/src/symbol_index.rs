@@ -277,10 +277,28 @@ pub fn release_free_memory() {
     }
 }
 
-/// Ranks candidate definitions for a reference in `from`: same file, same directory, files
-/// the source seems to import (their stem appears in it), then by path distance.
-pub fn rank(from: &Path, source: &str, candidates: &mut [Location]) {
+/// The names `location` answers to as a module: its file stem, or its directory for the
+/// `mod.rs` / `index.ts` / `__init__.py` style modules that are named after their folder.
+pub fn module_name(location: &Location) -> Option<&str> {
+    let stem = location.path.file_stem().and_then(|s| s.to_str())?;
+    if matches!(stem, "mod" | "index" | "__init__") {
+        location
+            .path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .or(Some(stem))
+    } else {
+        Some(stem)
+    }
+}
+
+/// Ranks candidate definitions for a reference to `name` in `from`: same file, same directory,
+/// a file that imports the name or its module, a file whose module the source merely mentions,
+/// then by path distance. `source` is the importing file's text.
+pub fn rank(from: &Path, source: &str, name: &str, candidates: &mut [Location]) {
     let dir = from.parent();
+    let imported = crate::imports::names(crate::languages::for_path(from).0, source);
     let score = |location: &Location| {
         let same_file = location.path == from;
         let same_dir = location.path.parent() == dir;
@@ -289,7 +307,10 @@ pub fn rank(from: &Path, source: &str, candidates: &mut [Location]) {
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or_default();
-        let imported = stem.len() > 1 && source.contains(stem);
+        // An import names the module, or the symbol itself: both beat a bare mention.
+        let imports = imported.iter().any(|import| import == stem)
+            || (name.len() > 1 && imported.iter().any(|import| import == name));
+        let mentioned = stem.len() > 1 && source.contains(stem);
         let shared = location
             .path
             .components()
@@ -299,7 +320,8 @@ pub fn rank(from: &Path, source: &str, candidates: &mut [Location]) {
         (
             !same_file,
             !same_dir,
-            !imported,
+            !imports,
+            !mentioned,
             usize::MAX - shared,
             location.path.clone(),
             location.line,
@@ -347,7 +369,7 @@ mod tests {
         let mut found = index.definitions("connect");
         assert_eq!(found.len(), 2);
         let main = root.join("src/main.rs");
-        rank(&main, "net::client::connect()", &mut found);
+        rank(&main, "net::client::connect()", "connect", &mut found);
         assert_eq!(found[0].path, lib);
         assert_eq!((found[0].line, found[0].column, found[0].len), (1, 7, 7));
 

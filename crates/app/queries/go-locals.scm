@@ -5,3 +5,7 @@
 (var_spec name: (identifier) @local.definition)
 (const_spec name: (identifier) @local.definition)
 (range_clause left: (expression_list (identifier) @local.definition))
+
+; References
+;-----------
+(identifier) @local.reference

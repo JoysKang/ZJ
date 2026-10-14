@@ -9,3 +9,7 @@
 (tuple_pattern (identifier) @local.definition)
 (tuple_struct_pattern type: (_) (identifier) @local.definition)
 (match_pattern (identifier) @local.definition)
+
+; References
+;-----------
+(identifier) @local.reference

@@ -5,3 +5,7 @@
 (declaration declarator: (identifier) @local.definition)
 (init_declarator declarator: (identifier) @local.definition)
 (init_declarator declarator: (pointer_declarator declarator: (identifier) @local.definition))
+
+; References
+;-----------
+(identifier) @local.reference

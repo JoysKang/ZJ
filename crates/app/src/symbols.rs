@@ -206,10 +206,18 @@ pub fn supported(language: &str) -> bool {
     sources(language).is_some()
 }
 
+/// One `Parser` per thread, reused across files and languages: `Parser::new` allocates a fresh
+/// arena per call, and the workspace index parses thousands of files on the same few threads.
+/// The buffers stay for the process lifetime, which is the trade for the churn.
 fn parse(queries: &Queries, text: &str) -> Option<Tree> {
-    let mut parser = Parser::new();
-    parser.set_language(&queries.language).ok()?;
-    parser.parse(text, None)
+    thread_local! {
+        static PARSER: std::cell::RefCell<Parser> = std::cell::RefCell::new(Parser::new());
+    }
+    PARSER.with(|parser| {
+        let mut parser = parser.borrow_mut();
+        parser.set_language(&queries.language).ok()?;
+        parser.parse(text, None)
+    })
 }
 
 fn symbol(text: &str, node: Node, kind: Kind) -> Symbol {
@@ -347,6 +355,98 @@ pub fn resolve_local(language: &str, text: &str, offset: usize) -> Option<(Strin
     Some((name, Local::Unknown { definitions }))
 }
 
+/// Scopes and local bindings of one file, collected from its locals query once.
+struct Locals {
+    /// `local.scope` ranges, plus the whole file, which every position is inside.
+    scopes: Vec<Range<usize>>,
+    /// Every `local.definition`: the name it binds and its range.
+    definitions: Vec<(String, Range<usize>)>,
+    /// Every `local.reference`: the name it mentions and its range.
+    references: Vec<(String, Range<usize>)>,
+}
+
+fn locals_in(queries: &Queries, tree: &Tree, text: &str) -> Option<Locals> {
+    let query = queries.locals()?;
+    let names = query.capture_names();
+    let mut locals = Locals {
+        scopes: std::iter::once(0..text.len()).collect(),
+        definitions: Vec::new(),
+        references: Vec::new(),
+    };
+    let mut cursor = QueryCursor::new();
+    cursor.set_match_limit(256);
+    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
+    while let Some(found) = matches.next() {
+        for capture in found.captures {
+            let range = capture.node.byte_range();
+            match names[capture.index as usize] {
+                "local.scope" => locals.scopes.push(range),
+                "local.definition" => {
+                    locals
+                        .definitions
+                        .push((text[range.clone()].to_string(), range));
+                }
+                "local.reference" => {
+                    locals
+                        .references
+                        .push((text[range.clone()].to_string(), range));
+                }
+                _ => {}
+            }
+        }
+    }
+    Some(locals)
+}
+
+/// The innermost scope containing `position` (`usize::MAX` when none does, i.e. past the end).
+fn innermost(scopes: &[Range<usize>], position: usize) -> Range<usize> {
+    scopes
+        .iter()
+        .filter(|scope| scope.start <= position && position < scope.end.max(scope.start + 1))
+        .min_by_key(|scope| scope.len())
+        .cloned()
+        .unwrap_or(0..usize::MAX)
+}
+
+/// The index in `locals.definitions` of the binding a reference named `name` at `at` resolves
+/// to. A definition is visible where its scope contains the reference; the innermost such scope
+/// wins, and within it the nearest definition before the reference (else the first after, for
+/// hoisted functions).
+fn nearest(locals: &Locals, name: &str, at: usize) -> Option<usize> {
+    let mut best: Option<(usize, bool, usize, usize)> = None;
+    for (index, (defined, range)) in locals.definitions.iter().enumerate() {
+        if defined != name {
+            continue;
+        }
+        let scope = innermost(&locals.scopes, range.start);
+        // A binding's scope is the scope that encloses it, not the binding node itself.
+        let scope = if scope == *range {
+            innermost(&locals.scopes, range.start.saturating_sub(1))
+        } else {
+            scope
+        };
+        if !(scope.start <= at && at <= scope.end) {
+            continue;
+        }
+        let before = range.start <= at;
+        let key = (scope.len(), !before, at.abs_diff(range.start));
+        if best
+            .as_ref()
+            .is_none_or(|(len, after, distance, _)| key < (*len, *after, *distance))
+        {
+            best = Some((key.0, key.1, key.2, index));
+        }
+    }
+    best.map(|(.., index)| index)
+}
+
+/// The 0-based line and byte column of `offset`.
+fn position(text: &str, offset: usize) -> (u32, u32) {
+    let line = text[..offset].matches('\n').count() as u32;
+    let column = offset - text[..offset].rfind('\n').map_or(0, |at| at + 1);
+    (line, column as u32)
+}
+
 fn local_binding(
     queries: &Queries,
     tree: &Tree,
@@ -354,61 +454,71 @@ fn local_binding(
     name: &str,
     at: Range<usize>,
 ) -> Option<Symbol> {
-    let query = queries.locals()?;
-    let names = query.capture_names();
-    let mut scopes: Vec<Range<usize>> = std::iter::once(0..text.len()).collect();
-    let mut definitions: Vec<Node> = Vec::new();
-    let mut cursor = QueryCursor::new();
-    cursor.set_match_limit(256);
-    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
-    while let Some(found) = matches.next() {
-        for capture in found.captures {
-            match names[capture.index as usize] {
-                "local.scope" => scopes.push(capture.node.byte_range()),
-                "local.definition" => {
-                    let node = capture.node;
-                    if &text[node.byte_range()] == name {
-                        definitions.push(node);
-                    }
-                }
-                _ => {}
+    let locals = locals_in(queries, tree, text)?;
+    let (_, range) = &locals.definitions[nearest(&locals, name, at.start)?];
+    let (line, column) = position(text, range.start);
+    Some(Symbol {
+        name: name.to_string(),
+        kind: Kind::Variable,
+        range: range.clone(),
+        line,
+        column,
+    })
+}
+
+/// One local binding: where it is defined, and every reference resolved to it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Binding {
+    pub definition: Range<usize>,
+    pub references: Vec<Range<usize>>,
+}
+
+/// Most bindings tinted in one file; a file with more locals than this gets the first ones.
+const MAX_BINDINGS: usize = 512;
+
+/// Most tinted ranges in one file (a definition or a reference). Every range is a decoration the
+/// editor tracks through each edit, so a pathological file stops here rather than in the editor.
+const MAX_TINTED: usize = 8192;
+
+/// Local bindings of one file, in source order, each with the references that resolve to it, so
+/// the definition and its occurrences can share a color and two same-named `let`s stay apart.
+/// Empty for a language without a locals query, or a file past the size cap.
+pub fn bindings(language: &str, text: &str) -> Vec<Binding> {
+    if text.len() > MAX_FILE_BYTES {
+        return Vec::new();
+    }
+    let Some(queries) = queries(language) else {
+        return Vec::new();
+    };
+    let Some(tree) = parse(queries, text) else {
+        return Vec::new();
+    };
+    let Some(locals) = locals_in(queries, &tree, text) else {
+        return Vec::new();
+    };
+    let mut references: Vec<Vec<Range<usize>>> = vec![Vec::new(); locals.definitions.len()];
+    for (name, range) in &locals.references {
+        if let Some(index) = nearest(&locals, name, range.start) {
+            // A definition is captured as a reference of itself by `(identifier)`; it is not one.
+            if locals.definitions[index].1 != *range {
+                references[index].push(range.clone());
             }
         }
     }
-    let innermost = |position: usize| {
-        scopes
-            .iter()
-            .filter(|scope| scope.start <= position && position < scope.end.max(scope.start + 1))
-            .min_by_key(|scope| scope.len())
-            .cloned()
-            .unwrap_or(0..text.len())
-    };
-    // A definition is visible where its scope contains the reference. The innermost such
-    // scope wins; within it the nearest definition before the reference (else the first after,
-    // for hoisted functions).
-    let mut best: Option<(usize, bool, usize, Node)> = None;
-    for node in definitions {
-        let scope = innermost(node.start_byte());
-        // A binding's scope is the scope that encloses it, not the binding node itself.
-        let scope = if scope == node.byte_range() {
-            innermost(node.start_byte().saturating_sub(1))
-        } else {
-            scope
-        };
-        if !(scope.start <= at.start && at.start <= scope.end) {
-            continue;
+    let mut bindings = Vec::new();
+    let mut budget = MAX_TINTED;
+    for ((_, definition), references) in locals.definitions.into_iter().zip(references) {
+        if bindings.len() >= MAX_BINDINGS || budget == 0 {
+            break;
         }
-        let before = node.start_byte() <= at.start;
-        let distance = at.start.abs_diff(node.start_byte());
-        let key = (scope.len(), !before, distance);
-        if best
-            .as_ref()
-            .is_none_or(|(len, after, dist, _)| key < (*len, *after, *dist))
-        {
-            best = Some((key.0, key.1, key.2, node));
-        }
+        let references: Vec<Range<usize>> = references.into_iter().take(budget).collect();
+        budget -= references.len().max(1);
+        bindings.push(Binding {
+            definition,
+            references,
+        });
     }
-    best.map(|(.., node)| symbol(text, node, Kind::Variable))
+    bindings
 }
 
 #[cfg(test)]
@@ -541,5 +651,53 @@ pub(crate) mod tests {
         assert_eq!(word_at(text, 6), Some(5..10));
         assert_eq!(word_at(text, 10), Some(5..10));
         assert_eq!(word_at(text, 19), None);
+    }
+
+    /// Two `let a`s are two bindings: each reference belongs to the one in scope, not to the
+    /// name, so tinting them the same color would mean nothing.
+    #[test]
+    fn bindings_keep_shadowed_locals_apart() {
+        let text = "fn main() {\n    let a = 1;\n    let b = a + a;\n    let a = b;\n    a\n}\n";
+        let bindings = bindings("rust", text);
+        assert_eq!(bindings.len(), 3);
+        let definitions: Vec<usize> = bindings.iter().map(|b| b.definition.start).collect();
+        assert!(
+            definitions.windows(2).all(|pair| pair[0] < pair[1]),
+            "definitions in source order: {definitions:?}"
+        );
+        // The first `a` is read twice in `let b = a + a`; `b` is read once; the shadowing `a`
+        // is read once at the end.
+        assert_eq!(bindings[0].references.len(), 2);
+        assert_eq!(bindings[1].references.len(), 1);
+        assert_eq!(bindings[2].references.len(), 1);
+    }
+
+    #[test]
+    fn bindings_exist_for_every_navigation_language() {
+        // The smallest source with a local binding and a reference to it, per language.
+        for (language, source) in [
+            ("rust", "fn main() { let x = 1; x; }\n"),
+            ("python", "def f(a):\n    return a\n"),
+            ("go", "package main\n\nfunc f(a int) int { return a }\n"),
+            ("c", "int f(int a) { return a; }\n"),
+            ("cpp", "int f(int a) { return a; }\n"),
+            ("java", "class A { int f(int a) { return a; } }\n"),
+            ("javascript", "function f(a) { return a; }\n"),
+            ("typescript", "function f(a: number) { return a; }\n"),
+            (
+                "tsx",
+                "export const App = (props: { t: string }) => <h1>{props.t}</h1>;\n",
+            ),
+            ("bash", "f() { local a=1; echo \"$a\"; }\n"),
+        ] {
+            let found = bindings(language, source);
+            assert!(!found.is_empty(), "{language}: no local bindings");
+            assert!(
+                found.iter().any(|binding| !binding.references.is_empty()),
+                "{language}: no reference resolved to its binding"
+            );
+        }
+        assert!(bindings("markdown", "# Title\n").is_empty());
+        assert!(bindings("plain", "text\n").is_empty());
     }
 }

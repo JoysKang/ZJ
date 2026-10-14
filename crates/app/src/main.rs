@@ -10,6 +10,7 @@ mod file_ops;
 mod files;
 mod fuzzy;
 mod hidden_files;
+mod imports;
 mod indent;
 mod input_switch;
 mod languages;

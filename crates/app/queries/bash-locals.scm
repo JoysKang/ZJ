@@ -2,3 +2,7 @@
 (function_definition) @local.scope
 (variable_assignment name: (variable_name) @local.definition)
 (for_statement variable: (variable_name) @local.definition)
+
+; References
+;-----------
+(variable_name) @local.reference

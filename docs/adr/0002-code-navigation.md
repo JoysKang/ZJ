@@ -32,3 +32,9 @@
 ## 2026-10-13 补充：Diff 版本内跳转
 
 Diff 支持 ⌘单击、F12 和 ⌃G 转到行。点击用 GPUI 文本布局命中 UTF-8 字节列；原补丁只在定义请求期间后台还原，保留 Tab 与作用域，不常驻额外全文副本。同文件目标及多候选列表跳到所选 Diff 侧，删除文件也保留旧版本；跨文件目标复用当前工作区的磁盘符号索引，因此不能保证历史跨文件版本一致。补丁或请求已变化时丢弃旧结果；导航历史用弱引用识别 Diff 文档，不延长全文的存活时间。没有完整上下文或可解析源码时说明原因，不猜测定义位置。
+
+## 2026-10-13 补充：import 参与排序、局部变量着色
+
+跨文件候选不再只看源码里是否出现过候选文件名。`crates/app/src/imports.rs` 按语言读 import 语句（`use` / `mod` / `import` / `from` / `#include` / `source` / `require(` 等；跨行语句按行尾是开括号或逗号续行），返回其中的模块名与符号名；`symbol_index::rank` 据此排序（import 到的模块或引用本身的符号名优先于「源码里提过这个名字」），`workbench::navigation::resolve` 在既有的「限定名唯一」之外新增一条：import 的模块名唯一命中一个候选时直接决定跳转，不再弹列表。文件名到模块名的换算统一在 `symbol_index::module_name`（`mod.rs` / `index.ts` / `__init__.py` 取目录名），原有限定名规则改用它，行为不变。只影响候选排序与唯一判定，不动 tags / locals 查询，不新增依赖。
+
+`symbols::bindings` 复用同一套 `locals` 查询与「最内层作用域、离引用最近」规则，把 `local.definition` 与其引用配对（定义自身也被 `(identifier)` 捕获为引用，跳过）。`workbench/local_vars.rs` 给每个绑定取一个主题色（`theme::Colors::bindings` 四色，取自 git 状态色，两种主题都按编辑器背景 4.5:1 校验），用 Kit 的 `TextDecorationCollection` 给定义与引用着色。只在打字停顿 250 ms 后、为当前可见文档在后台重算，切换标签时补算；上限 1 MiB 文件、512 个绑定、8192 个着色区间，超出部分留归语法色。为此给本项目自写的 7 份 locals 查询加了 `local.reference` 捕获（Rust / Python / Go / C / C++ / Java 用 `(identifier)`，Bash 用 `(variable_name)`）；JS / TS 原本就有。着色是装饰层，不改文本、选区、换行和撤销。
