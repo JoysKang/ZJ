@@ -585,7 +585,9 @@ impl Workbench {
                 .text_size(theme::TEXT_CAPTION)
                 .text_color(colors.muted)
                 .child(
-                    div()
+                    h_flex()
+                        .min_w(theme::HINT_KEYCAP_MIN_WIDTH)
+                        .justify_center()
                         .px_1()
                         .rounded(theme::RADIUS)
                         .bg(colors.keycap)

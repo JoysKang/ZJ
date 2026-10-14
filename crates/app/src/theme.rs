@@ -30,6 +30,8 @@ pub const TAB_INDICATOR_INSET: Pixels = px(12.);
 pub const TAB_ACTIVE_INDICATOR_HEIGHT: Pixels = px(2.);
 pub const DIRTY_DOT: Pixels = px(8.);
 pub const KEYCAP: Pixels = px(20.);
+/// Minimum width of a shortcut key cap in the agent empty-state hints, so their text lines up.
+pub const HINT_KEYCAP_MIN_WIDTH: Pixels = px(32.);
 pub const WELCOME_WIDTH: Pixels = px(340.);
 /// Welcome page logo (`assets/logo/zj-sprig*.svg`, 640 × 600 artwork at a quarter scale) and
 /// its cursor, placed where the artwork's `#zj-cursor` rect was (x 678, y 612, 26 × 190, from
@@ -406,19 +408,19 @@ pub const DARK: Palette = Palette {
     selected_fg: 0xffffff,
     active_line: 0x073642,
     selection: 0x274642,
-    caret: 0xd30102,
+    caret: 0xe5484d,
     foreground: 0xe8e9eb,
-    muted: 0x99a6a6,
+    muted: 0xa3afaf,
     accent: 0x34ada4,
     badge: 0x047aa6,
     badge_fg: 0xffffff,
     primary_hover: 0x036c93,
     primary_active: 0x035e80,
-    // A leaf green darkened until white text reaches 4.5:1 (Solarized's #859900 reads as
-    // olive at this size).
-    commit: 0x4e7d1f,
+    // A calm green, darkened and desaturated so the button does not outshine the selection
+    // (Solarized's #859900 reads as olive at this size); white text stays above 4.5:1.
+    commit: 0x3b6a45,
     commit_fg: 0xffffff,
-    commit_hover: 0x47731b,
+    commit_hover: 0x335c3c,
     keycap: 0x103a44,
     logo_cursor: 0xbf616a,
     // Solarized yellow.
@@ -470,11 +472,11 @@ pub const LIGHT: Palette = Palette {
     input_bg: 0xfafbfc,
     border: 0xe1e4e8,
     hover: 0xebf0f4,
-    selected: 0xe2e5e9,
+    selected: 0xd3d9e3,
     selected_fg: 0x242629,
     active_line: 0xf6f8fa,
     selection: 0xcadbf0,
-    caret: 0x044289,
+    caret: 0xa8434d,
     foreground: 0x242629,
     muted: 0x586069,
     accent: 0x005cc5,
@@ -485,7 +487,7 @@ pub const LIGHT: Palette = Palette {
     commit: 0xe3ebe5,
     commit_fg: 0x2b5139,
     commit_hover: 0xd3e1d7,
-    keycap: 0xe6e8e7,
+    keycap: 0xd8dde6,
     logo_cursor: 0xbf616a,
     // Nord aurora yellow.
     find_current: 0xebcb8b,
