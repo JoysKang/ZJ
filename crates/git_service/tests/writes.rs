@@ -906,17 +906,49 @@ fn a_cancelled_write_asks_git_to_stop_before_killing_it() {
         },
         generation: 2,
     };
+    let query_cancel = AtomicBool::new(false);
     let started = std::time::Instant::now();
-    let result = std::thread::scope(|scope| {
+    let (result, query_blocked, query_error) = std::thread::scope(|scope| {
         let commit = scope.spawn(|| service.write(&request, &cancel).map(|_| ()));
         while !marks.join("started").exists() && started.elapsed() < Duration::from_secs(10) {
             std::thread::sleep(Duration::from_millis(20));
         }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let service = &service;
+        let request = &request;
+        let query_cancel = &query_cancel;
+        let query = scope.spawn(move || {
+            let result = service.execute(
+                &Request {
+                    repo: request.repo.clone(),
+                    generation: 3,
+                    operation: Operation::Status,
+                },
+                query_cancel,
+            );
+            sender.send(result.map(|_| ())).unwrap();
+        });
+        let blocked = matches!(
+            receiver.recv_timeout(Duration::from_millis(150)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        );
+        query_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        query.join().unwrap();
+        let query_error = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .err()
+            .map(|error| error.kind());
         cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        commit.join().unwrap()
+        (commit.join().unwrap(), blocked, query_error)
     });
     assert!(marks.join("started").exists(), "the hook never ran");
     assert!(result.is_err());
+    assert!(
+        query_blocked,
+        "local queries must still wait for an index write"
+    );
+    assert_eq!(query_error, Some(std::io::ErrorKind::Interrupted));
     assert!(started.elapsed() < Duration::from_secs(10));
     assert!(marks.join("term").exists());
     assert!(!root.join(".git/index.lock").exists());
@@ -1117,4 +1149,123 @@ fn deleting_an_untracked_nested_repository_reports_that_it_stayed() {
     .to_string();
     assert!(error.contains("nested"), "{error}");
     assert!(nested.join("x.txt").exists());
+}
+
+#[test]
+fn a_slow_fetch_does_not_block_a_local_diff() {
+    common::hermetic();
+    let fixture = fixture();
+    let root = fixture.0.join("a");
+    let remote = fixture.0.join("b");
+    for dir in [&root, &remote] {
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "base"]);
+    }
+    git(
+        &root,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    let upload = fixture.0.join("gated-upload-pack");
+    fs::write(&upload, "#!/bin/sh\ndir=$(dirname \"$0\")\ntouch \"$dir/started\"\nwhile [ ! -e \"$dir/release\" ]; do sleep 0.01; done\nexec git-upload-pack \"$@\"\n").unwrap();
+    fs::set_permissions(&upload, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &root,
+        &[
+            "config",
+            "remote.origin.uploadpack",
+            upload.to_str().unwrap(),
+        ],
+    );
+    fs::write(root.join("src/main.rs"), "local change\n").unwrap();
+    // A second window queues a different repository's automatic remote check.
+    git(
+        &remote,
+        &["remote", "add", "origin", root.to_str().unwrap()],
+    );
+    git(
+        &remote,
+        &[
+            "config",
+            "remote.origin.uploadpack",
+            upload.to_str().unwrap(),
+        ],
+    );
+    let linked = fixture.0.join("linked");
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().unwrap(),
+        ],
+    );
+    fs::write(linked.join("src/main.rs"), "linked change\n").unwrap();
+    let service = GitService::new(2, Duration::from_secs(10)).unwrap();
+    let cancel = AtomicBool::new(false);
+    let repo = service.identify(&root, &cancel).unwrap();
+    let other = service.identify(&remote, &cancel).unwrap();
+    let linked_repo = service.identify(&linked, &cancel).unwrap();
+    let second_window = service.clone();
+    std::thread::scope(|scope| {
+        let fetching = scope.spawn(|| service.fetch(&repo, 1, &cancel));
+        for _ in 0..500 {
+            if fixture.0.join("started").exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let started = fixture.0.join("started").exists();
+        let second = scope.spawn(|| second_window.fetch(&other, 1, &cancel));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let service = &service;
+        let cancel = &cancel;
+        let repo = &repo;
+        let reading = scope.spawn(move || {
+            let result = service.execute(
+                &Request {
+                    repo: repo.clone(),
+                    generation: 2,
+                    operation: Operation::Diff {
+                        side: DiffSide::Worktree,
+                        path: "src/main.rs".into(),
+                        original_path: None,
+                    },
+                },
+                cancel,
+            );
+            let linked = service.execute(
+                &Request {
+                    repo: linked_repo,
+                    generation: 2,
+                    operation: Operation::Diff {
+                        side: DiffSide::Worktree,
+                        path: "src/main.rs".into(),
+                        original_path: None,
+                    },
+                },
+                cancel,
+            );
+            sender.send((result, linked)).unwrap();
+        });
+        let result = receiver.recv_timeout(Duration::from_secs(1));
+        let local_finished = result.is_ok();
+        fs::write(fixture.0.join("release"), "").unwrap();
+        fetching.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+        reading.join().unwrap();
+        let (reply, linked) =
+            result.unwrap_or_else(|_| receiver.recv_timeout(Duration::from_secs(1)).unwrap());
+        let reply = reply.unwrap();
+        let linked = linked.unwrap();
+        assert!(started, "the controlled remote did not start");
+        assert!(String::from_utf8_lossy(&reply.output).contains("+local change"));
+        assert!(String::from_utf8_lossy(&linked.output).contains("+linked change"));
+        assert!(
+            local_finished,
+            "a local Diff waited for the remote Fetch to finish"
+        );
+    });
 }

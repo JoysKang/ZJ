@@ -99,7 +99,9 @@ struct Shared {
     active: Mutex<usize>,
     available: Condvar,
     limit: usize,
-    repo_locks: Mutex<HashMap<RepoId, std::sync::Weak<RepoLock>>>,
+    repo_locks: Mutex<HashMap<LockKey, std::sync::Weak<RepoLock>>>,
+    /// Automatic remote checks share one slot, leaving capacity for local queries.
+    fetch_gate: RepoLock,
 }
 
 #[derive(Clone)]
@@ -109,6 +111,12 @@ pub struct GitService {
     /// How long a timed-out or cancelled Git gets after SIGTERM before SIGKILL. Writes need it:
     /// Git removes `index.lock` on SIGTERM but not on SIGKILL. Read queries take no locks.
     grace: Duration,
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+enum LockKey {
+    Worktree(RepoId),
+    SharedRefs(PathBuf),
 }
 
 /// Serializes operations on one repository. Waiters sleep on the condvar and wake as soon as
@@ -205,6 +213,7 @@ impl GitService {
                 available: Condvar::new(),
                 limit: concurrency,
                 repo_locks: Mutex::new(HashMap::new()),
+                fetch_gate: RepoLock::default(),
             }),
             timeout,
             grace: Duration::ZERO,
@@ -408,10 +417,21 @@ impl GitService {
     }
 
     fn repo_lock(&self, id: &RepoId) -> Arc<RepoLock> {
+        self.lock_for(LockKey::Worktree(id.clone()))
+    }
+
+    fn refs_lock(&self, common_dir: &Path) -> Arc<RepoLock> {
+        self.lock_for(LockKey::SharedRefs(common_dir.to_owned()))
+    }
+
+    fn lock_for(&self, key: LockKey) -> Arc<RepoLock> {
         let mut locks = self.shared.repo_locks.lock().unwrap();
         locks.retain(|_, lock| lock.strong_count() > 0);
-        let lock = locks.get(id).and_then(|l| l.upgrade()).unwrap_or_default();
-        locks.insert(id.clone(), Arc::downgrade(&lock));
+        let lock = locks
+            .get(&key)
+            .and_then(|l| l.upgrade())
+            .unwrap_or_default();
+        locks.insert(key, Arc::downgrade(&lock));
         lock
     }
 

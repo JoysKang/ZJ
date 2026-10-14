@@ -11,6 +11,8 @@ use gpui_kit::{
 };
 use std::ops::Range;
 
+type SyntaxRuns = Vec<(Range<usize>, HighlightStyle)>;
+
 /// Lines longer than this are shown without syntax or char-level highlighting.
 const MAX_STYLED_LINE: usize = 4_096;
 /// Token-level LCS budget (old tokens × new tokens) per modified line pair.
@@ -292,8 +294,13 @@ impl DiffDoc {
     }
 
     fn style(&mut self, language: Option<&str>, theme: &HighlightTheme, colors: ChangeColors) {
-        let old_syntax = language.map(|lang| highlight(lang, &self.old.text, theme));
-        let new_syntax = language.map(|lang| highlight(lang, &self.new.text, theme));
+        let (old_syntax, new_syntax) = match language {
+            Some(language) => {
+                let (old, new) = highlight_pair(language, &self.old.text, &self.new.text, theme);
+                (Some(old), Some(new))
+            }
+            None => (None, None),
+        };
         let mut old_changes: Vec<Vec<Range<usize>>> = vec![Vec::new(); self.old.lines.len()];
         let mut new_changes: Vec<Vec<Range<usize>>> = vec![Vec::new(); self.new.lines.len()];
         for row in &self.rows {
@@ -460,6 +467,69 @@ pub(crate) fn highlight(
         .into_iter()
         .filter(|(_, style)| *style != HighlightStyle::default())
         .collect()
+}
+
+/// The two sides share most text; edit one syntax tree instead of parsing both from scratch.
+fn highlight_pair(
+    language: &str,
+    old: &str,
+    new: &str,
+    theme: &HighlightTheme,
+) -> (SyntaxRuns, SyntaxRuns) {
+    let mut highlighter = SyntaxHighlighter::new(language);
+    if highlighter.language().as_ref() != language {
+        return (Vec::new(), Vec::new());
+    }
+    let styles = |highlighter: &SyntaxHighlighter, len| {
+        highlighter
+            .styles(&(0..len), theme)
+            .into_iter()
+            .filter(|(_, style)| *style != HighlightStyle::default())
+            .collect::<Vec<_>>()
+    };
+    highlighter.update(None, &gpui_kit::component::Rope::from(old), None);
+    let left = styles(&highlighter, old.len());
+    if old == new {
+        return (left.clone(), left);
+    }
+    let mut prefix = old
+        .bytes()
+        .zip(new.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !old.is_char_boundary(prefix) || !new.is_char_boundary(prefix) {
+        prefix -= 1;
+    }
+    let mut suffix = old
+        .bytes()
+        .rev()
+        .zip(new.bytes().rev())
+        .take((old.len() - prefix).min(new.len() - prefix))
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !old.is_char_boundary(old.len() - suffix) || !new.is_char_boundary(new.len() - suffix) {
+        suffix -= 1;
+    }
+    let position = |text: &str, end| {
+        let text = &text[..end];
+        tree_sitter::Point {
+            row: text.bytes().filter(|&byte| byte == b'\n').count(),
+            column: text.rsplit('\n').next().unwrap_or_default().len(),
+        }
+    };
+    highlighter.update(
+        Some(tree_sitter::InputEdit {
+            start_byte: prefix,
+            old_end_byte: old.len() - suffix,
+            new_end_byte: new.len() - suffix,
+            start_position: position(old, prefix),
+            old_end_position: position(old, old.len() - suffix),
+            new_end_position: position(new, new.len() - suffix),
+        }),
+        &gpui_kit::component::Rope::from(new),
+        None,
+    );
+    (left, styles(&highlighter, new.len()))
 }
 
 /// Splits whole-text syntax spans into per-line runs and overlays change backgrounds.
@@ -754,5 +824,55 @@ mod tests {
         let theme = HighlightTheme::default_dark();
         assert!(DiffDoc::parse("Binary files a and b differ\n", None, &theme, colors()).is_none());
         assert!(DiffDoc::parse("@@@ -1 -1 +1 @@@\n", None, &theme, colors()).is_none());
+    }
+
+    #[test]
+    fn paired_highlighting_matches_independent_parses() {
+        for theme in [
+            HighlightTheme::default_dark(),
+            HighlightTheme::default_light(),
+        ] {
+            for (language, old, new) in [
+                (
+                    "python",
+                    "value = 42\nprint(value)\n",
+                    "value = 43\nprint(value)\n",
+                ),
+                (
+                    "python",
+                    "# 中文\nvalue = '你好'\n",
+                    "# 中丈\nvalue = '您好'\n",
+                ),
+                (
+                    "rust",
+                    "fn main() {\n    /* comment */\n    let x = 42;\n}\n",
+                    "fn main() {\n    /* comment\n    let x = 42;\n}\n",
+                ),
+                ("javascript", "const x = 1;\n", "const x = `\nline\n`;\n"),
+                (
+                    "markdown",
+                    "```python\nx = 1\n```\n",
+                    "```rust\nlet x = 2;\n```\n",
+                ),
+                ("python", "", "print('你好')\n"),
+                ("python", "print('你好')\n", ""),
+                ("python", "abc", "abc\n"),
+                ("python", "abc\n", "abc"),
+                ("python", "abc", "abc"),
+                ("plain", "abc", "def"),
+            ] {
+                let (a, b) = highlight_pair(language, old, new, &theme);
+                assert_eq!(
+                    a,
+                    highlight(language, old, &theme),
+                    "old {language}: {old:?}"
+                );
+                assert_eq!(
+                    b,
+                    highlight(language, new, &theme),
+                    "new {language}: {new:?}"
+                );
+            }
+        }
     }
 }

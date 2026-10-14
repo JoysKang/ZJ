@@ -133,6 +133,8 @@ pub const BANNER_HEIGHT: Pixels = px(30.);
 
 // Diff editor (VS Code: 5-digit line numbers, +/- indicators). Text and rows follow the
 // editor font size, see [`diff_metrics`].
+/// Dedicated horizontal scrollbar strip beneath the Diff code viewport.
+pub const DIFF_SCROLLBAR_HEIGHT: Pixels = px(16.);
 pub const DIFF_GUTTER: Pixels = px(48.);
 pub const DIFF_INDICATOR: Pixels = px(20.);
 pub const DIFF_TEXT_END: Pixels = px(32.);

@@ -134,6 +134,9 @@ mod idle_ui_tests;
 #[path = "workbench/indent_ui_tests.rs"]
 mod indent_ui_tests;
 #[cfg(test)]
+#[path = "workbench/scrollbar_ui_tests.rs"]
+mod scrollbar_ui_tests;
+#[cfg(test)]
 #[path = "workbench/search_ui_tests.rs"]
 mod search_ui_tests;
 #[cfg(test)]
@@ -2321,6 +2324,7 @@ impl Workbench {
         let cancel = self.diff.cancel.clone();
         let service = self.service.clone();
         let version = self.diff.generation;
+        let previous = self.diff.source.clone();
         self.diff.title = format!("正在加载 {title}");
         let highlight = gpui_kit::component::Theme::global(cx)
             .highlight_theme
@@ -2350,8 +2354,27 @@ impl Workbench {
                 // Agent reviews load in `load_agent_diff`.
                 DiffSource::Agent(_) => return Err(std::io::Error::other("Agent 审阅不经过 Git")),
             };
+            if cancel.load(Ordering::Relaxed) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "操作已取消",
+                ));
+            }
+            // A status refresh often leaves the patch unchanged; keep its completed document.
+            if previous
+                .as_ref()
+                .is_some_and(|(old, was_dark)| *old == text && *was_dark == dark)
+            {
+                return Ok((text, None, None));
+            }
             let doc = crate::diff_doc::DiffDoc::parse(&text, language, &highlight, change_colors)
                 .map(Arc::new);
+            if cancel.load(Ordering::Relaxed) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "操作已取消",
+                ));
+            }
             let raw = crate::partial_patch::parse(&text).map(Arc::new);
             Ok::<_, std::io::Error>((text, doc, raw))
         });

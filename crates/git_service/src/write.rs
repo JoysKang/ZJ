@@ -142,6 +142,7 @@ impl GitService {
         generation: u64,
         cancel: &AtomicBool,
     ) -> io::Result<Reply> {
+        let _background = self.lock_repo(&self.shared.fetch_gate, cancel)?;
         let expected = self.status(repo, generation, cancel)?.into();
         self.write_with_timeout(
             &WriteRequest {
@@ -167,14 +168,15 @@ impl GitService {
     ) -> io::Result<Reply> {
         // Linked worktrees share refs and the stash reflog. Lock the canonical common
         // directory first so validating stash@{n} and mutating it stay one operation.
-        let common = self.repo_lock(&RepoId(request.repo.common_dir.clone()));
+        let common = self.refs_lock(&request.repo.common_dir);
         let _shared_refs = self.lock_repo(&common, cancel)?;
-        let private = (request.repo.id.0 != request.repo.common_dir)
-            .then(|| self.repo_lock(&request.repo.id));
-        let _serial = private
-            .as_ref()
-            .map(|lock| self.lock_repo(lock, cancel))
-            .transpose()?;
+        let private = self.repo_lock(&request.repo.id);
+        // Fetch changes only remote refs; local queries need not wait for the network.
+        let _serial = if matches!(request.operation, WriteOperation::Fetch) {
+            None
+        } else {
+            Some(self.lock_repo(&private, cancel)?)
+        };
         if self.identify(&request.repo.worktree, cancel)? != request.repo {
             return Err(error("仓库身份已变化，请重新打开工作区"));
         }

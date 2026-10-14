@@ -261,36 +261,21 @@ impl Workbench {
             .border_color(colors.border)
             .text_size(theme::TEXT_CAPTION)
             .when_some(self.diff.tab.as_ref(), |bar, tab| {
-                let name = tab
-                    .path
-                    .file_name()
-                    .unwrap_or(tab.path.as_os_str())
-                    .to_string_lossy()
-                    .replace(SINGLE_LINE, "⏎");
-                let directory = tab
-                    .path
-                    .parent()
-                    .map(|parent| parent.to_string_lossy().replace(SINGLE_LINE, "⏎"))
-                    .unwrap_or_default();
+                let path = tab.path.to_string_lossy().replace(SINGLE_LINE, "⏎");
                 bar.child(
                     div()
-                        .min_w_0()
-                        .flex_shrink_1()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_color(colors.foreground)
-                        .child(name),
-                )
-                .child(
-                    div()
+                        .id("diff-file-path")
                         .flex_1()
                         .min_w_0()
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
-                        .text_color(colors.muted)
-                        .child(directory),
+                        .text_color(colors.foreground)
+                        .child(path.clone())
+                        .tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(path.clone())
+                                .build(window, cx)
+                        }),
                 )
             })
             .when_some(self.diff.doc.as_ref(), |bar, doc| {
@@ -599,8 +584,7 @@ impl Workbench {
         .track_scroll(&self.diff.scroll)
         .size_full();
         let colors = theme::colors(cx);
-        div()
-            .relative()
+        v_flex()
             .flex_1()
             .w_0()
             .min_w_0()
@@ -609,17 +593,43 @@ impl Workbench {
             .when(kind == DiffList::Modified, |column| {
                 column.border_l_1().border_color(colors.border)
             })
-            .child(list)
             .child(
-                div().absolute().inset_0().child(
-                    Scrollbar::new(&self.diff.scroll)
-                        .id(match kind {
-                            DiffList::Original => "diff-original-scrollbar",
-                            DiffList::Modified => "diff-modified-scrollbar",
-                            DiffList::Inline => "diff-inline-scrollbar",
-                        })
-                        .viewport_from_layout(),
-                ),
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(list)
+                    .child(
+                        div().absolute().inset_0().child(
+                            Scrollbar::vertical(&self.diff.scroll)
+                                .id(match kind {
+                                    DiffList::Original => "diff-original-scrollbar",
+                                    DiffList::Modified => "diff-modified-scrollbar",
+                                    DiffList::Inline => "diff-inline-scrollbar",
+                                })
+                                .viewport_from_layout(),
+                        ),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .h(theme::DIFF_SCROLLBAR_HEIGHT)
+                    .w_full()
+                    .flex_shrink_0()
+                    .child(
+                        Scrollbar::horizontal(&self.diff.scroll)
+                            .id(match kind {
+                                DiffList::Original => "diff-original-horizontal-scrollbar",
+                                DiffList::Modified => "diff-modified-horizontal-scrollbar",
+                                DiffList::Inline => "diff-inline-horizontal-scrollbar",
+                            })
+                            .styles(|styles| {
+                                styles.track(|track| track.width(theme::DIFF_SCROLLBAR_HEIGHT))
+                            })
+                            .viewport_from_layout(),
+                    ),
             )
             .into_any_element()
     }
