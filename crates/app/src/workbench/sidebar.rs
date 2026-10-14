@@ -1,7 +1,7 @@
 //! The sidebar: VS Code-style view switcher on top, then Explorer / Search / Source Control.
 
 use super::SINGLE_LINE;
-use super::explorer_ops::{DraggedFiles, EditKind, FileClipboard, FileTransfer};
+use super::explorer_ops::{DraggedFiles, EditKind, FileTransfer, file_clipboard};
 use super::{Decoration, DecorationKind, Sidebar, Workbench};
 use crate::{file_icons, theme};
 use gpui_kit::{
@@ -380,7 +380,12 @@ impl Workbench {
                     )
                     .child(self.explorer_more()),
             )
-            .on_click(cx.listener(|this, _, _, cx| {
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this.explorer.edit.is_none() {
+                    this.explorer
+                        .set_selected(this.root.clone().into_iter().collect());
+                    this.explorer.focus.focus(window, cx);
+                }
                 this.explorer.collapsed = !this.explorer.collapsed;
                 cx.notify();
             }))
@@ -396,9 +401,7 @@ impl Workbench {
         let weak = cx.weak_entity();
         let root_path = root.entry.path.clone();
         let root_menu = move |menu: PopupMenu, _: &mut Window, cx: &mut Context<PopupMenu>| {
-            let can_paste = cx
-                .try_global::<FileClipboard>()
-                .is_some_and(|c| !c.paths.is_empty());
+            let can_paste = file_clipboard(cx).is_some();
             match weak.upgrade() {
                 Some(this) => this.read(cx).explorer_menu(&root_path, can_paste, menu),
                 None => menu,
@@ -471,6 +474,17 @@ impl Workbench {
                 .flex_1()
                 .min_h_0()
                 .w_full()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        if this.explorer.edit.is_none() {
+                            this.explorer
+                                .set_selected(this.root.clone().into_iter().collect());
+                            this.explorer.focus.focus(window, cx);
+                            cx.notify();
+                        }
+                    }),
+                )
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(|this, _, window, cx| {
@@ -813,9 +827,7 @@ impl Workbench {
             );
         }));
         let row = row.context_menu(move |menu, _, cx| {
-            let can_paste = cx
-                .try_global::<FileClipboard>()
-                .is_some_and(|c| !c.paths.is_empty());
+            let can_paste = file_clipboard(cx).is_some();
             match weak.upgrade() {
                 Some(this) => this.read(cx).explorer_menu(&path, can_paste, menu),
                 None => menu,

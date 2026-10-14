@@ -964,6 +964,167 @@ async fn failed_internal_moves_do_not_restore_or_replace_the_clipboard(cx: &mut 
 }
 
 #[gpui_kit::test]
+async fn finder_clipboard_folder_pastes_into_the_selected_directory(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let base = fixture("finder-clipboard");
+    let root = base.join("workspace");
+    let source = base.join("finder/外部 folder");
+    fs::create_dir_all(source.join("nested")).unwrap();
+    fs::write(source.join("nested/file.txt"), "external folder").unwrap();
+    let (handle, this) = open(cx, root.clone());
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.explorer.rows.len() == 6)
+    });
+    cx.update(|cx| cx.bind_keys([KeyBinding::new("secondary-v", PasteFiles, Some("Explorer"))]));
+    this.update(cx, |p, cx| {
+        p.explorer.set_selected(vec![root.join("b.txt")]);
+        p.copy_selection(true, cx);
+    });
+    // Finder replaces a pending ZJ cut and exposes native files alongside optional text.
+    cx.write_to_clipboard(ClipboardItem {
+        entries: vec![
+            ClipboardEntry::ExternalPaths(ExternalPaths(vec![source.clone()].into())),
+            ClipboardEntry::String(ClipboardString::new("外部 folder".into())),
+        ],
+    });
+    let position = row_position(cx, handle, &this, &root.join("dest"));
+    VisualTestContext::from_window(handle.into(), cx)
+        .simulate_click(position, Modifiers::default());
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("cmd-v", cx);
+    })
+    .unwrap();
+    let target = root.join("dest/外部 folder");
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            p.explorer.selected.contains(&target)
+                && p.explorer.rows.iter().any(|row| row.entry.path == target)
+        })
+    });
+    assert_eq!(
+        fs::read_to_string(target.join("nested/file.txt")).unwrap(),
+        "external folder"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("nested/file.txt")).unwrap(),
+        "external folder"
+    );
+    this.read_with(cx, |p, _| assert_eq!(p.message, "已复制 1 项"));
+    // Clicking empty Explorer space must reclaim focus from the editor and target the root.
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(root.join("a.txt"), Some(root.clone()), window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let blank = cx
+        .update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.explorer.set_selected(vec![root.join("dest")]);
+                p.documents[0]
+                    .editor
+                    .update(cx, |editor, cx| editor.focus(window, cx));
+                assert!(!p.explorer.focus.is_focused(window));
+            });
+            window.render_frame(cx);
+            window.find("explorer-blank").bounds().center()
+        })
+        .unwrap();
+    VisualTestContext::from_window(handle.into(), cx).simulate_click(blank, Modifiers::default());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.read_with(cx, |p, _| {
+            assert_eq!(p.explorer.selected, BTreeSet::from([root.clone()]));
+            assert!(p.explorer.focus.is_focused(window));
+        });
+        window.render_frame(cx);
+        window.press("cmd-v", cx);
+    })
+    .unwrap();
+    let target = root.join("外部 folder");
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            p.explorer.rows.iter().any(|row| row.entry.path == target) && p.message == "已复制 1 项"
+        })
+    });
+    assert_eq!(
+        fs::read_to_string(target.join("nested/file.txt")).unwrap(),
+        "external folder"
+    );
+    assert!(source.join("nested/file.txt").exists());
+    assert!(
+        root.join("b.txt").exists(),
+        "Finder paste must not consume the old internal cut"
+    );
+    assert!(!root.join("dest/b.txt").exists());
+    for item in [
+        ClipboardItem::new_string(root.join("b.txt").display().to_string()),
+        ClipboardItem {
+            entries: Vec::new(),
+        },
+    ] {
+        this.update(cx, |p, cx| {
+            p.explorer.set_selected(vec![root.join("b.txt")]);
+            p.copy_selection(true, cx);
+        });
+        cx.write_to_clipboard(item.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.select_tree_path(root.join("dest"), window, cx);
+                p.message = "clipboard unchanged".into();
+            });
+            window.render_frame(cx);
+            window.press("cmd-v", cx);
+            assert_eq!(this.read(cx).message, "clipboard unchanged");
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(root.join("b.txt").exists());
+        assert!(!root.join("dest/b.txt").exists());
+        assert_eq!(cx.read_from_clipboard(), Some(item));
+    }
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[gpui_kit::test]
+async fn an_older_file_clipboard_item_cannot_reactivate_a_newer_cut(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let base = fixture("clipboard-identity");
+    let root = base.join("workspace");
+    let source = root.join("b.txt");
+    let (handle, this) = open(cx, root.clone());
+    cx.update(|cx| cx.bind_keys([KeyBinding::new("secondary-v", PasteFiles, Some("Explorer"))]));
+    this.update(cx, |p, cx| {
+        p.explorer.set_selected(vec![source.clone()]);
+        p.copy_selection(false, cx);
+    });
+    let previous_copy = cx.read_from_clipboard().unwrap();
+    this.update(cx, |p, cx| p.copy_selection(true, cx));
+    // Clipboard history may restore an earlier copy of the same paths.
+    cx.write_to_clipboard(previous_copy);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.select_tree_path(root.join("dest"), window, cx)
+        });
+        window.render_frame(cx);
+        window.press("cmd-v", cx);
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        cx.read(|cx| !explorer_ops::file_is_moving(&source, cx))
+    });
+    assert!(
+        source.exists(),
+        "an old copy must not activate the pending cut"
+    );
+    assert!(!root.join("dest/b.txt").exists());
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[gpui_kit::test]
 async fn finder_drops_copy_into_folder_file_parent_and_blank_space(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let base = fixture("drop");
@@ -974,11 +1135,19 @@ async fn finder_drops_copy_into_folder_file_parent_and_blank_space(cx: &mut Test
     });
     for (name, row, destination) in [
         ("folder.txt", Some(root.join("dest")), root.join("dest")),
+        ("dest", Some(root.join("dest")), root.join("dest")),
         ("a.txt", Some(root.join("a.txt")), root.clone()),
         ("blank.txt", None, root.clone()),
     ] {
         let source = base.join("finder").join(name);
-        fs::write(&source, "from Finder").unwrap();
+        if name == "dest" {
+            fs::create_dir_all(source.join("嵌套 folder")).unwrap();
+            fs::write(source.join("嵌套 folder/file.txt"), "from Finder").unwrap();
+            fs::create_dir_all(root.join("dest/dest")).unwrap();
+            fs::write(root.join("dest/dest/keep.txt"), "existing").unwrap();
+        } else {
+            fs::write(&source, "from Finder").unwrap();
+        }
         let position = if let Some(row) = row {
             row_position(cx, handle, &this, &row)
         } else {
@@ -1006,7 +1175,13 @@ async fn finder_drops_copy_into_folder_file_parent_and_blank_space(cx: &mut Test
             window.dispatch_event(FileDropEvent::Ended.to_platform_input(), cx);
         })
         .unwrap();
-        let target = destination.join(if name == "a.txt" { "a copy.txt" } else { name });
+        let target = destination.join(if name == "a.txt" {
+            "a copy.txt"
+        } else if name == "dest" {
+            "dest copy"
+        } else {
+            name
+        });
         settle(cx, Some(handle), |cx| {
             this.read_with(cx, |p, _| {
                 p.explorer.selected.contains(&target)
@@ -1014,8 +1189,28 @@ async fn finder_drops_copy_into_folder_file_parent_and_blank_space(cx: &mut Test
             })
         });
         this.read_with(cx, |p, _| assert!(!p.explorer.collapsed));
-        assert_eq!(fs::read_to_string(&target).unwrap(), "from Finder");
-        assert_eq!(fs::read_to_string(&source).unwrap(), "from Finder");
+        if name == "dest" {
+            assert_eq!(
+                fs::read_to_string(target.join("嵌套 folder/file.txt")).unwrap(),
+                "from Finder"
+            );
+            assert!(source.join("嵌套 folder/file.txt").exists());
+            assert_eq!(
+                fs::read_to_string(root.join("dest/dest/keep.txt")).unwrap(),
+                "existing"
+            );
+            assert!(
+                !root.join("dest/dest copy 2").exists(),
+                "folder drop copied twice"
+            );
+            assert!(
+                !root.join("dest copy").exists(),
+                "folder drop bubbled to root"
+            );
+        } else {
+            assert_eq!(fs::read_to_string(&target).unwrap(), "from Finder");
+            assert_eq!(fs::read_to_string(&source).unwrap(), "from Finder");
+        }
         if name == "a.txt" {
             assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "a.txt");
             assert!(
@@ -1068,6 +1263,24 @@ async fn batch_cut_follows_open_buffers_and_keeps_failed_paths_for_retry(cx: &mu
             [root.join("missing.txt")]
         );
     });
+    fs::write(root.join("missing.txt"), "retry").unwrap();
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.select_tree_path(root.join("dest"), window, cx);
+            p.paste_files(window, cx);
+            p.paste_files(window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.message == "已移动 1 项")
+    });
+    assert_eq!(
+        fs::read_to_string(root.join("dest/missing.txt")).unwrap(),
+        "retry"
+    );
+    assert!(!root.join("dest/missing copy.txt").exists());
+    cx.read(|cx| assert!(cx.global::<explorer_ops::FileClipboard>().paths.is_empty()));
     assert!(!root.join("a.txt").exists() && !root.join("b.txt").exists());
     assert!(root.join("dest/a.txt").exists() && root.join("dest/b.txt").exists());
     // A pending copy must not overwrite newer selection or a newer clipboard operation.
@@ -1095,10 +1308,24 @@ async fn batch_cut_follows_open_buffers_and_keeps_failed_paths_for_retry(cx: &mu
         });
     })
     .unwrap();
-    settle(cx, Some(handle), |cx| {
-        this.read_with(cx, |p, _| p.message.contains("missing.txt"))
-            && root.join("dest/d.txt").exists()
-    });
+    super::test_support::wait(
+        cx,
+        Some(super::test_support::TICK),
+        Some(handle),
+        |cx| {
+            this.read_with(cx, |p, _| p.message.contains("missing.txt"))
+                && root.join("dest/d.txt").exists()
+        },
+        |cx| {
+            this.read_with(cx, |p, _| {
+                format!(
+                    "concurrent transfer error was lost: message={:?}, copied={}",
+                    p.message,
+                    root.join("dest/d.txt").exists()
+                )
+            })
+        },
+    );
     this.read_with(cx, |p, cx| {
         assert_eq!(
             p.explorer.selected,
@@ -1134,6 +1361,42 @@ async fn failed_cut_restores_the_clipboard_after_its_window_closes(cx: &mut Test
         cx.read(|cx| cx.global::<explorer_ops::FileClipboard>().paths == [root.join("missing.txt")])
     });
     assert!(cx.read(|cx| cx.global::<explorer_ops::FileClipboard>().cut));
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[gpui_kit::test]
+async fn a_failed_cut_does_not_restore_files_after_the_system_clipboard_changes(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let base = fixture("replaced-cut");
+    let root = base.join("workspace");
+    let (handle, this) = open(cx, root.clone());
+    let replacement = ClipboardItem::new_string("new clipboard".into());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.explorer.set_selected(vec![root.join("missing.txt")]);
+            p.copy_selection(true, cx);
+            p.select_tree_path(root.join("dest"), window, cx);
+            p.paste_files(window, cx);
+            assert!(p.message.starts_with("正在移动"));
+            cx.write_to_clipboard(replacement.clone());
+        });
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.message.contains("missing.txt"))
+    });
+    cx.read(|cx| assert!(cx.global::<explorer_ops::FileClipboard>().paths.is_empty()));
+    assert_eq!(cx.read_from_clipboard(), Some(replacement));
+    fs::write(root.join("missing.txt"), "must stay").unwrap();
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.paste_files(window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(root.join("missing.txt").exists());
+    assert!(!root.join("dest/missing.txt").exists());
     fs::remove_dir_all(base).unwrap();
 }
 

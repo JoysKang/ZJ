@@ -18,6 +18,8 @@ use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
     rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 gpui_kit::actions!(
@@ -43,11 +45,33 @@ gpui_kit::actions!(
 pub struct FileClipboard {
     pub paths: Vec<PathBuf>,
     pub cut: bool,
+    item: Option<ClipboardItem>,
     // Identifies the clipboard operation, including its consumed (empty) state.
     revision: Rc<()>,
 }
 
 impl Global for FileClipboard {}
+
+static NEXT_FILE_CLIPBOARD: AtomicU64 = AtomicU64::new(1);
+
+/// Native file entries take precedence; internal cuts belong to one exact system item.
+pub(super) fn file_clipboard(cx: &App) -> Option<(Vec<PathBuf>, bool)> {
+    let item = cx.read_from_clipboard()?;
+    let mut external = Vec::new();
+    let mut has_external = false;
+    for entry in &item.entries {
+        if let ClipboardEntry::ExternalPaths(paths) = entry {
+            has_external = true;
+            external.extend_from_slice(paths.paths());
+        }
+    }
+    if has_external {
+        return (!external.is_empty()).then_some((external, false));
+    }
+    let clipboard = cx.try_global::<FileClipboard>()?;
+    (clipboard.item.as_ref() == Some(&item) && !clipboard.paths.is_empty())
+        .then(|| (clipboard.paths.clone(), clipboard.cut))
+}
 
 #[derive(Default)]
 struct MovingFiles(BTreeSet<PathBuf>);
@@ -685,9 +709,28 @@ impl Workbench {
         if paths.is_empty() {
             return;
         }
+        // Clipboard history must not mistake an older copy for the current cut.
+        let sequence = NEXT_FILE_CLIPBOARD.fetch_add(1, Ordering::Relaxed);
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let item = ClipboardItem::new_string_with_metadata(
+            paths
+                .iter()
+                .map(|path| path.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            format!(
+                "zj.explorer.files:{}:{timestamp}:{sequence}",
+                std::process::id()
+            ),
+        );
+        cx.write_to_clipboard(item.clone());
         cx.set_global(FileClipboard {
             paths,
             cut,
+            item: Some(item),
             ..Default::default()
         });
         cx.notify();
@@ -697,15 +740,12 @@ impl Workbench {
         let Some(dir) = self.target_folder() else {
             return;
         };
-        let (paths, cut) = match cx.try_global::<FileClipboard>() {
-            Some(clipboard) if !clipboard.paths.is_empty() => {
-                (clipboard.paths.clone(), clipboard.cut)
-            }
-            _ => return,
+        let Some((paths, cut)) = file_clipboard(cx) else {
+            return;
         };
         if cut {
-            // Consume this cut once; failed paths are restored unless a newer copy replaces it.
-            cx.set_global(FileClipboard::default());
+            // Keep the item and revision so only this cut can restore failed paths.
+            cx.global_mut::<FileClipboard>().paths.clear();
         }
         let action = if cut {
             FileTransfer::Cut
@@ -752,15 +792,15 @@ impl Workbench {
             {
                 self.message = "移动失败：文件正在保存或移动，请稍后重试".into();
                 if action == FileTransfer::Cut
-                    && cx
-                        .try_global::<FileClipboard>()
-                        .is_some_and(|clipboard| clipboard.paths.is_empty())
+                    && cx.try_global::<FileClipboard>().is_some_and(|clipboard| {
+                        clipboard.paths.is_empty()
+                            && clipboard.item.is_some()
+                            && cx.read_from_clipboard() == clipboard.item
+                    })
                 {
-                    cx.set_global(FileClipboard {
-                        paths,
-                        cut: true,
-                        ..Default::default()
-                    });
+                    let clipboard = cx.global_mut::<FileClipboard>();
+                    clipboard.paths = paths;
+                    clipboard.cut = true;
                 }
                 cx.notify();
                 return;
@@ -776,6 +816,13 @@ impl Workbench {
         } else {
             None
         };
+        let clipboard_item = cx
+            .try_global::<FileClipboard>()
+            .and_then(|c| c.item.clone());
+        let verb = if moving { "移动" } else { "复制" };
+        let progress = format!("正在{verb} {} 项…", paths.len());
+        self.message = progress.clone();
+        cx.notify();
         let destination = dir.clone();
         let job = cx.background_spawn(async move {
             paths
@@ -814,6 +861,8 @@ impl Workbench {
                     .collect();
                 app.update(|cx| {
                     if !failed.is_empty()
+                        && clipboard_item.is_some()
+                        && cx.read_from_clipboard() == clipboard_item
                         && cx.try_global::<FileClipboard>().is_some_and(|clipboard| {
                             clipboard.paths.is_empty()
                                 && clipboard_revision.as_ref().is_some_and(|revision| {
@@ -821,11 +870,9 @@ impl Workbench {
                                 })
                         })
                     {
-                        cx.set_global(FileClipboard {
-                            paths: failed,
-                            cut: true,
-                            ..Default::default()
-                        });
+                        let clipboard = cx.global_mut::<FileClipboard>();
+                        clipboard.paths = failed;
+                        clipboard.cut = true;
                     }
                 });
             }
@@ -863,6 +910,7 @@ impl Workbench {
                 for directory in directories {
                     this.relist(directory, window, cx);
                 }
+                let count = targets.len();
                 if !targets.is_empty() && untouched {
                     this.explorer.set_selected(targets);
                 }
@@ -873,6 +921,9 @@ impl Workbench {
                         FileTransfer::Move => "移动失败",
                     };
                     this.message = format!("{label}：{}", errors.join("\n"));
+                } else if this.message == progress {
+                    // A successful transfer must not hide another operation's error.
+                    this.message = format!("已{verb} {count} 项");
                 }
                 cx.notify();
             });
