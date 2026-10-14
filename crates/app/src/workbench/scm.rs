@@ -750,17 +750,27 @@ impl Workbench {
                         }
                     }))
                     .child(
-                        Textarea::new(&group.commit_input)
-                            .text_size(theme::TEXT_BODY)
-                            .small()
+                        // One line is as tall as the action button and sits at its center.
+                        div()
+                            .flex()
+                            .items_center()
                             .flex_1()
                             .min_w_0()
-                            .appearance(false)
-                            .disabled(pending)
-                            .aria_label(format!("{name} 的提交消息")),
+                            .min_h(theme::ROW_HEIGHT)
+                            .child(
+                                Textarea::new(&group.commit_input)
+                                    .text_size(theme::TEXT_BODY)
+                                    .line_height(theme::SCM_DETAIL_LINE)
+                                    .small()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .appearance(false)
+                                    .disabled(pending)
+                                    .aria_label(format!("{name} 的提交消息")),
+                            ),
                     )
                     .child(
-                        div().p_1().child(
+                        div().flex_shrink_0().pr_1().child(
                             action(
                                 ("scm-generate-message", g),
                                 if generating {
