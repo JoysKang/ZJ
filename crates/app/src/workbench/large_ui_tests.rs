@@ -165,3 +165,63 @@ async fn the_viewer_goes_to_lines_copies_selected_lines_and_finds(cx: &mut TestA
     });
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[gpui_kit::test]
+async fn dragging_a_directory_keeps_large_viewers_in_all_windows_readable(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-large-drag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("source")).unwrap();
+    std::fs::create_dir(root.join("dest")).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("source/big.log");
+    let line = format!("{}\n", "x".repeat(99));
+    std::fs::write(&path, line.repeat(files::MAX_FILE_BYTES / 100 + 1)).unwrap();
+    let (handle, this) = open(cx, root.clone());
+    let owners = this.read_with(cx, |p, _| p.owners.clone());
+    let (other_handle, other_this) = cx.update(|cx| {
+        let bounds = Bounds::new(Point::default(), size(px(1400.), px(900.)));
+        super::super::test_support::new_window(cx, Some(root.clone()), owners, bounds)
+    });
+    let other_handle = other_handle.downcast::<gpui_kit::base::Root>().unwrap();
+    for (handle, view) in [(handle, &this), (other_handle, &other_this)] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            view.update(cx, |p, cx| {
+                p.open_file(path.clone(), Some(root.clone()), window, cx)
+            });
+        })
+        .unwrap();
+        settle(cx, Some(handle), |cx| held_line(view, cx, 0).is_some());
+    }
+    let indexes = [&this, &other_this].map(|view| {
+        view.read_with(cx, |p, _| {
+            p.large.as_ref().unwrap().index.as_ref().unwrap().clone()
+        })
+    });
+    let from =
+        super::super::explorer_ui_tests::row_position(cx, handle, &this, &root.join("source"));
+    let to = super::super::explorer_ui_tests::row_position(cx, handle, &this, &root.join("dest"));
+    super::super::explorer_ui_tests::drag(cx, handle, from, to);
+    let target = root.join("dest/source/big.log");
+    for ((handle, view), old) in [(handle, &this), (other_handle, &other_this)]
+        .into_iter()
+        .zip(indexes)
+    {
+        settle(cx, Some(handle), |cx| {
+            view.read_with(cx, |p, _| {
+                p.large.as_ref().is_some_and(|large| {
+                    large.path == target
+                        && large.error.is_none()
+                        && large
+                            .index
+                            .as_ref()
+                            .is_some_and(|index| !Arc::ptr_eq(index, &old))
+                })
+            }) && held_line(view, cx, 0).is_some()
+        });
+        assert_eq!(held_line(view, cx, 0).unwrap(), "x".repeat(99));
+        view.read_with(cx, |p, _| assert!(p.documents.is_empty()));
+    }
+    assert!(!path.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}

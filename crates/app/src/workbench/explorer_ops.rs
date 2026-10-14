@@ -4,8 +4,8 @@
 //! background (`file_ops`); file watching then refreshes Git status and the quick-open index,
 //! and the affected folders are listed again right away.
 
-use super::{Pane, TreeRow, Workbench};
-use crate::{file_ops, files::Entry};
+use super::{DocumentOwners, Pane, TreeRow, Workbench};
+use crate::{file_ops, files::Entry, theme};
 use gpui_kit::{
     component::{
         input::{InputEvent, InputState},
@@ -14,6 +14,8 @@ use gpui_kit::{
     *,
 };
 use std::{
+    cell::RefCell,
+    collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
     rc::Rc,
 };
@@ -46,6 +48,141 @@ pub struct FileClipboard {
 }
 
 impl Global for FileClipboard {}
+
+#[derive(Default)]
+struct MovingFiles(BTreeSet<PathBuf>);
+impl Global for MovingFiles {}
+
+pub(super) fn file_is_moving(path: &Path, cx: &App) -> bool {
+    cx.try_global::<MovingFiles>()
+        .is_some_and(|moving| moving.0.iter().any(|source| path.starts_with(source)))
+}
+
+fn moved_path(path: &Path, old: &Path, new: &Path) -> Option<PathBuf> {
+    path.strip_prefix(old).ok().map(|rest| {
+        if rest.as_os_str().is_empty() {
+            new.to_path_buf()
+        } else {
+            new.join(rest)
+        }
+    })
+}
+
+fn follow_moved_views(
+    owners: &DocumentOwners,
+    old: &Path,
+    new: &Path,
+    origin: EntityId,
+    cx: &mut App,
+) {
+    let mut views: HashMap<_, _> = owners
+        .borrow()
+        .values()
+        .filter(|owner| owner.path.starts_with(old))
+        .map(|owner| (owner.view.entity_id(), (owner.view.clone(), owner.window)))
+        .collect();
+    // Read-only large viewers do not own an editable document.
+    for handle in cx.windows() {
+        let Some(root) = handle.downcast::<gpui_kit::base::Root>() else {
+            continue;
+        };
+        let Ok(root) = root.read(cx) else {
+            continue;
+        };
+        let Ok(view) = root.view().clone().downcast::<Workbench>() else {
+            continue;
+        };
+        if view
+            .read(cx)
+            .large
+            .as_ref()
+            .is_some_and(|large| large.path.starts_with(old))
+        {
+            views
+                .entry(view.entity_id())
+                .or_insert((view.downgrade(), handle));
+        }
+    }
+    for (_, (view, handle)) in views {
+        let _ = handle.update(cx, |_, window, cx| {
+            let _ = view.update(cx, |this, cx| {
+                if cx.entity_id() == origin {
+                    this.follow_document_move(old, new, cx);
+                } else {
+                    this.follow_move(old, new, cx);
+                }
+                let paths: BTreeSet<_> = this
+                    .documents
+                    .iter()
+                    .filter(|doc| doc.path.starts_with(new))
+                    .map(|doc| doc.path.clone())
+                    .collect();
+                let dirty: Vec<_> = this
+                    .documents
+                    .iter()
+                    .filter(|doc| paths.contains(&doc.path) && doc.dirty)
+                    .map(|doc| doc.id)
+                    .collect();
+                for id in dirty {
+                    this.schedule_snapshot(id, window, cx);
+                }
+                // The watcher may have observed deletion before the move completion.
+                this.check_disk(Some(&paths), window, cx);
+                cx.notify();
+            });
+        });
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum FileTransfer {
+    Copy,
+    Cut,
+    Move,
+}
+
+/// Paths are captured when the gesture starts, rather than for every rendered row.
+#[derive(Clone)]
+pub(super) struct DraggedFiles {
+    pub(super) origin: EntityId,
+    pub(super) paths: Rc<RefCell<Vec<PathBuf>>>,
+}
+
+impl DraggedFiles {
+    pub(super) fn can_drop(&self, destination: &Path) -> bool {
+        let paths = self.paths.borrow();
+        !paths.is_empty()
+            && !paths.iter().any(|source| destination.starts_with(source))
+            && !paths
+                .iter()
+                .all(|source| source.parent() == Some(destination))
+    }
+}
+
+impl Render for DraggedFiles {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = theme::colors(cx);
+        let paths = self.paths.borrow();
+        let label = if let [path] = paths.as_slice() {
+            path.file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+                .replace(super::SINGLE_LINE, "⏎")
+        } else {
+            format!("{} 个项目", paths.len())
+        };
+        div()
+            .px_2()
+            .py_1()
+            .rounded(theme::RADIUS_LARGE)
+            .border_1()
+            .border_color(colors.strong_border)
+            .bg(colors.selected)
+            .text_color(colors.selected_fg)
+            .text_size(theme::TEXT_BODY)
+            .child(label)
+    }
+}
 
 #[derive(Clone, PartialEq)]
 pub(super) enum EditKind {
@@ -146,7 +283,7 @@ impl Workbench {
         cx.notify();
     }
 
-    fn selected_file_paths(&self) -> Vec<PathBuf> {
+    pub(super) fn selected_file_paths(&self) -> Vec<PathBuf> {
         file_ops::top_level_paths(
             self.explorer
                 .selected
@@ -380,26 +517,33 @@ impl Workbench {
         }
     }
 
-    /// Open tabs, the diff tab and the selection follow a renamed or moved entry.
-    fn follow_move(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
-        let moved = |path: &Path| {
-            path.strip_prefix(old).ok().map(|rest| {
-                if rest.as_os_str().is_empty() {
-                    new.to_path_buf()
-                } else {
-                    new.join(rest)
-                }
-            })
-        };
+    fn follow_document_move(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
+        let mut changed = false;
         for document in &mut self.documents {
-            if let Some(path) = moved(&document.path) {
+            if let Some(path) = moved_path(&document.path, old, new) {
                 if let Some(owner) = self.owners.borrow_mut().get_mut(&document.id) {
                     owner.path = path.clone();
                 }
                 document.path = path;
+                changed = true;
             }
         }
-        self.schedule_blame(cx);
+        if changed {
+            self.schedule_blame(cx);
+        }
+        if let Some(path) = self
+            .large
+            .as_ref()
+            .and_then(|large| moved_path(&large.path, old, new))
+        {
+            self.large_follow_move(path, cx);
+        }
+    }
+
+    /// Open documents and the tree selection follow a renamed or moved entry.
+    fn follow_move(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
+        self.follow_document_move(old, new, cx);
+        let moved = |path: &Path| moved_path(path, old, new);
         self.explorer.selected = self
             .explorer
             .selected
@@ -563,15 +707,20 @@ impl Workbench {
             // Consume this cut once; failed paths are restored unless a newer copy replaces it.
             cx.set_global(FileClipboard::default());
         }
-        self.transfer_files(paths, dir, cut, window, cx);
+        let action = if cut {
+            FileTransfer::Cut
+        } else {
+            FileTransfer::Copy
+        };
+        self.transfer_files(paths, dir, action, window, cx);
     }
 
-    /// Shared by paste and Finder drops; IO runs off the render thread.
+    /// Shared by paste, Finder drops and Explorer moves; IO runs off the render thread.
     pub(super) fn transfer_files(
         &mut self,
         paths: Vec<PathBuf>,
         dir: PathBuf,
-        cut: bool,
+        action: FileTransfer,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -580,13 +729,59 @@ impl Workbench {
             return;
         }
         let selection = self.explorer.selected.clone();
-        let clipboard_revision = cx.try_global::<FileClipboard>().map(|c| c.revision.clone());
+        let moving = action != FileTransfer::Copy;
+        if moving {
+            let current = cx.entity_id();
+            let affected = |path: &Path| paths.iter().any(|source| path.starts_with(source));
+            let saving_here = self
+                .documents
+                .iter()
+                .any(|doc| affected(&doc.path) && doc.saving);
+            let saving_elsewhere = self.owners.borrow().iter().any(|(id, owner)| {
+                affected(&owner.path)
+                    && owner.view.entity_id() != current
+                    && owner.view.upgrade().is_some_and(|view| {
+                        view.read(cx).document(*id).is_some_and(|doc| doc.saving)
+                    })
+            });
+            // Finish path synchronization before another move can relocate the destination.
+            let busy = cx
+                .try_global::<MovingFiles>()
+                .is_some_and(|moving| !moving.0.is_empty());
+            if saving_here || saving_elsewhere || busy || super::documents::saving_under(&paths, cx)
+            {
+                self.message = "移动失败：文件正在保存或移动，请稍后重试".into();
+                if action == FileTransfer::Cut
+                    && cx
+                        .try_global::<FileClipboard>()
+                        .is_some_and(|clipboard| clipboard.paths.is_empty())
+                {
+                    cx.set_global(FileClipboard {
+                        paths,
+                        cut: true,
+                        ..Default::default()
+                    });
+                }
+                cx.notify();
+                return;
+            }
+            cx.default_global::<MovingFiles>()
+                .0
+                .extend(paths.iter().cloned());
+        }
+        let owners = self.owners.clone();
+        let origin = cx.entity_id();
+        let clipboard_revision = if action == FileTransfer::Cut {
+            cx.try_global::<FileClipboard>().map(|c| c.revision.clone())
+        } else {
+            None
+        };
         let destination = dir.clone();
         let job = cx.background_spawn(async move {
             paths
                 .into_iter()
                 .map(|source| {
-                    let result = if cut {
+                    let result = if moving {
                         file_ops::move_into(&source, &destination)
                     } else {
                         file_ops::copy_into(&source, &destination)
@@ -598,8 +793,20 @@ impl Workbench {
         let app = cx.to_async();
         cx.spawn_in(window, async move |this, cx| {
             let results = job.await;
+            if moving {
+                app.update(|cx| {
+                    for (source, result) in &results {
+                        if let Ok(target) = result {
+                            follow_moved_views(&owners, source, target, origin, cx);
+                        }
+                    }
+                    for (source, _) in &results {
+                        cx.default_global::<MovingFiles>().0.remove(source);
+                    }
+                });
+            }
             // The clipboard belongs to the app, even if the originating window closes.
-            if cut {
+            if action == FileTransfer::Cut {
                 let failed: Vec<_> = results
                     .iter()
                     .filter(|(_, result)| result.is_err())
@@ -630,7 +837,7 @@ impl Workbench {
                 for (source, result) in results {
                     match result {
                         Ok(target) => {
-                            if cut {
+                            if moving {
                                 this.follow_move(&source, &target, cx);
                                 if let Some(parent) = source.parent() {
                                     directories.insert(parent.to_path_buf());
@@ -660,7 +867,12 @@ impl Workbench {
                     this.explorer.set_selected(targets);
                 }
                 if !errors.is_empty() {
-                    this.message = format!("粘贴失败：{}", errors.join("\n"));
+                    let label = match action {
+                        FileTransfer::Copy => "复制失败",
+                        FileTransfer::Cut => "粘贴失败",
+                        FileTransfer::Move => "移动失败",
+                    };
+                    this.message = format!("{label}：{}", errors.join("\n"));
                 }
                 cx.notify();
             });

@@ -90,6 +90,17 @@ pub(super) fn target_is_saving(path: &Path, identity: DocumentId, cx: &App) -> b
     })
 }
 
+pub(super) fn saving_under(paths: &[PathBuf], cx: &App) -> bool {
+    cx.try_global::<SaveTargets>().is_some_and(|targets| {
+        targets
+            .0
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|target| paths.iter().any(|source| target.starts_with(source)))
+    })
+}
+
 fn canonical_save_target(path: &Path) -> std::io::Result<(PathBuf, Option<DocumentId>)> {
     let path = match std::fs::canonicalize(path) {
         Ok(path) => Ok(path),
@@ -501,16 +512,21 @@ impl Workbench {
         let Some(doc) = self.document(id) else {
             return Task::ready(false);
         };
-        if doc.saving {
-            // Another save (often auto-save) is writing: wait for it, then save what is newer.
+        if doc.saving || super::explorer_ops::file_is_moving(&doc.path, cx) {
+            // A save or move is in flight: wait, then save at the current path.
             // Quitting with 保存 must not fail just because the two met.
             return cx.spawn_in(window, async move |this, cx| {
                 loop {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(20))
                         .await;
-                    match this.update(cx, |this, _| {
-                        this.document(id).map(|doc| (doc.saving, doc.dirty))
+                    match this.update(cx, |this, cx| {
+                        this.document(id).map(|doc| {
+                            (
+                                doc.saving || super::explorer_ops::file_is_moving(&doc.path, cx),
+                                doc.dirty,
+                            )
+                        })
                     }) {
                         Ok(Some((true, _))) => {}
                         Ok(Some((false, false))) => return true,
@@ -745,13 +761,17 @@ impl Workbench {
         let Some(doc) = self.document(id) else {
             return Task::ready(false);
         };
-        if doc.saving {
+        if doc.saving || super::explorer_ops::file_is_moving(&doc.path, cx) {
             return cx.spawn_in(window, async move |this, cx| {
                 loop {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(20))
                         .await;
-                    match this.update(cx, |this, _| this.document(id).map(|doc| doc.saving)) {
+                    match this.update(cx, |this, cx| {
+                        this.document(id).map(|doc| {
+                            doc.saving || super::explorer_ops::file_is_moving(&doc.path, cx)
+                        })
+                    }) {
                         Ok(Some(true)) => {}
                         Ok(Some(false)) => break,
                         _ => return false,
@@ -774,6 +794,9 @@ impl Workbench {
                 let attempt = (|| {
                     this.document(id).ok_or_else(|| "标签已关闭".to_string())?;
                     let (path, identity) = resolved.map_err(|error| error.to_string())?;
+                    if super::explorer_ops::file_is_moving(&path, cx) {
+                        return Err("目标文件正在移动，请稍后重试".into());
+                    }
                     let same_file = |doc: &Document| {
                         doc.path == path
                             || identity.is_some_and(|identity| {
@@ -1093,18 +1116,24 @@ impl Workbench {
         }
         let work = cx.background_spawn(async move {
             jobs.into_iter()
-                .map(|(id, path, known)| (id, known, save::check(&path, &known)))
+                .map(|(id, path, known)| {
+                    let result = save::check(&path, &known);
+                    (id, path, known, result)
+                })
                 .collect::<Vec<_>>()
         });
         cx.spawn_in(window, async move |this, cx| {
             let results = work.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                for (id, known, result) in results {
+                for (id, path, known, result) in results {
                     // A save (or another check) finished meanwhile: this answer compares the
                     // disk with a state that is no longer the tab's.
-                    let current = this
-                        .document(id)
-                        .is_some_and(|doc| doc.disk == Some(known) && !doc.saving);
+                    let current = this.document(id).is_some_and(|doc| {
+                        doc.path == path
+                            && doc.disk == Some(known)
+                            && !doc.saving
+                            && !super::explorer_ops::file_is_moving(&doc.path, cx)
+                    });
                     if !current {
                         continue;
                     }

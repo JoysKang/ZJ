@@ -114,6 +114,19 @@ impl Workbench {
         cx.notify();
     }
 
+    pub(super) fn large_follow_move(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(large) = self.large.as_mut().filter(|large| large.path != path) else {
+            return;
+        };
+        large.path = path;
+        if let Some(find) = large.find.as_mut() {
+            find.cancel.store(true, Ordering::Relaxed);
+            find._task = None;
+            find.status.clear();
+        }
+        self.large_index(cx);
+    }
+
     /// The watcher saw these paths change (`None`: anything may have).
     pub(super) fn large_check_disk(
         &mut self,

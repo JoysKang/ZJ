@@ -1,7 +1,7 @@
 //! The sidebar: VS Code-style view switcher on top, then Explorer / Search / Source Control.
 
 use super::SINGLE_LINE;
-use super::explorer_ops::{EditKind, FileClipboard};
+use super::explorer_ops::{DraggedFiles, EditKind, FileClipboard, FileTransfer};
 use super::{Decoration, DecorationKind, Sidebar, Workbench};
 use crate::{file_icons, theme};
 use gpui_kit::{
@@ -29,6 +29,42 @@ pub(super) fn chevron(expanded: bool, color: Hsla) -> Icon {
     })
     .size(theme::ICON_SIZE)
     .text_color(color)
+}
+
+/// Each hitbox consumes its own drop, including rejected moves.
+fn internal_drop_target<E: InteractiveElement>(
+    row: E,
+    destination: PathBuf,
+    enabled: bool,
+    colors: theme::Colors,
+    cx: &mut Context<Workbench>,
+) -> E {
+    let target = cx.entity_id();
+    // GPUI schedules drag cleanup only when the drop is handled, including no-op releases.
+    row.can_drop(|value, _, _| value.is::<DraggedFiles>() || value.is::<ExternalPaths>())
+        .drag_over::<DraggedFiles>({
+            let destination = destination.clone();
+            move |style, dragged, _, _| {
+                if enabled && dragged.origin == target && dragged.can_drop(&destination) {
+                    style.bg(colors.selected)
+                } else {
+                    style
+                }
+            }
+        })
+        .on_drop(
+            cx.listener(move |this, dragged: &DraggedFiles, window, cx| {
+                if enabled && dragged.origin == target && dragged.can_drop(&destination) {
+                    this.transfer_files(
+                        dragged.paths.borrow().clone(),
+                        destination.clone(),
+                        FileTransfer::Move,
+                        window,
+                        cx,
+                    );
+                }
+            }),
+        )
 }
 
 impl theme::Colors {
@@ -368,7 +404,14 @@ impl Workbench {
                 None => menu,
             }
         };
-        let header = header.context_menu(root_menu.clone());
+        let header = internal_drop_target(
+            header,
+            root.entry.path.clone(),
+            self.explorer.edit.is_none(),
+            colors,
+            cx,
+        )
+        .context_menu(root_menu.clone());
         let explorer = v_flex()
             .size_full()
             .min_h_0()
@@ -379,7 +422,13 @@ impl Workbench {
             })
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 if let Some(root) = this.root.clone() {
-                    this.transfer_files(paths.paths().to_vec(), root, false, window, cx);
+                    this.transfer_files(
+                        paths.paths().to_vec(),
+                        root,
+                        FileTransfer::Copy,
+                        window,
+                        cx,
+                    );
                 }
             }));
         self.explorer_actions(explorer, cx)
@@ -412,22 +461,27 @@ impl Workbench {
                 )
             })
             .child(
-                div()
-                    .id("explorer-blank")
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(|this, _, window, cx| {
-                            this.explorer
-                                .set_selected(this.root.clone().into_iter().collect());
-                            this.explorer.focus.focus(window, cx);
-                            cx.notify();
-                        }),
-                    )
-                    .test_support()
-                    .context_menu(root_menu),
+                internal_drop_target(
+                    div().id("explorer-blank"),
+                    root.entry.path.clone(),
+                    self.explorer.edit.is_none(),
+                    colors,
+                    cx,
+                )
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, window, cx| {
+                        this.explorer
+                            .set_selected(this.root.clone().into_iter().collect());
+                        this.explorer.focus.focus(window, cx);
+                        cx.notify();
+                    }),
+                )
+                .test_support()
+                .context_menu(root_menu),
             )
             .into_any_element()
     }
@@ -709,23 +763,55 @@ impl Workbench {
                     }
                 })
             });
+        let row = row.when(
+            self.explorer.edit.is_none() && self.root.as_ref() != Some(&path),
+            |row| {
+                let weak = cx.weak_entity();
+                let path = path.clone();
+                row.on_drag(
+                    DraggedFiles {
+                        origin: cx.entity_id(),
+                        paths: Default::default(),
+                    },
+                    move |dragged, _, window, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            if !this.explorer.selected.contains(&path) {
+                                this.select_tree_path(path.clone(), window, cx);
+                            } else {
+                                this.explorer.selection = Some(path.clone());
+                                this.explorer.focus.focus(window, cx);
+                                cx.notify();
+                            }
+                            *dragged.paths.borrow_mut() = this.selected_file_paths();
+                        });
+                        cx.new(|_| dragged.clone())
+                    },
+                )
+            },
+        );
         let weak = cx.weak_entity();
         let destination = if directory {
             path.clone()
         } else {
             path.parent().unwrap_or(&path).to_path_buf()
         };
-        let row = row
-            .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(colors.selected))
-            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
-                this.transfer_files(
-                    paths.paths().to_vec(),
-                    destination.clone(),
-                    false,
-                    window,
-                    cx,
-                );
-            }));
+        let row = internal_drop_target(
+            row,
+            destination.clone(),
+            self.explorer.edit.is_none(),
+            colors,
+            cx,
+        )
+        .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(colors.selected))
+        .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+            this.transfer_files(
+                paths.paths().to_vec(),
+                destination.clone(),
+                FileTransfer::Copy,
+                window,
+                cx,
+            );
+        }));
         let row = row.context_menu(move |menu, _, cx| {
             let can_paste = cx
                 .try_global::<FileClipboard>()
