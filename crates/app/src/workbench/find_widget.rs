@@ -576,6 +576,7 @@ impl Workbench {
             .child(
                 div().w(theme::FIND_INPUT_WIDTH).child(
                     Input::new(&find.query)
+                        .text_size(theme::TEXT_BODY)
                         .small()
                         .suffix(toggles)
                         .when(find.error.is_some(), |input| {
@@ -635,6 +636,7 @@ impl Workbench {
             .child(
                 div().w(theme::FIND_INPUT_WIDTH).child(
                     Input::new(&find.replacement)
+                        .text_size(theme::TEXT_BODY)
                         .small()
                         .suffix(self.find_toggle(
                             "find-preserve-case",

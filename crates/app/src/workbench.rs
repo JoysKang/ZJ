@@ -2473,6 +2473,7 @@ impl Workbench {
 
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        window.set_rem_size(theme::SPACING_REM);
         let colors = theme::colors(cx);
         // macOS: the dot in the window's close button.
         let edited = self.documents.iter().any(|doc| doc.dirty);
@@ -2592,6 +2593,7 @@ impl Render for Workbench {
         v_flex()
             .size_full()
             .relative()
+            .text_size(theme::TEXT_BODY)
             .key_context("WorkspaceEditor")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &NewWindow, _, cx| this.new_window(cx)))

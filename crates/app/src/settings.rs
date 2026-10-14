@@ -141,7 +141,7 @@ impl AgentSettings {
     }
 }
 
-pub const EDITOR_FONT_DEFAULT: f32 = 14.;
+pub const EDITOR_FONT_DEFAULT: f32 = 13.;
 pub const EDITOR_FONT_MIN: f32 = 10.;
 pub const EDITOR_FONT_MAX: f32 = 24.;
 

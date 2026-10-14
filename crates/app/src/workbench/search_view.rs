@@ -521,18 +521,23 @@ impl Workbench {
         let inputs = v_flex()
             .gap_1()
             .child(
-                div()
-                    .debug_selector(|| "search-query".into())
-                    .child(Input::new(&search.query).small().suffix(query_options)),
+                div().debug_selector(|| "search-query".into()).child(
+                    Input::new(&search.query)
+                        .text_size(theme::TEXT_BODY)
+                        .small()
+                        .suffix(query_options),
+                ),
             )
             .child(
                 h_flex()
                     .gap_1()
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(Input::new(&replace.input).small().suffix(preserve_case)),
+                        div().flex_1().min_w_0().child(
+                            Input::new(&replace.input)
+                                .text_size(theme::TEXT_BODY)
+                                .small()
+                                .suffix(preserve_case),
+                        ),
                     )
                     .child(replace_all),
             );
@@ -576,7 +581,7 @@ impl Workbench {
                                 div()
                                     .debug_selector(|| "search-include".into())
                                     .child(
-                                        Textarea::new(&search.include)
+                                        Textarea::new(&search.include).text_size(theme::TEXT_BODY)
                                             .small()
                                             .line_height(theme::SEARCH_GLOB_LINE),
                                     ),
@@ -589,7 +594,7 @@ impl Workbench {
                                     .debug_selector(|| "search-exclude".into())
                                     .relative()
                                     .child(
-                                        Textarea::new(&search.exclude)
+                                        Textarea::new(&search.exclude).text_size(theme::TEXT_BODY)
                                             .small()
                                             .line_height(theme::SEARCH_GLOB_LINE)
                                             .pr(theme::SEARCH_SWITCH_GUTTER),

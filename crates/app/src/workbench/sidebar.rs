@@ -504,7 +504,7 @@ impl Workbench {
                 },
             ))
             .child(
-                Input::new(&edit.input)
+                Input::new(&edit.input).text_size(theme::TEXT_BODY)
                     .xsmall()
                     .text_size(theme::TEXT_BODY)
                     .h(theme::ROW_HEIGHT - theme::ROW_INSET * 2.),

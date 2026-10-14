@@ -589,6 +589,7 @@ impl Workbench {
                     })
                     .child(
                         Textarea::new(&editing.editor)
+                            .text_size(gpui_kit::component::Theme::global(cx).mono_font_size)
                             .appearance(false)
                             .bordered(false),
                     )

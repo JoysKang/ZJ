@@ -749,6 +749,7 @@ impl Workbench {
                     }))
                     .child(
                         Textarea::new(&group.commit_input)
+                            .text_size(theme::TEXT_BODY)
                             .small()
                             .flex_1()
                             .min_w_0()

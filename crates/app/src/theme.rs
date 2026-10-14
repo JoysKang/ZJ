@@ -1,8 +1,8 @@
 //! Design tokens: the only place with literal sizes and colors.
 //!
 //! Sizes sit on a 2/4 px grid modelled on VS Code's workbench. Colors are semantic; the dark
-//! palette uses Solarized Dark and the light palette uses neutral surfaces. Both are written into
-//! GPUI Kit's theme (with the existing syntax palettes) so Kit components such as the
+//! palette follows VS Code Solarized Dark and the light palette follows Nord Light. Both are
+//! written into GPUI Kit's theme with mapped syntax colors so Kit components such as the
 //! Editor match.
 
 use gpui_kit::{
@@ -15,8 +15,8 @@ use serde_json::{Value, json};
 // Spacing (4 px grid). Kit's Tailwind-style helpers (`gap_1` = 4, `px_2` = 8, `px_3` = 12,
 // `p_4` = 16) are already on the grid; constants exist only where arithmetic is needed.
 
-// Heights: every list row shares one height; every bar shares another. The owner asked for
-// text one step larger than VS Code's 13 px, so rows grow from 22 to 24 on the same grid.
+// Heights: every list row shares one height; every bar shares another. Keep the existing
+// 24 px row geometry while matching VS Code's 13 px default text.
 pub const ROW_HEIGHT: Pixels = px(24.);
 /// Separation between code and the current-line Git annotation.
 pub const BLAME_GAP: Pixels = px(24.);
@@ -124,7 +124,9 @@ pub const EDITOR_MAX: Pixels = px(4000.);
 pub const ICON_SIZE: Pixels = px(16.);
 pub const SMALL_ICON_SIZE: Pixels = px(14.);
 pub const FILE_ICON_SIZE: Pixels = px(16.);
-pub const TEXT_BODY: Pixels = px(14.);
+/// Keep Kit rem-based spacing on the existing 4 px grid, independent of text size.
+pub const SPACING_REM: Pixels = px(16.);
+pub const TEXT_BODY: Pixels = px(13.);
 pub const TEXT_CAPTION: Pixels = px(13.);
 pub const TEXT_SECTION: Pixels = px(12.);
 pub const TEXT_BADGE: Pixels = px(10.);
@@ -186,7 +188,7 @@ pub const MD_OVERDRAW: Pixels = px(800.);
 pub const MD_EDIT_MAX_ROWS: usize = 400;
 
 /// Terminal row height for an editor font size (VS Code's `lineHeight` 1 is about 1.2× the
-/// font; a little more reads better at 14 px).
+/// font; a little more keeps small monospace text readable).
 pub fn terminal_line_height(font: Pixels) -> Pixels {
     px((f32::from(font) * 1.3).round())
 }
@@ -235,6 +237,8 @@ pub const AGENT_COMPOSER_BAR: Pixels = px(28.);
 pub const AGENT_SELECTOR_MAX: Pixels = px(120.);
 /// Four editable lines plus the textarea padding; the composer grows through eight lines.
 pub const AGENT_COMPOSER_MIN: Pixels = px(96.);
+/// Four editable rows fill the composer minimum after its vertical input padding.
+pub const AGENT_COMPOSER_LINE: Pixels = px(20.);
 pub const AGENT_QUOTA_WIDTH: Pixels = px(320.);
 pub const AGENT_IMAGE_WIDTH: Pixels = px(104.);
 pub const AGENT_IMAGE_HEIGHT: Pixels = px(72.);
@@ -272,7 +276,7 @@ pub const AGENT_OVERLAY_INPUT: Pixels = px(44.);
 pub const AGENT_OVERLAY_ROW: Pixels = px(80.);
 pub const AGENT_OVERLAY_ROWS: usize = 7;
 pub const RADIUS_OVERLAY: Pixels = px(12.);
-pub const TEXT_OVERLAY_INPUT: Pixels = px(15.);
+pub const TEXT_OVERLAY_INPUT: Pixels = px(13.);
 /// The workspace name flashed when switching between ZJ windows (`workbench/switch_hud.rs`):
 /// gray text on a feathered halo of the editor's color, no box, a little above the middle.
 pub const SWITCH_HUD_TEXT: Pixels = px(100.);
@@ -385,14 +389,14 @@ pub struct Palette {
     pub terminal: [u32; 16],
 }
 
-/// Solarized Dark: deep chrome, recessed panels, the base03 editor and base02 input areas.
-/// Foreground and accent are brighter to keep selection text and focus indicators readable.
+/// VS Code Solarized Dark surfaces, with brighter UI foreground, muted text and accent
+/// to retain text and focus contrast; its canonical syntax colors remain unchanged.
 pub const DARK: Palette = Palette {
     editor: 0x002b36,
     panel: 0x00212b,
-    title: 0x001820,
-    tabs: 0x002630,
-    input_bg: 0x073642,
+    title: 0x002c39,
+    tabs: 0x004052,
+    input_bg: 0x003847,
     border: 0x073642,
     hover: 0x003846,
     selected: 0x005a6f,
@@ -401,7 +405,7 @@ pub const DARK: Palette = Palette {
     selection: 0x274642,
     caret: 0xd30102,
     foreground: 0xe8e9eb,
-    muted: 0x93a1a1,
+    muted: 0x99a6a6,
     accent: 0x34ada4,
     badge: 0x047aa6,
     badge_fg: 0xffffff,
@@ -453,23 +457,24 @@ pub const DARK: Palette = Palette {
     ],
 };
 
-/// Softly separated neutral light surfaces, with darkened status colors for contrast.
+/// VS Code Nord Light surfaces and code foreground. UI foreground, buttons and Git
+/// decorations retain their readable colors instead of the source theme's low-contrast tones.
 pub const LIGHT: Palette = Palette {
-    editor: 0xffffff,
-    panel: 0xfcfcfb,
-    title: 0xf0f0ee,
-    tabs: 0xf5f5f3,
-    input_bg: 0xffffff,
-    border: 0xe2e3e1,
-    hover: 0xf0f1f0,
-    selected: 0xe6e8e7,
+    editor: 0xeceff4,
+    panel: 0xe5e9f0,
+    title: 0xe5e9f0,
+    tabs: 0xe5e9f0,
+    input_bg: 0xfafbfc,
+    border: 0xe1e4e8,
+    hover: 0xebf0f4,
+    selected: 0xe2e5e9,
     selected_fg: 0x242629,
-    active_line: 0xf5f5f3,
-    selection: 0xe6e8e7,
-    caret: 0x282b2f,
+    active_line: 0xf6f8fa,
+    selection: 0xcadbf0,
+    caret: 0x044289,
     foreground: 0x242629,
-    muted: 0x60666d,
-    accent: 0x282b2f,
+    muted: 0x586069,
+    accent: 0x005cc5,
     badge: 0x282b2f,
     badge_fg: 0xffffff,
     primary_hover: 0x3a3e44,
@@ -489,7 +494,7 @@ pub const LIGHT: Palette = Palette {
     deleted: 0x99353f,
     untracked: 0x3f6b2d,
     conflict: 0x7a4e73,
-    code: 0x242629,
+    code: 0x24292e,
     diff_green: 0xa3be8c,
     diff_red: 0xbf616a,
     diff_line_alpha: 0.26,
@@ -498,10 +503,10 @@ pub const LIGHT: Palette = Palette {
     attention_halo: 0xd08770,
     unread: 0x315fb1,
     running: 0x326443,
-    // A neutral tint separates user messages from the panel.
-    user_bubble: 0xedf0ed,
-    card: 0xffffff,
-    card_border: 0xe2e3e1,
+    // A Nord snow-storm tint separates user messages from the panel.
+    user_bubble: 0xdde4ed,
+    card: 0xfafbfc,
+    card_border: 0xe1e4e8,
     strong_border: 0xbfc2c4,
     mark: 0xebcb8b,
     mark_alpha: 0.55,
@@ -568,46 +573,53 @@ const SOLARIZED_SYNTAX: &[(&str, u32, Option<&str>)] = &[
     ("variant", 0xb58900, None),
 ];
 
+/// Maps the installed huytd.nord-light 0.1.1 TextMate theme to tree-sitter captures.
+/// More specific source scopes win; equally specific later rules override earlier ones.
+/// Class constructors use the class rule, while generic types use the entity fallback.
+/// The final empty fontStyle rules clear inherited italics and bold. Captures cannot express
+/// every TextMate context, so broad captures use the nearest source scope rather than guessing.
+/// Comment #748599, green #509546, operator #CB5C69 and escape #27C0B2 are darkened below
+/// to keep 4.5:1 on the Nord editor; the other mapped colors retain their source values.
 const NORD_LIGHT_SYNTAX: &[(&str, u32, Option<&str>)] = &[
-    ("attribute", 0x96593a, None),
-    ("boolean", 0x81587a, None),
-    ("comment", 0x5f6b82, Some("italic")),
-    ("comment.doc", 0x5f6b82, Some("italic")),
-    ("constant", 0x81587a, None),
-    ("constructor", 0x2f6f6d, None),
-    ("embedded", 0x2e3440, None),
-    ("emphasis", 0x81587a, Some("italic")),
-    ("emphasis.strong", 0x81587a, Some("bold")),
-    ("enum", 0x2f6f6d, None),
-    ("function", 0x2f6b8f, None),
-    ("hint", 0x99353f, None),
-    ("predictive", 0x4f7433, None),
-    ("keyword", 0x4c6a94, Some("bold")),
-    ("label", 0x81587a, None),
-    ("link_text", 0x4c6a94, None),
-    ("link_uri", 0x2f6b8f, None),
-    ("number", 0x81587a, None),
-    ("operator", 0x4c6a94, None),
-    ("preproc", 0x4c6a94, None),
-    ("primary", 0x2e3440, None),
-    ("property", 0x2f6b8f, None),
-    ("punctuation", 0x4c566a, None),
-    ("punctuation.bracket", 0x4c566a, None),
-    ("punctuation.delimiter", 0x4c566a, None),
-    ("punctuation.list_marker", 0x4c6a94, None),
-    ("punctuation.special", 0x96593a, None),
-    ("string", 0x4f7433, None),
-    ("string.escape", 0x96593a, None),
-    ("string.regex", 0x96593a, None),
-    ("string.special", 0x4f7433, None),
-    ("string.special.symbol", 0x4f7433, None),
-    ("tag", 0x4c6a94, None),
-    ("text.literal", 0x4f7433, None),
-    ("title", 0x4c6a94, Some("bold")),
-    ("type", 0x2f6f6d, None),
-    ("variable", 0x2e3440, None),
-    ("variable.special", 0x4c6a94, None),
-    ("variant", 0x2f6f6d, None),
+    ("attribute", 0x0d7579, None),
+    ("boolean", 0x3b4252, None),
+    ("comment", 0x606e7f, None),
+    ("comment.doc", 0x606e7f, None),
+    ("constant", 0x3b4252, None),
+    ("constructor", 0x0d7579, None),
+    ("embedded", 0x24292e, None),
+    ("emphasis", 0x24292e, None),
+    ("emphasis.strong", 0x24292e, None),
+    ("enum", 0x417939, None),
+    ("function", 0x0d7579, None),
+    ("hint", 0xad4f5a, None),
+    ("predictive", 0x417939, None),
+    ("keyword", 0x0d7579, None),
+    ("label", 0x417939, None),
+    ("link_text", 0xad4f5a, None),
+    ("link_uri", 0xad4f5a, None),
+    ("number", 0x3b4252, None),
+    ("operator", 0xad4f5a, None),
+    ("preproc", 0x0c60a5, None),
+    ("primary", 0x24292e, None),
+    ("property", 0x6f42c1, None),
+    ("punctuation", 0x3b4252, None),
+    ("punctuation.bracket", 0x3b4252, None),
+    ("punctuation.delimiter", 0x3b4252, None),
+    ("punctuation.list_marker", 0xad4f5a, None),
+    ("punctuation.special", 0x3b4252, None),
+    ("string", 0x417939, None),
+    ("string.escape", 0x197970, None),
+    ("string.regex", 0x0d7579, None),
+    ("string.special", 0x417939, None),
+    ("string.special.symbol", 0x417939, None),
+    ("tag", 0x0d7579, None),
+    ("text.literal", 0x417939, None),
+    ("title", 0x3b4252, None),
+    ("type", 0x417939, None),
+    ("variable", 0x3b4252, None),
+    ("variable.special", 0x0c60a5, None),
+    ("variant", 0x417939, None),
 ];
 
 fn syntax_json(entries: &[(&str, u32, Option<&str>)]) -> Value {
@@ -856,6 +868,7 @@ pub fn follow_appearance(window: Option<&mut Window>, cx: &mut App) {
         .try_global::<crate::settings::Settings>()
         .map_or(crate::settings::EDITOR_FONT_DEFAULT, |s| s.editor_font_size);
     Theme::update(cx, |theme| {
+        theme.font_size = TEXT_BODY;
         theme.mono_font_size = px(editor_font);
         theme.radius = RADIUS;
         theme.radius_lg = RADIUS_LARGE;

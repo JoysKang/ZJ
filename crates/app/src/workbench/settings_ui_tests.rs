@@ -128,7 +128,12 @@ async fn old_settings_are_completed_as_an_undoable_unsaved_edit(cx: &mut TestApp
         editor
     });
     assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
-    cx.read(|cx| assert_eq!(cx.global::<Settings>().editor_font_size, 14.));
+    cx.read(|cx| {
+        assert_eq!(
+            cx.global::<Settings>().editor_font_size,
+            crate::settings::EDITOR_FONT_DEFAULT
+        )
+    });
     cx.update_window(window.into(), |_, window, cx| {
         editor.update(cx, |state, cx| state.focus(window, cx));
         window.render_frame(cx);

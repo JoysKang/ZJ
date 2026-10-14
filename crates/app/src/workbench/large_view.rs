@@ -478,7 +478,7 @@ impl Workbench {
                     .child(
                         div()
                             .w(theme::FIND_INPUT_WIDTH)
-                            .child(Input::new(&find.input).small()),
+                            .child(Input::new(&find.input).text_size(theme::TEXT_BODY).small()),
                     )
                     .child(
                         Button::new("large-find-previous")

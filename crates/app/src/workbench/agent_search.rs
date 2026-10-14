@@ -499,9 +499,12 @@ impl Workbench {
                             .text_color(colors.muted),
                     )
                     .child(
-                        div()
-                            .flex_1()
-                            .child(Input::new(&search.input).appearance(false).bordered(false)),
+                        div().flex_1().child(
+                            Input::new(&search.input)
+                                .text_size(theme::TEXT_BODY)
+                                .appearance(false)
+                                .bordered(false),
+                        ),
                     )
                     .child(
                         div()

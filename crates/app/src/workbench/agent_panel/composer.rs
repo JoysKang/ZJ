@@ -367,8 +367,9 @@ impl Workbench {
             })
             .child(
                 div().px_1().child(
-                    Textarea::new(&self.agent.composer)
+                    Textarea::new(&self.agent.composer).text_size(theme::TEXT_BODY)
                         .min_h(theme::AGENT_COMPOSER_MIN)
+                        .line_height(theme::AGENT_COMPOSER_LINE)
                         .appearance(false)
                         .bordered(false)
                         .token(|context, _, cx| {

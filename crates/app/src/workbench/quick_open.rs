@@ -776,7 +776,7 @@ impl Workbench {
                     .p_2()
                     .border_b_1()
                     .border_color(colors.card_border)
-                    .child(Input::new(&quick.input).small()),
+                    .child(Input::new(&quick.input).text_size(theme::TEXT_BODY).small()),
             )
             .when_some(note, |panel, note| {
                 panel.child(

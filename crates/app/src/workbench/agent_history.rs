@@ -483,7 +483,7 @@ impl Workbench {
                 .flex_1()
                 .min_w_0()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(Input::new(&input).xsmall())
+                .child(Input::new(&input).text_size(theme::TEXT_BODY).xsmall())
                 .into_any_element(),
             None => div()
                 .flex_1()

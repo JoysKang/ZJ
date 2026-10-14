@@ -827,7 +827,7 @@ impl Workbench {
                             cx.stop_propagation();
                         }
                     }))
-                    .child(gpui_kit::component::input::Input::new(&input).small())
+                    .child(gpui_kit::component::input::Input::new(&input).text_size(theme::TEXT_BODY).small())
             }))
             .child(
                 h_flex()
