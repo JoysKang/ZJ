@@ -457,3 +457,33 @@ async fn tab_shortcuts_act_on_the_active_tab(cx: &mut TestAppContext) {
     assert!(names(cx, &this).is_empty());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[gpui_kit::test]
+async fn closing_the_last_open_tab_shows_the_next_restored_one(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = fixture("close-last");
+    let (window, this) = open(cx, root.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.restore_tabs(
+                ["a.txt", "b.txt"].map(|name| root.join(name)).to_vec(),
+                Some(root.join("a.txt")),
+                window,
+                cx,
+            );
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| names(cx, &this) == ["a.txt"]);
+    let id = this.read_with(cx, |p, _| p.documents[0].id);
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.close_document(id, window, cx));
+    })
+    .unwrap();
+    settle(cx, None, |cx| names(cx, &this) == ["b.txt"]);
+    this.read_with(cx, |p, _| {
+        assert!(p.pending_tabs.is_empty());
+        assert_eq!(p.active, Pane::Document(p.documents[0].id));
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}

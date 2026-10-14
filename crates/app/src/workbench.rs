@@ -1757,7 +1757,22 @@ impl Workbench {
 
     /// The tab's ×: asks 「要保存对 X 的更改吗？」 for an edited buffer.
     fn close_document(&mut self, id: DocumentId, window: &mut Window, cx: &mut Context<Self>) {
-        self.confirm_close(vec![id], true, window, cx).detach();
+        let closed = self.confirm_close(vec![id], true, window, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if closed.await {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    // The last open tab is gone but restored tabs are still in the bar:
+                    // show the next one instead of the welcome page.
+                    if this.active == Pane::Welcome
+                        && this.documents.is_empty()
+                        && let Some(next) = this.pending_tabs.first().cloned()
+                    {
+                        this.open_pending_tab(next, window, cx);
+                    }
+                });
+            }
+        })
+        .detach();
     }
 
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
