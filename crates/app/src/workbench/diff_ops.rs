@@ -202,6 +202,7 @@ impl Workbench {
             head: row,
         });
         self.diff.dragging = true;
+        self.diff.caret = None;
         cx.notify();
     }
 
@@ -214,6 +215,7 @@ impl Workbench {
             && selection.head != row
         {
             selection.head = row;
+            self.diff.caret = None;
             cx.notify();
         }
     }

@@ -28,8 +28,8 @@ const MAX_REFERENCES: usize = 500;
 const MAX_HISTORY: usize = 50;
 /// A definition asked for while the workspace index is being built waits this long for it,
 /// checking this often, rather than answering "nothing".
-const INDEX_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
-const INDEX_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+pub(super) const INDEX_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(super) const INDEX_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 const URI_PREFIX: &str = "zj-nav:";
 
 gpui_kit::actions!(
@@ -73,9 +73,24 @@ pub struct Target {
 
 /// A cursor position in the back / forward history.
 #[derive(Clone, Debug, PartialEq)]
-pub struct NavPoint {
-    path: PathBuf,
-    offset: usize,
+pub(super) enum NavPoint {
+    Document {
+        path: PathBuf,
+        offset: usize,
+    },
+    Diff {
+        origin: super::diff_navigation::Origin,
+        caret: super::diff_navigation::Caret,
+    },
+}
+
+impl NavPoint {
+    fn valid(&self, this: &Workbench) -> bool {
+        match self {
+            Self::Document { .. } => true,
+            Self::Diff { origin, .. } => origin.valid_history(this),
+        }
+    }
 }
 
 /// Kind icon and color in pickers, after VS Code's symbol icons.
@@ -114,7 +129,7 @@ fn target(path: &Path, text: &str, symbol: &symbols::Symbol) -> Target {
 }
 
 /// Resolves the identifier at `offset` in `path` (whose current text is `text`).
-fn resolve(
+pub(super) fn resolve(
     path: &Path,
     language: &str,
     text: &str,
@@ -260,7 +275,8 @@ impl DefinitionProvider for Definitions {
         let Some(view) = self.view.upgrade() else {
             return Task::ready(Ok(Vec::new()));
         };
-        let indexer = indexing_view(view, &self.path, cx);
+        let root = view.read(cx).root.clone();
+        let indexer = indexing_view(view, &self.path, root.as_deref(), cx);
         let index = indexer.update(cx, |this, cx| this.symbol_index(cx));
         let indexer = indexer.downgrade();
         let rope = text.clone();
@@ -315,13 +331,18 @@ impl DefinitionProvider for Definitions {
 
 /// The workbench whose index holds `path`: the editor's own, unless the file lies outside its
 /// folder and another window's folder holds it (the deepest such folder).
-fn indexing_view(view: Entity<Workbench>, path: &Path, cx: &App) -> Entity<Workbench> {
+pub(super) fn indexing_view(
+    view: Entity<Workbench>,
+    path: &Path,
+    current_root: Option<&Path>,
+    cx: &App,
+) -> Entity<Workbench> {
     // How deep the folder that holds `path` is.
     let holds = |this: &Workbench| {
         let root = this.root.as_ref().filter(|root| path.starts_with(root))?;
         Some(root.components().count())
     };
-    if holds(view.read(cx)).is_some() {
+    if current_root.is_some_and(|root| path.starts_with(root)) {
         return view;
     }
     cx.windows()
@@ -336,6 +357,7 @@ fn indexing_view(view: Entity<Workbench>, path: &Path, cx: &App) -> Entity<Workb
                 .downcast::<Workbench>()
                 .ok()
         })
+        .filter(|other| *other != view)
         .filter_map(|other| Some((holds(other.read(cx))?, other)))
         .max_by_key(|(depth, _)| *depth)
         .map_or(view, |(_, other)| other)
@@ -387,7 +409,7 @@ impl Workbench {
     }
 
     /// The index was asked for and is not there yet, but is on its way.
-    fn symbol_index_building(&self) -> bool {
+    pub(super) fn symbol_index_building(&self) -> bool {
         self.nav.symbols.is_none()
             && self.nav.symbols_requested
             && (self.nav.symbols_task.is_some() || self.index.is_none() && self.root.is_some())
@@ -477,14 +499,15 @@ impl Workbench {
         match targets.len() {
             0 => {}
             1 => self.jump_to(targets[0].clone(), true, window, cx),
-            _ => self.show_locations(targets, "定义", window, cx),
+            _ => self.show_locations(targets, "定义", None, window, cx),
         }
     }
 
-    fn show_locations(
+    pub(super) fn show_locations(
         &mut self,
         targets: Vec<Target>,
         what: &str,
+        origin: Option<super::diff_navigation::Origin>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -513,7 +536,13 @@ impl Workbench {
                     detail: format!("{relative}:{}", target.line + 1),
                     icon: PickIcon::File(crate::file_icons::for_file(&file)),
                     keys: Vec::new(),
-                    pick: Pick::Jump(target),
+                    pick: match &origin {
+                        Some(origin) => Pick::DiffJump {
+                            target,
+                            origin: origin.clone(),
+                        },
+                        None => Pick::Jump(target),
+                    },
                 }
             })
             .collect();
@@ -535,8 +564,15 @@ impl Workbench {
     }
 
     fn here(&self, cx: &App) -> Option<NavPoint> {
+        if self.active == Pane::Diff {
+            let caret = self.diff_navigation_caret()?;
+            return Some(NavPoint::Diff {
+                origin: self.diff_origin(caret.old)?,
+                caret,
+            });
+        }
         let (path, editor) = self.active_document()?;
-        Some(NavPoint {
+        Some(NavPoint::Document {
             path,
             offset: editor.read(cx).cursor(),
         })
@@ -614,24 +650,46 @@ impl Workbench {
         }
     }
 
+    fn navigate_to(&mut self, point: NavPoint, window: &mut Window, cx: &mut Context<Self>) {
+        match point {
+            NavPoint::Document { path, offset } => {
+                self.go(path, Placement::Offset(offset), window, cx)
+            }
+            NavPoint::Diff { origin, caret } if origin.valid_history(self) => {
+                self.diff_place(caret, window, cx)
+            }
+            NavPoint::Diff { .. } => {}
+        }
+    }
+
     pub(super) fn navigate_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(point) = self.nav.back.pop() else {
-            return;
+        let point = loop {
+            let Some(point) = self.nav.back.pop() else {
+                return;
+            };
+            if point.valid(self) {
+                break point;
+            }
         };
         if let Some(here) = self.here(cx) {
             self.nav.forward.push(here);
         }
-        self.go(point.path, Placement::Offset(point.offset), window, cx);
+        self.navigate_to(point, window, cx);
     }
 
     pub(super) fn navigate_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(point) = self.nav.forward.pop() else {
-            return;
+        let point = loop {
+            let Some(point) = self.nav.forward.pop() else {
+                return;
+            };
+            if point.valid(self) {
+                break point;
+            }
         };
         if let Some(here) = self.here(cx) {
             self.nav.back.push(here);
         }
-        self.go(point.path, Placement::Offset(point.offset), window, cx);
+        self.navigate_to(point, window, cx);
     }
 
     /// ⌃G / `:N:C`: puts the cursor at 0-based `line` and `column` (characters) of the
@@ -645,6 +703,10 @@ impl Workbench {
     ) {
         if self.active == Pane::Large {
             self.large_go_to(line as usize, cx);
+            return;
+        }
+        if self.active == Pane::Diff {
+            self.diff_go_to_line(line, column, window, cx);
             return;
         }
         let Pane::Document(id) = self.active else {
@@ -723,7 +785,7 @@ impl Workbench {
             let targets = job.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.message.clear();
-                this.show_locations(targets, "引用", window, cx);
+                this.show_locations(targets, "引用", None, window, cx);
             });
         }));
     }

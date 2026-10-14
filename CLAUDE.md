@@ -72,7 +72,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `languages.rs`：文件名 / 扩展名到语法的映射，以及 `register()`：Kit 0.7.1 给 Swift / C# / CMake / Proto 配的是空高亮查询（注册了语法也不会有颜色），启动时按 Kit 自己的语言名注册语法 crate 自带的查询（proto 的查询复制在 `queries/proto-highlights.scm`，来源见 LICENSE-QUERIES）；Kotlin / Lua 用 Kit 自带的查询，GraphQL 的语法 crate 不带任何查询，暂不支持。新增语法要同时打开 Kit 的 feature、必要时补 `register()` 条目，并在 `SAMPLES` 里加样例。
   - `editing.rs`：行编辑命令的纯逻辑（⌘/ 行注释、⌥↑↓ 移动行、⇧⌥↑↓ 复制行、⌘D 选词和下一个匹配，按 VS Code 规则），不依赖 GPUI；`workbench/edit_commands.rs` 接到文档编辑器上（`DocumentEditor > Input` 键上下文，只用 Kit 公开的主选区）。
   - `indent.rs`：每个文件的缩进（`.editorconfig` > 按内容猜测 > 语言默认），不依赖 GPUI；`.editorconfig` 在后台打开文件时一起读，状态栏的缩进菜单只改当前文档。
-  - `diff_doc.rs`：在后台把全上下文补丁还原成两侧全文，做行对齐、语法高亮和字符级差异；`workbench/diff_view.rs`：只切片现成数据的虚拟化左右 / 内联 Diff 编辑器；`workbench/diff_ops.rs`：行选择、复制、概览标尺和块 / 行级暂存；`partial_patch.rs`：从全上下文补丁生成只含所选行的补丁。
+  - `diff_doc.rs`：在后台把全上下文补丁还原成两侧全文，做行对齐、语法高亮和字符级差异；`workbench/diff_view.rs`：只切片现成数据的虚拟化左右 / 内联 Diff 编辑器；`workbench/diff_ops.rs`：行选择、复制、概览标尺和块 / 行级暂存；`workbench/diff_navigation.rs`：Diff 内 ⌘点击 / F12 定义与 ⌃G 转到行，后台从原补丁解析当前侧，同文件目标留在对应版本，跨文件复用工作区索引；`partial_patch.rs`：从全上下文补丁生成只含所选行的补丁。
   - `workbench/scm_actions.rs`：Git 写操作确认与结果展示，以及 stash 的选择面板和手动添加 / 移除仓库；`git_service/src/write.rs`：仓库锁内校验及有界执行（stash 的 apply / pop / drop 先确认 `stash@{n}` 仍是选中的提交）；`git_service/src/stash.rs`：stash 列表和单行 blame 的解析。
   - `workbench/scm_message.rs`：源码管理输入框右侧的 AI 按钮，用当前选择的 Agent 独立生成提交信息；优先使用暂存区，没有暂存内容时使用磁盘改动（含未跟踪文件），diff 上限 128 KiB。复用 Agent 进程池，拒绝本次会话的 ACP 文件访问和工具审批；支持时选只读 / 规划模式。手动输入、再次点击或关闭工作区取消生成，回填前核对仓库状态；不自动暂存、提交或推送。展开的干净仓库也保留输入框和提交按钮。
   - `workbench/blame.rs`：当前行末尾的 blame（作者、时间、提交摘要，悬停看详情、点击复制哈希；光标停 400 ms 后 `git blame -L`，编辑中的缓冲区用 `--contents -`，新的请求取消旧的）。Kit 的行尾注释参与绘制、鼠标命中和横向滚动范围，不改变文本、选区或换行；长行可横向滚动查看，超长摘要限宽截断后悬停看详情，折叠或纵向不可见的行隐藏。

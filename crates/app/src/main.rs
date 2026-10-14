@@ -311,6 +311,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             ),
             KeyBinding::new("ctrl-g", nav::GoToLine, Some("WorkspaceEditor")),
             KeyBinding::new("f12", GoToDefinition, Some("Input")),
+            KeyBinding::new("f12", GoToDefinition, Some("DiffEditor")),
             KeyBinding::new("shift-f12", nav::FindReferences, Some("WorkspaceEditor")),
             KeyBinding::new("secondary-c", workbench::CopyDiff, Some("DiffEditor")),
             KeyBinding::new("secondary-a", workbench::SelectAllDiff, Some("DiffEditor")),

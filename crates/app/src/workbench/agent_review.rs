@@ -144,6 +144,7 @@ impl Workbench {
                 }
                 this.diff.raw = None;
                 this.diff.selection = None;
+                this.diff.caret = None;
                 this.diff.fallback = None;
                 match result {
                     Some((text, Some(doc))) => {

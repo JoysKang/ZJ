@@ -46,6 +46,10 @@ pub use commands::ShowAllCommands;
 #[cfg(test)]
 #[path = "workbench/commands_ui_tests.rs"]
 mod commands_ui_tests;
+mod diff_navigation;
+#[cfg(test)]
+#[path = "workbench/diff_navigation_ui_tests.rs"]
+mod diff_navigation_ui_tests;
 mod diff_ops;
 pub use diff_ops::{CopyDiff, SelectAllDiff};
 mod diff_view;
@@ -678,6 +682,7 @@ impl Workbench {
                 doc: None,
                 raw: None,
                 selection: None,
+                caret: None,
                 dragging: false,
                 focus: cx.focus_handle(),
                 source: None,
@@ -2238,6 +2243,7 @@ impl Workbench {
         self.diff.doc = None;
         self.diff.raw = None;
         self.diff.selection = None;
+        self.diff.caret = None;
         self.diff.source = None;
         self.diff.change = None;
         self.diff.scroll = UniformListScrollHandle::new();
@@ -2425,6 +2431,7 @@ impl Workbench {
                                 this.diff.source = Some((text.clone(), dark));
                                 this.diff.raw = raw;
                                 this.diff.selection = None;
+                                this.diff.caret = None;
                                 this.diff.title = title;
                                 match doc {
                                     Some(doc) => {

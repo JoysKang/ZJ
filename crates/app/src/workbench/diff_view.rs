@@ -364,6 +364,11 @@ impl Workbench {
             .min_h_0()
             .key_context("DiffEditor")
             .track_focus(&self.diff.focus)
+            .on_action(cx.listener(
+                |this, _: &gpui_kit::component::input::GoToDefinition, window, cx| {
+                    this.diff_go_to_definition(window, cx)
+                },
+            ))
             .on_action(cx.listener(|this, _: &CopyDiff, _, cx| this.copy_diff_selection(cx)))
             .on_action(cx.listener(|this, _: &SelectAllDiff, _, cx| this.diff_select_all(cx)))
             .on_action(cx.listener(
@@ -483,7 +488,7 @@ impl Workbench {
                 range
                     .filter_map(|index| {
                         let selected = this.diff.selection.is_some_and(|s| s.contains(kind, index));
-                        let row = match kind {
+                        let (row, layout) = match kind {
                             DiffList::Original => doc.rows.get(index).map(|row| {
                                 pair_cell(&doc, row.old, row.kind, false, &paint, selected)
                             }),
@@ -530,6 +535,7 @@ impl Workbench {
                             })
                             .flatten();
                         let current_change = this.diff.change;
+                        let caret = super::diff_navigation::row_caret(&doc, kind, index);
                         Some(
                             row.id((id, index))
                                 .relative()
@@ -543,7 +549,18 @@ impl Workbench {
                                             event.modifiers.shift,
                                             window,
                                             cx,
-                                        )
+                                        );
+                                        this.diff.caret = caret.and_then(|mut caret| {
+                                            caret.column = layout
+                                                .as_ref()?
+                                                .index_for_position(event.position)
+                                                .ok()?;
+                                            Some(caret)
+                                        });
+                                        if event.modifiers.platform {
+                                            this.diff.dragging = false;
+                                            this.diff_go_to_definition(window, cx);
+                                        }
                                     }),
                                 )
                                 .on_mouse_move(cx.listener(
@@ -573,6 +590,14 @@ impl Workbench {
                                             id, block, staged, group, colors, cx,
                                         ))
                                     }
+                                })
+                                .map(|row| {
+                                    #[cfg(test)]
+                                    let row = {
+                                        use gpui_kit::test::TestSupportExt;
+                                        row.test_support()
+                                    };
+                                    row
                                 })
                                 .into_any_element(),
                         )
@@ -642,7 +667,7 @@ fn pair_cell(
     modified: bool,
     paint: &Paint,
     selected: bool,
-) -> Div {
+) -> (Div, Option<TextLayout>) {
     let side = if modified { &doc.new } else { &doc.old };
     match line {
         None => line_row(paint, Fill::Filler, &[None], None, selected),
@@ -670,14 +695,19 @@ fn line_row(
     numbers: &[Option<u32>],
     line: Option<(&Side, usize)>,
     selected: bool,
-) -> Div {
+) -> (Div, Option<TextLayout>) {
+    let text = line.map(|(side, index)| {
+        let text: SharedString = side.line_text(index).to_owned().into();
+        StyledText::new(text).with_highlights(side.lines[index].runs.iter().cloned())
+    });
+    let layout = text.as_ref().map(|text| text.layout().clone());
     let colors = &paint.colors;
     let indicator = match fill {
         Fill::Removed => "−",
         Fill::Added => "+",
         Fill::Plain | Fill::Filler => "",
     };
-    h_flex()
+    let row = h_flex()
         .h(paint.metrics.row)
         .w(paint.width)
         .min_w_full()
@@ -714,16 +744,10 @@ fn line_row(
                 .text_color(colors.muted)
                 .child(indicator),
         )
-        .when_some(line, |row, (side, index)| {
-            let line = &side.lines[index];
-            let text: SharedString = side.line_text(index).to_owned().into();
-            row.child(
-                div()
-                    .flex_shrink_0()
-                    .text_color(colors.code)
-                    .child(StyledText::new(text).with_highlights(line.runs.iter().cloned())),
-            )
-        })
+        .when_some(text, |row, text| {
+            row.child(div().flex_shrink_0().text_color(colors.code).child(text))
+        });
+    (row, layout)
 }
 
 /// "暂存块 / 还原块" (or "取消暂存块") in the gutter of a block's first row, on hover.
@@ -781,6 +805,7 @@ pub(super) struct DiffPane {
     /// Git's own patch lines, for copying exact text and staging selected lines.
     pub(super) raw: Option<Arc<crate::partial_patch::RawPatch>>,
     pub(super) selection: Option<diff_ops::DiffSelection>,
+    pub(super) caret: Option<super::diff_navigation::Caret>,
     pub(super) dragging: bool,
     pub(super) focus: FocusHandle,
     /// Patch text and dark mode the document was built from; equal reloads keep the view.

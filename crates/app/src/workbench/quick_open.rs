@@ -41,6 +41,10 @@ pub(super) enum PickIcon {
 #[derive(Clone)]
 pub(super) enum Pick {
     Jump(Target),
+    DiffJump {
+        target: Target,
+        origin: super::diff_navigation::Origin,
+    },
     /// Switches the repository to a branch (`remote`: creates the tracking local branch).
     Checkout {
         repo: RepoId,
@@ -247,11 +251,19 @@ impl Workbench {
                 ),
             };
         }
-        let Some((_, editor)) = self.active_document() else {
-            return row("请先打开一个文件".into(), None);
+        let (lines, here_line, here_column) = if self.active == super::Pane::Diff {
+            let Some(info) = self.diff_line_info() else {
+                return row("当前 Diff 没有可跳转的行".into(), None);
+            };
+            info
+        } else {
+            let Some((_, editor)) = self.active_document() else {
+                return row("请先打开一个文件".into(), None);
+            };
+            let state = editor.read(cx);
+            let here = state.cursor_position();
+            (state.text().lines_len() as u32, here.line, here.character)
         };
-        let state = editor.read(cx);
-        let lines = state.text().lines_len() as u32;
         match super::navigation::parse_line_query(query) {
             Some((line, column)) if line <= lines => {
                 let label = match column {
@@ -263,17 +275,14 @@ impl Workbench {
                     Some((line - 1, column.map_or(0, |column| column - 1))),
                 )
             }
-            _ => {
-                let here = state.cursor_position();
-                row(
-                    format!(
-                        "当前行: {}，字符: {}。请输入 1 到 {lines} 之间的行号。",
-                        here.line + 1,
-                        here.character + 1
-                    ),
-                    None,
-                )
-            }
+            _ => row(
+                format!(
+                    "当前行: {}，字符: {}。请输入 1 到 {lines} 之间的行号。",
+                    here_line + 1,
+                    here_column + 1
+                ),
+                None,
+            ),
         }
     }
 
@@ -534,6 +543,9 @@ impl Workbench {
             self.quick_open = None;
             match pick {
                 Some(Pick::Jump(target)) => self.jump_to(target, true, window, cx),
+                Some(Pick::DiffJump { target, origin }) => {
+                    self.diff_follow_target(origin, target, window, cx)
+                }
                 Some(Pick::Line(Some((line, column)))) => self.go_to_line(line, column, window, cx),
                 Some(Pick::Command(index)) => {
                     let command = &super::commands::COMMANDS[index];
