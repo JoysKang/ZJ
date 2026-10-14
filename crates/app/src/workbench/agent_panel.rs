@@ -553,7 +553,13 @@ impl Workbench {
                     .py_1()
                     .text_size(theme::TEXT_SECTION)
                     .text_color(colors.muted)
-                    .child(div().flex_shrink_0().child(spinner(self.agent.spin, colors)))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .relative()
+                            .top(theme::AGENT_RUNNING_ICON_OFFSET)
+                            .child(spinner(self.agent.spin, colors)),
+                    )
                     .child(div().min_w_0().child(line))
             }))
             .child(self.render_agent_composer(cx))

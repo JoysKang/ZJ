@@ -228,6 +228,8 @@ pub const AGENT_GLYPH_RADIUS: Pixels = px(5.);
 pub const STATUS_DOT: Pixels = px(8.);
 /// The pale halo around the waiting-for-approval dot.
 pub const STATUS_HALO: Pixels = px(14.);
+/// Optical alignment of the running loader with the status text.
+pub const AGENT_RUNNING_ICON_OFFSET: Pixels = px(1.);
 pub const AGENT_TOOL_ROW: Pixels = px(30.);
 pub const AGENT_CARD_HEAD: Pixels = px(32.);
 pub const AGENT_FILE_ROW: Pixels = px(26.);
