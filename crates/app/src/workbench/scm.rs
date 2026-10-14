@@ -1157,7 +1157,12 @@ impl Workbench {
             .unwrap_or_default()
             .to_string_lossy()
             .replace(SINGLE_LINE, "⏎");
-        let tooltip = file_path.display().to_string();
+        let conflicted = change.kind == ChangeKind::Conflict;
+        let tooltip = if conflicted {
+            format!("合并冲突：{}", file_path.display())
+        } else {
+            file_path.display().to_string()
+        };
         // The row whose diff is open is selected, as in VS Code.
         let selected = self.diff.tab.as_ref().is_some_and(|diff| {
             diff.path == file_path
@@ -1210,7 +1215,28 @@ impl Workbench {
                     colors.hover
                 })
             })
-            .child(file_icons::icon(file_icons::for_file(&name)))
+            .child(if conflicted {
+                div()
+                    .id(("scm-conflict-icon", index))
+                    .size(theme::FILE_ICON_SIZE)
+                    .aria_label("合并冲突")
+                    .child(
+                        Icon::new(IconName::GitMerge)
+                            .size(theme::FILE_ICON_SIZE)
+                            .text_color(colors.conflict),
+                    )
+                    .map(|icon| {
+                        #[cfg(test)]
+                        let icon = {
+                            use gpui_kit::test::TestSupportExt;
+                            icon.test_support()
+                        };
+                        icon
+                    })
+                    .into_any_element()
+            } else {
+                file_icons::icon(file_icons::for_file(&name)).into_any_element()
+            })
             .child(
                 div()
                     .flex_1()

@@ -83,6 +83,10 @@ pub trait InputExtras: Default + 'static {
         None
     }
 
+    fn before_line_widgets(&self) -> &[super::editor::BeforeLineWidget] {
+        &[]
+    }
+
     /// Decoration ranges to paint, innermost collection first.
     fn decoration_layers(&self) -> Vec<&[TextDecoration]> {
         Vec::new()
@@ -358,6 +362,7 @@ impl InputModeKind for TextareaMode {
 pub struct EditorExtras {
     // ZJ patch: one optional line-end annotation, independent of source text.
     pub(crate) line_end_annotation: Option<super::editor::LineEndAnnotation>,
+    pub(crate) before_line_widgets: Vec<super::editor::BeforeLineWidget>,
     pub(crate) lsp: Lsp,
     pub(crate) decorations: DecorationCollections,
     pub(crate) range_decorations: DecorationCollections<RangeDecoration>,
@@ -372,6 +377,7 @@ impl Default for EditorExtras {
     fn default() -> Self {
         Self {
             line_end_annotation: None,
+            before_line_widgets: Vec::new(),
             lsp: Lsp::default(),
             decorations: DecorationCollections::default(),
             range_decorations: DecorationCollections::default(),

@@ -168,7 +168,8 @@ impl<M: InputModeKind> InputBaseState<M> {
     ) -> bool {
         match event.phase {
             TouchPhase::Started => {
-                if self.disabled {
+                // ZJ patch: a long press on a control must not select the source underneath.
+                if self.disabled || self.position_in_before_line_widget(event.start_position) {
                     return false;
                 }
                 if !self.focus_handle.is_focused(window) {

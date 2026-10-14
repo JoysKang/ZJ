@@ -360,6 +360,8 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) replaying_history: bool,
     pub(super) validated_token_edit: bool,
     pub(super) document_revision: u64,
+    // ZJ patch: source byte and screen y retained through edits that move line widgets.
+    pub(super) before_line_anchor: Option<(usize, Pixels, Pixels)>,
     pub(super) token_presentation: super::InlineTokenPresentation,
     pub(super) token_layout_cache: Option<Box<super::token_presentation::TokenLayoutCache>>,
     /// Real per-frame bounds of the placed token elements, keyed by token
@@ -733,6 +735,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             replaying_history: false,
             validated_token_edit: false,
             document_revision: 0,
+            before_line_anchor: None,
             token_presentation: Default::default(),
             token_bounds: Default::default(),
             hovered_token: None,
@@ -925,8 +928,8 @@ impl<M: InputModeKind> InputBaseState<M> {
         };
         let line_height = last_layout.line_height;
 
-        let mut y_offset = last_layout.visible_top;
         for (vi, line) in last_layout.lines.iter().enumerate() {
+            let y_offset = last_layout.visible_line_y[vi];
             let prev_lines_offset = last_layout.visible_line_byte_offsets[vi];
             let local_offset = offset.saturating_sub(prev_lines_offset);
             if let Some(pos) = line.position_for_index(local_offset, last_layout, false) {
@@ -934,8 +937,6 @@ impl<M: InputModeKind> InputBaseState<M> {
                 let adjusted_pos = point(pos.x + last_layout.line_number_width, pos.y + y_offset);
                 return (vi, sub_line_index, Some(adjusted_pos));
             }
-
-            y_offset += line.size(line_height).height;
         }
         (0, 0, None)
     }
@@ -2297,6 +2298,65 @@ impl<M: InputModeKind> InputBaseState<M> {
         (row, display_point.column + point.columns_past_line_end)
     }
 
+    // ZJ patch: retain a text anchor, not an old line number, through a layout change.
+    pub(super) fn capture_before_line_viewport(&mut self) {
+        if self.before_line_anchor.is_some() {
+            return;
+        }
+        let Some(layout) = self.last_layout.as_ref() else {
+            return;
+        };
+        if (self.extras.before_line_widgets().is_empty()
+            && layout.height_projection.slots.is_empty())
+            || layout.document_revision != self.document_revision
+        {
+            return;
+        }
+        let offset = self.scroll_handle.offset();
+        if offset.y >= px(0.) {
+            return;
+        }
+        for (ix, line) in layout.lines.iter().enumerate() {
+            let top = layout.visible_line_y[ix] + offset.y;
+            if top + line.size(layout.line_height).height <= px(0.) {
+                continue;
+            }
+            let subline = ((-top / layout.line_height).floor().max(0.) as usize)
+                .min(line.wrapped_lines.len().saturating_sub(1));
+            let byte = layout.visible_line_byte_offsets[ix]
+                + line
+                    .wrapped_lines
+                    .iter()
+                    .take(subline)
+                    .map(|line| line.len)
+                    .sum::<usize>();
+            self.before_line_anchor = Some((byte, top + layout.line_height * subline, offset.y));
+            break;
+        }
+    }
+
+    fn map_before_line_viewport_edit(&mut self, range: &Range<usize>, new_len: usize) {
+        self.capture_before_line_viewport();
+        if let Some((byte, _, _)) = self.before_line_anchor.as_mut() {
+            if *byte >= range.end {
+                *byte = *byte - range.len() + new_len;
+            } else if *byte >= range.start {
+                *byte = range.start + new_len;
+            }
+        }
+    }
+
+    pub(super) fn position_in_before_line_widget(&self, position: Point<Pixels>) -> bool {
+        self.last_bounds
+            .as_ref()
+            .zip(self.last_layout.as_ref())
+            .is_some_and(|(bounds, layout)| {
+                layout
+                    .height_projection
+                    .contains_slot(position.y - bounds.origin.y, layout.line_height)
+            })
+    }
+
     pub(super) fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -2305,7 +2365,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     ) {
         // A token that consumed the press (a double click selecting it) must
         // not also place the caret.
-        if window.default_prevented() {
+        if window.default_prevented() || self.position_in_before_line_widget(event.position) {
             return;
         }
         self.undo_manager.break_transaction_coalescing();
@@ -2432,6 +2492,11 @@ impl<M: InputModeKind> InputBaseState<M> {
 
         if !within_bounds {
             // Clear hover when mouse leaves the input
+            M::clear_hover_state(self, cx);
+            return;
+        }
+
+        if self.position_in_before_line_widget(event.position) {
             M::clear_hover_state(self, cx);
             return;
         }
@@ -2564,7 +2629,8 @@ impl<M: InputModeKind> InputBaseState<M> {
         let display_pos = self
             .display_map
             .buffer_pos_to_display_pos(crate::input::BufferPoint::new(row, point.column));
-        let row_offset_y = line_height * display_pos.row;
+        let row_offset_y =
+            super::layout::HeightProjection::new(self).row_y(display_pos.row, line_height);
 
         // For Right alignment use 0 margin: the cursor indicator is clamped inside bounds
         // in layout_cursors, so shifting the text here would cause a first-click visual jump.
@@ -3007,6 +3073,7 @@ impl<M: InputModeKind> InputBaseState<M> {
     pub fn set_scroll_offset(&mut self, offset: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
         // ZJ patch: explicit scrolling supersedes the pending review placement.
         self.deferred_cursor_y = None;
+        self.before_line_anchor = None;
         self.deferred_scroll_offset = Some(offset);
         cx.notify();
     }
@@ -3109,8 +3176,15 @@ impl<M: InputModeKind> InputBaseState<M> {
         // - included the input padding.
         // - included the scroll offset.
         let inner_position = position - bounds.origin - point(line_number_width, px(0.));
+        if let Some(index) = last_layout
+            .height_projection
+            .slot_at_y(inner_position.y, line_height)
+        {
+            if let Some(widget) = self.extras.before_line_widgets().get(index) {
+                return (widget.anchor_byte, false, 0);
+            }
+        }
 
-        let mut y_offset = last_layout.visible_top;
         // Position relative to the last line walked, kept for a pointer that ends up
         // below every line.
         let mut last_line_pos = None;
@@ -3123,6 +3197,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             .enumerate()
         {
             let line_start_offset = last_layout.visible_line_byte_offsets[vi];
+            let y_offset = last_layout.visible_line_y[vi];
 
             // Calculate line origin for this display row
             let line_origin = point(px(0.), y_offset);
@@ -3153,7 +3228,6 @@ impl<M: InputModeKind> InputBaseState<M> {
                 return (self.resolve_index(line_start_offset), false, 0);
             }
 
-            y_offset += line_layout.size(line_height).height;
             last_line_pos = Some(pos);
         }
 
@@ -3826,6 +3900,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         for (range, new_text) in &sorted {
             let old_text = self.text.clone();
             self.mode.adjust_auto_closed_pair(range, new_text.len());
+            self.map_before_line_viewport_edit(range, new_text.len());
             self.text.replace(range.clone(), new_text);
 
             M::adjust_annotations(self, range, new_text.len());
@@ -4169,6 +4244,7 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         // Single-line path
         let old_text = self.text.clone();
         self.mode.adjust_auto_closed_pair(&range, new_text.len());
+        self.map_before_line_viewport_edit(&range, new_text.len());
         self.text.replace(range.clone(), new_text);
 
         let mut new_offset = (range.start + new_text.len()).min(self.text.len());
@@ -4331,6 +4407,7 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         let auto_closed_pairs_before = self.mode.auto_closed_pairs().clone();
         let old_text = self.text.clone();
         self.mode.adjust_auto_closed_pair(&range, new_text.len());
+        self.map_before_line_viewport_edit(&range, new_text.len());
         self.text.replace(range.clone(), new_text);
 
         if self.is_single_line() {
@@ -4429,9 +4506,9 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         let mut start_origin = None;
         let mut end_origin = None;
         let line_number_origin = point(line_number_width, px(0.));
-        let mut y_offset = last_layout.visible_top;
 
         for (vi, line) in last_layout.lines.iter().enumerate() {
+            let y_offset = last_layout.visible_line_y[vi];
             if start_origin.is_some() && end_origin.is_some() {
                 break;
             }
@@ -4457,8 +4534,6 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
                     end_origin = Some(p + point(px(0.), y_offset));
                 }
             }
-
-            y_offset += line.size(line_height).height;
         }
 
         let start_origin = start_origin.or_else(|| {
@@ -4484,10 +4559,21 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
         let last_layout = self.last_layout.as_ref()?;
-        let line_point = self.last_bounds?.localize(&point)?;
+        if !self.input_bounds.contains(&point) {
+            return None;
+        }
+        let line_point = point - self.last_bounds?.origin;
+        if last_layout
+            .height_projection
+            .contains_slot(line_point.y, last_layout.line_height)
+        {
+            return None;
+        }
 
         for (vi, line) in last_layout.lines.iter().enumerate() {
+            let y_offset = last_layout.visible_line_y[vi];
             let offset = last_layout.visible_line_byte_offsets[vi];
+            let line_point = line_point - gpui::point(last_layout.line_number_width, y_offset);
             if let Some(utf8_index) = line.index_for_position(line_point, last_layout) {
                 return Some(self.offset_to_utf16(offset + utf8_index));
             }
@@ -8505,11 +8591,9 @@ mod tests {
             });
         });
         cx.run_until_parked();
-        cx.executor()
-            .advance_clock(std::time::Duration::from_millis(300));
-        cx.run_until_parked();
+        // ZJ patch: a focused steady cursor stays visible without a hidden timer phase.
         view.input.read_with(&cx, |state, cx| {
-            assert!(!state.blink_cursor.read(cx).visible());
+            assert!(state.blink_cursor.read(cx).visible());
         });
         // Copy consumes its shortcut without editing text or moving selections.
         for _ in 0..5 {
@@ -8518,9 +8602,6 @@ mod tests {
             #[cfg(not(target_os = "macos"))]
             cx.simulate_keystrokes("ctrl-c");
             cx.run_until_parked();
-            cx.executor()
-                .advance_clock(std::time::Duration::from_millis(200));
-            cx.run_until_parked();
             view.input.read_with(&cx, |state, cx| {
                 assert!(state.blink_cursor.read(cx).visible());
             });
@@ -8528,27 +8609,19 @@ mod tests {
     }
 
     #[gpui::test]
-    fn test_multi_cursor_actions_reveal_hidden_carets(cx: &mut TestAppContext) {
+    fn test_multi_cursor_actions_keep_carets_visible(cx: &mut TestAppContext) {
         let view = InputView::<EditorMode>::new(cx);
         let mut cx = VisualTestContext::from_window(view.window_handle.into(), cx);
         setup_cursors(&mut cx, &view.input, "ab\na|b\nab");
-        // Start each action in the hidden phase without depending on a
-        // key-down listener: actions and text input also arrive directly.
+        // ZJ patch: direct actions keep the same focused, steady cursor visible.
+        cx.update(|window, cx| {
+            view.input.update(cx, |state, cx| state.focus(window, cx));
+        });
+        cx.run_until_parked();
+        view.input.read_with(&cx, |state, cx| {
+            assert!(state.blink_cursor.read(cx).visible())
+        });
         for action in 0..6 {
-            cx.update(|_, cx| {
-                view.input.update(cx, |state, cx| {
-                    state.blink_cursor = cx.new(|_| BlinkCursor::new());
-                    state.blink_cursor.update(cx, |cursor, cx| cursor.start(cx));
-                });
-            });
-            cx.run_until_parked();
-            cx.executor()
-                .advance_clock(std::time::Duration::from_millis(500));
-            cx.run_until_parked();
-            view.input.read_with(&cx, |state, cx| {
-                assert!(!state.blink_cursor.read(cx).visible(), "action {action}");
-            });
-
             cx.update(|window, cx| {
                 view.input.update(cx, |state, cx| {
                     match action {
@@ -10949,6 +11022,7 @@ impl InputBaseState<crate::input::EditorMode> {
     ///
     /// When disabling, all existing folds are cleared.
     pub fn set_folding(&mut self, folding: bool, _: &mut Window, cx: &mut Context<Self>) {
+        self.capture_before_line_viewport();
         if let LayoutMode::CodeEditor { folding: f, .. } = &mut self.mode {
             *f = folding;
         }
@@ -10986,6 +11060,7 @@ impl InputBaseState<crate::input::EditorMode> {
             return false;
         }
 
+        self.capture_before_line_viewport();
         for start_line in covering {
             self.display_map.set_folded(start_line, false);
         }

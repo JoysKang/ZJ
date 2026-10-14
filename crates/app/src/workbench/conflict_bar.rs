@@ -1,11 +1,10 @@
-//! Merge conflicts in the editor (logic in `crate::conflicts`): a conflicted file's markers
-//! are found in the background after each edit, its two sides tinted (current green, incoming
-//! blue), and a bar above the editor resolves the conflict at the cursor — 采用当前 / 采用传入
-//! / 保留双方, one at a time or all at once — and moves between conflicts. Once no marker is
-//! left, the bar offers to mark the file resolved (save, then stage it).
+//! Merge conflicts: tinted code and per-conflict controls before each opening marker.
+//! Scans run in the background. Actions bind the document, scanned version and byte anchor;
+//! after all markers are removed, the resolved banner offers save followed by staging.
 
 use super::*;
 use crate::conflicts::{self, Choice, Conflict};
+use gpui_kit::base::input::BeforeLineWidget;
 use gpui_kit::component::{
     Sizable,
     button::{Button, ButtonVariants},
@@ -13,6 +12,13 @@ use gpui_kit::component::{
     input::{RangeDecoration, RangeDecorationCollection, RangeDecorationStyle},
 };
 use workspace_editor_git::{ChangeKind, WriteOperation, WriteRequest};
+
+#[derive(Clone, Copy)]
+pub(super) struct ConflictTarget {
+    pub(super) document: DocumentId,
+    pub(super) version: u64,
+    pub(super) start: usize,
+}
 
 #[derive(Default)]
 pub(super) struct ConflictDoc {
@@ -24,10 +30,13 @@ pub(super) struct ConflictDoc {
 }
 
 impl Document {
-    /// How many conflicts the last scan found (`None`: not scanned yet).
+    /// Conflicts in the current version (`None`: the scan is pending).
     #[cfg(test)]
     pub(super) fn conflicts_found(&self) -> Option<usize> {
-        self.conflicts.version.map(|_| self.conflicts.list.len())
+        self.conflicts
+            .version
+            .filter(|version| *version == self.version)
+            .map(|_| self.conflicts.list.len())
     }
 }
 
@@ -79,6 +88,7 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         let colors = theme::colors(cx);
+        let weak = cx.weak_entity();
         let Some(doc) = self.document_mut(id).filter(|doc| doc.version == version) else {
             return;
         };
@@ -118,91 +128,156 @@ impl Workbench {
             }
             None => {}
         }
+        let widgets = found
+            .iter()
+            .map(|conflict| {
+                let weak = weak.clone();
+                let target = ConflictTarget {
+                    document: id,
+                    version,
+                    start: conflict.whole.start,
+                };
+                BeforeLineWidget {
+                    id: target.start as u64,
+                    anchor_byte: target.start,
+                    height: theme::CONFLICT_ACTION_HEIGHT,
+                    render: Rc::new(move |_, cx| {
+                        weak.update(cx, |this, cx| this.render_conflict_actions(target, cx))
+                            .ok()
+                            .flatten()
+                    }),
+                }
+            })
+            .collect();
+        doc.editor
+            .update(cx, |editor, cx| editor.set_before_line_widgets(widgets, cx));
         doc.conflicts.list = Arc::new(found);
         doc.conflicts.version = Some(version);
         cx.notify();
     }
 
-    /// The active document's conflicts (as last found) and the one at the cursor.
-    fn active_conflicts(
-        &self,
-        cx: &App,
-    ) -> Option<(DocumentId, Arc<Vec<Conflict>>, Option<usize>)> {
-        let id = self.active_document_id()?;
-        let doc = self.document(id)?;
-        let list = doc.conflicts.list.clone();
-        let current = conflicts::current(&list, doc.editor.read(cx).cursor());
-        Some((id, list, current))
+    fn conflict_at(&self, target: ConflictTarget) -> Option<(&Document, &Conflict)> {
+        if self.active != Pane::Document(target.document) {
+            return None;
+        }
+        let doc = self.document(target.document)?;
+        if doc.version != target.version || doc.conflicts.version != Some(target.version) {
+            return None;
+        }
+        let conflict = doc
+            .conflicts
+            .list
+            .iter()
+            .find(|c| c.whole.start == target.start)?;
+        Some((doc, conflict))
     }
 
-    /// Resolves the conflict at the cursor, or (`all`) every conflict, as `choice`.
+    fn render_conflict_actions(
+        &self,
+        target: ConflictTarget,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        self.conflict_at(target)?;
+        let colors = theme::colors(cx);
+        let action = |id, label, choice| {
+            Button::new((id, target.start))
+                .xsmall()
+                .text()
+                .label(label)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.resolve_conflict(target, choice, window, cx)
+                }))
+        };
+        let separator = || div().text_color(colors.muted).child("|");
+        Some(
+            h_flex()
+                .id(("conflict-actions", target.start))
+                .h(theme::CONFLICT_ACTION_HEIGHT)
+                .gap_1()
+                .whitespace_nowrap()
+                .text_size(theme::TEXT_CAPTION)
+                .text_color(colors.muted)
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(action("conflict-ours", "采用当前更改", Choice::Ours))
+                .child(separator())
+                .child(action("conflict-theirs", "采用传入的更改", Choice::Theirs))
+                .child(separator())
+                .child(action("conflict-both", "保留双方更改", Choice::Both))
+                .child(separator())
+                .child(
+                    Button::new(("conflict-compare", target.start))
+                        .xsmall()
+                        .text()
+                        .label("比较更改")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.compare_conflict(target, window, cx)
+                        })),
+                )
+                .test_support()
+                .into_any_element(),
+        )
+    }
+
+    /// Resolve precisely the clicked conflict; one replacement is one undo step.
     pub(super) fn resolve_conflict(
         &mut self,
+        target: ConflictTarget,
         choice: Choice,
-        all: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((id, list, current)) = self.active_conflicts(cx) else {
+        let Some((doc, conflict)) = self.conflict_at(target) else {
             return;
         };
-        let Some(doc) = self.document(id) else {
-            return;
-        };
-        // Markers found in an older text would cut the wrong bytes.
-        if doc.conflicts.version != Some(doc.version) {
-            return;
-        }
         let editor = doc.editor.clone();
         let text = editor.read(cx).text().to_string();
-        let chosen: Vec<&Conflict> = match (all, current) {
-            (true, _) => list.iter().collect(),
-            (false, Some(index)) => vec![&list[index]],
-            (false, None) => return,
-        };
-        let (Some(first), Some(last)) = (chosen.first(), chosen.last()) else {
-            return;
-        };
-        // One replacement from the first conflict to the end of the last: one undo step.
-        let span = first.whole.start..last.whole.end;
-        let mut replacement = String::new();
-        let mut at = span.start;
-        for conflict in &chosen {
-            replacement.push_str(&text[at..conflict.whole.start]);
-            replacement.push_str(&conflicts::resolve(&text, conflict, choice));
-            at = conflict.whole.end;
-        }
-        let range = crate::replace::utf16_offset(&text, span.start)
-            ..crate::replace::utf16_offset(&text, span.end);
-        let line = first.line as u32;
+        let replacement = conflicts::resolve(&text, conflict, choice);
+        let range = crate::replace::utf16_offset(&text, conflict.whole.start)
+            ..crate::replace::utf16_offset(&text, conflict.whole.end);
+        let line = conflict.line as u32;
         editor.update(cx, |state, cx| {
             state.replace_text_in_range(Some(range), &replacement, window, cx);
             state.set_cursor_position(lsp_types::Position::new(line, 0), window, cx);
+            state.focus(window, cx);
         });
     }
 
-    /// Moves the cursor to the previous / next conflict (wrapping around).
-    pub(super) fn step_conflict(
+    /// Compare the clicked conflict's two sides from the buffer, including unsaved edits.
+    fn compare_conflict(
         &mut self,
-        forward: bool,
+        target: ConflictTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((_, list, _)) = self.active_conflicts(cx) else {
+        let Some((doc, conflict)) = self.conflict_at(target) else {
             return;
         };
-        let Some(editor) = self.active_editor() else {
-            return;
-        };
-        let line = editor.read(cx).cursor_position().line as usize;
-        let target = if forward {
-            list.iter().find(|c| c.line > line).or(list.first())
-        } else {
-            list.iter().rev().find(|c| c.line < line).or(list.last())
-        };
-        if let Some(conflict) = target {
-            self.go_to_line(conflict.line as u32, 0, window, cx);
-        }
+        let text = doc.editor.read(cx).text().to_string();
+        let ours = text[conflict.ours.clone()].to_string();
+        let theirs = text[conflict.theirs.clone()].to_string();
+        let path = doc.path.clone();
+        let name = doc.name();
+        let navigation = self.file_generation;
+        let patch = cx.background_spawn(async move { crate::save::text_patch(&ours, &theirs) });
+        cx.spawn_in(window, async move |this, cx| {
+            let patch = patch.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.file_generation != navigation || this.conflict_at(target).is_none() {
+                    return;
+                }
+                this.show_diff_tab(
+                    DiffTab {
+                        label: format!("{name}（当前 ↔ 传入）"),
+                        tooltip: format!("{} · 当前更改 ↔ 传入的更改", path.display()),
+                        path,
+                        source: DiffSource::Local(patch.into()),
+                    },
+                    window,
+                    cx,
+                );
+            });
+        })
+        .detach();
     }
 
     /// 标记为已解决: saves the file if edited, then stages it. The save changes the file the
@@ -263,98 +338,43 @@ impl Workbench {
         .detach();
     }
 
-    /// The bar above a conflicted document.
+    /// Only the resolved state is a banner; unresolved actions live beside their code.
     pub(super) fn render_conflict_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (id, list, current) = self.active_conflicts(cx)?;
+        let id = self.active_document_id()?;
         let doc = self.document(id)?;
-        let conflicted = self.conflict_entry(&doc.path).is_some();
-        if list.is_empty() && !conflicted {
+        if doc.conflicts.version != Some(doc.version)
+            || !doc.conflicts.list.is_empty()
+            || self.conflict_entry(&doc.path).is_none()
+        {
             return None;
         }
         let colors = theme::colors(cx);
-        let button =
-            |id: &'static str, label: &'static str| Button::new(id).xsmall().ghost().label(label);
-        let resolve = |id: &'static str, label: &'static str, choice: Choice, all: bool| {
-            button(id, label).on_click(cx.listener(move |this, _, window, cx| {
-                this.resolve_conflict(choice, all, window, cx)
-            }))
-        };
-        let bar = h_flex()
-            .id("conflict-bar")
-            .w_full()
-            .h(theme::BANNER_HEIGHT)
-            .px_3()
-            .gap_1()
-            .flex_shrink_0()
-            .bg(colors.banner)
-            .border_b_1()
-            .border_color(colors.border)
-            .text_size(theme::TEXT_CAPTION)
-            .text_color(colors.foreground)
-            .child(
-                gpui_kit::component::Icon::new(gpui_kit::assets::IconName::GitMerge)
-                    .text_color(colors.conflict),
-            );
-        if list.is_empty() {
-            return Some(
-                bar.child(div().flex_1().min_w_0().child("冲突已全部解决。"))
-                    .child(
-                        button("conflict-mark-resolved", "标记为已解决（暂存）").on_click(
-                            cx.listener(move |this, _, window, cx| {
-                                this.mark_resolved(id, window, cx)
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-            );
-        }
-        let position = current.map_or(String::new(), |i| {
-            format!("第 {} / {} 处冲突", i + 1, list.len())
-        });
         Some(
-            bar.child(div().flex_1().min_w_0().child(position))
-                .child(resolve("conflict-ours", "采用当前", Choice::Ours, false))
-                .child(resolve(
-                    "conflict-theirs",
-                    "采用传入",
-                    Choice::Theirs,
-                    false,
-                ))
-                .child(resolve("conflict-both", "保留双方", Choice::Both, false))
-                .child(div().w_2())
-                .child(resolve(
-                    "conflict-all-ours",
-                    "全部采用当前",
-                    Choice::Ours,
-                    true,
-                ))
-                .child(resolve(
-                    "conflict-all-theirs",
-                    "全部采用传入",
-                    Choice::Theirs,
-                    true,
-                ))
+            h_flex()
+                .id("conflict-resolved-bar")
+                .w_full()
+                .h(theme::BANNER_HEIGHT)
+                .px_3()
+                .gap_1()
+                .flex_shrink_0()
+                .bg(colors.banner)
+                .border_b_1()
+                .border_color(colors.border)
+                .text_size(theme::TEXT_CAPTION)
+                .text_color(colors.foreground)
                 .child(
-                    Button::new("conflict-previous")
-                        .xsmall()
-                        .ghost()
-                        .icon(gpui_kit::assets::IconName::ChevronUp)
-                        .tooltip("上一处冲突")
-                        .on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.step_conflict(false, window, cx)
-                            }),
-                        ),
+                    gpui_kit::component::Icon::new(gpui_kit::assets::IconName::GitMerge)
+                        .text_color(colors.conflict),
                 )
+                .child(div().flex_1().min_w_0().child("冲突已全部解决。"))
                 .child(
-                    Button::new("conflict-next")
+                    Button::new("conflict-mark-resolved")
                         .xsmall()
                         .ghost()
-                        .icon(gpui_kit::assets::IconName::ChevronDown)
-                        .tooltip("下一处冲突")
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.step_conflict(true, window, cx)),
-                        ),
+                        .label("标记为已解决（暂存）")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.mark_resolved(id, window, cx)
+                        })),
                 )
                 .into_any_element(),
         )

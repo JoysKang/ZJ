@@ -1,6 +1,6 @@
 use gpui::{App, Div, Entity, InteractiveElement as _, IntoElement, RenderOnce, Stateful, Window};
 
-use super::{EditorMode, InputBaseState, InputModeKind};
+use super::{EditorMode, InputBaseState, InputModeKind, RopeExt as _};
 
 /// State for source-code editing.
 ///
@@ -18,7 +18,40 @@ pub struct LineEndAnnotation {
     pub(crate) render: std::rc::Rc<dyn Fn(&mut Window, &mut App) -> Option<gpui::AnyElement>>,
 }
 
+/// ZJ patch: an application-owned control occupying space before a logical code line.
+/// Anchors must be UTF-8 byte offsets at line starts; heights must be finite and positive.
+#[derive(Clone)]
+pub struct BeforeLineWidget {
+    pub id: u64,
+    pub anchor_byte: usize,
+    pub height: gpui::Pixels,
+    pub render: std::rc::Rc<dyn Fn(&mut Window, &mut App) -> Option<gpui::AnyElement>>,
+}
+
 impl EditorState {
+    /// Replace the controls. Invalid anchors/heights and duplicate logical lines are ignored.
+    /// Rendering is deferred until the slot intersects the viewport.
+    pub fn set_before_line_widgets(
+        &mut self,
+        mut widgets: Vec<BeforeLineWidget>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        widgets.retain(|widget| {
+            widget.anchor_byte <= self.text.len()
+                && f32::from(widget.height).is_finite()
+                && widget.height > gpui::px(0.)
+                && self
+                    .text
+                    .line_start_offset(self.text.offset_to_point(widget.anchor_byte).row)
+                    == widget.anchor_byte
+        });
+        widgets.sort_by_key(|widget| widget.anchor_byte);
+        widgets.dedup_by_key(|widget| widget.anchor_byte);
+        self.extras.before_line_widgets = widgets;
+        self.capture_before_line_viewport();
+        cx.notify();
+    }
+
     /// ZJ patch: preserve a reviewed line's viewport position on its first source frame,
     /// including soft wrapping. The intent is consumed by layout, not a frame callback.
     pub fn set_cursor_position_in_viewport(
@@ -78,6 +111,8 @@ impl InputModeKind for EditorMode {
 
     fn reset_annotations(state: &mut InputBaseState<Self>) {
         state.extras.hover_popover = None;
+        state.extras.before_line_widgets.clear();
+        state.before_line_anchor = None;
         state.extras.decorations.clear();
         state.extras.range_decorations.clear();
     }
@@ -91,6 +126,25 @@ impl InputModeKind for EditorMode {
         range: &std::ops::Range<usize>,
         new_len: usize,
     ) {
+        state.extras.before_line_widgets.retain_mut(|widget| {
+            if range.start <= widget.anchor_byte && widget.anchor_byte < range.end {
+                return false;
+            }
+            if widget.anchor_byte >= range.end {
+                widget.anchor_byte = widget.anchor_byte - range.len() + new_len;
+            }
+            widget.anchor_byte = state.text.line_start_offset(
+                state
+                    .text
+                    .offset_to_point(widget.anchor_byte.min(state.text.len()))
+                    .row,
+            );
+            true
+        });
+        state
+            .extras
+            .before_line_widgets
+            .dedup_by_key(|widget| widget.anchor_byte);
         state.extras.decorations.adjust_for_edit(range, new_len);
         state
             .extras
@@ -277,6 +331,10 @@ impl crate::input::InputExtras for super::EditorExtras {
     // ZJ patch: ordinary inputs/textarea retain the trait's empty default.
     fn line_end_annotation(&self) -> Option<&LineEndAnnotation> {
         self.line_end_annotation.as_ref()
+    }
+
+    fn before_line_widgets(&self) -> &[BeforeLineWidget] {
+        &self.before_line_widgets
     }
 
     fn decoration_layers(&self) -> Vec<&[super::TextDecoration]> {

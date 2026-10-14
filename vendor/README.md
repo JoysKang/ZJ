@@ -59,6 +59,14 @@ and its debug-only screenshot configuration alongside ZJ's shared atlas and draw
 
 `gpui-base` (GPUI Kit 0.7.1, the input and editor engine):
 
+- `src/input/editor/mod.rs` and `src/input/base/{layout,element,state,movement,touch}.rs`:
+  fixed-height `BeforeLineWidget` slots precede logical source lines. Only visible controls
+  are instantiated. A height projection keeps `LineLayout`'s text coordinates unchanged;
+  cursor, gutter, blame, selection, mouse and IME geometry use the projected positions.
+  Folded slots occupy no space; a source byte and its screen y keep the viewport stable
+  through slot changes, edits and folds. Explicit scroll/reveal takes priority. Inputs and
+  textareas have no slots or additional timers. ZJ uses this for merge conflict actions.
+
 - `src/input/base/state.rs`: `insert_text_at_preserving_selections` adds settings
   fields as one undoable insertion while keeping every cursor, selection direction,
   and line-end affinity. It refuses incomplete IME input and insertion points that

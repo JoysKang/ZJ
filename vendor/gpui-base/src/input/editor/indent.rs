@@ -119,14 +119,17 @@ impl<M: InputModeKind> TextElement<M> {
         let tab_size = state.mode.tab_size();
         let line_height = last_layout.line_height;
         let mut builder = PathBuilder::stroke(px(1.));
-        let mut offset_y = last_layout.visible_top;
+
         let mut last_indents = vec![];
 
-        for (&buffer_line, line_layout) in last_layout
+        for (vi, (&buffer_line, _line_layout)) in last_layout
             .visible_buffer_lines
             .iter()
             .zip(last_layout.lines.iter())
+            .enumerate()
         {
+            // ZJ patch: indent guides follow source text below before-line controls.
+            let offset_y = last_layout.visible_line_y[vi];
             let line = state.text.slice_line(buffer_line);
             let mut current_indents = vec![];
             if line.len() > 0 {
@@ -153,7 +156,6 @@ impl<M: InputModeKind> TextElement<M> {
                 current_indents = last_indents.clone();
             }
 
-            offset_y += line_layout.wrapped_lines.len() * line_height;
             last_indents = current_indents;
         }
 

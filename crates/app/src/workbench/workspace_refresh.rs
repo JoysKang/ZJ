@@ -242,6 +242,22 @@ impl Workbench {
         if plan.full {
             self.watch.refresh_pending = true;
             self.invalidate_preview(cx);
+            self.check_disk(None, window, cx);
+            // Overflow lost the paths, so query known repositories now and retain the rebuild.
+            let repos: HashSet<_> = self
+                .groups
+                .iter()
+                .map(|group| group.repo.id.clone())
+                .collect();
+            let local = Plan {
+                local_repos: repos.clone(),
+                repos,
+                ..Default::default()
+            };
+            match &mut self.watch.pending_plan {
+                Some(pending) => pending.merge(local),
+                None => self.watch.pending_plan = Some(local),
+            }
             return;
         }
         if plan.is_empty() {
@@ -264,6 +280,23 @@ impl Workbench {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn queue_watch_overflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.queue_plan(
+            Computed {
+                plan: Plan {
+                    full: true,
+                    ..Default::default()
+                },
+                base: None,
+                index: None,
+            },
+            window,
+            cx,
+        );
+        self.flush_workspace_refresh(window, cx);
+    }
+
     /// The watcher already reports changes; activation only re-queries status (cheap), unless
     /// watching is unavailable.
     pub(super) fn refresh_on_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -284,11 +317,43 @@ impl Workbench {
     }
 
     pub(super) fn flush_workspace_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.watch.debouncing
-            || self.loading
-            || self.index_task.is_some()
-            || !self.explorer.tasks.is_empty()
-        {
+        if self.watch.debouncing {
+            return;
+        }
+        let files_busy = self.index_task.is_some() || !self.explorer.tasks.is_empty();
+        // A network query or unrelated file work must not hide new local Git state.
+        // Keep the rest of the plan queued; refresh_repos preserves an interrupted Fetch.
+        if (self.watch.remote_active || files_busy) && (!self.loading || self.watch.remote_active) {
+            let repos = self
+                .watch
+                .pending_plan
+                .as_mut()
+                .map(|plan| {
+                    if self.watch.remote_active {
+                        let repos = std::mem::take(&mut plan.local_repos);
+                        plan.repos.retain(|repo| !repos.contains(repo));
+                        repos
+                    } else {
+                        plan.local_repos.clear();
+                        std::mem::take(&mut plan.repos)
+                    }
+                })
+                .unwrap_or_default();
+            if !repos.is_empty() {
+                if self
+                    .diff
+                    .tab
+                    .as_ref()
+                    .and_then(|diff| diff.request())
+                    .is_some_and(|request| repos.contains(&request.repo.id))
+                {
+                    self.invalidate_preview(cx);
+                }
+                self.refresh_repos(Some(repos), false, window, cx);
+                return;
+            }
+        }
+        if self.loading || files_busy {
             return;
         }
         if self.watch.remote_pending {

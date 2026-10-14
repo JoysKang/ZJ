@@ -358,17 +358,42 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.move_vertical(1, true, window, cx);
     }
 
+    // ZJ patch: a page spans pixels, including controls, from the affinity-aware caret row.
+    fn page_display_rows(&self, direction: isize) -> isize {
+        let Some(layout) = self.last_layout.as_ref() else {
+            return 0;
+        };
+        if layout.height_projection.slots.is_empty() {
+            return direction * (self.input_bounds.size.height / layout.line_height) as isize;
+        }
+        let wrap = self.display_map.offset_to_wrap_display_point_with_affinity(
+            self.cursor(),
+            self.line_end_affinity_at(self.cursor()),
+        );
+        let row = self
+            .display_map
+            .wrap_row_to_display_row(wrap.row)
+            .unwrap_or_else(|| self.display_map.nearest_visible_display_row(wrap.row));
+        let y = layout.height_projection.row_y(row, layout.line_height)
+            + self.input_bounds.size.height * direction as f32;
+        let target = layout.height_projection.row_at_y(
+            y.max(gpui::px(0.)),
+            layout.line_height,
+            self.display_map.display_row_count(),
+        );
+        target as isize - row as isize
+    }
+
     pub(super) fn page_up(&mut self, _: &MovePageUp, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_single_line() {
             return;
         }
 
-        let Some(last_layout) = &self.last_layout else {
+        if self.last_layout.is_none() {
             return;
-        };
-
-        let display_lines = (self.input_bounds.size.height / last_layout.line_height) as isize;
-        self.move_vertical(-display_lines, false, window, cx);
+        }
+        let display_lines = self.page_display_rows(-1);
+        self.move_vertical(display_lines, false, window, cx);
     }
 
     pub(super) fn page_down(
@@ -381,11 +406,10 @@ impl<M: InputModeKind> InputBaseState<M> {
             return;
         }
 
-        let Some(last_layout) = &self.last_layout else {
+        if self.last_layout.is_none() {
             return;
-        };
-
-        let display_lines = (self.input_bounds.size.height / last_layout.line_height) as isize;
+        }
+        let display_lines = self.page_display_rows(1);
         self.move_vertical(display_lines, false, window, cx);
     }
 

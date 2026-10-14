@@ -1599,10 +1599,13 @@ mod tests {
     /// A layout context whose only load-bearing field is the line height.
     fn test_last_layout(line_height: Pixels) -> LastLayout {
         LastLayout {
+            document_revision: 0,
             visible_range: 0..1,
             visible_buffer_lines: vec![0],
             visible_line_byte_offsets: vec![0],
             visible_top: px(0.),
+            visible_line_y: vec![px(0.)],
+            height_projection: Default::default(),
             visible_range_offset: 0..0,
             lines: Rc::new(vec![]),
             line_height,
@@ -1900,10 +1903,13 @@ mod tests {
         line_layout = line_layout.wrap_indent(px(20.0));
 
         let last_layout = LastLayout {
+            document_revision: 0,
             visible_range: 0..1,
             visible_buffer_lines: vec![0],
             visible_line_byte_offsets: vec![0],
             visible_top: px(0.),
+            visible_line_y: vec![px(0.)],
+            height_projection: Default::default(),
             visible_range_offset: 0..0,
             lines: Rc::new(vec![]),
             line_height: px(20.0),

@@ -1429,7 +1429,306 @@ async fn saving_as_another_path_never_keeps_the_old_files_blame(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
-async fn merge_conflicts_are_resolved_from_the_bar_and_marked_resolved(cx: &mut TestAppContext) {
+fn external_merge_conflicts_refresh_scm_and_an_open_clean_document(cx: &mut TestAppContext) {
+    external_merge_refresh(cx, false, false);
+}
+
+#[gpui_kit::test]
+fn external_merge_refresh_does_not_wait_for_an_unrelated_index(cx: &mut TestAppContext) {
+    external_merge_refresh(cx, true, false);
+}
+
+#[gpui_kit::test]
+fn external_merge_overflow_updates_known_repos_before_rebuilding_an_index(cx: &mut TestAppContext) {
+    external_merge_refresh(cx, true, true);
+}
+
+fn external_merge_refresh(cx: &mut TestAppContext, hold_index: bool, overflow: bool) {
+    cx.executor().allow_parking();
+    let repo = fixture(
+        if overflow {
+            "merge-overflow"
+        } else if hold_index {
+            "merge-during-index"
+        } else {
+            "external-merge"
+        },
+        0,
+    );
+    git(&repo, &["switch", "-q", "-c", "feature"]);
+    std::fs::write(repo.join("a.txt"), "feature\n").unwrap();
+    git(&repo, &["commit", "-q", "-am", "feature"]);
+    git(&repo, &["switch", "-q", "main"]);
+    std::fs::write(repo.join("a.txt"), "main\n").unwrap();
+    git(&repo, &["commit", "-q", "-am", "main"]);
+
+    // Initial discovery registers repository metadata before publishing its status.
+    let (window, this) = open(cx, repo.clone());
+    this.read_with(cx, |p, _| {
+        assert!(p.watch.subscription.is_some());
+        assert!(p.watch.error.is_none(), "{:?}", p.watch.error);
+        assert!(p.issues.is_empty(), "{:?}", p.issues);
+        assert!(
+            p.groups[0]
+                .status
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .changes
+                .is_empty()
+        );
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.sidebar = Sidebar::SourceControl;
+            p.open_file(repo.join("a.txt"), Some(repo.clone()), window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, cx| {
+            p.documents
+                .first()
+                .is_some_and(|doc| doc.editor.read(cx).text() == "main\n")
+                && !p.loading
+                && !p.watch.debouncing
+                && !p.watch.refresh_pending
+                && p.watch.pending_plan.is_none()
+                && p.index_task.is_none()
+                && p.explorer.tasks.is_empty()
+        })
+    });
+
+    if hold_index {
+        this.update(cx, |p, cx| {
+            p.index_task = Some(cx.spawn(async move |_, _| std::future::pending::<()>().await));
+        });
+    }
+
+    if overflow {
+        // Inject the watcher overflow signal, independently of any ordinary path notice.
+        this.update(cx, |p, _| {
+            p.watch.task = None;
+            p.watch.subscription = None;
+        });
+    }
+    let merge = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["merge", "-q", "feature"])
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(!merge.status.success(), "the external merge must conflict");
+    assert!(!git_out(&repo, &["ls-files", "-u"]).is_empty());
+    let conflict_text = std::fs::read_to_string(repo.join("a.txt")).unwrap();
+    assert!(conflict_text.contains("<<<<<<<"));
+
+    if overflow {
+        cx.update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| p.queue_watch_overflow(window, cx));
+        })
+        .unwrap();
+    }
+    super::super::test_support::wait(
+        cx,
+        Some(super::super::test_support::TICK),
+        Some(window),
+        |cx| {
+            this.read_with(cx, |p, _| {
+                p.groups[0]
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.as_ref().ok())
+                    .is_some_and(|s| {
+                        s.changes.iter().any(|c| {
+                            c.path == std::path::Path::new("a.txt")
+                                && c.kind == workspace_editor_git::ChangeKind::Conflict
+                        })
+                    })
+            })
+        },
+        |cx| {
+            this.read_with(cx, |p, _| format!(
+            "external merge: SCM never received Conflict; loading={}, remote_active={}, debouncing={}, refresh_pending={}, pending_plan={}, watch_error={:?}, status={:?}",
+            p.loading, p.watch.remote_active, p.watch.debouncing, p.watch.refresh_pending,
+            p.watch.pending_plan.is_some(), p.watch.error, p.groups[0].status
+        ))
+        },
+    );
+    super::super::test_support::wait(
+        cx,
+        Some(super::super::test_support::TICK),
+        Some(window),
+        |cx| {
+            this.read_with(cx, |p, cx| {
+                p.documents[0].editor.read(cx).text() == conflict_text.as_str()
+                    && p.documents[0].conflicts_found() == Some(1)
+            })
+        },
+        |cx| {
+            this.read_with(cx, |p, cx| format!(
+            "external merge: SCM updated but open clean document did not reload/scan; text={:?}, conflicts={:?}",
+            p.documents[0].editor.read(cx).text(), p.documents[0].conflicts_found()
+        ))
+        },
+    );
+    let file_row = this.read_with(cx, |p, _| {
+        p.rows
+            .iter()
+            .position(|row| matches!(row, Row::File(..)))
+            .unwrap()
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find(("scm-row-bounds", file_row)).visible());
+        assert!(window.find(("scm-conflict-icon", file_row)).visible());
+        assert!(window.find(("conflict-ours", 0usize)).visible());
+        assert!(window.try_find("conflict-bar").is_none());
+    })
+    .unwrap();
+    if hold_index {
+        this.read_with(cx, |p, _| {
+            assert!(p.index_task.is_some());
+            if overflow {
+                assert!(p.watch.refresh_pending);
+            }
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.index_task = None;
+                p.flush_workspace_refresh(window, cx);
+            });
+        })
+        .unwrap();
+    }
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+#[gpui_kit::test]
+fn external_remote_refs_refresh_without_waiting_for_the_path_index(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("refs-during-index", 1);
+    let (window, this) = open(cx, repo.clone());
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| {
+            !p.loading
+                && !p.watch.debouncing
+                && p.watch.pending_plan.is_none()
+                && p.index_task.is_none()
+        })
+    });
+    this.read_with(cx, |p, _| {
+        assert_eq!(
+            p.groups[0].status.as_ref().unwrap().as_ref().unwrap().ahead,
+            1
+        );
+    });
+    this.update(cx, |p, cx| {
+        p.index_task = Some(cx.spawn(async move |_, _| std::future::pending::<()>().await));
+    });
+    git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| {
+            p.groups[0]
+                .status
+                .as_ref()
+                .is_some_and(|s| s.as_ref().is_ok_and(|s| s.ahead == 0))
+        })
+    });
+    this.read_with(cx, |p, _| assert!(p.index_task.is_some()));
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.index_task = None;
+            p.flush_workspace_refresh(window, cx);
+        });
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+/// The local file/index changed while a background network query is still running.
+#[gpui_kit::test]
+async fn external_merge_is_visible_before_a_slow_remote_check_finishes(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
+    cx.executor().allow_parking();
+    let repo = fixture("merge-during-fetch", 0);
+    git(&repo, &["switch", "-q", "-c", "feature"]);
+    std::fs::write(repo.join("a.txt"), "feature\n").unwrap();
+    git(&repo, &["commit", "-q", "-am", "feature"]);
+    git(&repo, &["switch", "-q", "main"]);
+    std::fs::write(repo.join("a.txt"), "main\n").unwrap();
+    git(&repo, &["commit", "-q", "-am", "main"]);
+    let base = repo.parent().unwrap();
+    let started = base.join("fetch-started");
+    let release = base.join("release-fetch");
+    let upload = base.join("held-upload-pack");
+    std::fs::write(&upload, format!(
+        "#!/bin/sh\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\nexec /usr/bin/git-upload-pack \"$@\"\n",
+        started.display(), release.display()
+    )).unwrap();
+    std::fs::set_permissions(&upload, std::fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &repo,
+        &[
+            "config",
+            "remote.origin.uploadpack",
+            upload.to_str().unwrap(),
+        ],
+    );
+    let (window, this) = open(cx, repo.clone());
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| {
+            !p.loading && !p.watch.debouncing && p.watch.pending_plan.is_none()
+        })
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.request_remote_check(true, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        started.exists() && this.read_with(cx, |p, _| p.watch.remote_active)
+    });
+    let merge = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["merge", "-q", "feature"])
+        .output()
+        .unwrap();
+    assert!(!merge.status.success());
+    super::super::test_support::wait(
+        cx,
+        Some(super::super::test_support::TICK),
+        Some(window),
+        |cx| {
+            this.read_with(cx, |p, _| {
+                p.groups[0].status.as_ref().is_some_and(|s| {
+                    s.as_ref()
+                        .is_ok_and(|s| s.changes.iter().any(|c| c.kind == ChangeKind::Conflict))
+                })
+            })
+        },
+        |cx| {
+            this.read_with(cx, |p, _| format!(
+        "external merge was blocked by Fetch: loading={}, remote_active={}, pending_plan={:?}",
+        p.loading, p.watch.remote_active, p.watch.pending_plan
+    ))
+        },
+    );
+    assert!(
+        !release.exists(),
+        "conflict must become visible before releasing the network query"
+    );
+    std::fs::write(&release, "").unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| !p.loading && !p.watch.remote_pending)
+    });
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[gpui_kit::test]
+async fn merge_conflicts_are_resolved_inline_and_marked_resolved(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let repo = fixture("conflict", 0);
     std::fs::write(repo.join("a.txt"), "top\nbase 1\nm1\nm2\nm3\nm4\nbase 2\n").unwrap();
@@ -1451,10 +1750,10 @@ async fn merge_conflicts_are_resolved_from_the_bar_and_marked_resolved(cx: &mut 
     assert!(!merge.status.success(), "the merge must conflict");
 
     let (window, this) = open(cx, repo.clone());
-    let folder = Some(repo.clone());
-    let path = repo.join("a.txt");
     cx.update_window(window.into(), |_, window, cx| {
-        this.update(cx, |p, cx| p.open_file(path, folder, window, cx));
+        this.update(cx, |p, cx| {
+            p.open_diff(0, 0, DiffSide::Worktree, window, cx)
+        });
     })
     .unwrap();
     let count = |cx: &mut TestAppContext| {
@@ -1462,16 +1761,153 @@ async fn merge_conflicts_are_resolved_from_the_bar_and_marked_resolved(cx: &mut 
     };
     settle(cx, Some(window), |cx| count(cx) == Some(Some(2)));
 
-    // The first conflict (the cursor is at the top): keep both; the rest: take theirs.
-    let resolve = |cx: &mut TestAppContext, choice, all| {
-        cx.update_window(window.into(), |_, window, cx| {
-            this.update(cx, |p, cx| p.resolve_conflict(choice, all, window, cx));
-        })
-        .unwrap();
-    };
-    resolve(cx, crate::conflicts::Choice::Both, false);
+    let disk_before = std::fs::read_to_string(repo.join("a.txt")).unwrap();
+    let index_before = git_out(&repo, &["ls-files", "-s"]);
+    let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
+    let second = crate::conflicts::find(&disk_before)[1].clone();
+    cx.update_window(window.into(), |_, window, cx| {
+        editor.update(cx, |state, cx| {
+            let range = crate::replace::utf16_offset(&disk_before, second.ours.start)
+                ..crate::replace::utf16_offset(&disk_before, second.ours.end);
+            state.replace_text_in_range(Some(range), "main 2 手工修改🙂\n", window, cx);
+            state.set_cursor_position(lsp_types::Position::new(0, 0), window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| count(cx) == Some(Some(2)));
+    let (editor, original, old_target) = this.read_with(cx, |p, cx| {
+        let doc = &p.documents[0];
+        let text = doc.editor.read(cx).text().to_string();
+        let found = crate::conflicts::find(&text);
+        (
+            doc.editor.clone(),
+            text,
+            super::super::conflict_bar::ConflictTarget {
+                document: doc.id,
+                version: doc.version,
+                start: found[1].whole.start,
+            },
+        )
+    });
+    let found = crate::conflicts::find(&original);
+    cx.update_window(window.into(), |_, window, _| {
+        window.resize(size(
+            theme::SIDEBAR_MIN + theme::EDITOR_MIN + theme::WORKBENCH_INSET * 2.,
+            px(900.),
+        ));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        let compare = window.find(("conflict-compare", found[1].whole.start));
+        assert!(
+            compare.bounds().right() <= editor.read(cx).input_bounds().right(),
+            "every conflict action must fit in a narrow editor"
+        );
+        window.resize(size(px(1400.), px(900.)));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    // Compare the second conflict with the cursor still at the start of the file.
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let first = window
+            .find(("conflict-actions", found[0].whole.start))
+            .bounds();
+        let second = window
+            .find(("conflict-actions", found[1].whole.start))
+            .bounds();
+        assert!(
+            second.top() > first.bottom(),
+            "each conflict has its own row"
+        );
+        let marker = editor
+            .read(cx)
+            .range_to_bounds(&found[1].ours_marker)
+            .unwrap();
+        assert!(
+            second.bottom() <= marker.top(),
+            "actions belong above their marker"
+        );
+        assert!(window.try_find("conflict-bar").is_none());
+        window.click(("conflict-compare", found[1].whole.start), cx);
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.active == Pane::Diff && p.diff.doc.is_some())
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        // A delayed action from the editor row cannot edit a now-inactive source tab.
+        this.update(cx, |p, cx| {
+            p.resolve_conflict(old_target, crate::conflicts::Choice::Ours, window, cx)
+        });
+    })
+    .unwrap();
+    this.read_with(cx, |p, cx| {
+        let patch = match &p.diff.tab.as_ref().unwrap().source {
+            DiffSource::Local(patch) => patch,
+            _ => panic!("expected a read-only local comparison"),
+        };
+        assert!(patch.contains("main 2 手工修改🙂") && patch.contains("feature 2"));
+        assert!(!patch.contains("main 1"));
+        assert_eq!(p.documents[0].editor.read(cx).text().to_string(), original);
+    });
+    assert_eq!(
+        std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+        disk_before
+    );
+    assert_eq!(git_out(&repo, &["ls-files", "-s"]), index_before);
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.select_pane(Pane::Document(old_target.document), window, cx)
+        });
+        window.render_frame(cx);
+        window.click(("conflict-theirs", found[1].whole.start), cx);
+    })
+    .unwrap();
     settle(cx, Some(window), |cx| count(cx) == Some(Some(1)));
-    resolve(cx, crate::conflicts::Choice::Theirs, true);
+    let after_second = this.read_with(cx, |p, cx| {
+        p.documents[0].editor.read(cx).text().to_string()
+    });
+    assert!(after_second.contains("<<<<<<< HEAD\nmain 1"));
+    assert!(after_second.ends_with("feature 2\n"));
+    // A late click from the old row must not cut another conflict.
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.resolve_conflict(old_target, crate::conflicts::Choice::Ours, window, cx)
+        });
+    })
+    .unwrap();
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.text().to_string()),
+        after_second
+    );
+    cx.update_window(window.into(), |_, window, cx| window.press("cmd-z", cx))
+        .unwrap();
+    settle(cx, Some(window), |cx| count(cx) == Some(Some(2)));
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.text().to_string()),
+        original,
+        "one click is one undo step"
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("conflict-both", found[0].whole.start), cx);
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| count(cx) == Some(Some(1)));
+    let remaining = this.read_with(cx, |p, cx| {
+        crate::conflicts::find(&p.documents[0].editor.read(cx).text().to_string())[0]
+            .whole
+            .start
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("conflict-theirs", remaining), cx);
+    })
+    .unwrap();
     settle(cx, Some(window), |cx| count(cx) == Some(Some(0)));
     let text = this.read_with(cx, |p, cx| {
         p.documents[0].editor.read(cx).text().to_string()

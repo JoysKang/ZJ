@@ -136,14 +136,6 @@ pub fn resolve(text: &str, conflict: &Conflict, choice: Choice) -> String {
     }
 }
 
-/// The conflict the cursor (a byte offset) is in, else the next one after it, else the last.
-pub fn current(conflicts: &[Conflict], cursor: usize) -> Option<usize> {
-    conflicts
-        .iter()
-        .position(|c| cursor < c.whole.end)
-        .or(conflicts.len().checked_sub(1))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,14 +185,5 @@ mod tests {
         assert_eq!(find("<<<<<<<\n=======\n>>>>>>>").len(), 1);
         // A marker at the end of the text without a newline still closes.
         assert_eq!(find("<<<<<<<\n=======\n>>>>>>>")[0].whole.end, 23);
-    }
-
-    #[test]
-    fn the_current_conflict_follows_the_cursor() {
-        let conflicts = find(TEXT);
-        assert_eq!(current(&conflicts, 0), Some(0));
-        assert_eq!(current(&conflicts, conflicts[0].whole.end), Some(1));
-        assert_eq!(current(&conflicts, TEXT.len()), Some(1));
-        assert_eq!(current(&[], 0), None);
     }
 }

@@ -29,6 +29,8 @@ pub struct Plan {
     pub full: bool,
     pub rebuild_index: bool,
     pub repos: HashSet<RepoId>,
+    /// Worktree, index or local branch changes take priority over a background Fetch.
+    pub local_repos: HashSet<RepoId>,
     /// Explorer directories whose listing changed.
     pub dirs: BTreeSet<PathBuf>,
     pub added: Vec<PathBuf>,
@@ -52,6 +54,7 @@ impl Plan {
         self.full |= next.full;
         self.rebuild_index |= next.rebuild_index;
         self.repos.extend(next.repos);
+        self.local_repos.extend(next.local_repos);
         self.dirs.extend(next.dirs);
         self.added.extend(next.added);
         self.removed.extend(next.removed);
@@ -113,6 +116,22 @@ pub fn plan(
                     cache.forget(&repo.worktree);
                 }
                 plan.repos.insert(repo.id.clone());
+                if matches!(
+                    relative.to_str(),
+                    Some(
+                        "index"
+                            | "HEAD"
+                            | "ORIG_HEAD"
+                            | "MERGE_HEAD"
+                            | "CHERRY_PICK_HEAD"
+                            | "REBASE_HEAD"
+                    )
+                ) || relative.starts_with("refs/heads")
+                    || relative.starts_with("rebase-merge")
+                    || relative.starts_with("rebase-apply")
+                {
+                    plan.local_repos.insert(repo.id.clone());
+                }
                 touched = true;
             }
         }
@@ -262,6 +281,7 @@ fn relevant(plan: &mut Plan, repo: Option<&RepoRoots>, path: &Path, index: Optio
     plan.files.insert(path.to_path_buf());
     if let Some(repo) = repo {
         plan.repos.insert(repo.id.clone());
+        plan.local_repos.insert(repo.id.clone());
     }
     let parent = path.parent().map(Path::to_path_buf);
     let metadata = std::fs::symlink_metadata(path).ok();
@@ -300,6 +320,49 @@ mod tests {
             worktree: root.to_path_buf(),
             git_dirs: vec![root.join(".git")],
         }
+    }
+
+    #[test]
+    fn local_git_metadata_is_urgent_but_fetch_metadata_is_not() {
+        let root = std::env::temp_dir().join("zj-plan-local-metadata");
+        let repos = [repo(&root)];
+        let check = |_: &RepoRoots, _: &[PathBuf]| panic!("metadata must not run check-ignore");
+        for name in [
+            "index",
+            "HEAD",
+            "MERGE_HEAD",
+            "ORIG_HEAD",
+            "CHERRY_PICK_HEAD",
+            "REBASE_HEAD",
+            "refs/heads/main",
+            "rebase-merge/done",
+            "rebase-apply/next",
+        ] {
+            let p = plan(
+                &[root.join(".git").join(name)],
+                &repos,
+                None,
+                &mut IgnoreCache::default(),
+                &check,
+            );
+            assert_eq!(p.local_repos, p.repos, "{name}");
+            assert_eq!(p.repos.len(), 1, "{name}");
+        }
+        let p = plan(
+            &[
+                root.join(".git/FETCH_HEAD"),
+                root.join(".git/refs/remotes/origin/main"),
+            ],
+            &repos,
+            None,
+            &mut IgnoreCache::default(),
+            &check,
+        );
+        assert_eq!(p.repos.len(), 1);
+        assert!(
+            p.local_repos.is_empty(),
+            "Fetch must not repeatedly interrupt itself"
+        );
     }
 
     /// A simulated `cargo build`: thousands of writes under target/ cost one ignore check for
@@ -345,6 +408,7 @@ mod tests {
         );
         assert_eq!(p.repos, HashSet::from([repos[0].id.clone()]));
         assert_eq!(p.files.len(), 1);
+        assert_eq!(p.local_repos, p.repos);
         assert!(p.dirs.is_empty(), "content edits do not touch the explorer");
 
         fs::write(root.join("other/src/new.rs"), "").unwrap();

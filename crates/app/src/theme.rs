@@ -132,6 +132,7 @@ pub const TEXT_SECTION: Pixels = px(12.);
 pub const TEXT_BADGE: Pixels = px(10.);
 /// The editor's "file changed on disk" banner.
 pub const BANNER_HEIGHT: Pixels = px(30.);
+pub const CONFLICT_ACTION_HEIGHT: Pixels = ROW_HEIGHT;
 
 // Diff editor (VS Code: 5-digit line numbers, +/- indicators). Text and rows follow the
 // editor font size, see [`diff_metrics`].

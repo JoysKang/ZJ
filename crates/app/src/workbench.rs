@@ -2288,6 +2288,13 @@ impl Workbench {
             timing.mark("skipped");
             return;
         };
+        if change.kind == ChangeKind::Conflict {
+            let path = g.repo.worktree.join(&change.path);
+            let folder = Some(g.repo.worktree.clone());
+            self.open_file(path, folder, window, cx);
+            timing.mark("conflict");
+            return;
+        }
         let request = Request {
             repo: g.repo.clone(),
             generation: self.generation,
