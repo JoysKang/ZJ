@@ -19,6 +19,14 @@ macro_rules! embed {
 pub const EXTRA: &[(&str, &[u8])] = &[
     embed!("icons/chevrons-down-up.svg"),
     embed!("icons/files.svg"),
+    // Title bar: window and layout toggles (the filled region marks a visible area).
+    embed!("icons/new-window.svg"),
+    embed!("icons/sidebar-on.svg"),
+    embed!("icons/sidebar-off.svg"),
+    embed!("icons/terminal-panel-on.svg"),
+    embed!("icons/terminal-panel-off.svg"),
+    embed!("icons/agent-panel-on.svg"),
+    embed!("icons/agent-panel-off.svg"),
     embed!("icons/git-branch.svg"),
     embed!("icons/columns-2.svg"),
     embed!("icons/rows-2.svg"),

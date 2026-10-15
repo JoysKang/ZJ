@@ -94,7 +94,7 @@ impl Workbench {
                 Button::new("new-window")
                     .xsmall()
                     .ghost()
-                    .icon(IconName::Files)
+                    .icon(Icon::empty().path("icons/new-window.svg"))
                     .tooltip("新建窗口（⌘⇧N）")
                     .on_click(cx.listener(|this, _, _, cx| this.new_window(cx))),
             )
@@ -102,11 +102,11 @@ impl Workbench {
                 Button::new("toggle-sidebar")
                     .xsmall()
                     .ghost()
-                    .icon(if self.sidebar_visible {
-                        IconName::PanelLeftClose
+                    .icon(Icon::empty().path(if self.sidebar_visible {
+                        "icons/sidebar-on.svg"
                     } else {
-                        IconName::PanelLeftOpen
-                    })
+                        "icons/sidebar-off.svg"
+                    }))
                     .tooltip("切换侧栏（⌘B）")
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
             )
@@ -114,11 +114,11 @@ impl Workbench {
                 Button::new("toggle-terminal")
                     .xsmall()
                     .ghost()
-                    .icon(if self.terminals.is_visible() {
-                        IconName::PanelBottom
+                    .icon(Icon::empty().path(if self.terminals.is_visible() {
+                        "icons/terminal-panel-on.svg"
                     } else {
-                        IconName::PanelBottomOpen
-                    })
+                        "icons/terminal-panel-off.svg"
+                    }))
                     .tooltip("切换终端面板（⌃`）")
                     .on_click(
                         cx.listener(|this, _, window, cx| this.toggle_terminal_panel(window, cx)),
@@ -128,11 +128,11 @@ impl Workbench {
                 Button::new("toggle-agent")
                     .xsmall()
                     .ghost()
-                    .icon(if self.agent.visible {
-                        IconName::PanelRightClose
+                    .icon(Icon::empty().path(if self.agent.visible {
+                        "icons/agent-panel-on.svg"
                     } else {
-                        IconName::PanelRightOpen
-                    })
+                        "icons/agent-panel-off.svg"
+                    }))
                     .tooltip("切换 Agent 面板（⌥⌘B）")
                     .on_click(
                         cx.listener(|this, _, window, cx| this.toggle_agent_panel(window, cx)),
