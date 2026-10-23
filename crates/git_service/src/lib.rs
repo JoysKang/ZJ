@@ -8,7 +8,8 @@ mod stash;
 mod status;
 mod write;
 pub use graph::{
-    CommitDetails, CommitFile, GraphCommit, GraphRef, RefKind, parse_graph, parse_name_status,
+    CommitDetails, CommitFile, GraphCommit, GraphRef, RefKind, TagDetails, parse_graph,
+    parse_name_status,
 };
 pub use log::{Commit, parse_log};
 pub use ls_files::{ListedKind, parse_ls_files};
@@ -262,6 +263,18 @@ impl GitService {
         allow_difference: bool,
         input: Option<&[u8]>,
     ) -> io::Result<Vec<u8>> {
+        self.run_bounded(root, args, cancel, allow_difference, input, OUTPUT_LIMIT)
+    }
+
+    fn run_bounded(
+        &self,
+        root: &Path,
+        args: &[OsString],
+        cancel: &AtomicBool,
+        allow_difference: bool,
+        input: Option<&[u8]>,
+        limit: usize,
+    ) -> io::Result<Vec<u8>> {
         let _permit = self.permit(cancel)?;
         let started = Instant::now();
         let mut command = Command::new("git");
@@ -290,7 +303,7 @@ impl GitService {
             .spawn()?;
         let mut stdout = child.stdout.take().unwrap();
         let mut stderr = child.stderr.take().unwrap();
-        let mut output = Output::new(OUTPUT_LIMIT);
+        let mut output = Output::new(limit);
         let mut errors = Output::new(ERROR_LIMIT);
         let mut stdin = child.stdin.take();
         let mut remaining = input.unwrap_or_default();
@@ -328,7 +341,11 @@ impl GitService {
                 output.read_available(&mut stdout)?;
                 errors.read_available(&mut stderr)?;
                 if output.overflow {
-                    return Err(error("Git 输出超过 16 MB；查询受限，不能判断为干净"));
+                    return Err(error(if limit == OUTPUT_LIMIT {
+                        "Git 输出超过 16 MB；查询受限，不能判断为干净"
+                    } else {
+                        "标签说明超过 256 KiB；无法完整显示"
+                    }));
                 }
                 if status.is_none() {
                     status = child.try_wait()?;

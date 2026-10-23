@@ -126,6 +126,115 @@ pub fn parse_graph(bytes: &[u8]) -> io::Result<Vec<GraphCommit>> {
         .collect()
 }
 
+/// A tag's own message; lightweight tags never borrow the target's commit message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TagDetails {
+    pub name: String,
+    pub oid: String,
+    pub annotated: bool,
+    pub tagger: String,
+    pub tagger_email: String,
+    pub tagger_date: String,
+    /// Complete contents, including subject and any signature text (not verified).
+    pub message: String,
+    pub lossy: bool,
+}
+
+const TAG_LIMIT: usize = 256 * 1024;
+const TAG_FIELDS: &str = "%(refname)%00%(objectname)%00%(objecttype)%00%(objectsize)%00%(taggername)%00%(taggeremail)%00%(taggerdate:iso-strict)%00";
+
+impl crate::GitService {
+    /// Reads one exact local tag, without fetching objects or invoking signature tools.
+    pub fn tag_details(
+        &self,
+        repo: &workspace_editor_core::Repository,
+        name: &str,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> io::Result<TagDetails> {
+        let reference = format!("refs/tags/{name}");
+        if name.is_empty() || name.contains('\0') {
+            return Err(crate::error("无效的标签名"));
+        }
+        self.run(
+            &repo.worktree,
+            &["check-ref-format".into(), reference.clone().into()],
+            cancel,
+        )?;
+        let query = |contents: bool| {
+            self.run_bounded(
+                &repo.worktree,
+                &[
+                    "--no-pager".into(),
+                    "--no-lazy-fetch".into(),
+                    "--no-replace-objects".into(),
+                    "for-each-ref".into(),
+                    "--count=1".into(),
+                    format!(
+                        "--format={TAG_FIELDS}{}",
+                        if contents { "%(contents)" } else { "" }
+                    )
+                    .into(),
+                    "--".into(),
+                    reference.clone().into(),
+                ],
+                cancel,
+                false,
+                None,
+                TAG_LIMIT + 4096,
+            )
+        };
+        let metadata = query(false)?;
+        let fields = tag_fields(&metadata, &reference)?;
+        let oid = text(fields[1]);
+        if !matches!(oid.len(), 40 | 64) || !is_hash(&oid) {
+            return Err(crate::error("无效的标签对象"));
+        }
+        let annotated = fields[2] == b"tag";
+        let mut details = TagDetails {
+            name: name.into(),
+            oid,
+            annotated,
+            tagger: text(fields[4]),
+            tagger_email: text(fields[5]),
+            tagger_date: text(fields[6]),
+            message: String::new(),
+            lossy: false,
+        };
+        if annotated {
+            let size = std::str::from_utf8(fields[3])
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .ok_or_else(|| crate::error("无效的标签大小"))?;
+            if size > TAG_LIMIT {
+                return Err(crate::error("标签对象超过 256 KiB；无法完整显示说明"));
+            }
+            let contents = query(true)?;
+            let fields = tag_fields(&contents, &reference)?;
+            if fields[1] != details.oid.as_bytes() || fields[2] != b"tag" {
+                return Err(crate::error("标签在读取期间已变化，请重新查看"));
+            }
+            if fields[7].len() > TAG_LIMIT {
+                return Err(crate::error("标签说明超过 256 KiB；无法完整显示"));
+            }
+            details.lossy = std::str::from_utf8(fields[7]).is_err();
+            details.message = text(fields[7]);
+        }
+        Ok(details)
+    }
+}
+
+fn tag_fields<'a>(bytes: &'a [u8], reference: &str) -> io::Result<Vec<&'a [u8]>> {
+    let fields: Vec<_> = bytes
+        .strip_suffix(b"\n")
+        .unwrap_or(bytes)
+        .splitn(8, |b| *b == 0)
+        .collect();
+    if fields.len() != 8 || fields[0] != reference.as_bytes() {
+        return Err(crate::error("标签不存在或已删除，请刷新 Git 图"));
+    }
+    Ok(fields)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitFile {
     /// `A`, `M`, `D`, `R`, `C`, `T`.
@@ -264,6 +373,122 @@ mod tests {
         assert!(parse_graph(b"").unwrap().is_empty());
         assert!(parse_graph(format!("{A}\0\0a\0e\x001\0\0").as_bytes()).is_err());
         assert!(parse_graph(b"zz\0\0a\0e\x001\0\0s\0").is_err());
+    }
+
+    #[test]
+    fn tag_details_read_only_fixture() {
+        use std::{
+            fs,
+            process::Command,
+            sync::atomic::AtomicBool,
+            time::{Duration, SystemTime, UNIX_EPOCH},
+        };
+        let root = std::env::temp_dir().join(format!(
+            "zj-tag-details-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args([
+                    "-c",
+                    "user.name=Tag Fixture",
+                    "-c",
+                    "user.email=tag@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "tag.gpgSign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "提交正文不是标签说明",
+        ]);
+        let service = crate::GitService::new(1, Duration::from_secs(5)).unwrap();
+        let cancel = AtomicBool::new(false);
+        let repo = service.identify(&root, &cancel).unwrap();
+        for (name, message) in [
+            ("multi", "发布说明\n\n中文第二段\n第三行"),
+            ("single", "只有一个段落"),
+            (
+                "signature",
+                "发布摘要\n\n-----BEGIN PGP SIGNATURE-----\nfixture only\n-----END PGP SIGNATURE-----",
+            ),
+        ] {
+            git(&["tag", "-a", name, "-m", message]);
+            let details = service.tag_details(&repo, name, &cancel).unwrap();
+            assert!(details.annotated);
+            assert_eq!(details.message, format!("{message}\n"));
+            assert_eq!(details.tagger, "Tag Fixture");
+            assert!(!details.tagger_date.is_empty());
+        }
+        git(&["tag", "light"]);
+        let details = service.tag_details(&repo, "light", &cancel).unwrap();
+        assert!(!details.annotated);
+        assert!(details.message.is_empty());
+        git(&["tag", "-d", "single"]);
+        git(&["tag", "single/child"]);
+        assert!(
+            service
+                .tag_details(&repo, "single", &cancel)
+                .unwrap_err()
+                .to_string()
+                .contains("不存在")
+        );
+        for invalid in ["../multi", "multi*", "multi^{commit}", "multi\0"] {
+            assert!(service.tag_details(&repo, invalid, &cancel).is_err());
+        }
+        let message_file = root.join("message");
+        fs::write(&message_file, "x".repeat(TAG_LIMIT + 1)).unwrap();
+        git(&["tag", "-a", "large", "-F", message_file.to_str().unwrap()]);
+        assert!(
+            service
+                .tag_details(&repo, "large", &cancel)
+                .unwrap_err()
+                .to_string()
+                .contains("256 KiB")
+        );
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            service
+                .tag_details(&repo, "multi", &cancel)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Interrupted
+        );
+        cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+        fs::remove_dir_all(root.join(".git")).unwrap();
+        assert!(service.tag_details(&repo, "multi", &cancel).is_err());
     }
 
     #[test]

@@ -26,7 +26,7 @@ use std::sync::{
 use workspace_editor_core::RepoId;
 use workspace_editor_git::{
     Branch, CommitDetails, CommitFile, GraphCommit, GraphRef, GraphScope, Operation, RefKind,
-    Request, WriteOperation,
+    Request, TagDetails, WriteOperation,
 };
 
 /// Page size, also the step of 加载更多.
@@ -267,10 +267,21 @@ pub(super) struct GitGraph {
     selected: Option<usize>,
     details: Option<Result<CommitDetails, String>>,
     details_loading: bool,
+    tag: Option<String>,
+    tag_details: Option<Result<TagDetails, String>>,
+    tag_message: SharedString,
+    details_cancel: Arc<AtomicBool>,
     list: UniformListScrollHandle,
     /// Page loads check this to discard stale results.
     generation: u64,
     cancel: Arc<AtomicBool>,
+}
+
+impl Drop for GitGraph {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.details_cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 impl GitGraph {
@@ -289,10 +300,25 @@ impl GitGraph {
             selected: None,
             details: None,
             details_loading: false,
+            tag: None,
+            tag_details: None,
+            tag_message: SharedString::default(),
+            details_cancel: Arc::new(AtomicBool::new(false)),
             list: UniformListScrollHandle::new(),
             generation: 0,
             cancel: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn clear_details(&mut self) {
+        self.details_cancel.store(true, Ordering::Relaxed);
+        self.details_cancel = Arc::new(AtomicBool::new(false));
+        self.selected = None;
+        self.details = None;
+        self.tag = None;
+        self.tag_details = None;
+        self.tag_message = SharedString::default();
+        self.details_loading = false;
     }
 
     fn scope_label(&self) -> String {
@@ -323,6 +349,10 @@ impl Workbench {
             self.select_pane(Pane::Graph, window, cx);
             return;
         }
+        if let Some(graph) = &self.graph {
+            graph.cancel.store(true, Ordering::Relaxed);
+            graph.details_cancel.store(true, Ordering::Relaxed);
+        }
         self.graph = Some(GitGraph::new(repo));
         self.select_pane(Pane::Graph, window, cx);
         self.graph_load(true, window, cx);
@@ -331,6 +361,7 @@ impl Workbench {
     pub(super) fn close_graph(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(graph) = self.graph.take() {
             graph.cancel.store(true, Ordering::Relaxed);
+            graph.details_cancel.store(true, Ordering::Relaxed);
         }
         if self.active == Pane::Graph {
             self.active = self
@@ -368,8 +399,7 @@ impl Workbench {
         if reset {
             graph.commits.clear();
             graph.rows.clear();
-            graph.selected = None;
-            graph.details = None;
+            graph.clear_details();
             graph.list = UniformListScrollHandle::new();
         }
         cx.notify();
@@ -381,6 +411,7 @@ impl Workbench {
                 .find(|g| g.repo.id == repo.id)
                 .and_then(|g| g.status.as_ref()?.as_ref().ok()?.oid.clone());
         }
+        let request_cancel = cancel.clone();
         let job = cx.background_spawn(async move {
             let branches = reset.then(|| service.branches(&repo, &cancel));
             let page = service.graph(&repo, &scope, skip, PAGE, &cancel);
@@ -392,7 +423,7 @@ impl Workbench {
                 let Some(graph) = &mut this.graph else {
                     return;
                 };
-                if graph.generation != generation {
+                if graph.generation != generation || !Arc::ptr_eq(&graph.cancel, &request_cancel) {
                     return;
                 }
                 graph.loading = false;
@@ -490,9 +521,8 @@ impl Workbench {
         let Some(graph) = &mut self.graph else {
             return;
         };
-        if graph.selected == Some(index) {
-            graph.selected = None;
-            graph.details = None;
+        if graph.selected == Some(index) && graph.tag.is_none() {
+            graph.clear_details();
             cx.notify();
             return;
         }
@@ -500,6 +530,9 @@ impl Workbench {
             return;
         };
         let hash = commit.hash.clone();
+        graph.clear_details();
+        let request_cancel = graph.details_cancel.clone();
+        let cancel = request_cancel.clone();
         graph.selected = Some(index);
         graph.details = None;
         graph.details_loading = true;
@@ -507,15 +540,17 @@ impl Workbench {
         let repo = graph.repo.clone();
         let service = self.service.clone();
         let wanted = hash.clone();
-        let job = cx.background_spawn(async move {
-            service.commit_details(&repo, &wanted, &AtomicBool::new(false))
-        });
+        let job =
+            cx.background_spawn(async move { service.commit_details(&repo, &wanted, &cancel) });
         cx.spawn_in(window, async move |this, cx| {
             let result = job.await;
             let _ = this.update(cx, |this, cx| {
                 let Some(graph) = &mut this.graph else {
                     return;
                 };
+                if !Arc::ptr_eq(&graph.details_cancel, &request_cancel) {
+                    return;
+                }
                 // The selection may have moved on while the details loaded; an older answer
                 // neither shows nor ends the newer request's loading state.
                 let still_selected = graph
@@ -532,6 +567,50 @@ impl Workbench {
             });
         })
         .detach();
+    }
+
+    fn graph_select_tag(
+        &mut self,
+        repo: &RepoId,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(graph) = &mut self.graph else { return };
+        if graph.repo.id != *repo {
+            return;
+        }
+        graph.clear_details();
+        graph.tag = Some(name.clone());
+        graph.details_loading = true;
+        let repo = graph.repo.clone();
+        let request_repo = repo.id.clone();
+        let request_cancel = graph.details_cancel.clone();
+        let cancel = request_cancel.clone();
+        let service = self.service.clone();
+        let wanted = name.clone();
+        let job = cx.background_spawn(async move { service.tag_details(&repo, &wanted, &cancel) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = job.await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(graph) = &mut this.graph else { return };
+                if graph.repo.id != request_repo
+                    || graph.tag.as_ref() != Some(&name)
+                    || !Arc::ptr_eq(&graph.details_cancel, &request_cancel)
+                {
+                    return;
+                }
+                graph.details_loading = false;
+                graph.tag_message = result
+                    .as_ref()
+                    .map(|details| tag_display_text(&details.message).into())
+                    .unwrap_or_default();
+                graph.tag_details = Some(result.map_err(|error| error.to_string()));
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     /// A changed file in the details view opens the commit's diff for it, like clicking a
@@ -688,6 +767,12 @@ impl Workbench {
             .child(div().flex_1().min_h_0().child(list))
             .children(
                 graph
+                    .tag
+                    .as_ref()
+                    .map(|name| self.graph_tag_details(graph, name, cx)),
+            )
+            .children(
+                graph
                     .selected
                     .is_some()
                     .then(|| self.graph_details(graph, cx)),
@@ -728,7 +813,36 @@ impl Workbench {
                 commit
                     .refs
                     .iter()
-                    .map(move |reference| ref_chip(reference, lane, colors))
+                    .enumerate()
+                    .map(|(ref_index, reference)| {
+                        let chip = ref_chip(reference, lane, colors);
+                        if reference.kind == RefKind::Tag {
+                            let repo = graph.repo.id.clone();
+                            let name = reference.name.clone();
+                            div()
+                                .id(SharedString::from(format!(
+                                    "graph-tag-chip-{index}-{ref_index}"
+                                )))
+                                .cursor_pointer()
+                                .child(chip)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.graph_select_tag(&repo, name.clone(), window, cx);
+                                }))
+                                .map(|chip| {
+                                    #[cfg(test)]
+                                    let chip = {
+                                        use gpui_kit::test::TestSupportExt;
+                                        chip.test_support()
+                                    };
+                                    chip
+                                })
+                                .into_any_element()
+                        } else {
+                            chip
+                        }
+                    })
+                    .collect::<Vec<_>>()
             })
             .child(
                 div()
@@ -810,6 +924,12 @@ impl Workbench {
             let name = tag.name.clone();
             menu = menu
                 .separator()
+                .item(item(format!("查看标签详情“{name}”"), {
+                    let (repo, name) = (repo.clone(), name.clone());
+                    Box::new(move |this, window, cx| {
+                        this.graph_select_tag(&repo, name.clone(), window, cx)
+                    })
+                }))
                 .item(item(format!("推送标签“{name}”"), {
                     let (repo, name) = (repo.clone(), name.clone());
                     Box::new(move |this, window, cx| this.graph_push_tag(&repo, &name, window, cx))
@@ -1146,8 +1266,7 @@ impl Workbench {
                             .accessibility_label("关闭")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if let Some(graph) = &mut this.graph {
-                                    graph.selected = None;
-                                    graph.details = None;
+                                    graph.clear_details();
                                 }
                                 cx.notify();
                             })),
@@ -1177,6 +1296,7 @@ impl Workbench {
             .border_color(colors.border)
             .text_size(theme::TEXT_CAPTION)
             .children(tags.into_iter().enumerate().map(|(i, name)| {
+                let (detail_repo, detail_name) = (repo.clone(), name.clone());
                 let (push_repo, push_name) = (repo.clone(), name.clone());
                 let (delete_repo, delete_name) = (repo.clone(), name.clone());
                 h_flex()
@@ -1186,7 +1306,21 @@ impl Workbench {
                             .size(theme::ICON_SIZE)
                             .text_color(colors.muted),
                     )
-                    .child(name.clone())
+                    .child(
+                        Button::new(("graph-tag-details", i))
+                            .xsmall()
+                            .ghost()
+                            .label(name.clone())
+                            .tooltip("查看标签详情")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.graph_select_tag(
+                                    &detail_repo,
+                                    detail_name.clone(),
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
                     .child(
                         Button::new(("graph-tag-push", i))
                             .xsmall()
@@ -1210,6 +1344,126 @@ impl Workbench {
                             })),
                     )
             }))
+            .into_any_element()
+    }
+
+    fn graph_tag_details(
+        &self,
+        graph: &GitGraph,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = theme::colors(cx);
+        let body = if graph.details_loading {
+            div()
+                .text_color(colors.muted)
+                .child("正在加载标签详情…")
+                .into_any_element()
+        } else {
+            match &graph.tag_details {
+                Some(Ok(details)) => {
+                    let message = details.message.clone();
+                    v_flex()
+                        .gap_2()
+                        .child(div().text_color(colors.muted).child(if details.annotated {
+                            "附注标签（annotated）"
+                        } else {
+                            "轻量标签（lightweight），没有独立说明"
+                        }))
+                        .child(gpui_kit::base::SelectableText::new(
+                            "graph-tag-oid",
+                            details.oid.clone(),
+                        ))
+                        .when(details.annotated, |body| {
+                            body.child(div().text_color(colors.muted).child(format!(
+                                "{} {} · {}",
+                                details.tagger, details.tagger_email, details.tagger_date
+                            )))
+                            .child(
+                                Button::new("graph-tag-copy-message")
+                                    .xsmall()
+                                    .ghost()
+                                    .icon(IconName::Copy)
+                                    .label("复制完整说明")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.graph_copy(message.clone(), "已复制标签说明", cx)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_color(colors.muted)
+                                    .child("说明按原文显示；签名如有，未做验证"),
+                            )
+                            .when(details.lossy, |body| {
+                                body.child(
+                                    div()
+                                        .text_color(colors.modified)
+                                        .child("说明包含非 UTF-8 字节，已用替代字符显示"),
+                                )
+                            })
+                            .child(
+                                gpui_kit::base::SelectableText::new(
+                                    "graph-tag-message",
+                                    graph.tag_message.clone(),
+                                ),
+                            )
+                        })
+                        .into_any_element()
+                }
+                Some(Err(error)) => div()
+                    .text_color(colors.deleted)
+                    .child(format!("错误：{error}"))
+                    .into_any_element(),
+                None => div().into_any_element(),
+            }
+        };
+        v_flex()
+            .h(theme::GRAPH_DETAILS_MAX)
+            .flex_shrink_0()
+            .w_full()
+            .border_t_1()
+            .border_color(colors.border)
+            .bg(colors.panel)
+            .child(
+                h_flex()
+                    .h(theme::SECTION_HEIGHT)
+                    .px_3()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .text_size(theme::TEXT_CAPTION)
+                    .child(
+                        Icon::new(IconName::Tag)
+                            .size(theme::ICON_SIZE)
+                            .text_color(colors.muted),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(name.to_string()))
+                    .child(
+                        Button::new("graph-tag-details-close")
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::Close)
+                            .tooltip("关闭")
+                            .accessibility_label("关闭标签详情")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(graph) = &mut this.graph {
+                                    graph.clear_details();
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .id("graph-tag-details-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p_3()
+                    .text_size(theme::TEXT_CAPTION)
+                    .text_color(colors.foreground)
+                    .child(body),
+            )
             .into_any_element()
     }
 
@@ -1345,6 +1599,21 @@ impl Workbench {
             )
             .into_any_element()
     }
+}
+
+/// Keep untrusted message controls visible; the copy action retains the original text.
+fn tag_display_text(message: &str) -> String {
+    let mut displayed = String::with_capacity(message.len());
+    for c in message.chars() {
+        if (c.is_control() && c != '\n' && c != '\t')
+            || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        {
+            displayed.extend(c.escape_unicode());
+        } else {
+            displayed.push(c);
+        }
+    }
+    displayed
 }
 
 /// A branch-filter menu item; the current scope is marked.
@@ -1503,6 +1772,15 @@ mod tests {
                 (row.lane, down)
             })
             .collect()
+    }
+
+    #[test]
+    fn tag_message_controls_are_visible_without_changing_plain_text() {
+        assert_eq!(tag_display_text("中文\n\t正文"), "中文\n\t正文");
+        assert_eq!(
+            tag_display_text("a\0\u{1b}\u{202e}b"),
+            "a\\u{0}\\u{1b}\\u{202e}b"
+        );
     }
 
     #[test]

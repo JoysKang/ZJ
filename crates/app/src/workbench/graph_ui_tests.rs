@@ -216,6 +216,175 @@ async fn the_graph_shows_lanes_refs_details_and_diffs(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }
 
+#[gpui_kit::test]
+async fn tag_details_follow_selection_and_cancel_closed_requests(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("tag-details");
+    git(
+        &repo,
+        &["tag", "-a", "release", "-m", "发布摘要\n\n完整中文说明"],
+    );
+    git(&repo, &["tag", "light"]);
+    let (window, this) = open(cx, repo.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_git_graph(0, window, cx));
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| {
+            p.graph
+                .as_ref()
+                .is_some_and(|g| !g.loading && !g.commits.is_empty())
+        })
+    });
+    let id = this.read_with(cx, |p, _| p.graph.as_ref().unwrap().repo.id.clone());
+    let chip = this.read_with(cx, |p, _| {
+        let graph = p.graph.as_ref().unwrap();
+        let ref_index = graph.commits[0]
+            .refs
+            .iter()
+            .position(|reference| reference.name == "release")
+            .unwrap();
+        SharedString::from(format!("graph-tag-chip-0-{ref_index}"))
+    });
+    let chip_ready = chip.clone();
+    settle(cx, Some(window), |cx| {
+        cx.update_window(window.into(), |_, window, _| {
+            window.try_find(chip_ready.clone()).is_some()
+        })
+        .unwrap()
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(chip, cx);
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| {
+            p.graph
+                .as_ref()
+                .is_some_and(|g| !g.details_loading && g.tag_details.is_some())
+        })
+    });
+    this.read_with(cx, |p, _| {
+        let graph = p.graph.as_ref().unwrap();
+        assert_eq!(graph.tag.as_deref(), Some("release"));
+        assert!(
+            graph.selected.is_none(),
+            "tag click must not bubble into commit selection"
+        );
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.graph_select_tag(&id, "release".into(), window, cx);
+            let first = p.graph.as_ref().unwrap().details_cancel.clone();
+            p.graph_select_tag(&id, "light".into(), window, cx);
+            assert!(first.load(Ordering::Relaxed));
+            p.graph_select_tag(&id, "release".into(), window, cx);
+            assert!(!Arc::ptr_eq(
+                &first,
+                &p.graph.as_ref().unwrap().details_cancel
+            ));
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| {
+            p.graph
+                .as_ref()
+                .is_some_and(|g| !g.details_loading && g.tag_details.is_some())
+        })
+    });
+    this.read_with(cx, |p, _| {
+        let graph = p.graph.as_ref().unwrap();
+        assert_eq!(graph.tag.as_deref(), Some("release"));
+        assert!(graph.selected.is_none());
+        assert_eq!(
+            graph
+                .tag_details
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .message,
+            "发布摘要\n\n完整中文说明\n"
+        );
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.graph_select_tag(&id, "release".into(), window, cx);
+            let old = p.graph.as_ref().unwrap().details_cancel.clone();
+            p.close_graph(window, cx);
+            assert!(old.load(Ordering::Relaxed));
+            p.open_git_graph(0, window, cx);
+            p.graph_select_tag(&id, "light".into(), window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| {
+            p.graph
+                .as_ref()
+                .is_some_and(|g| !g.loading && !g.details_loading && g.tag_details.is_some())
+        })
+    });
+    this.read_with(cx, |p, _| {
+        let graph = p.graph.as_ref().unwrap();
+        assert_eq!(graph.tag.as_deref(), Some("light"));
+        let details = graph.tag_details.as_ref().unwrap().as_ref().unwrap();
+        assert!(!details.annotated);
+        assert!(details.message.is_empty());
+    });
+    git(&repo, &["tag", "-d", "release"]);
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.graph_select_tag(&id, "release".into(), window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| {
+            p.graph
+                .as_ref()
+                .is_some_and(|g| !g.details_loading && g.tag_details.is_some())
+        })
+    });
+    this.read_with(cx, |p, _| {
+        assert!(
+            p.graph
+                .as_ref()
+                .unwrap()
+                .tag_details
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap_err()
+                .contains("不存在")
+        )
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.graph_select_tag(&id, "light".into(), window, cx);
+            let old = p.graph.as_ref().unwrap().details_cancel.clone();
+            p.graph_select(0, window, cx);
+            assert!(old.load(Ordering::Relaxed));
+            assert!(p.graph.as_ref().unwrap().tag.is_none());
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| {
+            p.graph
+                .as_ref()
+                .is_some_and(|g| !g.details_loading && g.details.is_some())
+        })
+    });
+    this.read_with(cx, |p, _| {
+        assert!(p.graph.as_ref().unwrap().tag_details.is_none())
+    });
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
 fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .arg("-C")
