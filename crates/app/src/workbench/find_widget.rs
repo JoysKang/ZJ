@@ -135,8 +135,8 @@ impl FindState {
             self.matches.len().to_string()
         };
         match self.current {
-            Some(index) => format!("第 {} 项，共 {total} 项", index + 1),
-            None => format!("第 ? 项，共 {total} 项"),
+            Some(index) => format!("{} / {total}", index + 1),
+            None => format!("— / {total}"),
         }
     }
 }
@@ -572,69 +572,98 @@ impl Workbench {
                 cx,
             ));
         let find_row = h_flex()
+            .flex_wrap()
             .gap_1()
-            .child(
-                div().w(theme::FIND_INPUT_WIDTH).child(
-                    Input::new(&find.query)
-                        .text_size(theme::TEXT_BODY)
-                        .small()
-                        .suffix(toggles)
-                        .when(find.error.is_some(), |input| {
-                            input.border_color(colors.deleted)
-                        }),
-                ),
-            )
             .child(
                 div()
-                    .id("find-count")
-                    .min_w(theme::FIND_COUNT_WIDTH)
-                    .flex_shrink_0()
-                    .pl_1()
-                    .whitespace_nowrap()
-                    .overflow_hidden()
-                    .text_size(theme::TEXT_CAPTION)
-                    .text_color(if find.error.is_some() {
-                        colors.deleted
-                    } else if has_matches {
-                        colors.foreground
-                    } else {
-                        colors.muted
-                    })
-                    .when_some(find.error.clone(), |label, error| {
-                        label.tooltip(move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(error.clone())
-                                .build(window, cx)
-                        })
-                    })
-                    .child(find.label()),
+                    .id("find-query-field")
+                    .test_support()
+                    .flex_grow(1.)
+                    .flex_basis(theme::FIND_INPUT_WIDTH)
+                    .min_w_0()
+                    .child(
+                        Input::new(&find.query)
+                            .text_size(theme::TEXT_BODY)
+                            .small()
+                            .suffix(toggles)
+                            .when(find.error.is_some(), |input| {
+                                input.border_color(colors.deleted)
+                            }),
+                    ),
             )
             .child(
-                self.find_button("find-previous", IconName::ArrowUp, "上一个匹配项 (⇧Enter)")
-                    .disabled(!has_matches)
-                    .on_click(cx.listener(|this, _, _, cx| this.find_step(false, cx))),
-            )
-            .child(
-                self.find_button("find-next", IconName::ArrowDown, "下一个匹配项 (Enter)")
-                    .disabled(!has_matches)
-                    .on_click(cx.listener(|this, _, _, cx| this.find_step(true, cx))),
-            )
-            .child(
-                self.find_button(
-                    "find-selection",
-                    IconName::TextAlignStart,
-                    "在选区中查找 (⌥⌘L)",
-                )
-                .selected(find.scope.is_some())
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_find_in_selection(cx))),
-            )
-            .child(
-                self.find_button("find-close", IconName::Close, "关闭 (Esc)")
-                    .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
+                h_flex()
+                    .flex_grow(1.)
+                    .flex_basis(theme::FIND_ACTIONS_WIDTH)
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        div()
+                            .id("find-count")
+                            .test_support()
+                            .flex_1()
+                            .min_w_0()
+                            .pl_1()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_size(theme::TEXT_CAPTION)
+                            .text_color(if find.error.is_some() {
+                                colors.deleted
+                            } else if has_matches {
+                                colors.foreground
+                            } else {
+                                colors.muted
+                            })
+                            .tooltip({
+                                let detail = find.error.clone().unwrap_or_else(|| {
+                                    if has_matches {
+                                        format!("当前匹配 / 匹配总数：{}", find.label())
+                                    } else {
+                                        find.label()
+                                    }
+                                });
+                                move |window, cx| {
+                                    gpui_kit::component::tooltip::Tooltip::new(detail.clone())
+                                        .build(window, cx)
+                                }
+                            })
+                            .child(find.label()),
+                    )
+                    .child(
+                        self.find_button(
+                            "find-previous",
+                            IconName::ArrowUp,
+                            "上一个匹配项 (⇧Enter)",
+                        )
+                        .disabled(!has_matches)
+                        .on_click(cx.listener(|this, _, _, cx| this.find_step(false, cx))),
+                    )
+                    .child(
+                        self.find_button("find-next", IconName::ArrowDown, "下一个匹配项 (Enter)")
+                            .disabled(!has_matches)
+                            .on_click(cx.listener(|this, _, _, cx| this.find_step(true, cx))),
+                    )
+                    .child(
+                        self.find_button(
+                            "find-selection",
+                            IconName::TextAlignStart,
+                            "在选区中查找 (⌥⌘L)",
+                        )
+                        .selected(find.scope.is_some())
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_find_in_selection(cx))),
+                    )
+                    .child(
+                        self.find_button("find-close", IconName::Close, "关闭 (Esc)")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.close_find(window, cx)),
+                            ),
+                    ),
             );
         let replace_row = h_flex()
+            .flex_wrap()
             .gap_1()
             .child(
-                div().w(theme::FIND_INPUT_WIDTH).child(
+                div().flex_1().min_w_0().child(
                     Input::new(&find.replacement)
                         .text_size(theme::TEXT_BODY)
                         .small()
@@ -658,6 +687,13 @@ impl Workbench {
                     .disabled(!has_matches)
                     .on_click(cx.listener(|this, _, window, cx| this.find_replace_all(window, cx))),
             );
+        let replace_label = if readonly {
+            "只读文件不支持替换"
+        } else if replace_open {
+            "收起替换"
+        } else {
+            "展开替换"
+        };
         let chevron = Button::new("find-toggle-replace")
             .with_size(theme::FIND_BUTTON)
             .ghost()
@@ -666,7 +702,8 @@ impl Workbench {
             } else {
                 IconName::ChevronRight
             })
-            .tooltip("切换替换")
+            .tooltip(replace_label)
+            .accessibility_label(replace_label)
             .disabled(readonly)
             .on_click(cx.listener(|this, _, window, cx| {
                 this.find.replace_open = !this.find.replace_open;
@@ -686,7 +723,9 @@ impl Workbench {
                 .absolute()
                 .top_0()
                 .right(theme::FIND_RIGHT)
-                .min_w(theme::FIND_WIDTH)
+                .left(theme::FIND_RIGHT)
+                .max_w(theme::FIND_WIDTH)
+                .ml_auto()
                 .p_1()
                 .gap_1()
                 .items_start()

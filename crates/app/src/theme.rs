@@ -96,11 +96,11 @@ pub const WORKBENCH_RADIUS: Pixels = px(12.);
 /// Each panel contributes 2 px to the 4 px gap between surfaces.
 pub const WORKBENCH_INSET: Pixels = px(2.);
 /// The editor's floating find / replace widget (VS Code: 419 px wide, inputs about 220 px).
-pub const FIND_WIDTH: Pixels = px(440.);
+pub const FIND_WIDTH: Pixels = px(500.);
 pub const FIND_INPUT_WIDTH: Pixels = px(236.);
+pub const FIND_ACTIONS_WIDTH: Pixels = px(192.);
 /// Clear of the editor's vertical scrollbar.
 pub const FIND_RIGHT: Pixels = px(16.);
-pub const FIND_COUNT_WIDTH: Pixels = px(112.);
 /// Buttons are 22 px with 16 px icons; the toggles inside the inputs 20 px.
 pub const FIND_BUTTON: Pixels = px(22.);
 pub const FIND_TOGGLE: Pixels = px(20.);

@@ -4,7 +4,103 @@ use super::super::test_support::{open, settle};
 use super::super::*;
 #[allow(unused_imports)]
 use core::prelude::v1::test;
-use gpui_kit::TestAppContext;
+use gpui_kit::{TestAppContext, test::TestWindowExt};
+
+#[gpui_kit::test]
+async fn find_controls_fit_a_narrow_editor(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-find-width-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("a.txt");
+    std::fs::write(&path, "needle needle\n").unwrap();
+    let (handle, this) = open(cx, root.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(path, Some(root.clone()), window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_find(true, window, cx);
+            p.find
+                .query
+                .update(cx, |input, cx| input.set_value("needle", window, cx));
+            p.find
+                .replacement
+                .update(cx, |input, cx| input.set_value("done", window, cx));
+            p.find_update(false, cx);
+        });
+    })
+    .unwrap();
+    for width in [1400., 560., 244., 1400., 244.] {
+        this.update(cx, |p, cx| {
+            p.sidebar_visible = width > 244.;
+            cx.notify();
+        });
+        cx.simulate_window_resize(handle.into(), size(px(width), px(650.)));
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let editor = window.find("workbench-editor").bounds();
+            assert_eq!(window.viewport_size().width, px(width));
+            let query = window.find("find-query-field").bounds();
+            let next = window.find("find-next").bounds();
+            if width == 1400. {
+                assert!(
+                    next.top() < query.bottom(),
+                    "wide find controls should share a row"
+                );
+            } else {
+                assert!(editor.size.width <= px(360.));
+                assert!(
+                    next.top() >= query.bottom(),
+                    "narrow find controls should wrap together"
+                );
+            }
+            this.read_with(cx, |p, _| assert_eq!(p.find.label(), "1 / 2"));
+            assert!(window.find("find-count").bounds().size.width > theme::FIND_BUTTON);
+            for id in [
+                "find-toggle-replace",
+                "find-case",
+                "find-word",
+                "find-regex",
+                "find-previous",
+                "find-next",
+                "find-selection",
+                "find-close",
+                "replace-one",
+                "replace-all",
+            ] {
+                let control = window.find(id);
+                assert!(control.visible(), "{id} is clipped");
+                let bounds = control.bounds();
+                assert!(
+                    bounds.left() >= editor.left() && bounds.right() <= editor.right(),
+                    "{id} escapes editor: {bounds:?}, editor={editor:?}"
+                );
+            }
+        })
+        .unwrap();
+    }
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("replace-all", cx);
+        this.read_with(cx, |p, cx| {
+            assert_eq!(
+                p.documents[0].editor.read(cx).text().to_string(),
+                "done done\n"
+            )
+        });
+        window.click("find-close", cx);
+        this.read_with(cx, |p, _| assert!(!p.find.open));
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
 
 #[gpui_kit::test]
 async fn find_in_selection_follows_edits_above_it(cx: &mut TestAppContext) {

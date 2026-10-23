@@ -185,6 +185,43 @@ async fn the_viewer_goes_to_lines_copies_selected_lines_and_finds(cx: &mut TestA
             p.large.as_ref().unwrap().selection == Some((50_000, 50_000))
         })
     });
+    this.update(cx, |p, cx| {
+        p.sidebar_visible = false;
+        cx.notify();
+    });
+    cx.simulate_window_resize(window.into(), size(px(244.), px(650.)));
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.viewport_size().width, px(244.));
+        let editor = window.find("workbench-editor").bounds();
+        let input = window.find("large-find-input").bounds();
+        assert!(
+            input.size.width >= theme::FIND_INPUT_WIDTH / 2.,
+            "query is squeezed: {input:?}"
+        );
+        let status = window.find("large-find-status").bounds();
+        assert!(
+            status.size.width >= theme::FIND_BUTTON * 3.,
+            "result status is squeezed: {status:?}"
+        );
+        for id in ["large-find-previous", "large-find-next", "large-find-close"] {
+            let button = window.find(id);
+            assert!(button.visible(), "{id} is clipped");
+            let bounds = button.bounds();
+            assert!(
+                bounds.left() >= editor.left() && bounds.right() <= editor.right(),
+                "{id} escapes editor: {bounds:?}"
+            );
+        }
+        window.click("large-find-close", cx);
+        this.read_with(cx, |p, _| {
+            let large = p.large.as_ref().unwrap();
+            assert!(large.find.is_none());
+            assert!(large.focus.is_focused(window));
+        });
+    })
+    .unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }
 

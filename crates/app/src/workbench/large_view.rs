@@ -468,8 +468,10 @@ impl Workbench {
             .children(large.find.as_ref().map(|find| {
                 h_flex()
                     .w_full()
-                    .h(theme::BANNER_HEIGHT)
+                    .min_h(theme::BANNER_HEIGHT)
+                    .flex_wrap()
                     .px_3()
+                    .py_1()
                     .gap_1()
                     .flex_shrink_0()
                     .border_b_1()
@@ -483,37 +485,74 @@ impl Workbench {
                     )
                     .child(
                         div()
-                            .w(theme::FIND_INPUT_WIDTH)
+                            .id("large-find-input")
+                            .test_support()
+                            .flex_grow(1.)
+                            .flex_basis(theme::FIND_INPUT_WIDTH)
+                            .min_w_0()
                             .child(Input::new(&find.input).text_size(theme::TEXT_BODY).small()),
                     )
                     .child(
-                        Button::new("large-find-previous")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::ArrowUp)
-                            .tooltip("上一个 (⇧Enter)")
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.large_find_step(false, cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new("large-find-next")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::ArrowDown)
-                            .tooltip("下一个 (Enter)")
-                            .on_click(cx.listener(|this, _, _, cx| this.large_find_step(true, cx))),
-                    )
-                    .child(div().flex_1().min_w_0().child(find.status.clone()))
-                    .child(
-                        Button::new("large-find-close")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::Close)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.large_close_find(window, cx)
-                                }),
+                        h_flex()
+                            .flex_grow(1.)
+                            .flex_basis(theme::FIND_ACTIONS_WIDTH)
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                Button::new("large-find-previous")
+                                    .xsmall()
+                                    .ghost()
+                                    .icon(IconName::ArrowUp)
+                                    .flex_shrink_0()
+                                    .tooltip("上一个 (⇧Enter)")
+                                    .accessibility_label("上一个匹配项")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.large_find_step(false, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("large-find-next")
+                                    .xsmall()
+                                    .ghost()
+                                    .icon(IconName::ArrowDown)
+                                    .flex_shrink_0()
+                                    .tooltip("下一个 (Enter)")
+                                    .accessibility_label("下一个匹配项")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.large_find_step(true, cx)
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("large-find-status")
+                                    .test_support()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_ellipsis()
+                                    .tooltip({
+                                        let status = find.status.clone();
+                                        move |window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(
+                                                status.clone(),
+                                            )
+                                            .build(window, cx)
+                                        }
+                                    })
+                                    .child(find.status.clone()),
+                            )
+                            .child(
+                                Button::new("large-find-close")
+                                    .xsmall()
+                                    .ghost()
+                                    .flex_shrink_0()
+                                    .icon(IconName::Close)
+                                    .tooltip("关闭查找（Esc）")
+                                    .accessibility_label("关闭查找（Esc）")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.large_close_find(window, cx)
+                                    })),
                             ),
                     )
             }))
