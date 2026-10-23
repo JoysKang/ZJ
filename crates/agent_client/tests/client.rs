@@ -1348,6 +1348,28 @@ fn pooled(ws: &Workspace, pool: &Arc<AgentPool>, env: &[(&str, &str)]) -> Client
 }
 
 #[test]
+fn eof_changes_make_old_hunk_decisions_stale_without_writing() {
+    use workspace_editor_agent::review::{STALE_REVIEW, full_context_patch, resolve_hunk};
+    let ws = Workspace::new("review-eof");
+    let client = AgentClient::start(options(&ws, &[])).unwrap();
+    let path = ws.path("src/a.rs");
+    for (shown_text, current) in [("new", "new\n"), ("new\n", "new")] {
+        for accept in [false, true] {
+            let before = "old";
+            client.set_snapshot(&path, Some(Some(before.into())));
+            std::fs::write(&path, current).unwrap();
+            let shown = full_context_patch(before, shown_text).0;
+            assert_eq!(
+                resolve_hunk(&client, &path, 0, accept, &shown),
+                Err(STALE_REVIEW.into())
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), current);
+            assert_eq!(client.snapshot(&path), Some(Some(before.into())));
+        }
+    }
+}
+
+#[test]
 fn concurrent_reviews_never_apply_two_decisions_to_the_same_shown_patch() {
     use workspace_editor_agent::review::{STALE_REVIEW, full_context_patch, resolve_hunk};
     let ws = Workspace::new("review-race");

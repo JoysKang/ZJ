@@ -28,8 +28,10 @@ pub fn full_context_patch(before: &str, after: &str) -> (String, Vec<Hunk>) {
     out.push_str(&format!("@@ -1,{} +1,{} @@\n", old.len(), new.len()));
     let mut push = |prefix: char, line: &str| {
         out.push(prefix);
-        out.push_str(line.strip_suffix('\n').unwrap_or(line));
-        out.push('\n');
+        out.push_str(line);
+        if !line.ends_with('\n') {
+            out.push_str("\n\\ No newline at end of file\n");
+        }
     };
     let mut at = 0;
     for hunk in &hunks {
@@ -223,7 +225,10 @@ mod tests {
         assert_eq!(patch, "@@ -1,5 +1,6 @@\n a\n-b\n+B\n c\n d\n-e\n+E\n+f\n");
         // A new file is all additions.
         let (patch, hunks) = full_context_patch("", "x\ny");
-        assert_eq!(patch, "@@ -1,0 +1,2 @@\n+x\n+y\n");
+        assert_eq!(
+            patch,
+            "@@ -1,0 +1,2 @@\n+x\n+y\n\\ No newline at end of file\n"
+        );
         assert_eq!(hunks.len(), 1);
         assert_eq!(line_counts(before, after), (3, 2));
     }
