@@ -361,8 +361,6 @@ struct Locals {
     scopes: Vec<Range<usize>>,
     /// Every `local.definition`: the name it binds and its range.
     definitions: Vec<(String, Range<usize>)>,
-    /// Every `local.reference`: the name it mentions and its range.
-    references: Vec<(String, Range<usize>)>,
 }
 
 fn locals_in(queries: &Queries, tree: &Tree, text: &str) -> Option<Locals> {
@@ -371,7 +369,6 @@ fn locals_in(queries: &Queries, tree: &Tree, text: &str) -> Option<Locals> {
     let mut locals = Locals {
         scopes: std::iter::once(0..text.len()).collect(),
         definitions: Vec::new(),
-        references: Vec::new(),
     };
     let mut cursor = QueryCursor::new();
     cursor.set_match_limit(256);
@@ -384,11 +381,6 @@ fn locals_in(queries: &Queries, tree: &Tree, text: &str) -> Option<Locals> {
                 "local.definition" => {
                     locals
                         .definitions
-                        .push((text[range.clone()].to_string(), range));
-                }
-                "local.reference" => {
-                    locals
-                        .references
                         .push((text[range.clone()].to_string(), range));
                 }
                 _ => {}
@@ -464,61 +456,6 @@ fn local_binding(
         line,
         column,
     })
-}
-
-/// One local binding: where it is defined, and every reference resolved to it.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Binding {
-    pub definition: Range<usize>,
-    pub references: Vec<Range<usize>>,
-}
-
-/// Most bindings tinted in one file; a file with more locals than this gets the first ones.
-const MAX_BINDINGS: usize = 512;
-
-/// Most tinted ranges in one file (a definition or a reference). Every range is a decoration the
-/// editor tracks through each edit, so a pathological file stops here rather than in the editor.
-const MAX_TINTED: usize = 8192;
-
-/// Local bindings of one file, in source order, each with the references that resolve to it, so
-/// the definition and its occurrences can share a color and two same-named `let`s stay apart.
-/// Empty for a language without a locals query, or a file past the size cap.
-pub fn bindings(language: &str, text: &str) -> Vec<Binding> {
-    if text.len() > MAX_FILE_BYTES {
-        return Vec::new();
-    }
-    let Some(queries) = queries(language) else {
-        return Vec::new();
-    };
-    let Some(tree) = parse(queries, text) else {
-        return Vec::new();
-    };
-    let Some(locals) = locals_in(queries, &tree, text) else {
-        return Vec::new();
-    };
-    let mut references: Vec<Vec<Range<usize>>> = vec![Vec::new(); locals.definitions.len()];
-    for (name, range) in &locals.references {
-        if let Some(index) = nearest(&locals, name, range.start) {
-            // A definition is captured as a reference of itself by `(identifier)`; it is not one.
-            if locals.definitions[index].1 != *range {
-                references[index].push(range.clone());
-            }
-        }
-    }
-    let mut bindings = Vec::new();
-    let mut budget = MAX_TINTED;
-    for ((_, definition), references) in locals.definitions.into_iter().zip(references) {
-        if bindings.len() >= MAX_BINDINGS || budget == 0 {
-            break;
-        }
-        let references: Vec<Range<usize>> = references.into_iter().take(budget).collect();
-        budget -= references.len().max(1);
-        bindings.push(Binding {
-            definition,
-            references,
-        });
-    }
-    bindings
 }
 
 #[cfg(test)]
@@ -651,53 +588,5 @@ pub(crate) mod tests {
         assert_eq!(word_at(text, 6), Some(5..10));
         assert_eq!(word_at(text, 10), Some(5..10));
         assert_eq!(word_at(text, 19), None);
-    }
-
-    /// Two `let a`s are two bindings: each reference belongs to the one in scope, not to the
-    /// name, so tinting them the same color would mean nothing.
-    #[test]
-    fn bindings_keep_shadowed_locals_apart() {
-        let text = "fn main() {\n    let a = 1;\n    let b = a + a;\n    let a = b;\n    a\n}\n";
-        let bindings = bindings("rust", text);
-        assert_eq!(bindings.len(), 3);
-        let definitions: Vec<usize> = bindings.iter().map(|b| b.definition.start).collect();
-        assert!(
-            definitions.windows(2).all(|pair| pair[0] < pair[1]),
-            "definitions in source order: {definitions:?}"
-        );
-        // The first `a` is read twice in `let b = a + a`; `b` is read once; the shadowing `a`
-        // is read once at the end.
-        assert_eq!(bindings[0].references.len(), 2);
-        assert_eq!(bindings[1].references.len(), 1);
-        assert_eq!(bindings[2].references.len(), 1);
-    }
-
-    #[test]
-    fn bindings_exist_for_every_navigation_language() {
-        // The smallest source with a local binding and a reference to it, per language.
-        for (language, source) in [
-            ("rust", "fn main() { let x = 1; x; }\n"),
-            ("python", "def f(a):\n    return a\n"),
-            ("go", "package main\n\nfunc f(a int) int { return a }\n"),
-            ("c", "int f(int a) { return a; }\n"),
-            ("cpp", "int f(int a) { return a; }\n"),
-            ("java", "class A { int f(int a) { return a; } }\n"),
-            ("javascript", "function f(a) { return a; }\n"),
-            ("typescript", "function f(a: number) { return a; }\n"),
-            (
-                "tsx",
-                "export const App = (props: { t: string }) => <h1>{props.t}</h1>;\n",
-            ),
-            ("bash", "f() { local a=1; echo \"$a\"; }\n"),
-        ] {
-            let found = bindings(language, source);
-            assert!(!found.is_empty(), "{language}: no local bindings");
-            assert!(
-                found.iter().any(|binding| !binding.references.is_empty()),
-                "{language}: no reference resolved to its binding"
-            );
-        }
-        assert!(bindings("markdown", "# Title\n").is_empty());
-        assert!(bindings("plain", "text\n").is_empty());
     }
 }

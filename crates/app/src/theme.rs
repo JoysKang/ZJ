@@ -736,10 +736,6 @@ pub struct Colors {
     pub graph_lanes: [Hsla; 8],
     /// The terminal draws on the editor background in the code color, as VS Code's does.
     pub terminal: crate::terminal::Palette,
-    /// Local bindings in the editor's text, cycled by binding index: a binding's definition and
-    /// its references share one color, so two same-named locals read apart. Reused from the git
-    /// status hues, which already read as text on the editor background.
-    pub bindings: [Hsla; 4],
 }
 
 fn hsla(hex: u32) -> Hsla {
@@ -840,7 +836,6 @@ impl Palette {
                 background: hsla(self.editor),
                 cursor: hsla(self.caret),
             },
-            bindings: [self.accent, self.modified, self.untracked, self.deleted].map(hsla),
         }
     }
 }
@@ -1079,26 +1074,6 @@ mod tests {
                     assert!(ratio >= 4.5, "{name} {status} on {surface}: {ratio:.2}");
                 }
             }
-        }
-    }
-
-    /// The local binding tints recolor body text: each must read on the editor background, and
-    /// the four must differ, or two bindings would look like one.
-    #[test]
-    fn binding_tints_read_on_the_editor() {
-        for (name, p) in [("dark", DARK), ("light", LIGHT)] {
-            let colors = p.colors();
-            let tints: Vec<u32> = colors
-                .bindings
-                .iter()
-                .map(|color| u32::from(color.to_rgb()) >> 8)
-                .collect();
-            for (index, tint) in tints.iter().enumerate() {
-                let ratio = contrast(*tint, p.editor);
-                assert!(ratio >= 4.5, "{name} binding {index}: {ratio:.2}");
-            }
-            let distinct: std::collections::BTreeSet<u32> = tints.iter().copied().collect();
-            assert_eq!(distinct.len(), tints.len(), "{name} binding tints differ");
         }
     }
 

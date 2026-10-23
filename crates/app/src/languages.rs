@@ -348,6 +348,43 @@ mod tests {
         }
     }
 
+    /// Python's highlight query gives same-kind uppercase assignments one category color; that
+    /// they agree is what matters, not which hue the grammar maps them to.
+    #[test]
+    fn python_uppercase_assignments_share_their_category_color() {
+        register();
+        let source = concat!(
+            "FLOWER_URL = \"https://example.invalid/flowers\"\n",
+            "TASK_PATH = \"example.invalid/tasks\"\n",
+            "USERNAME = \"demo-user\"\n",
+            "PASSWORD = \"not-a-real-password\"\n",
+        );
+        for dark in [true, false] {
+            let theme = crate::theme::highlight_theme_for_tests(dark);
+            let runs = crate::diff_doc::highlight("python", source, &theme);
+            let mut color = None;
+            for name in ["FLOWER_URL", "TASK_PATH", "USERNAME", "PASSWORD"] {
+                let start = source.find(name).unwrap();
+                let style = runs
+                    .iter()
+                    .rev()
+                    .find(|(range, _)| range.start <= start && range.end >= start + name.len())
+                    .unwrap_or_else(|| panic!("python missing {name}"))
+                    .1;
+                let found = style
+                    .color
+                    .unwrap_or_else(|| panic!("{name} has no color (dark={dark})"));
+                match color {
+                    Some(color) => assert_eq!(
+                        found, color,
+                        "{name} differs from the other assignments (dark={dark})"
+                    ),
+                    None => color = Some(found),
+                }
+            }
+        }
+    }
+
     /// Each grammar parses its sample and yields visibly styled captures in both app themes.
     #[test]
     fn every_grammar_highlights_with_app_themes() {

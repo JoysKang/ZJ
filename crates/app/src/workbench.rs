@@ -79,10 +79,6 @@ mod graph_view;
 mod input_area;
 mod large_view;
 pub use large_view::CopyLargeLines;
-mod local_vars;
-#[cfg(test)]
-#[path = "workbench/local_vars_ui_tests.rs"]
-mod local_vars_ui_tests;
 mod markdown_preview;
 #[cfg(test)]
 #[path = "workbench/markdown_ui_tests.rs"]
@@ -256,7 +252,6 @@ struct Document {
     /// Markdown files: the live preview (`None` for other languages).
     markdown: Option<markdown_preview::MarkdownPreview>,
     conflicts: conflict_bar::ConflictDoc,
-    locals: local_vars::LocalDoc,
     _subscription: Subscription,
 }
 
@@ -1218,7 +1213,6 @@ impl Workbench {
         self.observe_cursor(cx);
         self.reveal_tree_entry(window, cx);
         self.remember_tabs(false, window, cx);
-        self.tint_locals(cx);
         cx.notify();
     }
 
