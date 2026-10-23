@@ -99,6 +99,7 @@ pub const WORKBENCH_INSET: Pixels = px(2.);
 pub const FIND_WIDTH: Pixels = px(500.);
 pub const FIND_INPUT_WIDTH: Pixels = px(236.);
 pub const FIND_ACTIONS_WIDTH: Pixels = px(192.);
+pub const TERMINAL_TAB_MAX_WIDTH: Pixels = px(160.);
 /// Clear of the editor's vertical scrollbar.
 pub const FIND_RIGHT: Pixels = px(16.);
 /// Buttons are 22 px with 16 px icons; the toggles inside the inputs 20 px.

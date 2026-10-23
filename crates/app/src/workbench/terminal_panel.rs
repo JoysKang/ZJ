@@ -38,6 +38,7 @@ pub(super) struct TerminalPanel<T> {
     visible: bool,
     groups: Vec<Group<T>>,
     active: usize,
+    tabs_scroll: ScrollHandle,
     /// The shell to start; `None` is the user's login shell (tests use `/bin/sh`).
     shell: Option<Shell>,
     subscriptions: Vec<(EntityId, Subscription)>,
@@ -49,6 +50,7 @@ impl<T> Default for TerminalPanel<T> {
             visible: false,
             groups: Vec::new(),
             active: 0,
+            tabs_scroll: ScrollHandle::new(),
             shell: None,
             subscriptions: Vec::new(),
         }
@@ -145,6 +147,7 @@ impl<T> TerminalPanel<T> {
     pub(super) fn focus(&mut self, group: usize, pane: usize) -> Option<&T> {
         self.active = group;
         let target = self.groups.get_mut(group)?;
+        self.tabs_scroll.scroll_to_item(group);
         target.focused = pane;
         target.panes.get(pane)
     }
@@ -385,11 +388,23 @@ impl Workbench {
         };
         let chips = (terminals.groups().len() > 1).then(|| {
             h_flex()
+                .id("terminal-groups")
+                .test_support()
+                .flex_1()
+                .min_w_0()
+                .overflow_x_scroll()
+                .track_scroll(&terminals.tabs_scroll)
                 .gap_1()
                 .children(terminals.groups().enumerate().map(|(g, panes)| {
                     let active = g == terminals.active();
+                    let title = format!("{}: {}", g + 1, label(panes, cx));
                     div()
                         .id(("terminal-group", g))
+                        .test_support()
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
+                        .max_w(theme::TERMINAL_TAB_MAX_WIDTH)
+                        .text_ellipsis()
                         .px_2()
                         .rounded(theme::RADIUS)
                         .cursor_pointer()
@@ -402,14 +417,24 @@ impl Workbench {
                                     .hover(|chip| chip.bg(colors.hover))
                             }
                         })
-                        .child(format!("{}: {}", g + 1, label(panes, cx)))
+                        .child(title.clone())
+                        .tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(title.clone())
+                                .build(window, cx)
+                        })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.select_terminal_group(g, window, cx)
                         }))
                 }))
         });
         let button = |id: &'static str, icon: IconName, tooltip: &'static str| {
-            Button::new(id).xsmall().ghost().icon(icon).tooltip(tooltip)
+            Button::new(id)
+                .xsmall()
+                .ghost()
+                .flex_shrink_0()
+                .icon(icon)
+                .tooltip(tooltip)
+                .accessibility_label(tooltip)
         };
         let header = h_flex()
             .h(theme::SECTION_HEIGHT)
@@ -418,12 +443,15 @@ impl Workbench {
             .gap_2()
             .child(
                 div()
+                    .flex_shrink_0()
                     .text_size(theme::TEXT_SECTION)
                     .text_color(colors.foreground)
                     .child("终端"),
             )
             .children(chips)
-            .child(div().flex_1())
+            .when(terminals.groups().len() <= 1, |header| {
+                header.child(div().flex_1())
+            })
             .child(
                 button("terminal-new", IconName::Plus, "新建终端（⌃⇧`）")
                     .on_click(cx.listener(|this, _, window, cx| this.new_terminal(window, cx))),
