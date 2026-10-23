@@ -169,7 +169,7 @@ pub struct Settings {
     /// back to the one last used in it (`input_switch`). On by default.
     pub auto_input_source: bool,
     pub agent: AgentSettings,
-    /// files.autoSave: "off" (default), "afterDelay" (1 s after the last edit) or
+    /// files.autoSave: "afterDelay" (default; 1 s after the last edit), "off" or
     /// "onFocusChange" (when the window loses focus or another tab is chosen).
     pub auto_save: crate::save::AutoSave,
     /// Repositories added by hand to a workspace (开发说明 R03): the workspace folder to the
@@ -195,7 +195,7 @@ impl Default for Settings {
             dock_icon_blink: false,
             auto_input_source: true,
             agent: AgentSettings::default(),
-            auto_save: crate::save::AutoSave::Off,
+            auto_save: crate::save::AutoSave::default(),
             extra_repos: BTreeMap::new(),
         }
     }
@@ -675,5 +675,25 @@ mod tests {
         assert!(crate::secrets::resolve(&env, |_| None).is_err());
         assert!(!loaded.show_hidden);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_auto_save_defaults_to_after_delay_and_an_explicit_off_stays_off() {
+        assert_eq!(
+            Settings::from_json(&json!({ "editor_font_size": 13 })),
+            Settings::default()
+        );
+        assert_eq!(
+            Settings::from_json(&json!({})).auto_save,
+            crate::save::AutoSave::AfterDelay
+        );
+        assert_eq!(
+            Settings::from_json(&json!({ "auto_save": "off" })).auto_save,
+            crate::save::AutoSave::Off
+        );
+        assert_eq!(
+            Settings::default().auto_save,
+            crate::save::AutoSave::AfterDelay
+        );
     }
 }

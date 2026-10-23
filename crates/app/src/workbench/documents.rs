@@ -302,9 +302,13 @@ impl Workbench {
             doc.auto_save_task = Some(cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(save::AUTO_SAVE_DELAY).await;
                 let _ = this.update_in(cx, |this, window, cx| {
-                    let due = this
-                        .document(id)
-                        .is_some_and(|doc| doc.dirty && !doc.deleted && doc.auto_save.fire(ticket));
+                    // The delay may outlive the setting: 文件 → 自动保存 can be switched to
+                    // Off or 失去焦点时 while this timer is waiting.
+                    let due = cx.global::<crate::settings::Settings>().auto_save
+                        == AutoSave::AfterDelay
+                        && this.document(id).is_some_and(|doc| {
+                            doc.dirty && !doc.deleted && doc.auto_save.fire(ticket)
+                        });
                     if due {
                         this.save_document(id, false, window, cx).detach();
                     }
@@ -314,7 +318,7 @@ impl Workbench {
         self.schedule_snapshot(id, window, cx);
     }
 
-    /// files.autoSave = onFocusChange: the window lost focus or another tab was chosen.
+    /// files.autoSave = onFocusChange: the editor or window lost focus, or another tab was chosen.
     pub(super) fn auto_save_on_focus_change(
         &mut self,
         only: Option<DocumentId>,
@@ -382,8 +386,8 @@ impl Workbench {
         let subscription = cx.subscribe_in(
             &editor,
             window,
-            move |this: &mut Self, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::Change) {
+            move |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
                     this.document_changed(id, window, cx);
                     this.markdown_buffer_changed(id, cx);
                     if this.active == Pane::Document(id) {
@@ -391,6 +395,8 @@ impl Workbench {
                     }
                     cx.notify();
                 }
+                InputEvent::Blur => this.auto_save_on_focus_change(Some(id), window, cx),
+                _ => {}
             },
         );
         (editor, subscription)

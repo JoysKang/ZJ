@@ -478,63 +478,14 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         ]);
         // ⌘/ and the other line editing keys on document editors (workbench/edit_commands.rs).
         cx.bind_keys(workbench::edit_key_bindings());
-        cx.set_menus([
-            Menu::new("ZJ").items([
-                MenuItem::action("设置…", workbench::OpenSettingsFile),
-                MenuItem::separator(),
-                MenuItem::os_submenu("服务", SystemMenuType::Services),
-                MenuItem::separator(),
-                MenuItem::action("退出 ZJ", workbench::Quit),
-            ]),
-            Menu::new("文件").items([
-                MenuItem::action("新建文件", workbench::NewUntitled),
-                MenuItem::action("新建窗口", workbench::NewWindow),
-                MenuItem::separator(),
-                MenuItem::action("打开文件…", workbench::OpenFile),
-                MenuItem::action("打开文件夹…", workbench::OpenFolder),
-                MenuItem::separator(),
-                MenuItem::action("保存", workbench::Save),
-                MenuItem::action("另存为…", workbench::SaveAs),
-                MenuItem::action("全部保存", workbench::SaveAll),
-                MenuItem::separator(),
-                MenuItem::action("关闭编辑器", workbench::CloseEditor),
-                MenuItem::separator(),
-                MenuItem::submenu(Menu::new("自动保存").items([
-                    MenuItem::action("关闭", workbench::AutoSaveOff),
-                    MenuItem::action("编辑后 1 秒", workbench::AutoSaveAfterDelay),
-                    MenuItem::action("失去焦点时", workbench::AutoSaveOnFocusChange),
-                ])),
-            ]),
-            Menu::new("查看").items([
-                MenuItem::action("命令面板…", workbench::ShowAllCommands),
-                MenuItem::separator(),
-                MenuItem::action("放大", workbench::ZoomIn),
-                MenuItem::action("缩小", workbench::ZoomOut),
-                MenuItem::action("重置缩放", workbench::ZoomReset),
-                MenuItem::separator(),
-                MenuItem::action("自动换行", workbench::ToggleSoftWrap),
-                MenuItem::separator(),
-                MenuItem::action("显示 / 隐藏点文件", workbench::ToggleHiddenFiles),
-                MenuItem::separator(),
-                MenuItem::action("Agent 面板", workbench::ToggleAgentPanel),
-                MenuItem::action("搜索 Agent 会话…", workbench::SearchSessions),
-            ]),
-            Menu::new("转到").items([
-                MenuItem::action("返回", nav::NavigateBack),
-                MenuItem::action("前进", nav::NavigateForward),
-                MenuItem::separator(),
-                MenuItem::action("转到定义", GoToDefinition),
-                MenuItem::action("查找所有引用", nav::FindReferences),
-                MenuItem::action("转到文件中的符号…", nav::GoToSymbol),
-                MenuItem::action("转到行/列…", nav::GoToLine),
-            ]),
-        ]);
+        perf::watch_key_latency(cx);
+
+        install_menus(cx);
         let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
         cx.set_global(workbench::OpenDocuments(documents.clone()));
         // ⌘Q asks about unsaved changes window by window before quitting.
         cx.on_action(|_: &workbench::Quit, cx| workbench::quit(cx));
         session::track(cx);
-        perf::watch_key_latency(cx);
         // Before the windows open: they restore what an abnormal exit left unsaved.
         if let Some(dir) = recovery::dir() {
             workbench::recovery::install(dir, cx);
@@ -581,6 +532,146 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         cx.activate(true);
     });
     Ok(())
+}
+
+fn install_menus(cx: &mut App) {
+    let mut current = cx.global::<settings::Settings>().auto_save;
+    cx.set_menus(app_menus(current));
+    cx.observe_global::<settings::Settings>(move |cx| {
+        let mode = cx.global::<settings::Settings>().auto_save;
+        if mode != current {
+            current = mode;
+            cx.set_menus(app_menus(mode));
+        }
+    })
+    .detach();
+}
+
+fn app_menus(auto_save: save::AutoSave) -> [Menu; 4] {
+    [
+        Menu::new("ZJ").items([
+            MenuItem::action("设置…", workbench::OpenSettingsFile),
+            MenuItem::separator(),
+            MenuItem::os_submenu("服务", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("退出 ZJ", workbench::Quit),
+        ]),
+        Menu::new("文件").items([
+            MenuItem::action("新建文件", workbench::NewUntitled),
+            MenuItem::action("新建窗口", workbench::NewWindow),
+            MenuItem::separator(),
+            MenuItem::action("打开文件…", workbench::OpenFile),
+            MenuItem::action("打开文件夹…", workbench::OpenFolder),
+            MenuItem::separator(),
+            MenuItem::action("保存", workbench::Save),
+            MenuItem::action("另存为…", workbench::SaveAs),
+            MenuItem::action("全部保存", workbench::SaveAll),
+            MenuItem::separator(),
+            MenuItem::action("关闭编辑器", workbench::CloseEditor),
+            MenuItem::separator(),
+            MenuItem::submenu(
+                Menu::new("自动保存").items([
+                    MenuItem::action("关闭", workbench::AutoSaveOff)
+                        .checked(auto_save == save::AutoSave::Off),
+                    MenuItem::action("编辑后 1 秒", workbench::AutoSaveAfterDelay)
+                        .checked(auto_save == save::AutoSave::AfterDelay),
+                    MenuItem::action("失去焦点时", workbench::AutoSaveOnFocusChange)
+                        .checked(auto_save == save::AutoSave::OnFocusChange),
+                ]),
+            ),
+        ]),
+        Menu::new("查看").items([
+            MenuItem::action("命令面板…", workbench::ShowAllCommands),
+            MenuItem::separator(),
+            MenuItem::action("放大", workbench::ZoomIn),
+            MenuItem::action("缩小", workbench::ZoomOut),
+            MenuItem::action("重置缩放", workbench::ZoomReset),
+            MenuItem::separator(),
+            MenuItem::action("自动换行", workbench::ToggleSoftWrap),
+            MenuItem::separator(),
+            MenuItem::action("显示 / 隐藏点文件", workbench::ToggleHiddenFiles),
+            MenuItem::separator(),
+            MenuItem::action("Agent 面板", workbench::ToggleAgentPanel),
+            MenuItem::action("搜索 Agent 会话…", workbench::SearchSessions),
+        ]),
+        Menu::new("转到").items([
+            MenuItem::action("返回", nav::NavigateBack),
+            MenuItem::action("前进", nav::NavigateForward),
+            MenuItem::separator(),
+            MenuItem::action("转到定义", GoToDefinition),
+            MenuItem::action("查找所有引用", nav::FindReferences),
+            MenuItem::action("转到文件中的符号…", nav::GoToSymbol),
+            MenuItem::action("转到行/列…", nav::GoToLine),
+        ]),
+    ]
+}
+
+#[cfg(test)]
+mod menu_tests {
+    use super::*;
+    #[allow(unused_imports)]
+    use core::prelude::v1::test;
+
+    fn checked_auto_save(cx: &mut TestAppContext) -> Vec<String> {
+        cx.update(|cx| {
+            let menus = cx.get_menus().unwrap();
+            let file = menus.iter().find(|menu| menu.name == "文件").unwrap();
+            let auto_save = file
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    OwnedMenuItem::Submenu(menu) if menu.name == "自动保存" => Some(menu),
+                    _ => None,
+                })
+                .unwrap();
+            auto_save
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    OwnedMenuItem::Action {
+                        name,
+                        checked: true,
+                        ..
+                    } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    async fn auto_save_menu_tracks_settings_updates_and_saved_settings(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(settings::Settings::default());
+            install_menus(cx);
+        });
+        assert_eq!(checked_auto_save(cx), ["编辑后 1 秒"]);
+
+        for (mode, label) in [
+            (save::AutoSave::Off, "关闭"),
+            (save::AutoSave::OnFocusChange, "失去焦点时"),
+            (save::AutoSave::AfterDelay, "编辑后 1 秒"),
+        ] {
+            let written =
+                cx.update(|cx| settings::update(cx, |settings| settings.auto_save = mode));
+            written.await.unwrap();
+            cx.run_until_parked();
+            assert_eq!(checked_auto_save(cx), [label]);
+        }
+        // Saving the settings buffer uses apply(), shared by all windows.
+        cx.update(|cx| {
+            settings::apply(
+                settings::Settings {
+                    auto_save: save::AutoSave::OnFocusChange,
+                    ..settings::Settings::default()
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        assert_eq!(checked_auto_save(cx), ["失去焦点时"]);
+    }
 }
 
 // The vendored macOS renderer's low-memory policy is plain Rust; test it here so it runs on

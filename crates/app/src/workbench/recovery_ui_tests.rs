@@ -93,7 +93,13 @@ async fn an_edit_is_snapshotted_after_a_pause_and_forgotten_once_saved(cx: &mut 
     let path = root.join("a.txt");
     std::fs::write(&path, "one").unwrap();
     cx.update(|cx| super::install(store.clone(), cx));
-    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    // This test is about the 2 s recovery snapshot: the default 1 s auto-save would save the
+    // buffer first and drop the snapshot it is waiting for.
+    let settings = Settings {
+        auto_save: crate::save::AutoSave::Off,
+        ..Settings::default()
+    };
+    let (window, this) = open_window(cx, Some(root.clone()), settings, empty_store());
     wait(
         cx,
         Some(TICK),

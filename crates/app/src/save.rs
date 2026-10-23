@@ -307,11 +307,11 @@ impl<T> QuitFlow<T> {
     }
 }
 
-/// files.autoSave: off, afterDelay (1000 ms), onFocusChange.
+/// files.autoSave: off, afterDelay (1000 ms, the default), onFocusChange.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AutoSave {
-    #[default]
     Off,
+    #[default]
     AfterDelay,
     OnFocusChange,
 }
@@ -677,7 +677,9 @@ mod tests {
 
     #[test]
     fn auto_save_debounces_edits() {
+        assert_eq!(AutoSave::default(), AutoSave::AfterDelay);
         assert_eq!(AutoSave::parse("afterDelay"), AutoSave::AfterDelay);
+        assert_eq!(AutoSave::parse("off"), AutoSave::Off);
         assert_eq!(AutoSave::parse("nonsense"), AutoSave::Off);
         assert_eq!(
             AutoSave::parse(AutoSave::OnFocusChange.as_str()),

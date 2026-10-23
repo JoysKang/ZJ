@@ -137,6 +137,113 @@ async fn markdown_opens_rendered_and_edits_one_block_at_a_time(cx: &mut TestAppC
 }
 
 #[gpui_kit::test]
+async fn markdown_block_blur_saves_the_latest_text_only_on_focus_change(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-markdown-blur-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("a.md");
+    std::fs::write(&path, "one\n\ntwo\n").unwrap();
+    let (window, this) = open(cx, root.clone());
+    window_do(cx, window, |window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(path.clone(), Some(root.clone()), window, cx)
+        });
+    });
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| !p.documents.is_empty()) && blocks(cx, &this).len() == 2
+    });
+
+    for mode in [
+        crate::save::AutoSave::Off,
+        crate::save::AutoSave::AfterDelay,
+        crate::save::AutoSave::OnFocusChange,
+    ] {
+        cx.update(|cx| cx.global_mut::<crate::settings::Settings>().auto_save = mode);
+        window_do(cx, window, |window, cx| {
+            window.activate_window();
+            window.click(("md-block", 0usize), cx);
+        });
+        assert_eq!(editing(cx, &this), Some(Some(0)));
+        // Blur in the same update as the last keystroke: Change/version notifications may
+        // still be queued when the textarea loses focus.
+        window_do(cx, window, |window, cx| {
+            window.input("X", cx);
+            let focus = this.read(cx).focus_handle.clone();
+            focus.focus(window, cx);
+        });
+        assert_eq!(editing(cx, &this), None);
+        let latest = buffer(cx, &this);
+        assert!(latest.contains('X'));
+        if mode == crate::save::AutoSave::OnFocusChange {
+            settle(cx, Some(window), |cx| {
+                this.read_with(cx, |p, _| !p.documents[0].dirty && !p.documents[0].saving)
+            });
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), latest);
+        } else {
+            // No fake clock advancement: AfterDelay must not save immediately on Blur.
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\n\ntwo\n");
+            this.read_with(cx, |p, _| {
+                assert!(p.documents[0].dirty);
+                assert!(!p.documents[0].saving);
+            });
+        }
+        cx.update(|cx| {
+            cx.global_mut::<crate::settings::Settings>().auto_save = crate::save::AutoSave::Off
+        });
+        settle(cx, Some(window), |cx| {
+            blocks(cx, &this)[0] == latest.split("\n\n").next().unwrap()
+        });
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[gpui_kit::test]
+async fn markdown_block_blur_does_not_recreate_a_deleted_file(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root =
+        std::env::temp_dir().join(format!("zj-markdown-blur-deleted-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("a.md");
+    std::fs::write(&path, "one\n").unwrap();
+    let (window, this) = open(cx, root.clone());
+    cx.update(|cx| {
+        cx.global_mut::<crate::settings::Settings>().auto_save =
+            crate::save::AutoSave::OnFocusChange
+    });
+    window_do(cx, window, |window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(path.clone(), Some(root.clone()), window, cx)
+        });
+    });
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| !p.documents.is_empty()) && !blocks(cx, &this).is_empty()
+    });
+    window_do(cx, window, |window, cx| {
+        window.activate_window();
+        window.click(("md-block", 0usize), cx);
+    });
+    std::fs::remove_file(&path).unwrap();
+    // The watcher normally supplies this state; set it directly to avoid watcher timing.
+    this.update(cx, |p, _| p.documents[0].deleted = true);
+    window_do(cx, window, |window, cx| {
+        window.input("X", cx);
+        let focus = this.read(cx).focus_handle.clone();
+        focus.focus(window, cx);
+    });
+    assert_eq!(editing(cx, &this), None);
+    assert!(!path.exists());
+    this.read_with(cx, |p, _| {
+        assert!(p.documents[0].dirty);
+        assert!(!p.documents[0].saving);
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[gpui_kit::test]
 async fn local_images_resolve_remote_ones_do_not_and_relative_links_open_here(
     cx: &mut TestAppContext,
 ) {

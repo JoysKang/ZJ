@@ -7,7 +7,7 @@ use crate::save::AutoSave;
 use crate::settings::Settings;
 #[allow(unused_imports)]
 use core::prelude::v1::test;
-use gpui_kit::TestAppContext;
+use gpui_kit::{TestAppContext, base::Root, test::TestWindowExt};
 
 fn second_window(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Workbench>) {
     cx.update(|cx| {
@@ -38,6 +38,46 @@ fn edited_untitled(
     .unwrap();
     assert!(this.read_with(cx, |p, _| p.document(id).unwrap().dirty));
     id
+}
+
+/// Opens `path` as the workspace's only tab and types at its start, leaving it dirty with
+/// auto-save scheduled for the configured mode.
+fn open_edited_buffer(
+    cx: &mut TestAppContext,
+    root: &std::path::Path,
+    path: &std::path::Path,
+    mode: AutoSave,
+) -> (WindowHandle<Root>, Entity<Workbench>, Entity<EditorState>) {
+    let settings = Settings {
+        auto_save: mode,
+        ..Settings::default()
+    };
+    let (window, this) = open_window(cx, Some(root.to_path_buf()), settings, empty_store());
+    wait(
+        cx,
+        Some(TICK),
+        None,
+        |cx| loaded(cx, &this),
+        |_| "the folder never finished loading".into(),
+    );
+    let (open_path, folder) = (path.to_path_buf(), Some(root.to_path_buf()));
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(open_path, folder, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        editor.update(cx, |state, cx| {
+            state.replace_text_in_range(Some(0..0), "two", window, cx)
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(this.read_with(cx, |p, _| p.documents[0].dirty));
+    (window, this, editor)
 }
 
 #[gpui_kit::test]
@@ -409,14 +449,165 @@ async fn focus_change_auto_save_leaves_a_deleted_file_deleted(cx: &mut TestAppCo
     });
     assert!(this.read_with(cx, |p, _| p.documents[0].dirty));
 
-    // Losing focus must not recreate it; only an explicit save does.
+    // Losing editor focus to the Agent composer must not recreate it.
+    let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
     cx.update_window(window.into(), |_, window, cx| {
-        this.update(cx, |p, cx| p.auto_save_on_focus_change(None, window, cx));
+        window.activate_window();
+        editor.update(cx, |state, cx| state.focus(window, cx));
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent.visible = true;
+            p.agent
+                .composer
+                .update(cx, |state, cx| state.focus(window, cx));
+        });
+        window.render_frame(cx);
     })
     .unwrap();
     cx.run_until_parked();
     assert!(!path.exists());
     assert!(!root.join("src").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[gpui_kit::test]
+async fn editor_blur_auto_saves_without_a_tab_or_window_change(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-auto-editor-blur-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("a.rs");
+    std::fs::write(&path, "one\n").unwrap();
+    let (window, this, editor) = open_edited_buffer(cx, &root, &path, AutoSave::OnFocusChange);
+    let id = this.read_with(cx, |p, _| p.documents[0].id);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.activate_window();
+        editor.update(cx, |state, cx| state.focus(window, cx));
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\n");
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.agent.visible = true;
+            p.agent
+                .composer
+                .update(cx, |state, cx| state.focus(window, cx));
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| {
+            !p.document(id).unwrap().dirty && !p.document(id).unwrap().saving
+        })
+    });
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "twoone\n");
+    this.read_with(cx, |p, _| assert_eq!(p.active, Pane::Document(id)));
+    cx.update_window(window.into(), |_, window, cx| {
+        let composer = this.read(cx).agent.composer.read(cx).focus_handle(cx);
+        assert!(composer.is_focused(window));
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[gpui_kit::test]
+async fn editor_blur_does_not_save_in_other_modes(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-auto-blur-modes-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("a.rs");
+    std::fs::write(&path, "one\n").unwrap();
+    let (window, this, editor) = open_edited_buffer(cx, &root, &path, AutoSave::Off);
+    for mode in [AutoSave::Off, AutoSave::AfterDelay] {
+        cx.update(|cx| cx.global_mut::<Settings>().auto_save = mode);
+        cx.update_window(window.into(), |_, window, cx| {
+            window.activate_window();
+            editor.update(cx, |state, cx| {
+                state.focus(window, cx);
+                state.replace_text_in_range(Some(0..0), "two", window, cx);
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.agent.visible = true;
+                p.agent
+                    .composer
+                    .update(cx, |state, cx| state.focus(window, cx));
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\n");
+        this.read_with(cx, |p, _| {
+            assert!(p.documents[0].dirty);
+            assert!(!p.documents[0].saving);
+        });
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[gpui_kit::test]
+async fn after_delay_writes_an_edited_file_on_its_own(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-auto-delay-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("a.rs");
+    std::fs::write(&path, "one\n").unwrap();
+    let (window, this, editor) = open_edited_buffer(cx, &root, &path, AutoSave::AfterDelay);
+    // No explicit save and no focus change: the delay alone writes the buffer.
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| !p.documents[0].dirty && !p.documents[0].saving)
+    });
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "twoone\n");
+    assert_eq!(
+        editor.read_with(cx, |s, _| s.text().to_string()),
+        "twoone\n"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[gpui_kit::test]
+async fn switching_auto_save_off_cancels_the_pending_delay(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-auto-off-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("a.rs");
+    std::fs::write(&path, "one\n").unwrap();
+    let (window, this, _) = open_edited_buffer(cx, &root, &path, AutoSave::AfterDelay);
+    // 文件 → 自动保存: 关闭 while this edit's timer is still waiting.
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.set_auto_save(AutoSave::Off, window, cx);
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(crate::save::AUTO_SAVE_DELAY * 3);
+    cx.run_until_parked();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\n");
+    assert!(
+        this.read_with(cx, |p, _| p.documents[0].dirty),
+        "the buffer was saved after auto-save was switched off"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 

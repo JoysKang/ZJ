@@ -342,7 +342,12 @@ impl Workbench {
                         .and_then(|md| md.editing.as_ref())
                         .is_some_and(|editing| editing.editor == *editor);
                     if current {
+                        this.markdown_typed(id, window, cx);
                         this.markdown_finish(id, false, window, cx);
+                        // Let the source buffer's queued Change update its dirty/version first.
+                        cx.defer_in(window, move |this, window, cx| {
+                            this.auto_save_on_focus_change(Some(id), window, cx);
+                        });
                     }
                 }
                 _ => {}
