@@ -229,6 +229,7 @@ pub enum RowStatus {
     Awaiting,
     Unread,
     Error,
+    Review,
 }
 
 impl RowStatus {
@@ -258,6 +259,7 @@ impl RowStatus {
             RowStatus::Awaiting => Some("待批准"),
             RowStatus::Unread => Some("完成，未读"),
             RowStatus::Error => Some("出错"),
+            RowStatus::Review => Some("待审阅"),
             RowStatus::None => None,
         }
     }

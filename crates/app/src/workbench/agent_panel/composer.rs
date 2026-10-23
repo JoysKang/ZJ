@@ -234,6 +234,7 @@ impl Workbench {
             .primary()
             .small()
             .icon(IconName::ArrowUp)
+            .accessibility_label(if busy { "追加指令" } else { "发送" })
             .tooltip(if busy && !can_steer {
                 "当前 Agent 尚不能接收运行中的补充指令"
             } else if busy {
@@ -392,6 +393,22 @@ impl Workbench {
                         .aria_label("给 Agent 的消息"),
                 ),
             )
+            .when(busy, |composer| {
+                composer.child(
+                    div()
+                        .id("agent-send-hint")
+                        .test_support()
+                        .px_2()
+                        .pb_1()
+                        .text_size(theme::TEXT_CAPTION)
+                        .text_color(colors.muted)
+                        .child(if can_steer {
+                            "追加到当前轮"
+                        } else {
+                            "当前 Agent 尚不能接收运行中的补充指令"
+                        }),
+                )
+            })
             .when(self.agent.images_loading > 0, |composer| {
                 composer.child(
                     div()
@@ -470,6 +487,7 @@ impl Workbench {
                                 .small()
                                 .icon(IconName::Square)
                                 .tooltip("停止")
+                                .accessibility_label("停止")
                                 .on_click(cx.listener(|this, _, _, cx| this.agent_cancel(cx))),
                         )
                     }),

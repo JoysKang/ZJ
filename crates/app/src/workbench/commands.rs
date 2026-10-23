@@ -32,7 +32,7 @@ macro_rules! command {
     };
 }
 
-gpui_kit::actions!(commands, [ShowAllCommands]);
+gpui_kit::actions!(commands, [ShowAllCommands, ReviewAgentChanges]);
 
 pub(super) const COMMANDS: &[Command] = &[
     command!("文件: 新建文件", NewUntitled),
@@ -92,6 +92,7 @@ pub(super) const COMMANDS: &[Command] = &[
     command!("Agent: 附加当前文件或选区", AddSelectionToAgent),
     command!("Agent: 选区操作…", ShowSelectionActions),
     command!("Agent: 下一个待审批", NextApproval),
+    command!("Agent: 审阅当前会话修改", ReviewAgentChanges),
 ];
 
 /// 打开面板时按当时的焦点解析每个命令的最高优先级绑定；没有焦点时用当前上下文栈。

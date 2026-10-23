@@ -93,6 +93,10 @@ pub(super) fn status_mark(status: RowStatus, frame: usize, colors: theme::Colors
             .into_any_element(),
         RowStatus::Unread => dot(colors.unread).into_any_element(),
         RowStatus::Error => dot(colors.deleted).into_any_element(),
+        RowStatus::Review => Icon::new(IconName::GitCompare)
+            .size(theme::SMALL_ICON_SIZE)
+            .text_color(colors.muted)
+            .into_any_element(),
         RowStatus::None => div().into_any_element(),
     }
 }
@@ -307,7 +311,12 @@ impl Workbench {
         let colors = theme::colors(cx);
         let compact = self.agent.compact();
         let icon_button = |id: &'static str, icon: IconName, tooltip: &'static str| {
-            Button::new(id).ghost().xsmall().icon(icon).tooltip(tooltip)
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .icon(icon)
+                .tooltip(tooltip)
+                .accessibility_label(tooltip)
         };
         let more = {
             let weak = cx.weak_entity();
@@ -316,6 +325,7 @@ impl Workbench {
                 .xsmall()
                 .icon(IconName::Ellipsis)
                 .tooltip("更多")
+                .accessibility_label("更多")
                 .dropdown_menu(move |menu, _, _| {
                     let settings = weak.clone();
                     let close = weak.clone();
@@ -474,7 +484,12 @@ impl Workbench {
                         .child("Agent 设置"),
                 ),
         };
-        bar.into_any_element()
+        bar.child(
+            icon_button("agent-close", IconName::Close, "关闭 Agent 面板（⌥⌘B）").on_click(
+                cx.listener(|this, _, window, cx| this.set_agent_panel(false, window, cx)),
+            ),
+        )
+        .into_any_element()
     }
 
     // ----- thread view --------------------------------------------------------------------
@@ -483,7 +498,9 @@ impl Workbench {
         let colors = theme::colors(cx);
         let compact = self.agent.compact();
         let active: Vec<&LiveSession> = self.agent.active_sessions().collect();
-        let strip = agent_model::show_live_strip(active.len()) && !compact;
+        let strip = !compact
+            && (agent_model::show_live_strip(active.len())
+                || active.iter().any(|s| !s.thread.changed_files.is_empty()));
         let session = self.agent.current();
         let info = session.map(|s| {
             let now = workspace_editor_agent_history::now_ms();
@@ -696,6 +713,7 @@ impl Workbench {
             let status = s.row_status();
             h_flex()
                 .id(("agent-strip", key))
+                .test_support()
                 .h(theme::AGENT_STRIP_ROW)
                 .mx_1()
                 .px_2()
@@ -751,6 +769,16 @@ impl Workbench {
                         .text_color(colors.attention)
                         .child(Icon::new(IconName::ShieldAlert).size(theme::SMALL_ICON_SIZE))
                         .child("待批准")
+                        .into_any_element(),
+                    RowStatus::Review => div()
+                        .flex_shrink_0()
+                        .text_size(theme::TEXT_SECTION)
+                        .text_color(if selected {
+                            colors.selected_fg
+                        } else {
+                            colors.muted
+                        })
+                        .child(format!("{} 个文件待审阅", s.thread.changed_files.len()))
                         .into_any_element(),
                     other => status_mark(other, self.agent.spin, colors),
                 })

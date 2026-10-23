@@ -66,15 +66,17 @@ impl Workbench {
 
     /// Opens the first changed file of the current session (the card's 审阅).
     pub(super) fn agent_review_first(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.agent.current else {
+        let Some(session) = self.agent.current() else {
+            self.message = "没有当前 Agent 会话可审阅".into();
+            cx.notify();
             return;
         };
-        let path = self
-            .agent
-            .session(key)
-            .and_then(|s| s.thread.changed_files.keys().next().cloned());
-        if let Some(path) = path {
+        let key = session.key;
+        if let Some(path) = session.thread.changed_files.keys().next().cloned() {
             self.agent_open_review(key, path, window, cx);
+        } else {
+            self.message = "当前会话没有待审阅的修改".into();
+            cx.notify();
         }
     }
 

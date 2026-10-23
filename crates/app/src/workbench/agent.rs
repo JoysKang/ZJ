@@ -242,7 +242,12 @@ impl LiveSession {
         } else {
             self.thread.status
         };
-        agent_model::RowStatus::of_thread(status, self.thread.unread)
+        let status = agent_model::RowStatus::of_thread(status, self.thread.unread);
+        if status == agent_model::RowStatus::None && !self.thread.changed_files.is_empty() {
+            agent_model::RowStatus::Review
+        } else {
+            status
+        }
     }
 
     /// Starting the agent with nothing sent yet.
@@ -487,9 +492,11 @@ impl AgentPanel {
         self.preset(id).or_else(|| self.presets.first())
     }
 
-    /// Sessions running, waiting for approval or finished unread (direction B's strip).
+    /// Sessions running or needing attention, including read replies with unreviewed changes.
     pub fn active_sessions(&self) -> impl Iterator<Item = &LiveSession> {
-        self.sessions.iter().filter(|s| s.busy() || s.thread.unread)
+        self.sessions
+            .iter()
+            .filter(|s| s.busy() || s.row_status() != agent_model::RowStatus::None)
     }
 
     pub fn compact(&self) -> bool {

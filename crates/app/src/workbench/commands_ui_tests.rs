@@ -133,6 +133,50 @@ async fn shift_cmd_p_runs_commands_and_remembers_recent(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
+async fn review_current_session_command_reports_empty_states(cx: &mut TestAppContext) {
+    use super::test_support::{empty_store, install_globals, new_window};
+    let (handle, this) = cx.update(|cx| {
+        let owners = install_globals(cx, crate::settings::Settings::default(), empty_store());
+        let (handle, this) = new_window(
+            cx,
+            None,
+            owners,
+            Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(800.))),
+        );
+        (handle.downcast::<Root>().unwrap(), this)
+    });
+    for has_session in [false, true] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                if has_session {
+                    p.agent_ensure_session(cx);
+                } else {
+                    p.agent.current = None;
+                }
+                p.open_quick_open_with(">审阅当前会话修改", window, cx);
+            });
+            window.render_frame(cx);
+        })
+        .unwrap();
+        let matching = rows(cx, &this);
+        assert_eq!(matching, [("Agent: 审阅当前会话修改".into(), Vec::new())]);
+        press(cx, handle, "enter");
+        this.read_with(cx, |p, _| {
+            assert!(p.quick_open.is_none());
+            assert!(p.diff.tab.is_none());
+            assert_eq!(
+                p.message,
+                if has_session {
+                    "当前会话没有待审阅的修改"
+                } else {
+                    "没有当前 Agent 会话可审阅"
+                }
+            );
+        });
+    }
+}
+
+#[gpui_kit::test]
 async fn command_results_and_footer_stay_visible_in_a_low_window(cx: &mut TestAppContext) {
     use super::test_support::{empty_store, install_globals, new_window};
     let (handle, this) = cx.update(|cx| {

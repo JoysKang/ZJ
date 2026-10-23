@@ -2851,6 +2851,9 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &NextApproval, window, cx| {
                 this.agent_next_approval(window, cx)
             }))
+            .on_action(cx.listener(|this, _: &commands::ReviewAgentChanges, window, cx| {
+                this.agent_review_first(window, cx)
+            }))
             .bg(colors.title)
             .text_color(colors.foreground)
             .child(self.render_title_bar(window, cx))

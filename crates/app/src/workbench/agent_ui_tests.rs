@@ -106,6 +106,122 @@ fn temp_root(name: &str) -> PathBuf {
     std::fs::canonicalize(root).unwrap()
 }
 
+#[test]
+fn review_status_preserves_approval_running_error_and_unread_priority() {
+    let mut session = LiveSession::new(1, builtin_presets().remove(0));
+    session.thread.changed_files.insert(
+        PathBuf::from("a.txt"),
+        agent_thread::FileChange {
+            added: 1,
+            removed: 0,
+            new_file: false,
+        },
+    );
+    for (status, unread, expected) in [
+        (
+            agent_thread::Status::Idle,
+            false,
+            agent_model::RowStatus::Review,
+        ),
+        (
+            agent_thread::Status::Idle,
+            true,
+            agent_model::RowStatus::Unread,
+        ),
+        (
+            agent_thread::Status::Running,
+            false,
+            agent_model::RowStatus::Running,
+        ),
+        (
+            agent_thread::Status::Awaiting,
+            true,
+            agent_model::RowStatus::Awaiting,
+        ),
+        (
+            agent_thread::Status::Error,
+            true,
+            agent_model::RowStatus::Error,
+        ),
+    ] {
+        session.thread.status = status;
+        session.thread.unread = unread;
+        assert_eq!(session.row_status(), expected);
+    }
+    session.thread.status = agent_thread::Status::Idle;
+    session.thread.unread = false;
+    assert_eq!(session.row_status().label(), Some("待审阅"));
+    session.thread.changed_files.clear();
+    assert_eq!(session.row_status(), agent_model::RowStatus::None);
+}
+
+#[gpui_kit::test]
+async fn reading_a_reply_keeps_its_review_entry_until_the_last_change_is_resolved(
+    cx: &mut TestAppContext,
+) {
+    let (handle, this) = open(cx, None);
+    cx.update_window(handle.into(), |_, window, cx| {
+        let key = this.update(cx, |p, cx| {
+            p.agent_ensure_session(cx);
+            p.agent.width = px(420.);
+            let key = p.agent.current.unwrap();
+            let session = p.agent.session_mut(key).unwrap();
+            session.thread.unread = true;
+            session.thread.changed_files.insert(
+                PathBuf::from("a.txt"),
+                agent_thread::FileChange {
+                    added: 1,
+                    removed: 0,
+                    new_file: false,
+                },
+            );
+            p.agent_select(key, window, cx);
+            assert!(!p.agent.current().unwrap().thread.unread);
+            assert_eq!(
+                p.agent.current().unwrap().row_status(),
+                agent_model::RowStatus::Review
+            );
+            assert_eq!(
+                p.agent.active_sessions().map(|s| s.key).collect::<Vec<_>>(),
+                [key]
+            );
+            key
+        });
+        window.render_frame(cx);
+        assert!(window.try_find(("agent-strip", key)).is_some());
+        this.update(cx, |p, cx| {
+            let mut waiting = LiveSession::new(p.agent.next_key, builtin_presets().remove(0));
+            p.agent.next_key += 1;
+            waiting.thread.status = agent_thread::Status::Awaiting;
+            let waiting_key = waiting.key;
+            p.agent.sessions.push(waiting);
+            assert_eq!(
+                p.agent.active_sessions().map(|s| s.key).collect::<Vec<_>>(),
+                [key, waiting_key]
+            );
+            p.agent
+                .session_mut(key)
+                .unwrap()
+                .thread
+                .changed_files
+                .clear();
+            assert_eq!(
+                p.agent.session(key).unwrap().row_status(),
+                agent_model::RowStatus::None
+            );
+            assert_eq!(
+                p.agent.active_sessions().map(|s| s.key).collect::<Vec<_>>(),
+                [waiting_key]
+            );
+            p.agent.session_mut(waiting_key).unwrap().thread.status = agent_thread::Status::Idle;
+            cx.notify();
+        });
+        window.render_frame(cx);
+        assert!(window.try_find(("agent-strip", key)).is_none());
+    })
+    .unwrap();
+}
+
 #[gpui_kit::test]
 async fn quitting_stops_agents_even_while_the_workbench_is_still_owned(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
@@ -456,6 +572,33 @@ async fn quota_hover_and_click_query_now_and_anchor_to_the_button(cx: &mut TestA
 }
 
 #[gpui_kit::test]
+async fn header_close_hides_each_view_without_losing_the_draft(cx: &mut TestAppContext) {
+    let (handle, this) = open(cx, None);
+    for width in [300., 420.] {
+        for view in [AgentView::Thread, AgentView::History, AgentView::Settings] {
+            cx.update_window(handle.into(), |_, window, cx| {
+                this.update(cx, |p, cx| {
+                    p.agent.width = px(width);
+                    p.set_agent_panel(true, window, cx);
+                    p.agent
+                        .composer
+                        .update(cx, |input, cx| input.set_value("未发送的草稿", window, cx));
+                    p.agent_show(view, window, cx);
+                });
+                window.render_frame(cx);
+                assert!(window.find("agent-close").visible());
+                window.click("agent-close", cx);
+                this.read_with(cx, |p, cx| {
+                    assert!(!p.agent.visible);
+                    assert_eq!(p.agent.composer.read(cx).value().as_str(), "未发送的草稿");
+                });
+            })
+            .unwrap();
+        }
+    }
+}
+
+#[gpui_kit::test]
 async fn composer_controls_stay_inside_the_panel_with_quota_and_model_options(
     cx: &mut TestAppContext,
 ) {
@@ -507,6 +650,10 @@ async fn composer_controls_stay_inside_the_panel_with_quota_and_model_options(
                 let send = window.find("agent-send").bounds();
                 assert!(quota.right() <= send.left(), "quota overlaps send at width={width}");
                 if busy {
+                    let hint = window.find("agent-send-hint").bounds();
+                    assert!(hint.left() >= composer.left() && hint.right() <= composer.right(),
+                        "send hint escapes composer at width={width}: {hint:?}");
+                    assert!(hint.top() >= composer.top() && hint.bottom() <= composer.bottom());
                     let stop = window.find("agent-stop").bounds();
                     assert!(stop.right() <= composer.right(), "stop={stop:?} escapes composer={composer:?} at width={width}");
                     assert!(send.right() <= stop.left(), "send overlaps stop at width={width}");
@@ -1347,6 +1494,7 @@ async fn steering_works_from_enter_and_send_with_context_and_a_separate_stop_but
     });
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
+        assert!(window.try_find("agent-send-hint").is_some());
         window.click(("agent-process", 0usize), cx);
     })
     .unwrap();
@@ -1455,6 +1603,11 @@ async fn steering_unavailable_keeps_the_typed_message_and_context(cx: &mut TestA
         |_| "the original turn never starts".into(),
     );
     let attachment = Attachment::File(root.join("a.txt"));
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("agent-send-hint").is_some());
+    })
+    .unwrap();
     this.update(cx, |p, _| p.agent.attachments.push(attachment.clone()));
     send(cx, handle, &this, "保留这条补充说明");
     assert_eq!(
@@ -1887,11 +2040,24 @@ async fn rejecting_a_hunk_in_the_review_restores_the_file_and_the_tab(cx: &mut T
     let review_path = path.clone();
     cx.update_window(handle.into(), |_, window, cx| {
         this.update(cx, |p, cx| {
-            p.agent_open_review(key, review_path, window, cx)
+            p.agent_select(key, window, cx);
+            assert_eq!(
+                p.agent.current().unwrap().row_status(),
+                agent_model::RowStatus::Review
+            );
+            p.open_quick_open_with(">审阅当前会话修改", window, cx)
         });
+        window.render_frame(cx);
+        window.press("enter", cx);
     })
     .unwrap();
     until(cx, &this, "the review loads", |p| p.diff.doc.is_some());
+    this.read_with(cx, |p, _| {
+        let diff = p.diff.tab.as_ref().and_then(|tab| tab.agent()).unwrap();
+        assert_eq!(diff.key, key);
+        assert_eq!(diff.path, review_path);
+        assert!(p.message.is_empty());
+    });
     cx.update_window(handle.into(), |_, window, cx| {
         this.update(cx, |p, cx| p.agent_review_hunk(0, false, window, cx));
     })
@@ -1907,6 +2073,13 @@ async fn rejecting_a_hunk_in_the_review_restores_the_file_and_the_tab(cx: &mut T
         p.agent
             .current()
             .is_some_and(|s| !s.thread.changed_files.contains_key(&path))
+    });
+    this.read_with(cx, |p, _| {
+        assert_eq!(
+            p.agent.current().unwrap().row_status(),
+            agent_model::RowStatus::None
+        );
+        assert!(p.agent.active_sessions().all(|s| s.key != key));
     });
     let _ = std::fs::remove_dir_all(root);
 }
