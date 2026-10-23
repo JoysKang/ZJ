@@ -1,5 +1,5 @@
 //! ACP agents in front of the Claude Code and Codex CLIs, so ZJ needs neither Node.js nor npm
-//! adapters (docs/adr/0009). ZJ's own executable runs them in a helper mode:
+//! adapters (docs/决策/0009-Agent桥接.md). ZJ's own executable runs them in a helper mode:
 //!
 //! `workspace-editor --agent-bridge claude|codex <cli> [--login <args>…]`
 //!

@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-# SQLite + FTS5 for local agent chat history; see docs/adr/0004. No statement cache (hashlink).
+# SQLite + FTS5 for local agent chat history; see docs/决策/0004-Agent与历史.md. No statement cache (hashlink).
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 
 [lints]

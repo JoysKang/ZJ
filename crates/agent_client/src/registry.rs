@@ -1,7 +1,7 @@
 //! Built-in agent presets, user-defined agents and launch resolution.
 //!
 //! Every agent speaks ACP over stdio. Claude Code and Codex run behind ZJ's own bridge
-//! (`--agent-bridge`, the `agent_bridge` crate, docs/adr/0009) in front of their CLI on this
+//! (`--agent-bridge`, the `agent_bridge` crate, docs/决策/0009-Agent桥接.md) in front of their CLI on this
 //! machine; ZJ never installs a CLI, Node.js or an adapter. A missing or outdated CLI is a
 //! [`LaunchError`] with an install hint, which the panel shows as soon as the agent is picked.
 

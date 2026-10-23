@@ -1,4 +1,4 @@
-# Only libsqlite3-sys reads this (bundled SQLite for crates/agent_history, docs/adr/0004):
+# Only libsqlite3-sys reads this (bundled SQLite for crates/agent_history, docs/决策/0004-Agent与历史.md):
 # drop the extensions rusqlite enables by default that agent_history does not use
 # (FTS3, R*Tree, dbstat, STAT4, soundex, column metadata, load_extension, JSON) and a few
 # legacy APIs. FTS5 and the trigram tokenizer stay. Saves about 0.45 MB of the binary.

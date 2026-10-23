@@ -220,7 +220,7 @@ pub const GRAPH_TIME: Pixels = px(84.);
 /// The details view under the graph never takes more than this much height.
 pub const GRAPH_DETAILS_MAX: Pixels = px(300.);
 
-// Agent panel (docs/adr/0004, design in ZJ-agent-ui-design.md).
+// Agent panel (docs/决策/0004-Agent与历史.md, design in ZJ-agent-ui-design.md).
 /// Below this width the panel switches to the compact density (direction C).
 pub const AGENT_COMPACT_WIDTH: Pixels = px(360.);
 pub const AGENT_PANEL_MIN: Pixels = px(crate::settings::AGENT_PANEL_WIDTH_MIN);

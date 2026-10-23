@@ -13,7 +13,7 @@ fmt / clippy settings don't apply to them.
 The first commit, "build(gpui): 原样引入 …", copies the crates.io sources as they are (without
 `Cargo.lock` and `.cargo_vcs_info.json`). Every later change is marked with a `ZJ patch` comment;
 `git diff <that commit> -- vendor` shows all of them. Why we patch, what it saves and how to
-measure it are in [docs/adr/0005-gpu-memory.md](../docs/adr/0005-gpu-memory.md).
+measure it are in [docs/决策/0005-渲染内存.md](../docs/决策/0005-渲染内存.md).
 
 The 0.7.1 upgrade rebases the ZJ changes onto the published crates.io sources. Input
 viewport intents coexist with upstream's horizontal alignment and textarea scroll clamps;

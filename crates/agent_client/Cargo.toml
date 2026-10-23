@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-# ACP client over stdio, no tokio; see docs/adr/0004.
+# ACP client over stdio, no tokio; see docs/决策/0004-Agent与历史.md.
 agent-client-protocol = { version = "=2.2.0", default-features = false }
 # Already in the tree through GPUI Kit / the ACP crate.
 async-channel = "=2.5.0"

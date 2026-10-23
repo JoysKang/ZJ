@@ -1,4 +1,4 @@
-//! Real-agent smoke test (docs/adr/0009): drives `AgentClient` against the Claude Code or
+//! Real-agent smoke test (docs/决策/0009-Agent桥接.md): drives `AgentClient` against the Claude Code or
 //! Codex CLI on this machine through the bridge and prints what each scenario saw, plus the
 //! agent process tree's footprint. It runs real turns (a few short prompts) on the account.
 //!

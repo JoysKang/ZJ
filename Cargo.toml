@@ -62,11 +62,11 @@ strip = true
 debug = 1
 
 # GPUI 0.3.8 的 macOS 渲染器 / 窗口层与 gpui-base 0.7.1：保留 ZJ 的本地补丁，
-# 原版本、改动和测量方法见 vendor/README.md 与 docs/adr/0005-gpu-memory.md。
+# 原版本、改动和测量方法见 vendor/README.md 与 docs/决策/0005-渲染内存.md。
 [patch.crates-io]
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 gpui-base = { path = "vendor/gpui-base" }
 
-# Agent 相关依赖原来单独按体积优化（docs/adr/0004）：dist 已整体 opt-level = "s"，
+# Agent 相关依赖原来单独按体积优化（docs/决策/0004-Agent与历史.md）：dist 已整体 opt-level = "s"，
 # 逐包覆盖不再需要。

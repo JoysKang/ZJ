@@ -1,6 +1,6 @@
 # ZJ
 
-Rust 原生多工作区代码编辑器的 P0 / P1 开发原型。需求与阶段门禁见 [开发说明](轻量代码编辑器开发说明.md)，执行记录见 [开发记录](docs/development.md)。界面按 VS Code 布局（暗色 Solarized Dark、亮色 Nord Light，跟随系统）：统一标题栏带命令中心，侧栏顶部切换资源管理器、搜索和源代码管理，右侧是标签页、面包屑和编辑区，底部状态栏。可编辑并保存 UTF-8 文件（原子写入、外部修改提示、可选自动保存），支持全部仓库 Changes、左右对照 Diff、Git 日常操作、Markdown 实时预览、内置终端和 Agent 面板。未保存编辑在停顿 2 秒后写入恢复快照，异常退出后恢复最近一次已落盘快照；最后一次快照之后的编辑仍可能丢失。
+Rust 原生多工作区代码编辑器的 P0 / P1 开发原型。需求与阶段门禁见 [开发说明](轻量代码编辑器开发说明.md)，执行记录见 [开发记录](docs/开发记录.md)。界面按 VS Code 布局（暗色 Solarized Dark、亮色 Nord Light，跟随系统）：统一标题栏带命令中心，侧栏顶部切换资源管理器、搜索和源代码管理，右侧是标签页、面包屑和编辑区，底部状态栏。可编辑并保存 UTF-8 文件（原子写入、外部修改提示、可选自动保存），支持全部仓库 Changes、左右对照 Diff、Git 日常操作、Markdown 实时预览、内置终端和 Agent 面板。未保存编辑在停顿 2 秒后写入恢复快照，异常退出后恢复最近一次已落盘快照；最后一次快照之后的编辑仍可能丢失。
 
 ## 构建与运行
 
@@ -63,7 +63,7 @@ python3 tools/fixtures.py /tmp/zj-fixture-f
 - Markdown 支持分块预览，点击块可直接编辑，`⇧⌘V` 切换源码。相对链接在 ZJ 中打开；本地图片按解码预算加载，远程和 data 图片不加载。
 - 终端支持新建、拆分、终止和隐藏面板；多个分组的标题可横向滚动，长标题保持单行并限宽省略，悬停显示完整标题，右侧操作按钮固定可见。新建或切换终端时，对应分组会滚入可见区域；隐藏面板不终止进程。
 - 输入法跟随焦点（macOS，设置 `auto_input_source`，默认开）：进入终端时切到英文输入法；点 Agent 输入框时切回上次在那里用的输入法（第一次是你平时用的中文输入法）。在这两处仍可以手动切换；编辑器不受影响。
-- Claude Code 和 Codex 由 ZJ 自己的桥接直接驱动本机的 `claude` / `codex` CLI，不需要 Node.js 或 npm 适配器（docs/adr/0009）。ZJ 不会自动安装任何东西：在面板里选中一个本机没装或版本太旧的 Agent 时，空会话里会直接显示原因和安装命令（`brew install --cask claude-code` / `brew install --cask codex`），装好后再选一次即可。以前自动装进 `~/Library/Application Support/ZJ/agents` 的适配器和 Node.js 已不再使用，可以删除。
+- Claude Code 和 Codex 由 ZJ 自己的桥接直接驱动本机的 `claude` / `codex` CLI，不需要 Node.js 或 npm 适配器（docs/决策/0009-Agent桥接.md）。ZJ 不会自动安装任何东西：在面板里选中一个本机没装或版本太旧的 Agent 时，空会话里会直接显示原因和安装命令（`brew install --cask claude-code` / `brew install --cask codex`），装好后再选一次即可。以前自动装进 `~/Library/Application Support/ZJ/agents` 的适配器和 Node.js 已不再使用，可以删除。
 - Claude Code（AskUserQuestion）和 Codex（规划时的提问）向你提问时，面板显示问题卡片：单选点一下答案即可（⏎ 选第一个），多选勾好后点「提交」，也可以在输入框里自己写答案或补充说明（⏎ 提交，要求保密的问题隐藏输入），Esc 跳过。Codex 支持内置命令 `/review`、`/review-branch`、`/review-commit`、`/compact`、`/plan`、`/goal`、`/status`、`/mcp`、`/skills`、`/rename`、`/logout`，以及工作区的技能。两种 Agent 都会在第一轮之后自动给会话起标题。
 - Codex、Claude 运行时可在 Agent 输入框继续补充指令，按 Enter 或点击发送即可；输入区显示「追加到当前轮」，停止按钮独立保留。追加指令沿用当前会话和文件引用，待审批的操作仍需审批；不支持此能力或尚未启动完成的 Agent 会显示说明并保留输入，供稍后发送。
 - Codex 额度详情贴近额度按钮，悬停或点击都会查询最新账户额度；点击后保留详情，点外部关闭。查询失败会显示原因，缓存记录保留实际时间，不作为本次刷新结果。
@@ -99,6 +99,6 @@ python3 tools/sample_resources.py APP_PID --seconds 30 --output target/resources
 
 ## 当前门禁
 
-G1 尚未通过。2026-10-23 计时集成后的全工作区测试为 638 passed、0 failed、4 ignored；随后 HUD 字号修复的 3 项专项、Clippy 与最终 dist 通过，体积 49.46 MB。空闲 CPU 上限已按用户要求调整为 p95 ≤1%，接近 0% 的目标不变。隔离原生夹具已覆盖 1／3／5 窗口空闲占用、菜单保存与退出、放弃修改、会话恢复及文本提交后的常用快捷键；最终产物三轮 ABC 编辑的 CPU 提交 p99 为 8.33–8.98 ms，低于 16.7 ms 上限，略高于 8.3 ms 目标；完整按键到画面延迟和长期使用仍未验收。白天补充已验证脏文档取消／保存关闭、系统另存为、终端基本操作、微信拼音「你好」候选提交与撤销，以及实际快照的强退恢复；其他 IME 场景仍待验证。窗口切换提示的连续字号缓存增长已修复，最终产物 20 次开关并空闲 60 秒后为 59.62 MB（较初始 +1.23 MB）；未完成四小时回放。已有按事件路径的增量刷新、窗口／标签会话恢复和未保存编辑快照；跨窗口共享仓库快照仍待后续开发。最新原生诊断与修复见[原生交互与资源问题修复](docs/reports/2026-10-23-native-repairs.md)，最新交互证据见[白天补充验收](docs/reports/2026-10-23-daytime-followup.md)及 [A01–A19 矩阵](docs/reports/2026-10-23-acceptance-status.md)，前一轮交互补充见[未完成交互补充](docs/reports/2026-10-23-ui-followup.md)，此前修复见[自主迭代补充记录](docs/reports/2026-10-22-overnight-followup.md)，逐构建资源数据见[原生补充验收](docs/reports/2026-10-22-native-validation-followup.md)，历史发现保留在[体检报告](docs/reports/2026-10-22-health-check.md)。
+G1 尚未完整通过。2026-10-23 最终回归：Rust 工作区 647 项通过、4 项忽略，Python 17 项通过，fmt、Clippy、dist 与 Git 超时／回收检查通过；二进制 49,478,048 字节。四小时回放、完整屏幕呈现延迟和最新版本的完整亮暗视觉验收仍未完成，历史实机数据不代表最新构建。
 
-后续方案调研：[代码高亮](docs/reports/syntax-highlighting-research.md)、[Agent 集成](docs/reports/agent-integration-research.md)。调研不表示新增语言 grammar 或 Agent 已接入；首版范围保持当前约定。
+文档从[文档目录](docs/文档目录.md)进入；当前结果见[体检结论](docs/验收/体检结论.md)和[原生验收](docs/验收/原生验收.md)。方案调研仅记录候选与取舍，不表示已经实现。

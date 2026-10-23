@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 # ACP in front of the Claude Code and Codex CLIs, run as ZJ's own executable in a helper mode
-# (docs/adr/0009). No GPUI, no Node.js.
+# (docs/决策/0009-Agent桥接.md). No GPUI, no Node.js.
 [dependencies]
 serde_json = "1"
 

@@ -2,7 +2,7 @@
 //!
 //! - [`registry`]: built-in presets (Claude Code, Codex, Claude Code · DeepSeek) and
 //!   user-defined agents; launch resolution with friendly errors. The built-in agents run
-//!   behind ZJ's own bridge (`agent_bridge`, docs/adr/0009) in front of their CLI on this
+//!   behind ZJ's own bridge (`agent_bridge`, docs/决策/0009-Agent桥接.md) in front of their CLI on this
 //!   machine; nothing is installed.
 //! - [`AgentClient`]: one session. Its agent process starts on first use in its own process
 //!   group with a sanitized environment and speaks ACP v1 over stdio; sessions from the same

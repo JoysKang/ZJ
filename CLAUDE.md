@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器开发说明.md`，执行记录见 `docs/development.md`。
+AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器开发说明.md`，执行记录见 `docs/开发记录.md`。
 
 ## 定位
 
@@ -8,13 +8,13 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 1. **颜值**：界面统一、克制、耐看；亮色和暗色都要达到可交付的质量。
 2. **轻量**：内存低、CPU 空闲接近 0、二进制小，功能简单。
-3. 功能完整度排在最后。LSP、插件不做；终端只做基本的新建、拆分和关闭（docs/adr/0006）。
+3. 功能完整度排在最后。LSP、插件不做；终端只做基本的新建、拆分和关闭（docs/决策/0006-内置终端.md）。
 
 ## 资源预算（M5 Pro，`--profile dist`）
 
 | 指标 | 目标 | 上限 |
 | --- | --- | --- |
-| 二进制体积（aarch64，stripped）| ≤ 50 MB | 52 MB（CI 会检查，2026-10-13 实测 49.4 MB；各语法的边际增量与压缩选项见 docs/adr/0001，Agent 面板见 docs/adr/0004，Agent 桥接见 docs/adr/0009）|
+| 二进制体积（aarch64，stripped）| ≤ 50 MB | 52 MB（CI 会检查，2026-10-13 实测 49.4 MB；各语法的边际增量与压缩选项见 docs/决策/0001-语法支持.md，Agent 面板见 docs/决策/0004-Agent与历史.md，Agent 桥接见 docs/决策/0009-Agent桥接.md）|
 | 冷启动到首帧 | ≤ 250 ms | 400 ms |
 | 空闲 footprint，1 个窗口 | ≤ 70 MB | 100 MB |
 | 3 个窗口 + 20 个文档 | ≤ 220 MB | 300 MB |
@@ -47,8 +47,8 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 - `crates/core`：身份模型与共享常量（`RepoId`、`DocumentId`、`EXCLUDED_DIRS`、按 Git 规则校验 `.git` 的 `git_marker`），**不依赖 GPUI**。
 - `crates/git_service`：调用系统 git，负责有界输出、超时、取消、全局限流，**不依赖 GPUI**。仓库发现最多向下 4 层，跳过 `EXCLUDED_DIRS` 和上层仓库忽略的目录，无效的 `.git` 静默跳过（自动发现找不到的仓库可以手动添加，见 `settings.rs` 的 `extra_repos`）。`lib.rs` 是服务本体（进程、限流、发现、查询），解析放在各自的文件里：`status.rs`（porcelain v2）、`refs.rs`（分支）、`log.rs`（未推送的提交）、`graph.rs`（Git 图的分页和提交详情）、`ls_files.rs`（快速打开的路径）、`stash.rs`（stash 和 blame），写操作在 `write.rs`。
-- `crates/agent_client`：ACP 客户端（Agent 预设、子进程、会话、权限、`fs/*`、改动前快照与审阅、空闲退出），**不依赖 GPUI**，见 docs/adr/0004。内置的 Claude Code / Codex 预设是 `Launch::Bridge`：只用本机的 CLI，ZJ 不安装 CLI、Node.js 或适配器；找不到或版本太旧时返回带安装命令的 `LaunchError`（docs/adr/0009）。`client.rs` 是一个会话（`AgentClient`），其私有子模块 `steering.rs` 处理运行中追加指令、适配器续跑的结束通知和延迟响应的取消；仅在初始化声明支持时使用 `_session/steering`，不改变权限审批。`host.rs` 是 Agent 进程：同一种 Agent、同样的环境变量在整个应用里共用一个进程（`AgentPool`），请求按会话 id 分发，会话空闲时 `session/close`，没有会话时进程退出。应用退出时同步关闭进程池，停止并回收全部 Agent 进程组，拒绝晚到的启动；输出队列已满也不会阻塞退出。
-- `crates/agent_bridge`：Claude Code / Codex 的 ACP 桥接，**不依赖 GPUI**，只依赖 `serde_json`，见 docs/adr/0009。ZJ 自己的可执行文件以 `--agent-bridge claude|codex <CLI>` 运行它（`main` 在 GPUI 之前转入），`agent_client` 把它当普通 ACP Agent 启动；`ZJ_AGENT_BRIDGE` 可指向单独构建的 `zj-agent-bridge`（开发、冒烟）。`claude.rs` 每个会话一个 `claude -p` stream-json 进程，按 `result` 回报的用户消息 uuid 判断一轮结束（追加指令会打断当前段落）；`codex.rs` 所有会话共用一个 `codex app-server`，会话就是 thread。会话 id、模式 id、模型设置 id 和引用写法都与原来的 npm 适配器一致。改了任何一边的协议处理，都要用 `crates/agent_client/examples/agent_smoke.rs` 对真实 CLI 跑一遍。
+- `crates/agent_client`：ACP 客户端（Agent 预设、子进程、会话、权限、`fs/*`、改动前快照与审阅、空闲退出），**不依赖 GPUI**，见 docs/决策/0004-Agent与历史.md。内置的 Claude Code / Codex 预设是 `Launch::Bridge`：只用本机的 CLI，ZJ 不安装 CLI、Node.js 或适配器；找不到或版本太旧时返回带安装命令的 `LaunchError`（docs/决策/0009-Agent桥接.md）。`client.rs` 是一个会话（`AgentClient`），其私有子模块 `steering.rs` 处理运行中追加指令、适配器续跑的结束通知和延迟响应的取消；仅在初始化声明支持时使用 `_session/steering`，不改变权限审批。`host.rs` 是 Agent 进程：同一种 Agent、同样的环境变量在整个应用里共用一个进程（`AgentPool`），请求按会话 id 分发，会话空闲时 `session/close`，没有会话时进程退出。应用退出时同步关闭进程池，停止并回收全部 Agent 进程组，拒绝晚到的启动；输出队列已满也不会阻塞退出。
+- `crates/agent_bridge`：Claude Code / Codex 的 ACP 桥接，**不依赖 GPUI**，只依赖 `serde_json`，见 docs/决策/0009-Agent桥接.md。ZJ 自己的可执行文件以 `--agent-bridge claude|codex <CLI>` 运行它（`main` 在 GPUI 之前转入），`agent_client` 把它当普通 ACP Agent 启动；`ZJ_AGENT_BRIDGE` 可指向单独构建的 `zj-agent-bridge`（开发、冒烟）。`claude.rs` 每个会话一个 `claude -p` stream-json 进程，按 `result` 回报的用户消息 uuid 判断一轮结束（追加指令会打断当前段落）；`codex.rs` 所有会话共用一个 `codex app-server`，会话就是 thread。会话 id、模式 id、模型设置 id 和引用写法都与原来的 npm 适配器一致。改了任何一边的协议处理，都要用 `crates/agent_client/examples/agent_smoke.rs` 对真实 CLI 跑一遍。
 - `crates/agent_history`：Agent 会话历史（SQLite + FTS5，后台写线程、搜索、钉住、硬删除），**不依赖 GPUI**。
 - `crates/app`：GPUI 界面。
   - `theme.rs`：唯一允许写字面尺寸和颜色的地方。
@@ -64,7 +64,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `workbench/switch_hud.rs`：从另一个 ZJ 窗口切过来时，在窗口中央闪现工作区名称（放大淡入、停留、淡出，约 1 秒的一次性动画，结束后不再出帧；窗口第一次激活、从别的 App 切回时不显示；开启“减少动态效果”时不缩放、不渐变）。动画字号取整以复用有限的字体／字形缓存键，不能逐帧生成任意小数字号。
   - `file_ops.rs`：资源管理器的新建、重命名、复制、移动和移到废纸篓；`workbench/explorer_ops.rs`：右键菜单、快捷键和行内改名；`workbench/tab_menu.rs`：编辑器标签页的右键菜单、对应快捷键和 ⇧⌘T 重开已关闭标签的栈。
   - Markdown 预览：`markdown_blocks.rs` 把文件切成顶层块（纯函数）；`md_images.rs` 解析图片地址（本地图片按文件头尺寸检查解码预算，远程 / data: 不加载，纯函数），预览在后台和分块一起解析，渲染时只查表（用 Kit 基础 `TextView` 的 `image_source`）；相对链接在 ZJ 里打开；`workbench/markdown_preview.rs` 按块用 Kit `TextView` 渲染，点击的块换成源码文本框并直接写回缓冲区，⇧⌘V 切换源码。源码视图下不切分。
-  - 终端（docs/adr/0006）：`terminal.rs` 是 `alacritty_terminal` 的衔接层（起 shell、事件、按键编码、ANSI 颜色映射），不依赖界面状态；`workbench/terminal_view.rs` 画网格并处理键鼠和输入法；`workbench/terminal_panel.rs` 是底部面板的分组、拆分和关闭。终端没有定时器，只在 shell 有输出时重画。
+  - 终端（docs/决策/0006-内置终端.md）：`terminal.rs` 是 `alacritty_terminal` 的衔接层（起 shell、事件、按键编码、ANSI 颜色映射），不依赖界面状态；`workbench/terminal_view.rs` 画网格并处理键鼠和输入法；`workbench/terminal_panel.rs` 是底部面板的分组、拆分和关闭。终端没有定时器，只在 shell 有输出时重画。
   - `text_search.rs`：全文搜索（glob 包含 / 排除、默认排除、二进制与大文件跳过、结果上限）；`workbench/search_view.rs`：搜索视图，打开匹配时用现有布局意图将选中文字放到顶部留白下方（`theme::SEARCH_RESULT_TOP`），保留上下文和正常滚动边界；`workbench/search_replace.rs`：搜索视图里的替换（行内预览、替换前 Diff、原子写入、跳过搜索后改过的文件、撤销）。
   - `replace.rs`：查找替换的共同规则（Aa / ab / .*、`$1` 与大小写转义、保留大小写、CRLF、不跨行）；`workbench/find_widget.rs`：编辑器右上角的查找替换浮层（⌘F / ⌥⌘F）。
   - `watch.rs`：共用原生文件监听、路径引用回收和有界事件信号（带变更路径，超出上限退化为全量刷新）；不持有界面实体。
@@ -81,11 +81,11 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - 合并冲突：`conflicts.rs` 找冲突标记和三种解决方式（纯函数）；`workbench/conflict_bar.rs` 在冲突文件编辑后后台扫描、两侧着色（`theme` 的 `conflict_*`），每处冲突标记上方显示采用当前 / 传入 / 双方和只读比较操作，随代码滚动；动作校验文档版本和冲突位置，解决完后保存并按新状态暂存。
   - `workbench/graph_view.rs`：编辑区里的 Git 图（纯函数的车道布局、分页提交列表、提交详情、打开提交 Diff）。
   - `session.rs`：重启时恢复的窗口记录（`session.json`，每个窗口的文件夹、位置大小、文件标签和激活的标签；退出时按系统窗口的前后顺序保存，重启按从后到前的顺序创建；重启时只读入激活的标签，其余标签点开时才读）。
-  - Agent 面板（docs/adr/0004）：`agent_model.rs` 放不依赖 GPUI 的逻辑（会话分组和时间、`@` 引用、附件、从历史恢复）；回复用 Kit 的 `TextView` 渲染（可选中，代码块带复制按钮），`markdown.rs` 只管代码块的语法高亮（编辑器的语法主题），`workbench/agent/highlights.rs` 在后台算好、绘制时只查表；`quota.rs` 读取 Codex 本地记录并解析实时响应；`workbench/agent/quota.rs` 在显示会话和一轮结束时更新本地记录，Codex 对话面板显示时每 10 分钟、悬停或点击额度按钮时后台通过 `agent_client` 的短时 app-server 连接查询最新额度（不运行 Agent 回合，不由 ZJ 读凭据）；关闭面板、进入历史或切换其他 Agent 时停止定时刷新，弹层显示下次刷新时间。`agent_images.rs` 在后台校验和缩略图片，输入区显示可删除预览，发送 ACP 图片内容；执行过程折叠后仍按可见行布局；`secrets.rs` 解析 Agent 的环境变量（`$变量名` 或 macOS 钥匙串 `keychain:账户名`，设置里不存明文密钥）。`workbench/agent.rs` 是会话与面板视图的状态，其余逻辑按主题放在 `workbench/agent/`（`turns` 发送与事件泵、`permissions` 审批与模式、`composer` 引用与附件、`changes` 改动文件、`history` 会话历史、`buffers` 给 Agent 的未保存缓冲区、`highlights` 代码块高亮）；`agent_panel.rs`（标题、会话条、切换器；`agent_panel/` 下是对话行、卡片、改动文件、输入框、设置）、`agent_history.rs`（会话列表）、`agent_search.rs`（⌘J 搜索）、`agent_review.rs`（编辑区里逐处接受 / 拒绝）只做渲染和交互。转圈只在面板可见、窗口在前台、有会话运行时才有定时器。
-  - `symbols.rs`：tree-sitter tags / locals 查询做定义、引用、文件大纲和局部变量绑定（查询在 `crates/app/queries/`）；`imports.rs`：按语言读 import 语句，供跨文件候选排序；`symbol_index.rs`：首次跳转时后台建立的工作区符号索引；`workbench/navigation.rs`：转到定义、符号列表、查找引用、转到行（⌃G，命令中心里的 `:行:列`）和前进后退；`workbench/local_vars.rs`：给同一绑定的定义与引用着同色（打字停顿后在后台重算，只算可见文档）。不跑语言服务器，见 docs/adr/0002。
+  - Agent 面板（docs/决策/0004-Agent与历史.md）：`agent_model.rs` 放不依赖 GPUI 的逻辑（会话分组和时间、`@` 引用、附件、从历史恢复）；回复用 Kit 的 `TextView` 渲染（可选中，代码块带复制按钮），`markdown.rs` 只管代码块的语法高亮（编辑器的语法主题），`workbench/agent/highlights.rs` 在后台算好、绘制时只查表；`quota.rs` 读取 Codex 本地记录并解析实时响应；`workbench/agent/quota.rs` 在显示会话和一轮结束时更新本地记录，Codex 对话面板显示时每 10 分钟、悬停或点击额度按钮时后台通过 `agent_client` 的短时 app-server 连接查询最新额度（不运行 Agent 回合，不由 ZJ 读凭据）；关闭面板、进入历史或切换其他 Agent 时停止定时刷新，弹层显示下次刷新时间。`agent_images.rs` 在后台校验和缩略图片，输入区显示可删除预览，发送 ACP 图片内容；执行过程折叠后仍按可见行布局；`secrets.rs` 解析 Agent 的环境变量（`$变量名` 或 macOS 钥匙串 `keychain:账户名`，设置里不存明文密钥）。`workbench/agent.rs` 是会话与面板视图的状态，其余逻辑按主题放在 `workbench/agent/`（`turns` 发送与事件泵、`permissions` 审批与模式、`composer` 引用与附件、`changes` 改动文件、`history` 会话历史、`buffers` 给 Agent 的未保存缓冲区、`highlights` 代码块高亮）；`agent_panel.rs`（标题、会话条、切换器；`agent_panel/` 下是对话行、卡片、改动文件、输入框、设置）、`agent_history.rs`（会话列表）、`agent_search.rs`（⌘J 搜索）、`agent_review.rs`（编辑区里逐处接受 / 拒绝）只做渲染和交互。转圈只在面板可见、窗口在前台、有会话运行时才有定时器。
+  - `symbols.rs`：tree-sitter tags / locals 查询做定义、引用、文件大纲和局部变量绑定（查询在 `crates/app/queries/`）；`imports.rs`：按语言读 import 语句，供跨文件候选排序；`symbol_index.rs`：首次跳转时后台建立的工作区符号索引；`workbench/navigation.rs`：转到定义、符号列表、查找引用、转到行（⌃G，命令中心里的 `:行:列`）和前进后退；`workbench/local_vars.rs`：给同一绑定的定义与引用着同色（打字停顿后在后台重算，只算可见文档）。不跑语言服务器，见 docs/决策/0002-代码导航.md。
 - Agent 的 `@` 同时引用文件和文件夹：复用路径索引匹配文件及其祖先目录，后台按查询的父路径列一层目录以补充空文件夹；沿用隐藏与排除规则，禁止路径逃出工作区。文件夹附件显示图标和 `/` 后缀，发送 ACP `resource_link`，由 Agent 自己读取内容。
 - Agent 输出按轮次合并为一个执行过程，运行时默认展开，可手动折叠，运行中追加指令仍属于当前轮；结束时自动收起当前轮过程并单独显示最终回复。修改文件列表独立控制，每个新轮次默认收起，当前轮的更新或追加指令保留手动展开状态。待审批、待登录和会话错误直接显示；命令审批优先显示 Agent 提供的原始命令与工作目录，可选中和复制，长命令在卡片内滚动，不把通用工具标题当作命令。展开成员继续使用外层虚拟列表；停留在底部时跟随最新输出，向上阅读时保持位置，返回底部后恢复跟随。输入区不显示上下文占用圆环。
-- `vendor/`：打过补丁的 GPUI macOS 渲染器和窗口层（`gpui-pre-apple` / `gpui-pre-macos`），以及 GPUI Kit 的 `gpui-base`（编辑器光标常亮），都用 `[patch.crates-io]` 指向。改动都标 `ZJ patch`，说明在 `vendor/README.md`，理由和测量方法在 docs/adr/0005；`ZJ_GPU_LOWMEM=0` 恢复上游行为。升级 GPUI 时要先处理这里。
+- `vendor/`：打过补丁的 GPUI macOS 渲染器和窗口层（`gpui-pre-apple` / `gpui-pre-macos`），以及 GPUI Kit 的 `gpui-base`（编辑器光标常亮），都用 `[patch.crates-io]` 指向。改动都标 `ZJ patch`，说明在 `vendor/README.md`，理由和测量方法在 docs/决策/0005-渲染内存.md；`ZJ_GPU_LOWMEM=0` 恢复上游行为。升级 GPUI 时要先处理这里。
 - UI 的 render 回调里不做 IO、不跑 Git 命令、不做全文解析；这些都通过 `background_spawn` 执行，结果带 generation 校验。
 
 ### 异步写入与关闭约束

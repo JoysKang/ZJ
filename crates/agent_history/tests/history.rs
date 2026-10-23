@@ -851,7 +851,7 @@ fn write_errors_surface_on_flush() {
 
 #[test]
 fn bundled_sqlite_has_fts5_without_the_trimmed_extras() {
-    // .cargo/config.toml passes LIBSQLITE3_FLAGS; see docs/adr/0004.
+    // .cargo/config.toml passes LIBSQLITE3_FLAGS; see docs/决策/0004-Agent与历史.md.
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     let mut stmt = conn.prepare("PRAGMA compile_options").unwrap();
     let options: Vec<String> = stmt
