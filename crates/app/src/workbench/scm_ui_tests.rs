@@ -776,6 +776,54 @@ async fn inactive_commit_button_does_not_keep_the_active_fill(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
+async fn empty_commit_reveals_and_focuses_its_message(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("commit-focus", 0);
+    let (handle, this) = open(cx, repo.clone());
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.scm_commit_unavailable(0), Some("没有可提交的更改"));
+    });
+    std::fs::write(repo.join("a.txt"), "changed\n").unwrap();
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.refresh(window, cx));
+    })
+    .unwrap();
+    settle(cx, None, |cx| this.read_with(cx, |p, _| !p.loading));
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.sidebar = Sidebar::SourceControl;
+            assert_eq!(p.scm_commit_unavailable(0), None);
+            p.groups[0].write_pending = true;
+            assert_eq!(p.scm_commit_unavailable(0), Some("Git 操作进行中，请稍候"));
+            p.groups[0].write_pending = false;
+            p.groups[0].expanded = false;
+            p.rebuild_rows();
+            p.scm_commit(
+                p.groups[0].repo.id.clone(),
+                scm_actions::CommitMode::Commit,
+                window,
+                cx,
+            );
+            assert!(p.groups[0].expanded);
+            assert_eq!(p.groups[0].write_message, "请输入提交消息");
+            assert!(p.groups[0].commit_input.focus_handle(cx).is_focused(window));
+            assert!(!p.groups[0].write_pending);
+        });
+        window.render_frame(cx);
+        window.input("填写提交说明", cx);
+        this.read_with(cx, |p, cx| {
+            assert_eq!(
+                p.groups[0].commit_input.read(cx).value().as_str(),
+                "填写提交说明"
+            );
+        });
+    })
+    .unwrap();
+    assert!(!cx.has_pending_prompt());
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+#[gpui_kit::test]
 async fn repository_more_menu_keeps_advanced_commit_actions(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let repo = fixture("commit-menu", 0);
@@ -2168,6 +2216,53 @@ async fn file_statuses_stay_in_the_right_column_for_long_names(cx: &mut TestAppC
         }
     })
     .unwrap();
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+#[gpui_kit::test]
+async fn section_actions_stay_visible_away_from_the_heading(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("section-actions", 0);
+    std::fs::write(repo.join("a.txt"), "staged\n").unwrap();
+    git(&repo, &["add", "a.txt"]);
+    std::fs::write(repo.join("a.txt"), "worktree\n").unwrap();
+    let (handle, this) = open(cx, repo.clone());
+    this.update(cx, |p, cx| {
+        p.sidebar = Sidebar::SourceControl;
+        cx.notify();
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.hover(("scm-repo-graph", 0usize), cx);
+        let ids = [
+            ("scm-discard-all", 0usize),
+            ("scm-all", DiffSide::Staged as usize),
+            ("scm-all", DiffSide::Worktree as usize),
+        ];
+        let bounds: Vec<_> = ids.iter().map(|id| window.find(*id).bounds()).collect();
+        for pending in [true, false] {
+            this.update(cx, |p, cx| {
+                p.groups[0].write_pending = pending;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            for (id, bounds) in ids.iter().zip(&bounds) {
+                assert!(window.find(*id).visible());
+                assert_eq!(window.find(*id).bounds(), *bounds);
+                if pending {
+                    window.click(*id, cx);
+                }
+            }
+            this.read_with(cx, |p, _| {
+                assert_eq!(p.groups[0].write_pending, pending);
+                assert!(!p.groups[0].staged_collapsed);
+                assert!(!p.groups[0].changes_collapsed);
+                assert!(p.groups[0].write_task.is_none());
+            });
+        }
+    })
+    .unwrap();
+    assert!(!cx.has_pending_prompt());
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }
 

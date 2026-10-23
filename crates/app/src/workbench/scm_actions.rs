@@ -490,6 +490,9 @@ impl Workbench {
             let index = self.groups.iter().position(|g| g.repo.id == id);
             if let Some(group) = index.map(|index| &mut self.groups[index]) {
                 group.write_message = "请输入提交消息".into();
+                group.expanded = true;
+                group.commit_input.focus_handle(cx).focus(window, cx);
+                self.rebuild_rows();
                 cx.notify();
             }
             return;

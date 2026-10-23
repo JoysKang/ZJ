@@ -350,7 +350,7 @@ impl Workbench {
             });
         let row = match row {
             Row::Group(_) | Row::Commit(_) => unreachable!("handled above"),
-            Row::Heading(g, side, count) => self.scm_heading_row(g, side, count, base, hover, cx),
+            Row::Heading(g, side, count) => self.scm_heading_row(g, side, count, base, cx),
             Row::Folder(g, folder, side) => self.scm_folder_row(g, folder, side, base, cx),
             Row::File(g, i, side, depth) => {
                 self.scm_file_row(index, g, i, side, depth, base, hover, cx)
@@ -414,9 +414,7 @@ impl Workbench {
                 let counts = (behind > 0 || ahead > 0).then(|| format!("{behind}↓ {ahead}↑"));
                 (upstream, behind, counts)
             });
-        let can_commit = matches!(&group.status, Some(Ok(status))
-            if !status.changes.is_empty()
-                && !status.changes.iter().any(|c| c.kind == ChangeKind::Conflict));
+        let commit_unavailable = self.scm_commit_unavailable(g);
         let label = format!(
             "仓库 {name} · {}{}",
             error.as_deref().or(branch.as_deref()).unwrap_or_default(),
@@ -477,7 +475,7 @@ impl Workbench {
                     .child(title_text),
             );
         let pending = group.write_pending;
-        let commit_disabled = pending || group.commit_generation.is_some() || !can_commit;
+        let commit_disabled = commit_unavailable.is_some();
         let commit_bg = if commit_disabled {
             colors.keycap
         } else {
@@ -528,7 +526,7 @@ impl Workbench {
                             .size(theme::ICON_SIZE)
                             .text_color(commit_fg),
                     )
-                    .tooltip("提交（⌘Enter）")
+                    .tooltip(commit_unavailable.unwrap_or("提交（⌘Enter）"))
                     .accessibility_label("提交（⌘Enter）")
                     .disabled(commit_disabled)
                     .on_click(cx.listener({
@@ -703,6 +701,29 @@ impl Workbench {
             .into_any_element()
     }
 
+    pub(super) fn scm_commit_unavailable(&self, g: usize) -> Option<&'static str> {
+        let group = &self.groups[g];
+        if group.write_pending {
+            Some("Git 操作进行中，请稍候")
+        } else if group.commit_generation.is_some() {
+            Some("正在生成提交信息，可在输入框右侧取消")
+        } else {
+            match &group.status {
+                Some(Ok(status))
+                    if status
+                        .changes
+                        .iter()
+                        .any(|c| c.kind == ChangeKind::Conflict) =>
+                {
+                    Some("请先解决合并冲突")
+                }
+                Some(Ok(status)) if status.changes.is_empty() => Some("没有可提交的更改"),
+                Some(Ok(_)) => None,
+                _ => Some("仓库状态不可用，暂时无法提交"),
+            }
+        }
+    }
+
     /// The repository's message box and AI action, under the repository header.
     fn scm_commit_row(&self, g: usize, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
@@ -814,7 +835,6 @@ impl Workbench {
         side: DiffSide,
         count: usize,
         base: Stateful<Div>,
-        hover: SharedString,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = theme::colors(cx);
@@ -822,6 +842,18 @@ impl Workbench {
         let discard = matches!(side, DiffSide::Worktree)
             .then(|| self.scm_discard(g, None))
             .flatten();
+        let pending = self.groups[g].write_pending;
+        let has_discard = matches!(side, DiffSide::Worktree)
+            && self.groups[g]
+                .status
+                .as_ref()
+                .and_then(|status| status.as_ref().ok())
+                .is_some_and(|status| {
+                    status
+                        .changes
+                        .iter()
+                        .any(|change| change.unstaged() && change.kind != ChangeKind::Conflict)
+                });
         let collapsed = match side {
             DiffSide::Staged => self.groups[g].staged_collapsed,
             DiffSide::Worktree => self.groups[g].changes_collapsed,
@@ -844,28 +876,37 @@ impl Workbench {
                     }),
             )
             .child(
-                hover_actions(hover)
-                    .when_some(discard, |actions, request| {
+                h_flex()
+                    .flex_shrink_0()
+                    .gap_1()
+                    .when(has_discard, |actions| {
                         actions.child(
                             action(("scm-discard-all", g), IconName::Undo2, "放弃所有更改", cx)
+                                .disabled(discard.is_none())
+                                .when(pending, |button| button.tooltip("Git 操作进行中，请稍候"))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
-                                    this.request_git_write(request.clone(), window, cx);
+                                    if let Some(request) = &discard {
+                                        this.request_git_write(request.clone(), window, cx);
+                                    }
                                 })),
                         )
                     })
-                    .when_some(toggle, |actions, request| {
+                    .map(|actions| {
                         let (icon, label) = match side {
                             DiffSide::Staged => (IconName::Minus, "取消暂存所有更改"),
                             DiffSide::Worktree => (IconName::Plus, "暂存所有更改"),
                         };
                         actions.child(
-                            action(("scm-all", g * 2 + side as usize), icon, label, cx).on_click(
-                                cx.listener(move |this, _, window, cx| {
+                            action(("scm-all", g * 2 + side as usize), icon, label, cx)
+                                .disabled(toggle.is_none())
+                                .when(pending, |button| button.tooltip("Git 操作进行中，请稍候"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
-                                    this.request_git_write(request.clone(), window, cx);
-                                }),
-                            ),
+                                    if let Some(request) = &toggle {
+                                        this.request_git_write(request.clone(), window, cx);
+                                    }
+                                })),
                         )
                     }),
             )
