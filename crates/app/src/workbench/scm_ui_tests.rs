@@ -376,7 +376,7 @@ async fn remote_check_discovers_incoming_and_does_not_fetch_from_watch_refresh(
     let _ = std::fs::remove_dir_all(base);
 }
 
-/// Make Fetch observable and slow enough to exercise interruption and window release.
+/// Hold Fetch until the test releases it, so interruption does not depend on machine speed.
 fn slow_upload_pack(repo: &std::path::Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let base = repo.parent().unwrap();
@@ -385,8 +385,8 @@ fn slow_upload_pack(repo: &std::path::Path) -> PathBuf {
     std::fs::write(
         &upload,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$$\" >> '{}'\nsleep 2\nexec /usr/bin/git-upload-pack \"$@\"\n",
-            pids.display()
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" >> '{}'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\nexec /usr/bin/git-upload-pack \"$@\"\n",
+            pids.display(), base.join("release-fetch").display()
         ),
     )
     .unwrap();
@@ -409,8 +409,15 @@ async fn remote_check_survives_an_ordinary_refresh(cx: &mut TestAppContext) {
     git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
     let head = git_out(&repo, &["rev-parse", "HEAD"]);
     let pids = slow_upload_pack(&repo);
-    let (window, this) = open(cx, repo.clone());
     std::fs::write(repo.join("a.txt"), "local edit\n").unwrap();
+    let (window, this) = open(cx, repo.clone());
+    this.update(cx, |p, _| {
+        // This test counts explicit interruptions; native events have their own coverage.
+        p.watch.task = None;
+        p.watch.subscription = None;
+        p.watch.debouncing = false;
+        p.watch.pending_plan = None;
+    });
     cx.update_window(window.into(), |_, window, cx| {
         this.update(cx, |p, cx| {
             p.sidebar = Sidebar::SourceControl;
@@ -445,6 +452,11 @@ async fn remote_check_survives_an_ordinary_refresh(cx: &mut TestAppContext) {
     })
     .unwrap();
     assert!(cancelled.load(Ordering::Relaxed));
+    settle(cx, Some(window), |cx| {
+        std::fs::read_to_string(&pids).unwrap().lines().count() >= 2
+            && this.read_with(cx, |p, _| p.watch.remote_active)
+    });
+    std::fs::write(repo.parent().unwrap().join("release-fetch"), "").unwrap();
     settle(cx, Some(window), |cx| {
         this.read_with(cx, |p, _| !p.loading && !p.watch.remote_pending)
     });
