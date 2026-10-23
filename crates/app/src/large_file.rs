@@ -32,14 +32,7 @@ pub struct LineIndex {
     checkpoints: Vec<u64>,
     /// The file as indexed; a read that finds it different reports `Changed`.
     pub stamp: FileStamp,
-    /// Line breaks seen, and the last bytes indexed: a file that only grew (a log) is indexed
-    /// on from here, once those bytes are found unchanged.
-    newlines: usize,
-    tail: Vec<u8>,
 }
-
-/// Bytes kept from the end of an index to recognize a file that was only appended to.
-const TAIL: usize = 256;
 
 /// A line as shown: lossily decoded, tabs expanded, cut at `SHOWN_LINE_BYTES`.
 #[derive(Clone, Debug, PartialEq)]
@@ -63,44 +56,17 @@ impl From<io::Error> for ReadError {
 
 /// Indexes `path` in one pass. `cancel` stops it (the viewer was closed or reopened).
 pub fn index(path: &Path, cancel: &AtomicBool) -> io::Result<LineIndex> {
-    index_from(path, None, cancel)
-}
-
-/// Indexes `path` again after a change: from where `old` ended when the file is the same one
-/// and only grew (its last indexed bytes unchanged), otherwise from the start.
-pub fn reindex(path: &Path, old: &LineIndex, cancel: &AtomicBool) -> io::Result<LineIndex> {
-    index_from(path, Some(old), cancel)
-}
-
-fn index_from(path: &Path, old: Option<&LineIndex>, cancel: &AtomicBool) -> io::Result<LineIndex> {
     let mut file = fs::File::open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(io::Error::other("不是普通文件"));
     }
     let stamp = FileStamp::of(&metadata);
-    let appended = old.filter(|old| {
-        old.stamp.device == stamp.device
-            && old.stamp.inode == stamp.inode
-            && stamp.len >= old.bytes
-            && {
-                let mut tail = vec![0; old.tail.len()];
-                file.seek(SeekFrom::Start(old.bytes - old.tail.len() as u64))
-                    .and_then(|_| file.read_exact(&mut tail))
-                    .is_ok_and(|_| tail == old.tail)
-            }
-    });
+    // An unchanged tail cannot prove that earlier line breaks were not rewritten.
     let mut buffer = vec![0; CHUNK];
-    let (mut checkpoints, mut offset, mut newlines, mut tail) = match appended {
-        Some(old) => (
-            old.checkpoints.clone(),
-            old.bytes,
-            old.newlines,
-            old.tail.clone(),
-        ),
-        None => (vec![0], 0u64, 0usize, Vec::new()),
-    };
-    file.seek(SeekFrom::Start(offset))?;
+    let mut checkpoints = vec![0];
+    let (mut offset, mut newlines) = (0u64, 0usize);
+    let mut ends_with_break = true;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "已取消"));
@@ -122,20 +88,18 @@ fn index_from(path: &Path, old: Option<&LineIndex>, cancel: &AtomicBool) -> io::
                 checkpoints.push(offset + at as u64 + 1);
             }
         }
-        tail.extend_from_slice(&chunk[read.saturating_sub(TAIL)..]);
-        let excess = tail.len().saturating_sub(TAIL);
-        tail.drain(..excess);
+        ends_with_break = chunk.last() == Some(&b'\n');
         offset += read as u64;
     }
-    let ends_with_break = tail.last().is_none_or(|byte| *byte == b'\n');
+    if FileStamp::of(&file.metadata()?) != stamp {
+        return Err(io::Error::other("索引期间文件已变化，请重试"));
+    }
     Ok(LineIndex {
         bytes: offset,
         // A final line without a newline still counts; an empty file shows one empty line.
         lines: (newlines + usize::from(!ends_with_break)).max(1),
         checkpoints,
         stamp,
-        newlines,
-        tail,
     })
 }
 
@@ -473,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_that_only_grew_is_indexed_on_and_a_rewritten_one_from_the_start() {
+    fn growing_and_rewritten_files_get_fresh_line_indexes() {
         let mut contents = String::new();
         for n in 0..(STRIDE + 5) {
             contents.push_str(&format!("line {n}\n"));
@@ -488,8 +452,8 @@ mod tests {
             writeln!(file, " end {n}").unwrap();
         }
         drop(file);
-        let grown = reindex(&path, &old, &cancel).unwrap();
-        assert_eq!(grown, index(&path, &cancel).unwrap());
+        let grown = index(&path, &cancel).unwrap();
+        assert!(grown.lines > old.lines);
         assert_eq!(grown.lines, 2 * STRIDE + 8);
         // Rewritten with the same length: indexed from the start, not "appended".
         let bytes = fs::read(&path).unwrap();
@@ -498,9 +462,11 @@ mod tests {
             .map(|b| if *b == b'e' { b'\n' } else { *b })
             .collect();
         fs::write(&path, &rewritten).unwrap();
+        let rewritten_index = index(&path, &cancel).unwrap();
         assert_eq!(
-            reindex(&path, &grown, &cancel).unwrap(),
-            index(&path, &cancel).unwrap()
+            rewritten_index.lines,
+            rewritten.iter().filter(|byte| **byte == b'\n').count()
+                + usize::from(rewritten.last() != Some(&b'\n'))
         );
         fs::remove_file(path).unwrap();
     }

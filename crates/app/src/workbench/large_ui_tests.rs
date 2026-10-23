@@ -68,6 +68,28 @@ async fn a_large_file_opens_in_the_viewer_and_follows_the_disk(cx: &mut TestAppC
         held_line(&this, cx, lines).as_deref() == Some("appended")
     });
 
+    // Rewrite an early newline without changing the inode, length or tail. Old sparse
+    // checkpoints must not survive just because the last bytes still match.
+    let mut rewritten = std::fs::read(&path).unwrap();
+    rewritten[99] = b'x';
+    std::fs::write(&path, rewritten).unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.check_disk(Some(&changed), window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| {
+            p.large.as_ref().unwrap().index.as_ref().unwrap().lines == lines
+        })
+    });
+    this.read_with(cx, |p, _| {
+        let index = p.large.as_ref().unwrap().index.as_ref().unwrap();
+        assert_eq!(
+            crate::large_file::read_text(&path, index, lines - 1..lines).unwrap(),
+            "appended\n"
+        );
+    });
+
     // A binary file is not shown, and the viewer stays as it was.
     let folder = Some(root.clone());
     let blob = root.join("blob.bin");
