@@ -18,10 +18,12 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 | 冷启动到首帧 | ≤ 250 ms | 400 ms |
 | 空闲 footprint，1 个窗口 | ≤ 70 MB | 100 MB |
 | 3 个窗口 + 20 个文档 | ≤ 220 MB | 300 MB |
-| 空闲 CPU（光标不闪）| 0% | p95 ≤ 0.1% |
+| 空闲 CPU（光标不闪）| 0% | p95 ≤ 1%（2026-10-22 按用户要求调整）|
 | 按键到画面 p99 | ≤ 8.3 ms | 16.7 ms |
 
 内存看 physical footprint（`footprint -p PID` 或 `tools/sample_resources.py`），并把 Git 子进程算在内。
+
+按键的自动化计时从 macOS 去重后的 keyDown、IME／GPUI 分发前开始，到同窗口下一次成功的 Metal `commit()` 返回为止，字段为 `key_cpu_submit_p99_ms`，沿用 8.3／16.7 ms 检查线。它不含 GPU 完成、合成器呈现和屏幕 scanout，因此达标只能证明 CPU 提交阶段，不能替代完整「按键到画面」验收。同帧多个按键共用提交终点，按键不一定改变像素。旧 `key_latency` 止于绘制前回调，不与新数据直接比较；Diff 的 `frame_upper` 仍是包含额外帧间隔的上界，不用于按键预算。
 
 表中“光标不闪”指编辑器光标和欢迎页 logo 光标都不闪：两者都常亮。编辑器光标靠 `vendor/gpui-base` 的 ZJ patch（Kit 原本每 500 ms 闪一次并整窗重画）；logo 光标是静态色块。任何闪烁或动画都会让窗口一直出帧，空闲 CPU 上升，渲染器也等不到空闲去归还帧缓冲、停掉 display link（1 个窗口约 190 MB 对 70 MB）。Dock 图标闪烁（设置 `dock_icon_blink`，默认关）是每 530 ms 一次 `setApplicationIconImage`，一个 App 级定时器，不画窗口；开启“减少动态效果”时停止并恢复完整图标。它不计入空闲 CPU 预算，但不要再加别的常驻动画。
 
@@ -56,10 +58,10 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `save.rs`：保存的纯逻辑（同目录临时文件 + fsync + rename、保留权限 / 换行符 / BOM、符号链接写到目标、多硬链接原地写、只读识别、按设备 / inode / 大小 / mtime / 内容哈希判断外部修改、退出询问的状态机、自动保存防抖、比较用的补丁）；`workbench/documents.rs`：保存、另存为、全部保存、Untitled、关闭 / 退出确认、外部修改横幅、自动保存，以及给 Agent 层的 `buffer_text` / `on_buffer_saved`。
   - 编辑恢复（开发说明 R11 / A16）：`recovery.rs` 是快照记录的纯逻辑（每个未保存缓冲区一个带版本的 JSON，放在设置文件旁的 `recovery/`，临时文件 + rename，权限 0600）；`workbench/recovery.rs` 在编辑停顿 2 秒后经单一后台队列写快照，保存 / 重新加载 / 不保存 / 关窗时删除，退出时同步清空，启动时把异常退出留下的快照恢复进标签（带横幅，可放弃）。只在有待写快照时才有定时器。
   - `settings.rs`：所有窗口共用的设置文件（字号、显示隐藏文件、名称隐藏规则 `hidden_files`、Diff 布局、隐藏无变更仓库、搜索排除、Dock 图标闪烁、自动保存、按工作区手动添加的仓库 `extra_repos`）。⌘, 在标签里打开它，保存后在所有窗口生效，JSON 或隐藏规则写错时保留原设置并在状态栏说明。旧文件缺少 `hidden_files` 时，只向当前编辑缓冲区插入规则，保留未知键和未保存内容，可撤销，保存前不写盘；空数组不补默认值。规则修改只重载树和可见查询，不重建路径索引，`.git` 与既有索引资源限制不变。
-  - `perf.rs`：给 `tools/measure_budget.py` 用的打点（首帧耗时；`ZJ_LATENCY_LOG=1` 时记录按键到下一帧画完的耗时），平时只有一行首帧日志。
+  - `perf.rs`：给 `tools/measure_budget.py` 用的启动打点（首个绘制前回调，尚非提交完成）与 Diff 分段计时。`ZJ_LATENCY_LOG=1` 的按键计时由 vendor macOS 输入层与 Metal 渲染器记录，终点为 CPU 提交，见上方预算口径；平时只有一行首帧日志。
   - `platform.rs`：少量 macOS 系统接口（“减少动态效果”、Dock 图标替换与闪烁、键盘输入源的读取与切换），其他平台和测试里为空实现（测试不会动真实的输入法）。
   - 输入法跟随焦点（设置 `auto_input_source`，默认开）：`input_switch.rs` 是纯逻辑（进终端总是切到英文；Agent 输入框切回上次在那里用的输入源，第一次用之前见过的中文输入法），`workbench/input_area.rs` 在终端、输入框获得焦点和窗口回到前台时调用。编辑器等其他位置不管；只在窗口在前台时切换，不轮询。
-  - `workbench/switch_hud.rs`：从另一个 ZJ 窗口切过来时，在窗口中央闪现工作区名称（放大淡入、停留、淡出，约 1 秒的一次性动画，结束后不再出帧；窗口第一次激活、从别的 App 切回时不显示；开启“减少动态效果”时不缩放、不渐变）。
+  - `workbench/switch_hud.rs`：从另一个 ZJ 窗口切过来时，在窗口中央闪现工作区名称（放大淡入、停留、淡出，约 1 秒的一次性动画，结束后不再出帧；窗口第一次激活、从别的 App 切回时不显示；开启“减少动态效果”时不缩放、不渐变）。动画字号取整以复用有限的字体／字形缓存键，不能逐帧生成任意小数字号。
   - `file_ops.rs`：资源管理器的新建、重命名、复制、移动和移到废纸篓；`workbench/explorer_ops.rs`：右键菜单、快捷键和行内改名；`workbench/tab_menu.rs`：编辑器标签页的右键菜单、对应快捷键和 ⇧⌘T 重开已关闭标签的栈。
   - Markdown 预览：`markdown_blocks.rs` 把文件切成顶层块（纯函数）；`md_images.rs` 解析图片地址（本地图片按文件头尺寸检查解码预算，远程 / data: 不加载，纯函数），预览在后台和分块一起解析，渲染时只查表（用 Kit 基础 `TextView` 的 `image_source`）；相对链接在 ZJ 里打开；`workbench/markdown_preview.rs` 按块用 Kit `TextView` 渲染，点击的块换成源码文本框并直接写回缓冲区，⇧⌘V 切换源码。源码视图下不切分。
   - 终端（docs/adr/0006）：`terminal.rs` 是 `alacritty_terminal` 的衔接层（起 shell、事件、按键编码、ANSI 颜色映射），不依赖界面状态；`workbench/terminal_view.rs` 画网格并处理键鼠和输入法；`workbench/terminal_panel.rs` 是底部面板的分组、拆分和关闭。终端没有定时器，只在 shell 有输出时重画。
@@ -88,7 +90,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 ### 异步写入与关闭约束
 
-- 保存完成只确认发起时的文本版本和路径；期间的新编辑保留 dirty，路径变化时不把旧结果写进新路径的磁盘状态。关闭标签、窗口和应用前重新核对当前文档；「不保存」只授权丢弃该次提示对应的版本。
+- 保存或重新加载完成只确认发起时的文本版本和路径；期间的新编辑保留 dirty，路径变化时不把旧结果写进新路径的磁盘状态。文档 ID 标识缓冲区生命周期，另存为或移动不改变；磁盘设备／inode 仅用于查重，不能复用为新缓冲区 ID。关闭标签、窗口和应用前重新核对当前文档；「不保存」只授权丢弃该次提示对应的版本。
 - 同一文档的保存与另存为串行。另存为在 `workbench/documents.rs` 预留规范路径和现有文件身份，跨窗口查重；预留持续到后台写入与前台结果处理都结束，异步打开也检查占用。
 - 恢复快照的后台失败通过有界事件通知界面，不等待下一次编辑。临时文件只在成功创建后才归当前写入所有，创建失败不能清理别人的临时文件。
 - `git_service` 写操作按 common directory、private git directory 的顺序加锁，使 linked worktree 的共享引用和 stash 校验、变更串行；仍不能约束外部 Git 进程。
@@ -101,6 +103,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 - 布局参照 VS Code 工作台的尺寸，按用户要求默认字号 13：正文 `TEXT_BODY` 13、标题栏 `TITLE_HEIGHT` 33、标签栏 `TAB_HEIGHT` 36、列表行 `ROW_HEIGHT` 24、状态栏 `STATUS_HEIGHT` 24；常规间距用 4 px 网格（不用 `gap_0p5` 这类半格工具类，`theme.rs` 的测试会检查）；按用户要求，工作台外侧留白使用 `WORKBENCH_INSET` 2 px，标题栏在 28 px 搜索框上下各留 2.5 px。由行高推出的居中偏移 `SCM_LINE_PAD` 沿用原值。编辑器字号默认 13，可缩放，Diff 行高随之计算（`theme::diff_metrics`）。
 - 配色：工作台深色主题使用 Solarized Dark，浅色主题使用用户 VS Code 中的 Nord Light（huytd.nord-light）主表面；语法高亮映射 Solarized Dark／Nord Light，浅色低对比 token 按需调深以满足可读性。常规界面调整不得替换主题配色。只在 `theme.rs` 的 `DARK` / `LIGHT` / 语法表与 Kit 主题映射中调整颜色；不要在界面代码里写色值。控件、卡片和浮层圆角也同步到 Kit 主题。
 - 界面图标只用 Lucide（`IconName`），不要用文本符号充当图标。Kit 默认只内嵌 104 个图标（`gpui-kit-assets` 的 `default-icons.txt`），没内嵌的 `IconName` 会画成空白；需要额外的图标时，把 SVG 放进 `crates/app/assets/icons/`，并登记到 `assets.rs` 的 `EXTRA`。
+- 只有图标的交互按钮必须设置 `accessibility_label`，动作随状态变化时名称同步变化；tooltip 不替代可访问名称，原生验收按名称定位而非按钮序号。
 - 文件类型图标用 vscode-icons 的一个子集（`crates/app/assets/file-icons/`，MIT 许可），映射写在 `file_icons.rs`。这些是彩色 SVG，用 `img()` 绘制：第一次画彩色图片时，GPUI 会分配一张 polychrome 图集（所有窗口共用，vendor 补丁把初始尺寸从 1024² 降到 512²，约 1 MiB）。新增图标前先看体积（当前合计约 58 KB）。
 - 文字对比度：正文 ≥ 7:1，次要文字 ≥ 4.5:1（`theme.rs` 里有测试检查）。
 - 外观跟随系统亮暗；可以用环境变量 `ZJ_APPEARANCE=light|dark` 强制指定，方便截图和调试。
@@ -124,3 +127,4 @@ python3 tools/fixtures.py /tmp/zj-fixture-f  # 生成临时夹具，目标路径
 - 日志用 `eprintln!("event=... key=value")` 这种格式，不输出文件内容和凭据。
 - 提交信息用 Conventional Commits 格式（例如 `feat(scm): …`），正文可以写中文；一个提交只做一件事，每个提交都要能构建。
 - 测试只在临时夹具里进行，不在真实仓库上做写入、重置或提交。
+- 无头 GPUI 布局测试用 `TestAppContext::simulate_window_resize` 改变视口，并断言实际 `viewport_size` 或面板宽度；`Window::resize` 在测试平台不发送尺寸回调，不能证明窄窗口布局。
