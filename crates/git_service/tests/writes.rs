@@ -771,6 +771,15 @@ fn tags_are_created_pushed_and_deleted() {
     git(&root, &["remote", "add", "origin", bare.to_str().unwrap()]);
     git(&root, &["push", "-u", "origin", "main"]);
 
+    // Each tag action must keep the unrelated annotated tag private, even with followTags.
+    git(&root, &["config", "push.followTags", "true"]);
+    write(
+        &service,
+        &root,
+        create("private", Some("not selected"), false),
+    )
+    .unwrap();
+
     // Lightweight without a message, annotated with one; the annotated one is pushed.
     write(&service, &root, create("v1", None, false)).unwrap();
     assert_eq!(git(&root, &["cat-file", "-t", "v1"]).trim(), "commit");
@@ -802,7 +811,7 @@ fn tags_are_created_pushed_and_deleted() {
         push: false,
     };
     assert!(write(&service, &root, symbolic).is_err());
-    assert_eq!(tags(&root), ["v1", "v2"]);
+    assert_eq!(tags(&root), ["private", "v1", "v2"]);
 
     // Pushing one tag publishes only it.
     write(
@@ -823,10 +832,10 @@ fn tags_are_created_pushed_and_deleted() {
         remote,
     };
     write(&service, &root, delete("v1", true)).unwrap();
-    assert_eq!(tags(&root), ["v2"]);
+    assert_eq!(tags(&root), ["private", "v2"]);
     assert_eq!(tags(&bare), ["v2"]);
     write(&service, &root, delete("v2", false)).unwrap();
-    assert!(tags(&root).is_empty());
+    assert_eq!(tags(&root), ["private"]);
     assert_eq!(tags(&bare), ["v2"]);
     assert!(write(&service, &root, delete("v2", false)).is_err());
 }

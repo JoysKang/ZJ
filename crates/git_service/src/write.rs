@@ -803,6 +803,7 @@ fn tag_push_args(remote: &str, refspec: String) -> Vec<OsString> {
         "push".into(),
         "--porcelain".into(),
         "--no-force".into(),
+        "--no-follow-tags".into(),
         "--".into(),
         remote.into(),
         refspec.into(),
