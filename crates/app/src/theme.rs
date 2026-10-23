@@ -533,49 +533,49 @@ pub const LIGHT: Palette = Palette {
 /// Syntax colors (tree-sitter capture → color, style) in the same Kit JSON shape as its theme
 /// files, following VS Code's Solarized Dark token colors (keyword/operator green, function and
 /// property blue, type/constructor orange, constants yellow, numbers magenta, strings cyan).
-/// Solarized keeps its canonical comment color (#586E75, below 4.5:1 by design). Captures a
-/// table does not list fall back to their prefix (`function.method` → `function`).
+/// Low-contrast Solarized accents are lifted toward white to reach 4.5:1 on the editor;
+/// comments use base0 with italics. Unlisted captures fall back to their prefix.
 const SOLARIZED_SYNTAX: &[(&str, u32, Option<&str>)] = &[
     ("attribute", 0x93a1a1, None),
     ("boolean", 0xb58900, None),
-    ("comment", 0x586e75, Some("italic")),
-    ("comment.doc", 0x586e75, Some("italic")),
+    ("comment", 0x839496, Some("italic")),
+    ("comment.doc", 0x839496, Some("italic")),
     ("constant", 0xb58900, None),
-    ("constructor", 0xcb4b16, None),
+    ("constructor", 0xd67349, None),
     ("embedded", 0x839496, None),
-    ("emphasis", 0xd33682, Some("italic")),
-    ("emphasis.strong", 0xd33682, Some("bold")),
-    ("enum", 0xcb4b16, None),
-    ("function", 0x268bd2, None),
+    ("emphasis", 0xdd649e, Some("italic")),
+    ("emphasis.strong", 0xdd649e, Some("bold")),
+    ("enum", 0xd67349, None),
+    ("function", 0x3794d6, None),
     // Diff additions / deletions (see diff_syntax.rs).
-    ("hint", 0xdc322f, None),
+    ("hint", 0xe56562, None),
     ("predictive", 0x859900, None),
     ("keyword", 0x859900, None),
-    ("label", 0x6c71c4, None),
-    ("link_text", 0x268bd2, None),
+    ("label", 0x8488cd, None),
+    ("link_text", 0x3794d6, None),
     ("link_uri", 0x2aa198, None),
-    ("number", 0xd33682, None),
+    ("number", 0xdd649e, None),
     ("operator", 0x859900, None),
     ("preproc", 0xb58900, None),
     ("primary", 0x839496, None),
     // VS Code maps variable.other.property / variable.other to blue.
-    ("property", 0x268bd2, None),
+    ("property", 0x3794d6, None),
     ("punctuation", 0x839496, None),
     ("punctuation.bracket", 0x839496, None),
     ("punctuation.delimiter", 0x839496, None),
-    ("punctuation.list_marker", 0xcb4b16, None),
-    ("punctuation.special", 0xdc322f, None),
+    ("punctuation.list_marker", 0xd67349, None),
+    ("punctuation.special", 0xe56562, None),
     ("string", 0x2aa198, None),
-    ("string.escape", 0xcb4b16, None),
-    ("string.regex", 0xdc322f, None),
+    ("string.escape", 0xd67349, None),
+    ("string.regex", 0xe56562, None),
     ("string.special", 0x2aa198, None),
     ("string.special.symbol", 0x2aa198, None),
-    ("tag", 0x268bd2, None),
+    ("tag", 0x3794d6, None),
     ("text.literal", 0x2aa198, None),
-    ("title", 0x268bd2, Some("bold")),
-    ("type", 0xcb4b16, None),
+    ("title", 0x3794d6, Some("bold")),
+    ("type", 0xd67349, None),
     ("variable", 0x839496, None),
-    ("variable.special", 0x268bd2, None),
+    ("variable.special", 0x3794d6, None),
     ("variant", 0xb58900, None),
 ];
 
@@ -585,13 +585,14 @@ const SOLARIZED_SYNTAX: &[(&str, u32, Option<&str>)] = &[
 /// The final empty fontStyle rules clear inherited italics and bold. Captures cannot express
 /// every TextMate context, so broad captures use the nearest source scope rather than guessing.
 /// Comment #748599, green #509546, operator #CB5C69 and escape #27C0B2 are darkened below
-/// to keep 4.5:1 on the Nord editor; the other mapped colors retain their source values.
+/// to keep 4.5:1 on the Nord editor. Keywords use the palette's purple and constants its blue
+/// so control flow, calls and literal values remain distinct; other colors retain source values.
 const NORD_LIGHT_SYNTAX: &[(&str, u32, Option<&str>)] = &[
     ("attribute", 0x0d7579, None),
-    ("boolean", 0x3b4252, None),
+    ("boolean", 0x0c60a5, None),
     ("comment", 0x606e7f, None),
     ("comment.doc", 0x606e7f, None),
-    ("constant", 0x3b4252, None),
+    ("constant", 0x0c60a5, None),
     ("constructor", 0x0d7579, None),
     ("embedded", 0x24292e, None),
     ("emphasis", 0x24292e, None),
@@ -600,11 +601,11 @@ const NORD_LIGHT_SYNTAX: &[(&str, u32, Option<&str>)] = &[
     ("function", 0x0d7579, None),
     ("hint", 0xad4f5a, None),
     ("predictive", 0x417939, None),
-    ("keyword", 0x0d7579, None),
+    ("keyword", 0x6f42c1, None),
     ("label", 0x417939, None),
     ("link_text", 0xad4f5a, None),
     ("link_uri", 0xad4f5a, None),
-    ("number", 0x3b4252, None),
+    ("number", 0x0c60a5, None),
     ("operator", 0xad4f5a, None),
     ("preproc", 0x0c60a5, None),
     ("primary", 0x24292e, None),
@@ -637,7 +638,13 @@ fn syntax_json(entries: &[(&str, u32, Option<&str>)]) -> Value {
             Some(style) => entry["font_style"] = json!(style),
             None => {}
         }
-        map.insert((*name).to_owned(), entry);
+        // Kit 0.7.1 uses an underscore for this JSON field, but a dotted capture name.
+        let key = if *name == "comment.doc" {
+            "comment_doc"
+        } else {
+            name
+        };
+        map.insert((*key).to_owned(), entry);
     }
     Value::Object(map)
 }
@@ -1255,10 +1262,33 @@ mod tests {
     }
 
     #[test]
-    fn light_syntax_is_readable() {
-        for (name, color, _) in NORD_LIGHT_SYNTAX {
-            let ratio = contrast(*color, LIGHT.editor);
-            assert!(ratio >= 4.5, "nord light {name}: {ratio:.2}");
+    fn syntax_is_readable_in_both_appearances() {
+        for (appearance, entries, palette) in [
+            ("dark", SOLARIZED_SYNTAX, DARK),
+            ("light", NORD_LIGHT_SYNTAX, LIGHT),
+        ] {
+            for (name, color, _) in entries {
+                let ratio = contrast(*color, palette.editor);
+                assert!(ratio >= 4.5, "{appearance} {name}: {ratio:.2}");
+            }
+        }
+    }
+
+    #[test]
+    fn syntax_entries_survive_kit_deserialization() {
+        for entries in [SOLARIZED_SYNTAX, NORD_LIGHT_SYNTAX] {
+            let syntax: gpui_kit::component::highlighter::SyntaxColors =
+                serde_json::from_value(syntax_json(entries)).unwrap();
+            let serialized = serde_json::to_value(&syntax).unwrap();
+            for (name, color, _) in entries {
+                let key = if *name == "comment.doc" {
+                    "comment_doc"
+                } else {
+                    name
+                };
+                assert!(!serialized[key].is_null(), "Kit ignored {name}");
+                assert_eq!(syntax.style(name).unwrap().color, Some(rgb(*color).into()));
+            }
         }
     }
 }

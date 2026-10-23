@@ -279,8 +279,76 @@ mod tests {
         assert_eq!(comment("x.diff"), None);
     }
 
-    /// Each language has a registered grammar, parses its sample, and yields highlight
-    /// captures that the app's own syntax themes (dark and light) give a non-default color.
+    #[test]
+    fn common_tokens_keep_distinct_styles() {
+        register();
+        for dark in [true, false] {
+            let theme = crate::theme::highlight_theme_for_tests(dark);
+            for (language, source, tokens) in [
+                (
+                    "rust",
+                    "fn greet(count: u32) { let enabled = true; let text = \"hello\"; let n = 42; }",
+                    ["fn", "greet", "u32", "true", "\"hello\"", "42"],
+                ),
+                (
+                    "typescript",
+                    "function greet(count: number) { const enabled = true; const text = \"hello\"; const n = 42; }",
+                    ["function", "greet", "number", "true", "\"hello\"", "42"],
+                ),
+            ] {
+                let runs = crate::diff_doc::highlight(language, source, &theme);
+                let styles: Vec<_> = tokens
+                    .iter()
+                    .map(|token| {
+                        let start = source.find(token).unwrap();
+                        runs.iter()
+                            .rev()
+                            .find(|(range, _)| {
+                                range.start <= start && range.end >= start + token.len()
+                            })
+                            .unwrap_or_else(|| panic!("{language} missing {token}"))
+                            .1
+                    })
+                    .collect();
+                for (index, capture) in
+                    ["keyword", "function", "type", "boolean", "string", "number"]
+                        .iter()
+                        .enumerate()
+                {
+                    // Kit's Rust query groups boolean and numeric literals as constants.
+                    let capture = if language == "rust" && matches!(index, 3 | 5) {
+                        "constant"
+                    } else {
+                        capture
+                    };
+                    assert_eq!(
+                        styles[index],
+                        theme.style.syntax.style(capture).unwrap(),
+                        "{language} {} (dark={dark})",
+                        tokens[index]
+                    );
+                }
+                for (a, b) in [(0, 1), (1, 2), (3, 4), (4, 5)] {
+                    assert_ne!(
+                        styles[a].color, styles[b].color,
+                        "{language} {} / {} (dark={dark})",
+                        tokens[a], tokens[b]
+                    );
+                }
+                for index in [3, 5] {
+                    assert_ne!(
+                        styles[index].color,
+                        theme.style.syntax.style("variable").unwrap().color,
+                        "{language} {} / variable (dark={dark})",
+                        tokens[index]
+                    );
+                }
+                assert_eq!(crate::markdown::highlight(language, source, &theme), runs);
+            }
+        }
+    }
+
+    /// Each grammar parses its sample and yields visibly styled captures in both app themes.
     #[test]
     fn every_grammar_highlights_with_app_themes() {
         // `main` registers these before any window opens; the test process needs the same.
@@ -301,14 +369,20 @@ mod tests {
                     crate::theme::LIGHT.code
                 })
                 .into();
-                let colored = highlighter
+                let styled = highlighter
                     .styles(&(0..sample.len()), &theme)
                     .into_iter()
-                    .filter(|(_, style)| style.color.is_some_and(|color| color != plain))
+                    .filter(|(_, style)| {
+                        style.color.is_some_and(|color| color != plain)
+                            || style.font_style == Some(gpui_kit::FontStyle::Italic)
+                            || style
+                                .font_weight
+                                .is_some_and(|weight| weight > gpui_kit::FontWeight::NORMAL)
+                    })
                     .count();
                 assert!(
-                    colored >= 3,
-                    "{language} (dark={dark}): only {colored} colored spans"
+                    styled >= 3,
+                    "{language} (dark={dark}): only {styled} styled spans"
                 );
             }
         }
