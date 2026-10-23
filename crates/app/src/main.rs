@@ -478,8 +478,6 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         ]);
         // ⌘/ and the other line editing keys on document editors (workbench/edit_commands.rs).
         cx.bind_keys(workbench::edit_key_bindings());
-        perf::watch_key_latency(cx);
-
         install_menus(cx);
         let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
         cx.set_global(workbench::OpenDocuments(documents.clone()));
@@ -680,3 +678,9 @@ mod menu_tests {
 #[path = "../../../vendor/gpui-pre-apple/src/zj_low_memory.rs"]
 #[allow(dead_code)] // `enabled()` reads the environment for the renderer, not for the tests.
 mod gpu_low_memory_policy;
+
+// ZJ patch: exercise the renderer's plain-Rust timing queue without a native window.
+#[cfg(test)]
+#[path = "../../../vendor/gpui-pre-apple/src/zj_key_latency.rs"]
+#[allow(dead_code)]
+mod gpu_key_latency;

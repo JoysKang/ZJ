@@ -19,6 +19,20 @@ class RUsage(ctypes.Structure):
         "child_pageins", "child_elapsed_abstime", "diskio_bytesread", "diskio_byteswritten")]
 
 
+def mach_timebase():
+    class Timebase(ctypes.Structure):
+        _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
+    lib = ctypes.CDLL("/usr/lib/libSystem.dylib")
+    info = Timebase()
+    if lib.mach_timebase_info(ctypes.byref(info)) != 0 or info.denom == 0:
+        raise RuntimeError("Cannot read Mach timebase")
+    return info.numer / info.denom
+
+
+def cpu_seconds(ticks, timebase):
+    return ticks * timebase / 1e9
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("pid", type=int)
@@ -31,6 +45,7 @@ def main():
     lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
     lib.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
     lib.proc_pid_rusage.restype = ctypes.c_int
+    timebase = mach_timebase()
     samples, overhead, previous, totals, cpu_samples = [], [], {}, [], []
     unavailable_children = 0
     started = time.monotonic()
@@ -57,11 +72,12 @@ def main():
                         raise OSError(ctypes.get_errno(), f"proc_pid_rusage failed for app pid {pid}")
                     unavailable_children += 1
                     continue
-                cpu_time = usage.user_time + usage.system_time
+                cpu_time = cpu_seconds(usage.user_time + usage.system_time, timebase)
+                sampled_at = time.monotonic()
                 identity = (pid, usage.proc_start_abstime)
                 before = previous.get(identity)
-                cpu = (cpu_time - before[1]) / 1e9 / (tick - before[0]) * 100 if before else 0
-                previous[identity] = (tick, cpu_time)
+                cpu = (cpu_time - before[1]) / (sampled_at - before[0]) * 100 if before else 0
+                previous[identity] = (sampled_at, cpu_time)
                 snapshot.append((pid, usage.phys_footprint, usage.resident_size, cpu))
             cost = time.monotonic() - tick
             elapsed = tick - started

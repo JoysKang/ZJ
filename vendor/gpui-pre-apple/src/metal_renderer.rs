@@ -140,6 +140,8 @@ pub struct MetalRenderer {
     headless_render_target: Option<metal::Texture>,
     /// ZJ patch: low-memory mode state (see `zj_low_memory`).
     zj: ZjLowMemory,
+    // ZJ patch: each window owns its pending key timestamps.
+    zj_key_latency: crate::zj_key_latency::KeyLatency,
 }
 
 /// ZJ patch: what the low-memory mode tracks per renderer.
@@ -459,6 +461,8 @@ impl MetalRenderer {
             path_sample_count: PATH_SAMPLE_COUNT,
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
+            // ZJ patch: no timestamp storage is allocated until timing is enabled and used.
+            zj_key_latency: Default::default(),
             zj: ZjLowMemory {
                 // Only window renderers: headless rendering keeps upstream behaviour.
                 enabled: layer_present && zj_low_memory::enabled(),
@@ -647,6 +651,11 @@ impl MetalRenderer {
         // nothing to do
     }
 
+    // ZJ patch: called only for deduplicated native keyDown events in this window.
+    pub fn zj_key_down(&mut self) {
+        self.zj_key_latency.key_down();
+    }
+
     pub fn draw(&mut self, scene: &Scene) {
         let layer = match &self.layer {
             Some(l) => l.clone(),
@@ -698,11 +707,15 @@ impl MetalRenderer {
 
         if self.presents_with_transaction {
             command_buffer.commit();
+            // ZJ patch: CPU submission boundary, before scheduling / presentation waits.
+            self.zj_key_latency.submitted();
             command_buffer.wait_until_scheduled();
             drawable.present();
         } else {
             command_buffer.present_drawable(drawable);
             command_buffer.commit();
+            // ZJ patch: same boundary for the non-transactional path.
+            self.zj_key_latency.submitted();
         }
         // ZJ patch: the idle clock for giving back the spare drawable.
         self.zj.idle.frame(Instant::now());

@@ -31,6 +31,15 @@ and its debug-only screenshot configuration alongside ZJ's shared atlas and draw
   - the drawable count;
   - when the path textures need (re)allocating and when they have been idle long enough to free;
   - what to release when a window is hidden.
+- `src/zj_key_latency.rs` (new): bounded, per-renderer timestamps, enabled only by
+  `ZJ_LATENCY_LOG=1`. The macOS window records deduplicated native keyDown before IME / GPUI
+  dispatch. Both on-screen Metal paths drain them immediately after `commit()` returns,
+  before any scheduling wait. Failed / skipped draws keep them pending; another window's
+  frame cannot drain them. The queue holds at most 256 keys; overflow logs a dropped sample
+  and invalidates the benchmark. Disabled timing reads no clock and allocates no queue storage.
+  `event=key_cpu_submit` measures CPU submission, **not** GPU completion or screen scan-out.
+  Coalesced keys share a submission timestamp; keys need not change pixels. No forced frames,
+  timers, input content, or GPU waits are added. Tests run through the app crate.
 - `src/metal_renderer.rs`:
   - `maximumDrawableCount` is 2 instead of 3.
   - The path intermediate texture and its MSAA texture are allocated by the first frame that

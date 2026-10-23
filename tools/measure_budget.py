@@ -7,8 +7,17 @@ temporary directory too) and reports:
   1. cold start to first frame (median of --runs launches);
   2. idle physical footprint and CPU, one window;
   3. physical footprint with 3 windows and 20 open files;
-  4. keystroke-to-frame latency p50 / p99 (System Events types the keys: the terminal needs
-     Privacy & Security → Automation (System Events) and → Accessibility; --skip-latency skips).
+  4. native keyDown-to-Metal CPU submission p50 / p99 (not GPU completion or display scan-out).
+     System Events types the keys: the terminal needs Privacy & Security → Automation
+     (System Events) and → Accessibility; --skip-latency skips.
+     The start is after native key-equivalent deduplication, before IME / GPUI dispatch;
+     the end is the same window's next successful Metal commit return, with no extra frame.
+     Keys coalesced into one frame share that endpoint. A key need not change pixels.
+     Hardware / OS input delivery before keyDown is excluded. Old key_latency / frame_upper
+     logs are not samples, and old reports are not directly comparable.
+     The benchmark selects the already-enabled ABC input source and restores the previous
+     native source even on failure. It verifies saved ASCII edits in the temporary fixture;
+     the save key is separate from the measured keys. No IME preedit is counted as editing.
 
 --breakdown also measures 3 windows without files and 1 window with the 20 files, and prints
 the `footprint` categories of the 3-window, 20-file run, to tell windows from documents.
@@ -21,6 +30,7 @@ Footprint counts the whole process tree (git children included), as CLAUDE.md as
 import argparse
 import ctypes
 import json
+import math
 import os
 import shutil
 import signal
@@ -32,6 +42,9 @@ import threading
 import time
 from pathlib import Path
 
+from sample_resources import mach_timebase
+from native_input_source import abc_input_source
+
 ROOT = Path(__file__).resolve().parents[1]
 
 # (target, limit) from CLAUDE.md.
@@ -39,9 +52,13 @@ BUDGET = {
     "cold_start_ms": (250, 400),
     "idle_footprint_mb": (70, 100),
     "three_windows_20_docs_mb": (220, 300),
-    "idle_cpu_p95_percent": (0.0, 0.1),
-    "key_latency_p99_ms": (8.3, 16.7),
+    "idle_cpu_p95_percent": (0.0, 1.0),
+    "key_cpu_submit_p99_ms": (8.3, 16.7),
 }
+
+# The dist binary, stripped aarch64: ≤ 50 MB target, 52 MB limit (CLAUDE.md, CI checks the
+# limit in .github/workflows/ci.yml as BINARY_BUDGET_BYTES).
+BINARY_BUDGET = (50_000_000, 52_000_000)
 
 
 class RUsage(ctypes.Structure):
@@ -97,13 +114,38 @@ def cpu_seconds(pid):
     return total * info / 1e9
 
 
-def mach_timebase():
-    class Timebase(ctypes.Structure):
-        _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
-    libc = ctypes.CDLL("/usr/lib/libSystem.dylib")
-    tb = Timebase()
-    libc.mach_timebase_info(ctypes.byref(tb))
-    return tb.numer / tb.denom
+class CpuMeter:
+    """CPU percent over the real interval, from one rusage snapshot per process.
+
+    The loop below cannot assume `time.sleep(interval)` took exactly `interval` seconds:
+    `cpu_seconds` walks the process tree (which may take tens of milliseconds). Percent is
+    therefore divided by the measured elapsed time, and both the startup window and the
+    steady window are kept rather than dropping the early samples.
+    """
+
+    def __init__(self, pid):
+        self.pid = pid
+        self.previous = cpu_seconds(pid)
+        self.previous_at = time.monotonic()
+
+    def sample(self):
+        now = cpu_seconds(self.pid)
+        now_at = time.monotonic()
+        elapsed = now_at - self.previous_at
+        percent = (now - self.previous) / elapsed * 100 if elapsed > 0 else 0.0
+        self.previous = now
+        self.previous_at = now_at
+        return percent, elapsed
+
+
+def p95(samples):
+    """The smallest sample at or above the 95th percentile (`ceil(0.95 n)`-th of the
+    sorted samples, 1-based), clamped to the last one."""
+    ordered = sorted(samples)
+    if not ordered:
+        return 0.0
+    rank = max(1, -(-95 * len(ordered) // 100))  # ceil(0.95 n) without float rounding
+    return ordered[min(len(ordered) - 1, rank - 1)]
 
 
 class App:
@@ -191,9 +233,14 @@ def measure_cold_start(binary, folder, env, runs):
     return statistics.median(wall), statistics.median(reported), max(wall)
 
 
-def measure_idle(binary, folder, env, seconds, file=None, show_categories=False):
-    """One window idle; with `file` a document is shown, otherwise the welcome page (whose
-    logo cursor blinks while the window is in front)."""
+def measure_idle(binary, folder, env, seconds, file=None, show_categories=False, steady_at=None):
+    """One window idle; with `file` a document is shown, otherwise the welcome page.
+
+    The budget window starts 10 s after the document/workspace finished loading and keeps
+    every sample, as the budget asks. `steady_at` (diagnostic only; it never replaces the
+    budget number) additionally measures a second window starting `steady_at` seconds after
+    that same point, and is reported in the JSON.
+    """
     # The frame log tells whether idle CPU comes from frames (a wake-up) or from other work.
     app = App(binary, [folder, *([file] if file else [])], dict(env, ZJ_FRAME_LOG="1"))
     try:
@@ -201,22 +248,47 @@ def measure_idle(binary, folder, env, seconds, file=None, show_categories=False)
         app.wait_for("event=refresh_finished", timeout=30)
         if file:
             app.wait_for("event=document_opened", timeout=30)
+        load_done = time.monotonic()
         time.sleep(10)
         frames_before = len(app.events("event=frame"))
         wakes_before = len(app.events("event=display_link state=woken"))
-        footprints = []
-        interval = 0.2
-        cpu = []
-        previous = cpu_seconds(app.process.pid)
-        end = time.monotonic() + seconds
-        while time.monotonic() < end:
-            time.sleep(interval)
-            now = cpu_seconds(app.process.pid)
-            cpu.append((now - previous) / interval * 100)
-            previous = now
-            footprints.append(footprint_mb(app.process.pid))
-        cpu.sort()
-        p95 = cpu[int(len(cpu) * 0.95) - 1] if cpu else 0.0
+        logs = []
+
+        def collect(window_seconds):
+            footprints, cpu = [], []
+            meter = CpuMeter(app.process.pid)
+            end = time.monotonic() + window_seconds
+            while time.monotonic() < end:
+                time.sleep(0.2)
+                percent, elapsed = meter.sample()
+                cpu.append(percent)
+                footprints.append(footprint_mb(app.process.pid))
+                logs.append((percent, elapsed))
+            return statistics.median(footprints), p95(cpu), cpu
+
+        idle, cpu_p95, _ = collect(seconds)
+        steady = None
+        if steady_at is not None:
+            # Anchored like the budget window: both offsets count from the end of loading.
+            # The budget window runs first, so a later start cannot be earlier than now;
+            # the recorded offset is the measured one, never the requested one.
+            budget_start = load_done + 10
+            target = budget_start + steady_at
+            time.sleep(max(0.0, target - time.monotonic()))
+            actual_start = time.monotonic() - budget_start
+            steadies, steady_p95, _ = collect(seconds)
+            steady = {
+                "requested_after_load_seconds": 10 + steady_at,
+                "actual_start_after_budget_start_seconds": actual_start,
+                "seconds": seconds,
+                "footprint_mb": steadies,
+                "cpu_p95_percent": steady_p95,
+            }
+            print(f"    诊断（不替代预算窗口）：预算窗口起点后 {actual_start:.1f} s 起的 "
+                  f"{seconds:.0f} s（实测，请求值 {steady_at:.0f} s）"
+                  f"footprint {steadies:.1f} MB，CPU p95 {steady_p95:.3f}%")
+            print(f"    采样间隔：中位 {statistics.median(e for _, e in logs):.3f} s，"
+                  f"最大 {max(e for _, e in logs):.3f} s（按实测间隔计算百分比）")
         frames = len(app.events("event=frame")) - frames_before
         wakes = len(app.events("event=display_link state=woken")) - wakes_before
         print(f"    测量期间出帧 {frames} 次，display link 被唤醒 {wakes} 次"
@@ -224,7 +296,7 @@ def measure_idle(binary, folder, env, seconds, file=None, show_categories=False)
         if show_categories:
             for dirty, name in categories(app.process.pid):
                 print(f"    {dirty:8.1f} MB  {name}")
-        return statistics.median(footprints), p95
+        return idle, cpu_p95, steady
     finally:
         app.stop()
 
@@ -296,33 +368,92 @@ def measure_per_window(binary, base, env):
     return (three - one) / 2
 
 
+def latency_summary(lines, keys):
+    """Accept only complete samples with the CPU-submission boundary declared explicitly."""
+    if keys <= 0:
+        raise ValueError("keys must be positive")
+    samples = []
+    for line in lines:
+        fields = dict(part.split("=", 1) for part in line.split() if "=" in part)
+        if fields.get("event") == "key_latency_dropped":
+            raise RuntimeError("key latency queue overflowed; run is invalid")
+        if fields.get("event") != "key_cpu_submit":
+            continue
+        if (fields.get("start"), fields.get("end")) != ("native_key_down", "metal_commit_return"):
+            raise RuntimeError("unexpected key latency measurement boundary")
+        try:
+            value = float(fields["us"]) / 1000
+        except (KeyError, ValueError) as error:
+            raise RuntimeError("invalid CPU submission sample") from error
+        if not math.isfinite(value) or value < 0:
+            raise RuntimeError("invalid CPU submission sample")
+        samples.append(value)
+    if len(samples) != keys:
+        raise RuntimeError(f"expected {keys} CPU submission samples, got {len(samples)}; "
+                           "old logs, missed input or extra keys cannot validate this run")
+    samples.sort()
+    p99 = samples[math.ceil(len(samples) * 0.99) - 1]
+    return statistics.median(samples), p99, len(samples)
+
+
+def latency_osascript(script, timeout=30):
+    try:
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True,
+                                timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("System Events 输入超时，本次按键延迟测量无效") from error
+    if result.returncode:
+        raise RuntimeError("System Events 操作失败，本次输入已中止："
+                           + result.stderr.strip())
+
+
+def verify_ascii_edit(before, after, keys):
+    # Only synthetic benchmark files: preserve every non-injected byte.
+    if len(after) != len(before) + keys or after.replace(b"a", b"") != before.replace(b"a", b""):
+        raise RuntimeError(f"Expected {keys} committed ASCII characters in the saved fixture")
+
+
 def measure_latency(binary, folder, file, env, keys):
+    if keys <= 0:
+        raise ValueError("keys must be positive")
+    before = file.read_bytes()
     env = dict(env, ZJ_LATENCY_LOG="1")
     app = App(binary, [folder, file], env)
     try:
         app.wait_for("event=document_opened", timeout=30)
         time.sleep(2)
         pid = app.process.pid
-        script = f'''
-tell application "System Events"
-    set frontmost of (first process whose unix id is {pid}) to true
-    delay 0.5
-    repeat {keys} times
-        keystroke "a"
-        delay 0.03
-    end repeat
-end tell'''
-        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError("System Events 没能打字：请在 系统设置 → 隐私与安全性 → 自动化 里允许"
-                               "终端控制 System Events，并在 辅助功能 里勾选终端，然后重开终端再试"
-                               f"（{result.stderr.strip()}）")
-        time.sleep(1)
-        samples = sorted(value_of(l, "us") / 1000 for l in app.events("event=key_latency"))
-        if len(samples) < keys // 2:
-            raise RuntimeError(f"only {len(samples)} of {keys} keystrokes were logged")
-        p99 = samples[min(len(samples) - 1, int(len(samples) * 0.99))]
-        return statistics.median(samples), p99, len(samples)
+        guard = f'''if (unix id of (first application process whose frontmost is true)) is not {pid} then
+    error "ZJ lost foreground focus; input stopped"
+end if'''
+        latency_osascript(f'''tell application "System Events"
+set frontmost of (first process whose unix id is {pid}) to true
+delay 0.5
+{guard}
+end tell''')
+        with abc_input_source() as source:
+            source.require_abc()
+            latency_osascript(f'''tell application "System Events"
+repeat {keys} times
+    {guard}
+    keystroke "a"
+    delay 0.03
+end repeat
+end tell''', timeout=max(30, keys * 0.2))
+            time.sleep(1)
+            source.require_abc()
+            # Freeze samples before the separate save key generates another timing event.
+            summary = latency_summary(app.events("event=key_"), keys)
+            latency_osascript(f'''tell application "System Events"
+{guard}
+keystroke "s" using command down
+end tell''')
+            deadline = time.monotonic() + 5
+            while file.read_bytes() == before and time.monotonic() < deadline:
+                time.sleep(0.05)
+            verify_ascii_edit(before, file.read_bytes(), keys)
+            source.require_abc()
+            return summary
     finally:
         app.stop()
 
@@ -344,12 +475,20 @@ def main():
     parser.add_argument("--idle-seconds", type=float, default=30)
     parser.add_argument("--keys", type=int, default=200)
     parser.add_argument("--skip-latency", action="store_true")
+    parser.add_argument("--steady-window", type=float, default=None,
+                        help="diagnostic only: also measure a window this many seconds after the "
+                             "budget window's start (end of loading + 10 s); must be at least "
+                             "--idle-seconds. The JSON records the measured start in "
+                             "idle_steady.actual_start_after_budget_start_seconds")
     parser.add_argument("--breakdown", action="store_true",
                         help="also 3 windows without files, 1 window with the files, categories")
     parser.add_argument("--per-window", action="store_true",
                         help="also what one more window costs, by footprint category")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    if args.steady_window is not None and args.steady_window < args.idle_seconds:
+        parser.error("--steady-window must be at least --idle-seconds: the diagnostic window "
+                     "starts after the budget window, so a smaller offset would overlap it")
     if not args.binary.is_file():
         sys.exit(f"{args.binary} is missing: cargo build --profile dist --locked")
 
@@ -363,16 +502,23 @@ def main():
         report["cold_start_reported_ms"] = reported
         report["cold_start_worst_ms"] = worst
         print(f"冷启动到首帧：中位 {wall:.0f} ms（应用自报 {reported:.0f} ms，最慢 {worst:.0f} ms）")
-        # The budget's idle CPU is without the blinking logo cursor: a document is shown.
-        idle, cpu = measure_idle(args.binary, folders[0], env, args.idle_seconds, files[0],
-                                 show_categories=args.breakdown)
+        # The budget's idle CPU is measured with a document shown (no logo cursor animation).
+        idle, cpu, steady = measure_idle(args.binary, folders[0], env, args.idle_seconds,
+                                         files[0], show_categories=args.breakdown,
+                                         steady_at=args.steady_window)
         report["idle_footprint_mb"] = idle
         report["idle_cpu_p95_percent"] = cpu
+        if steady:
+            report["idle_steady"] = steady
         print(f"空闲（1 个窗口，打开一个文件）：{idle:.1f} MB；CPU p95：{cpu:.3f}%")
-        welcome, blink_cpu = measure_idle(args.binary, folders[0], env, args.idle_seconds,
-                                          show_categories=args.breakdown)
+        welcome, blink_cpu, blink_steady = measure_idle(args.binary, folders[0], env,
+                                                        args.idle_seconds,
+                                                        show_categories=args.breakdown,
+                                                        steady_at=args.steady_window)
         report["idle_welcome_footprint_mb"] = welcome
         report["idle_welcome_cpu_p95_percent"] = blink_cpu
+        if blink_steady:
+            report["idle_welcome_steady"] = blink_steady
         print(f"空闲（1 个窗口，欢迎页）：{welcome:.1f} MB；CPU p95：{blink_cpu:.3f}%")
         many = measure_many(args.binary, folders, files, env, show_categories=args.breakdown)
         report["three_windows_20_docs_mb"] = many
@@ -391,9 +537,15 @@ def main():
         if not args.skip_latency:
             try:
                 p50, p99, count = measure_latency(args.binary, folders[0], files[0], env, args.keys)
-                report["key_latency_p50_ms"] = p50
-                report["key_latency_p99_ms"] = p99
-                print(f"按键到画面（{count} 次）：p50 {p50:.2f} ms，p99 {p99:.2f} ms")
+                report["key_cpu_submit_p50_ms"] = p50
+                report["key_cpu_submit_p99_ms"] = p99
+                report["key_cpu_submit_samples"] = count
+                report["key_cpu_submit_start"] = "native_key_down"
+                report["key_cpu_submit_end"] = "metal_commit_return"
+                report["key_cpu_submit_input_source"] = "com.apple.keylayout.ABC"
+                report["key_cpu_submit_saved_ascii_keys"] = count
+                print(f"原生按键到 CPU 提交（{count} 次，不含 GPU 完成／屏幕 scanout）："
+                      f"p50 {p50:.2f} ms，p99 {p99:.2f} ms")
             except RuntimeError as error:
                 print(f"按键延迟未测：{error}")
 
@@ -403,7 +555,8 @@ def main():
         if name in report:
             value = report[name]
             print(f"{name:<24}{value:>10.2f}{target:>10}{limit:>10}  {verdict(name, value)}")
-    print(f"二进制体积：{report['binary_bytes'] / 1_000_000:.2f} MB（目标 30 MB）")
+    print(f"二进制体积：{report['binary_bytes'] / 1_000_000:.2f} MB"
+          f"（目标 ≤ {BINARY_BUDGET[0] / 1_000_000:g} MB，上限 {BINARY_BUDGET[1] / 1_000_000:g} MB）")
     if args.output:
         args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
 

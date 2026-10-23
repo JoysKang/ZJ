@@ -1,8 +1,9 @@
 //! Timing marks for the resource budget (CLAUDE.md), read by `tools/measure_budget.py`:
-//! - `event=first_frame ms=…`: launch (start of `main`) to the first window's first frame;
-//! - `event=key_latency us=…` (only with `ZJ_LATENCY_LOG=1`): a keystroke, before dispatch,
-//!   to the end of the frame that follows it (drawn and handed to the GPU; the display's own
-//!   scan-out is not included).
+//! - `event=first_frame ms=…`: launch to the first window's pre-draw callback (not submission).
+//! - `event=key_cpu_submit us=…` (`ZJ_LATENCY_LOG=1`): emitted by the vendored macOS
+//!   renderer, from deduplicated native keyDown before IME / GPUI dispatch to the same
+//!   window's next successful Metal commit return. CPU submission, not GPU completion or
+//!   display scan-out; no additional frame callback / interval. No key content is logged.
 //!
 //! - `event=diff_timing` (only with `ZJ_DIFF_TIMING_LOG=1`): cumulative Diff load stages;
 //!   `frame_upper` includes a frame interval after draw/present, not GPU completion or scan-out.
@@ -23,7 +24,7 @@ pub fn mark_start() {
     START.get_or_init(Instant::now);
 }
 
-/// Logs the first frame of the first window (once per process).
+/// Logs the first window's pre-draw callback (once per process), not a completed frame.
 pub fn first_frame(window: &gpui_kit::Window) {
     if FIRST_FRAME.swap(true, Ordering::Relaxed) {
         return;
@@ -34,20 +35,6 @@ pub fn first_frame(window: &gpui_kit::Window) {
     window.on_next_frame(move |_, _| {
         eprintln!("event=first_frame ms={}", start.elapsed().as_millis());
     });
-}
-
-/// `ZJ_LATENCY_LOG=1`: log every keystroke's latency to the next frame.
-pub fn watch_key_latency(cx: &mut gpui_kit::App) {
-    if std::env::var_os("ZJ_LATENCY_LOG").is_none_or(|v| v == "0") {
-        return;
-    }
-    cx.intercept_keystrokes(|_, window, _| {
-        let pressed = Instant::now();
-        window.on_next_frame(move |_, _| {
-            eprintln!("event=key_latency us={}", pressed.elapsed().as_micros());
-        });
-    })
-    .detach();
 }
 
 /// Optional, process-wide IDs keep concurrent windows' Diff timings distinct.

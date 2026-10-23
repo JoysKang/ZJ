@@ -2686,6 +2686,8 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
                 return NO;
             }
 
+            // ZJ patch: start before IME or GPUI dispatch, after key-equivalent deduplication.
+            lock.renderer.zj_key_down();
             drop(lock);
 
             let is_composing =
