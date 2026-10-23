@@ -82,16 +82,13 @@ impl Workbench {
                         .relative()
                 } else {
                     close.child(
-                        div()
-                            .when(!active, |icon| {
-                                icon.opacity(0.)
-                                    .group_hover(group.clone(), |icon| icon.opacity(1.))
-                            })
-                            .child(
-                                Icon::new(IconName::Close)
-                                    .size(theme::ICON_SIZE)
-                                    .text_color(colors.foreground),
-                            ),
+                        Icon::new(IconName::Close)
+                            .size(theme::ICON_SIZE)
+                            .text_color(if active {
+                                colors.foreground
+                            } else {
+                                colors.muted
+                            }),
                     )
                 }
             })
