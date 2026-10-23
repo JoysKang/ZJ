@@ -1849,7 +1849,8 @@ impl Workbench {
         self.loading = true;
         self.watch.remote_active = check_remotes;
         self.excluded = 0;
-        self.diff.stale = self.diff.tab.as_ref().is_some_and(|diff| {
+        // A queued refresh of another repository must not consume this diff's pending reload.
+        self.diff.stale |= self.diff.tab.as_ref().is_some_and(|diff| {
             diff.request().is_some_and(|request| {
                 targets
                     .as_ref()

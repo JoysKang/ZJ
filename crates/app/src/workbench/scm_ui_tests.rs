@@ -2242,6 +2242,126 @@ async fn hidden_file_actions_keep_their_slot_and_do_not_stage(cx: &mut TestAppCo
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }
 
+/// Drive the watcher plans in a fixed order so an extra native event cannot hide a lost reload.
+async fn queued_other_repo_refresh_keeps_current_diff(cx: &mut TestAppContext, loading: bool) {
+    cx.executor().allow_parking();
+    let repo = fixture(
+        if loading {
+            "diff-queued-loading"
+        } else {
+            "diff-queued"
+        },
+        0,
+    );
+    let base = repo.parent().unwrap();
+    let other = base.join("other");
+    std::fs::create_dir(&other).unwrap();
+    git(&other, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "edit one\n").unwrap();
+    let (handle, this) = open(cx, base.to_path_buf());
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            !p.loading
+                && p.index_task.is_none()
+                && p.explorer.tasks.is_empty()
+                && !p.watch.debouncing
+        })
+    });
+    let (a, b) = this.update(cx, |p, _| {
+        p.watch.task = None;
+        p.watch.subscription = None;
+        p.watch.pending_plan = None;
+        p.watch.refresh_pending = false;
+        let a = p
+            .groups
+            .iter()
+            .position(|g| g.repo.worktree == repo)
+            .unwrap();
+        let b = p
+            .groups
+            .iter()
+            .find(|g| g.repo.worktree == other)
+            .unwrap()
+            .repo
+            .id
+            .clone();
+        (a, b)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            let index = p.groups[a]
+                .status
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .changes
+                .iter()
+                .position(|c| c.path == std::path::Path::new("a.txt"))
+                .unwrap();
+            p.open_diff(a, index, DiffSide::Worktree, window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| !p.diff.loading && p.diff.doc.is_some())
+    });
+    this.read_with(cx, |p, _| {
+        assert!(p.diff.source.as_ref().unwrap().0.contains("+edit one"));
+    });
+    std::fs::write(repo.join("a.txt"), "edit two\n").unwrap();
+    std::fs::write(other.join("new.txt"), "other edit\n").unwrap();
+    let generation = cx
+        .update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                if loading {
+                    // No foreground result can arrive before the following invalidation.
+                    p.load_diff(window, cx);
+                    assert!(p.diff.loading);
+                }
+                let a = p.groups[a].repo.id.clone();
+                p.invalidate_preview(cx);
+                p.refresh_repos(Some(HashSet::from([a])), false, window, cx);
+                p.watch.pending_plan = Some(crate::refresh_plan::Plan {
+                    repos: HashSet::from([b.clone()]),
+                    local_repos: HashSet::from([b]),
+                    ..Default::default()
+                });
+                p.generation
+            })
+        })
+        .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            p.generation > generation
+                && !p.loading
+                && !p.diff.loading
+                && p.watch.pending_plan.is_none()
+        })
+    });
+    this.read_with(cx, |p, _| {
+        let patch = &p.diff.source.as_ref().unwrap().0;
+        assert!(
+            patch.contains("+edit two"),
+            "current diff kept the old patch: {patch}"
+        );
+        assert!(!patch.contains("+edit one"));
+        assert!(p.diff.doc.is_some());
+        assert!(!p.diff.stale);
+    });
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[gpui_kit::test]
+async fn queued_other_repo_refresh_reloads_current_diff(cx: &mut TestAppContext) {
+    queued_other_repo_refresh_keeps_current_diff(cx, false).await;
+}
+
+#[gpui_kit::test]
+async fn queued_other_repo_refresh_reloads_an_invalidated_loading_diff(cx: &mut TestAppContext) {
+    queued_other_repo_refresh_keeps_current_diff(cx, true).await;
+}
+
 fn change_tree_fixture(name: &str) -> PathBuf {
     let repo = fixture(name, 0);
     for directory in ["alpha/nested", "beta"] {
