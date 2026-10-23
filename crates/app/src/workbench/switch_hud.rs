@@ -49,6 +49,11 @@ fn frame(t: f32) -> (f32, f32) {
     (FROM_SCALE + (1.0 - FROM_SCALE) * eased, opacity)
 }
 
+fn text_size(scale: f32) -> Pixels {
+    // Glyph caches keep exact font sizes: animation timings must reuse a bounded set.
+    (theme::SWITCH_HUD_TEXT * scale).round()
+}
+
 impl Workbench {
     /// This window gained or lost the focus.
     pub(super) fn switch_hud_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -111,7 +116,7 @@ impl Workbench {
                 }])
                 .max_w(relative(theme::SWITCH_HUD_MAX_WIDTH))
                 .opacity(opacity * theme::SWITCH_HUD_OPACITY)
-                .text_size(theme::SWITCH_HUD_TEXT * scale)
+                .text_size(text_size(scale))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(colors.muted)
                 .overflow_hidden()
@@ -203,6 +208,25 @@ mod tests {
         });
         activate(cx, wa);
         assert!(!shown(cx, &a));
+    }
+
+    #[test]
+    fn repeated_animation_timings_use_bounded_font_sizes() {
+        let mut sizes = std::collections::HashSet::new();
+        for tick in 0..10_000 {
+            let (scale, _) = frame(tick as f32 / 10_000.0);
+            sizes.insert(f32::from(text_size(scale)).to_bits());
+        }
+        let smallest = text_size(FROM_SCALE);
+        let largest = text_size(1.0);
+        let max_sizes = f32::from(largest - smallest).ceil() as usize + 1;
+        assert!(
+            sizes.len() <= max_sizes,
+            "{} font sizes exceed the {max_sizes} pixel-sized steps",
+            sizes.len()
+        );
+        assert!(sizes.contains(&f32::from(smallest).to_bits()));
+        assert!(sizes.contains(&f32::from(largest).to_bits()));
     }
 
     #[test]
