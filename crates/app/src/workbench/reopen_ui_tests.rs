@@ -75,8 +75,16 @@ async fn shift_cmd_t_reopens_the_last_closed_tab_with_its_cursor(cx: &mut TestAp
         this.read_with(cx, |p, _| p.documents.len() == 2)
     });
     assert_eq!(names(cx, &this), ["a.txt", "b.txt"]);
-    assert_eq!(b_editor.read_with(cx, |state, _| state.cursor()), 5);
-    assert_eq!(this.read_with(cx, |p, _| p.active), Pane::Document(b));
+    this.read_with(cx, |p, cx| {
+        let reopened = p
+            .documents
+            .iter()
+            .find(|doc| doc.path == root.join("b.txt"))
+            .unwrap();
+        assert_ne!(reopened.id, b);
+        assert_eq!(reopened.editor.read(cx).cursor(), 5);
+        assert_eq!(p.active, Pane::Document(reopened.id));
+    });
 
     // The stack is empty now; ⇧⌘T says so and changes nothing.
     press(cx, window, "cmd-shift-t");

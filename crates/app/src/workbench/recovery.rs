@@ -14,12 +14,29 @@ pub(crate) struct RecoveryQueue {
     dir: PathBuf,
     /// Held while an operation runs; `true` once the app quits, after which the queue writes
     /// nothing (a removal at quit must not be undone by a write still queued).
-    closed: Arc<Mutex<bool>>,
+    state: Arc<Mutex<QueueState>>,
     _task: Task<()>,
     _reporter: Task<()>,
 }
 
 impl Global for RecoveryQueue {}
+
+#[derive(Default)]
+struct QueueState {
+    closed: bool,
+    pending_removals: HashMap<String, usize>,
+}
+
+impl QueueState {
+    fn removed(&mut self, key: &str) {
+        if let Some(count) = self.pending_removals.get_mut(key) {
+            *count -= 1;
+            if *count == 0 {
+                self.pending_removals.remove(key);
+            }
+        }
+    }
+}
 
 /// Snapshots found at launch, waiting for a window to take them.
 #[derive(Default)]
@@ -40,18 +57,20 @@ pub(crate) fn install(dir: PathBuf, cx: &mut App) {
     cx.set_global(PendingRecovery(records));
     let (ops, incoming) = async_channel::unbounded::<Op>();
     let (failed, failures) = async_channel::bounded(1);
-    let closed = Arc::new(Mutex::new(false));
-    let gate = closed.clone();
+    let state = Arc::new(Mutex::new(QueueState::default()));
+    let gate = state.clone();
     let queue_dir = dir.clone();
     let task = cx.background_spawn(async move {
         while let Ok(op) = incoming.recv().await {
-            let closed = gate.lock().unwrap();
-            if *closed {
+            let mut state = gate.lock().unwrap();
+            if state.closed {
                 continue;
             }
             if let Err(error) = recovery::apply(&queue_dir, &op) {
                 eprintln!("event=recovery_write_failed");
                 let _ = failed.try_send(error.to_string());
+            } else if let Op::Remove(key) = op {
+                state.removed(&key);
             }
         }
     });
@@ -86,7 +105,7 @@ pub(crate) fn install(dir: PathBuf, cx: &mut App) {
     cx.set_global(RecoveryQueue {
         ops,
         dir,
-        closed,
+        state,
         _task: task,
         _reporter: reporter,
     });
@@ -94,6 +113,14 @@ pub(crate) fn install(dir: PathBuf, cx: &mut App) {
 
 fn send(cx: &App, op: Op) {
     if let Some(queue) = cx.try_global::<RecoveryQueue>() {
+        let mut state = queue.state.lock().unwrap();
+        if state.closed {
+            return;
+        }
+        if let Op::Remove(key) = &op {
+            *state.pending_removals.entry(key.clone()).or_default() += 1;
+        }
+        // The queue is unbounded and owned by the app for its whole lifetime.
         let _ = queue.ops.try_send(op);
     }
 }
@@ -109,7 +136,7 @@ pub(crate) fn forget_everything(cx: &mut App) {
     let Some(queue) = cx.try_global::<RecoveryQueue>() else {
         return;
     };
-    let (dir, closed) = (queue.dir.clone(), queue.closed.clone());
+    let (dir, state) = (queue.dir.clone(), queue.state.clone());
     let mut keys = Vec::new();
     if let Some(owners) = cx.try_global::<OpenDocuments>().map(|o| o.0.clone()) {
         let mut views: Vec<Entity<Workbench>> = Vec::new();
@@ -129,11 +156,16 @@ pub(crate) fn forget_everything(cx: &mut App) {
             );
         }
     }
-    let mut closed = closed.lock().unwrap();
-    *closed = true;
+    let mut state = state.lock().unwrap();
+    state.closed = true;
     for key in keys {
-        if let Err(e) = recovery::apply(&dir, &Op::Remove(key)) {
+        state.pending_removals.entry(key).or_insert(1);
+    }
+    for key in state.pending_removals.keys().cloned().collect::<Vec<_>>() {
+        if let Err(e) = recovery::apply(&dir, &Op::Remove(key.clone())) {
             eprintln!("event=recovery_remove_failed error={e}");
+        } else {
+            state.pending_removals.remove(&key);
         }
     }
 }
@@ -143,7 +175,7 @@ impl Workbench {
     fn snapshot_key(doc: &mut Document) -> String {
         if doc.untitled {
             doc.untitled_key
-                .get_or_insert_with(|| recovery::untitled_key(doc.id.inode))
+                .get_or_insert_with(|| recovery::untitled_key(doc.id.0))
                 .clone()
         } else {
             recovery::file_key(&doc.path)

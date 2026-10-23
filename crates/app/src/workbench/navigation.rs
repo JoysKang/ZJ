@@ -375,6 +375,8 @@ pub(super) fn indexing_view(
 
 /// Adds go to definition to a newly created editor for a supported language.
 pub(super) fn attach(state: &mut EditorState, path: &Path, view: WeakEntity<Workbench>) {
+    state.lsp_mut().definition_provider = None;
+    state.lsp_mut().show_document = None;
     {
         let Some(language) = symbol_index::language(path) else {
             return;

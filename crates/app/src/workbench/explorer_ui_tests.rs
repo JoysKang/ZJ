@@ -1504,3 +1504,110 @@ async fn narrow_sidebar_keeps_navigation_badge_actions_and_search_focus(cx: &mut
     }
     let _ = fs::remove_dir_all(base);
 }
+
+#[gpui_kit::test]
+async fn renaming_a_folder_updates_other_windows_and_lazy_tabs(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let base = fixture("rename-owner-lazy");
+    let root = base.join("workspace");
+    let old = root.join("folder");
+    fs::create_dir_all(&old).unwrap();
+    fs::write(old.join("a.txt"), "disk").unwrap();
+    fs::write(old.join("b.txt"), "lazy").unwrap();
+    let (handle, this) = open(cx, root.clone());
+    let owners = this.read_with(cx, |p, _| p.owners.clone());
+    let (other_handle, other) = cx.update(|cx| {
+        super::test_support::new_window(
+            cx,
+            Some(root.clone()),
+            owners,
+            Bounds::new(Point::default(), size(px(1400.), px(900.))),
+        )
+    });
+    let session = base.join("session.json");
+    cx.update(|cx| crate::session::track_at(Some(session.clone()), cx));
+    cx.update_window(other_handle, |_, window, cx| {
+        crate::session::remember(window, Some(&root), true, cx);
+        other.update(cx, |p, cx| {
+            p.restore_tabs(
+                vec![old.join("a.txt"), old.join("b.txt")],
+                Some(old.join("a.txt")),
+                window,
+                cx,
+            )
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        other.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let (id, editor) = other.read_with(cx, |p, _| {
+        (p.documents[0].id, p.documents[0].editor.clone())
+    });
+    cx.update_window(other_handle, |_, window, cx| {
+        editor.update(cx, |state, cx| {
+            state.replace_text_in_range(Some(0..4), "edited", window, cx)
+        });
+    })
+    .unwrap();
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.start_tree_edit(explorer_ops::EditKind::Rename(old.clone()), window, cx);
+            p.explorer
+                .edit
+                .as_ref()
+                .unwrap()
+                .input
+                .clone()
+                .update(cx, |input, cx| {
+                    input.set_value("renamed", window, cx);
+                });
+        });
+        window.render_frame(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    let new = root.join("renamed");
+    settle(cx, None, |cx| {
+        other.read_with(cx, |p, _| p.document(id).unwrap().path == new.join("a.txt"))
+    });
+    other.read_with(cx, |p, _| {
+        assert_eq!(p.pending_tabs, [new.join("b.txt")]);
+        assert_eq!(p.tab_order, [new.join("a.txt"), new.join("b.txt")]);
+    });
+    let remembered = crate::session::load_from(&session);
+    assert!(
+        remembered
+            .iter()
+            .any(|w| w.tabs == [new.join("a.txt"), new.join("b.txt")])
+    );
+    let saved = cx
+        .update_window(other_handle, |_, window, cx| {
+            other.update(cx, |p, cx| p.save_document(id, false, window, cx))
+        })
+        .unwrap();
+    assert!(saved.await);
+    assert_eq!(fs::read_to_string(new.join("a.txt")).unwrap(), "edited");
+    assert!(!old.exists());
+    cx.update_window(other_handle, |_, window, cx| {
+        other.update(cx, |p, cx| {
+            p.open_pending_tab(new.join("b.txt"), window, cx)
+        });
+    })
+    .unwrap();
+    super::test_support::wait(
+        cx,
+        Some(super::test_support::TICK),
+        None,
+        |cx| other.read_with(cx, |p, _| p.documents.len() == 2),
+        |cx| {
+            other.read_with(cx, |p, _| {
+                format!(
+                    "lazy open failed: {}, pending={:?}, generation={}",
+                    p.message, p.pending_tabs, p.file_generation
+                )
+            })
+        },
+    );
+    fs::remove_dir_all(base).unwrap();
+}

@@ -116,12 +116,15 @@ fn follow_moved_views(
         let Ok(view) = root.view().clone().downcast::<Workbench>() else {
             continue;
         };
-        if view
-            .read(cx)
-            .large
-            .as_ref()
-            .is_some_and(|large| large.path.starts_with(old))
-        {
+        let affected = {
+            let this = view.read(cx);
+            this.large
+                .as_ref()
+                .is_some_and(|large| large.path.starts_with(old))
+                || this.pending_tabs.iter().any(|path| path.starts_with(old))
+                || this.documents.iter().any(|doc| doc.path.starts_with(old))
+        };
+        if affected {
             views
                 .entry(view.entity_id())
                 .or_insert((view.downgrade(), handle));
@@ -152,6 +155,7 @@ fn follow_moved_views(
                 }
                 // The watcher may have observed deletion before the move completion.
                 this.check_disk(Some(&paths), window, cx);
+                this.remember_tabs(true, window, cx);
                 cx.notify();
             });
         });
@@ -491,6 +495,16 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if let EditKind::Rename(path) = &kind
+            && !self.reserve_move(std::slice::from_ref(path), cx)
+        {
+            self.message = "重命名失败：文件正在保存或移动，请稍后重试".into();
+            cx.notify();
+            return;
+        }
+        let owners = self.owners.clone();
+        let origin = cx.entity_id();
+        let app = cx.to_async();
         let job = cx.background_spawn({
             let kind = kind.clone();
             async move {
@@ -503,6 +517,14 @@ impl Workbench {
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = job.await;
+            if let EditKind::Rename(old) = &kind {
+                app.update(|cx| {
+                    if let Ok(path) = &result {
+                        follow_moved_views(&owners, old, path, origin, cx);
+                    }
+                    cx.default_global::<MovingFiles>().0.remove(old);
+                });
+            }
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(path) => {
@@ -542,18 +564,24 @@ impl Workbench {
     }
 
     fn follow_document_move(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
-        let mut changed = false;
+        let mut changed = Vec::new();
         for document in &mut self.documents {
             if let Some(path) = moved_path(&document.path, old, new) {
-                if let Some(owner) = self.owners.borrow_mut().get_mut(&document.id) {
-                    owner.path = path.clone();
-                }
                 document.path = path;
-                changed = true;
+                changed.push(document.id);
             }
         }
-        if changed {
-            self.schedule_blame(cx);
+        for id in changed {
+            self.document_path_changed(id, cx);
+        }
+        for path in self
+            .pending_tabs
+            .iter_mut()
+            .chain(self.tab_order.iter_mut())
+        {
+            if let Some(moved) = moved_path(path, old, new) {
+                *path = moved;
+            }
         }
         if let Some(path) = self
             .large
@@ -755,6 +783,33 @@ impl Workbench {
         self.transfer_files(paths, dir, action, window, cx);
     }
 
+    fn reserve_move(&self, paths: &[PathBuf], cx: &mut Context<Self>) -> bool {
+        let current = cx.entity_id();
+        let affected = |path: &Path| paths.iter().any(|source| path.starts_with(source));
+        let saving_here = self
+            .documents
+            .iter()
+            .any(|doc| affected(&doc.path) && doc.saving);
+        let saving_elsewhere = self.owners.borrow().iter().any(|(id, owner)| {
+            affected(&owner.path)
+                && owner.view.entity_id() != current
+                && owner
+                    .view
+                    .upgrade()
+                    .is_some_and(|view| view.read(cx).document(*id).is_some_and(|doc| doc.saving))
+        });
+        let busy = cx
+            .try_global::<MovingFiles>()
+            .is_some_and(|moving| !moving.0.is_empty());
+        if saving_here || saving_elsewhere || busy || super::documents::saving_under(paths, cx) {
+            return false;
+        }
+        cx.default_global::<MovingFiles>()
+            .0
+            .extend(paths.iter().cloned());
+        true
+    }
+
     /// Shared by paste, Finder drops and Explorer moves; IO runs off the render thread.
     pub(super) fn transfer_files(
         &mut self,
@@ -770,44 +825,21 @@ impl Workbench {
         }
         let selection = self.explorer.selected.clone();
         let moving = action != FileTransfer::Copy;
-        if moving {
-            let current = cx.entity_id();
-            let affected = |path: &Path| paths.iter().any(|source| path.starts_with(source));
-            let saving_here = self
-                .documents
-                .iter()
-                .any(|doc| affected(&doc.path) && doc.saving);
-            let saving_elsewhere = self.owners.borrow().iter().any(|(id, owner)| {
-                affected(&owner.path)
-                    && owner.view.entity_id() != current
-                    && owner.view.upgrade().is_some_and(|view| {
-                        view.read(cx).document(*id).is_some_and(|doc| doc.saving)
-                    })
-            });
-            // Finish path synchronization before another move can relocate the destination.
-            let busy = cx
-                .try_global::<MovingFiles>()
-                .is_some_and(|moving| !moving.0.is_empty());
-            if saving_here || saving_elsewhere || busy || super::documents::saving_under(&paths, cx)
+        if moving && !self.reserve_move(&paths, cx) {
+            self.message = "移动失败：文件正在保存或移动，请稍后重试".into();
+            if action == FileTransfer::Cut
+                && cx.try_global::<FileClipboard>().is_some_and(|clipboard| {
+                    clipboard.paths.is_empty()
+                        && clipboard.item.is_some()
+                        && cx.read_from_clipboard() == clipboard.item
+                })
             {
-                self.message = "移动失败：文件正在保存或移动，请稍后重试".into();
-                if action == FileTransfer::Cut
-                    && cx.try_global::<FileClipboard>().is_some_and(|clipboard| {
-                        clipboard.paths.is_empty()
-                            && clipboard.item.is_some()
-                            && cx.read_from_clipboard() == clipboard.item
-                    })
-                {
-                    let clipboard = cx.global_mut::<FileClipboard>();
-                    clipboard.paths = paths;
-                    clipboard.cut = true;
-                }
-                cx.notify();
-                return;
+                let clipboard = cx.global_mut::<FileClipboard>();
+                clipboard.paths = paths;
+                clipboard.cut = true;
             }
-            cx.default_global::<MovingFiles>()
-                .0
-                .extend(paths.iter().cloned());
+            cx.notify();
+            return;
         }
         let owners = self.owners.clone();
         let origin = cx.entity_id();

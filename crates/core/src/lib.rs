@@ -91,16 +91,28 @@ pub struct Repository {
     pub common_dir: PathBuf,
 }
 
-/// Symlinks and hard links to the same inode resolve to the same document.
+/// A buffer's identity, unchanged by saving or moving its file.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct DocumentId {
+pub struct DocumentId(pub u64);
+
+impl DocumentId {
+    pub fn allocate() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+/// Symlinks and hard links to the same inode share this disk identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FileIdentity {
     pub device: u64,
     pub inode: u64,
 }
 
 #[derive(Debug)]
 pub struct DocumentIdentity {
-    pub id: DocumentId,
+    pub id: FileIdentity,
     pub target: PathBuf,
     pub multiple_links: bool,
 }
@@ -113,7 +125,7 @@ impl DocumentIdentity {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "不是普通文件"));
         }
         Ok(Self {
-            id: DocumentId {
+            id: FileIdentity {
                 device: metadata.dev(),
                 inode: metadata.ino(),
             },

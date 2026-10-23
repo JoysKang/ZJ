@@ -33,12 +33,9 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
-use workspace_editor_core::DocumentId;
+use workspace_editor_core::{DocumentId, FileIdentity};
 
 gpui_kit::actions!(
     file,
@@ -59,22 +56,17 @@ gpui_kit::actions!(
 // VS Code's 查看: 切换自动换行.
 gpui_kit::actions!(view, [ToggleSoftWrap]);
 
-/// Untitled buffers have no file, so no device / inode: they get ids from a device number
-/// no real file system uses.
-const UNTITLED_DEVICE: u64 = u64::MAX;
-static NEXT_UNTITLED: AtomicU64 = AtomicU64::new(1);
-
 /// All open documents of all windows, for the agent layer.
 pub struct OpenDocuments(pub DocumentOwners);
 impl Global for OpenDocuments {}
 
 #[derive(Default)]
-struct SaveTargets(Arc<Mutex<HashMap<PathBuf, Option<DocumentId>>>>);
+struct SaveTargets(Arc<Mutex<HashMap<PathBuf, Option<FileIdentity>>>>);
 impl Global for SaveTargets {}
 
 struct SaveTarget {
     path: PathBuf,
-    targets: Arc<Mutex<HashMap<PathBuf, Option<DocumentId>>>>,
+    targets: Arc<Mutex<HashMap<PathBuf, Option<FileIdentity>>>>,
 }
 
 impl Drop for SaveTarget {
@@ -83,7 +75,7 @@ impl Drop for SaveTarget {
     }
 }
 
-pub(super) fn target_is_saving(path: &Path, identity: DocumentId, cx: &App) -> bool {
+pub(super) fn target_is_saving(path: &Path, identity: FileIdentity, cx: &App) -> bool {
     cx.try_global::<SaveTargets>().is_some_and(|targets| {
         let targets = targets.0.lock().unwrap();
         targets.contains_key(path) || targets.values().any(|id| *id == Some(identity))
@@ -101,7 +93,7 @@ pub(super) fn saving_under(paths: &[PathBuf], cx: &App) -> bool {
     })
 }
 
-fn canonical_save_target(path: &Path) -> std::io::Result<(PathBuf, Option<DocumentId>)> {
+fn canonical_save_target(path: &Path) -> std::io::Result<(PathBuf, Option<FileIdentity>)> {
     let path = match std::fs::canonicalize(path) {
         Ok(path) => Ok(path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -116,10 +108,7 @@ fn canonical_save_target(path: &Path) -> std::io::Result<(PathBuf, Option<Docume
         Err(error) => Err(error),
     }?;
     let identity = match crate::files::FileStamp::read(&path) {
-        Ok(stamp) => Some(DocumentId {
-            device: stamp.device,
-            inode: stamp.inode,
-        }),
+        Ok(stamp) => Some(stamp.identity()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error),
     };
@@ -377,7 +366,6 @@ impl Workbench {
     ) -> (Entity<EditorState>, Subscription) {
         let (language, _) = language_for(path);
         let view = cx.weak_entity();
-        let untitled = id.device == UNTITLED_DEVICE;
         let editor = cx.new(|cx| {
             // The workbench's own find widget takes ⌘F (find_widget.rs).
             let mut state = EditorState::new(window, cx)
@@ -386,7 +374,7 @@ impl Workbench {
                 .tab_size(tab_size(indent))
                 .soft_wrap(soft_wrap_default(language))
                 .default_value(text);
-            if !untitled {
+            if path.is_absolute() {
                 super::navigation::attach(&mut state, path, view);
             }
             state
@@ -414,10 +402,7 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> DocumentId {
-        let id = DocumentId {
-            device: UNTITLED_DEVICE,
-            inode: NEXT_UNTITLED.fetch_add(1, Ordering::Relaxed),
-        };
+        let id = DocumentId::allocate();
         let path = save::untitled_name(
             self.owners
                 .borrow()
@@ -750,6 +735,28 @@ impl Workbench {
         })
     }
 
+    /// Refreshes state derived from a buffer's path without replacing its editor or undo history.
+    pub(super) fn document_path_changed(&mut self, id: DocumentId, cx: &mut Context<Self>) {
+        let Some(doc) = self.document_mut(id) else {
+            return;
+        };
+        let path = doc.path.clone();
+        let (language, name) = language_for(&path);
+        doc.language = name;
+        let editor = doc.editor.clone();
+        let view = cx.weak_entity();
+        editor.update(cx, |state, cx| {
+            state.set_highlighter(language, cx);
+            super::navigation::attach(state, &path, view);
+        });
+        if let Some(owner) = self.owners.borrow_mut().get_mut(&id) {
+            owner.path = path;
+        }
+        self.markdown_path_changed(id, language, cx);
+        self.markdown_refresh(id, cx);
+        self.schedule_blame(cx);
+    }
+
     /// Writes the buffer to a new `path` and makes the tab that file.
     pub(super) fn write_as(
         &mut self,
@@ -800,10 +807,8 @@ impl Workbench {
                     let same_file = |doc: &Document| {
                         doc.path == path
                             || identity.is_some_and(|identity| {
-                                doc.disk.is_some_and(|disk| {
-                                    disk.stamp.device == identity.device
-                                        && disk.stamp.inode == identity.inode
-                                })
+                                doc.disk
+                                    .is_some_and(|disk| disk.stamp.identity() == identity)
                             })
                     };
                     let in_this_window = this
@@ -865,25 +870,34 @@ impl Workbench {
                 let saved = match result {
                     Ok(state) => {
                         let (language, language_name) = language_for(&path);
+                        let old_path = this.document(id).unwrap().path.clone();
+                        this.pending_tabs.retain(|tab| *tab != path);
+                        if old_path != path {
+                            this.tab_order.retain(|tab| *tab != path);
+                            for tab in &mut this.tab_order {
+                                if *tab == old_path {
+                                    *tab = path.clone();
+                                }
+                            }
+                        }
                         let mut was_untitled = false;
                         if let Some(doc) = this.document_mut(id) {
                             was_untitled = doc.untitled;
                             doc.path = path.clone();
                             doc.untitled = false;
                             doc.language = language_name;
-                            doc.editor
-                                .update(cx, |state, cx| state.set_highlighter(language, cx));
                         }
                         // An untitled buffer only had the plain-text default; now it has a language.
                         if was_untitled {
                             this.set_indent(id, indent::language_default(&path), cx);
                             this.set_soft_wrap(id, soft_wrap_default(language), window, cx);
                         }
-                        this.markdown_path_changed(id, language, cx);
-                        if let Some(owner) = this.owners.borrow_mut().get_mut(&id) {
-                            owner.path = path.clone();
-                        }
+                        this.document_path_changed(id, cx);
                         this.saved(id, &path, state, version, window, cx);
+                        if this.document(id).is_some_and(|doc| doc.dirty) {
+                            this.schedule_snapshot(id, window, cx);
+                        }
+                        this.remember_tabs(true, window, cx);
                         if let Some(parent) = path.parent() {
                             this.relist_folder(parent.to_path_buf(), window, cx);
                         }
@@ -1290,9 +1304,20 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(path) = self.document(id).map(|doc| doc.path.clone()) else {
+        let Some(doc) = self.document(id) else {
             return;
         };
+        if doc.saving || super::explorer_ops::file_is_moving(&doc.path, cx) {
+            self.message = "文件正在保存或移动，请稍后重新加载".into();
+            cx.notify();
+            return;
+        }
+        let (path, version, known) = (doc.path.clone(), doc.version, doc.disk);
+        if only_at.is_some_and(|expected| expected != version) {
+            self.check_disk(Some(&BTreeSet::from([path])), window, cx);
+            return;
+        }
+        let requested = path.clone();
         let work = cx.background_spawn(async move {
             refuse_too_large(&path)?;
             let bytes = std::fs::read(&path)?;
@@ -1302,12 +1327,19 @@ impl Workbench {
         cx.spawn_in(window, async move |this, cx| {
             let result = work.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if let Some(version) = only_at
-                    && let Some(doc) = this.document(id)
-                    && doc.version != version
+                let Some(doc) = this.document(id) else {
+                    return;
+                };
+                if doc.path != requested
+                    || doc.version != version
+                    || doc.disk != known
+                    || doc.saving
+                    || super::explorer_ops::file_is_moving(&doc.path, cx)
                 {
                     let paths = BTreeSet::from([doc.path.clone()]);
                     this.check_disk(Some(&paths), window, cx);
+                    this.message = "重新加载期间内容或路径已改变，已保留修改，请重试".into();
+                    cx.notify();
                     return;
                 }
                 match result.map(|(state, bytes)| (state, decode(&bytes))) {

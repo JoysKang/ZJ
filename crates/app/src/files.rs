@@ -12,7 +12,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
-use workspace_editor_core::{DocumentId, GitMarker, git_marker, is_excluded_dir};
+use workspace_editor_core::{FileIdentity, GitMarker, git_marker, is_excluded_dir};
 use workspace_editor_git::{ListedKind, parse_ls_files};
 
 pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
@@ -543,10 +543,17 @@ impl FileStamp {
     pub fn read(path: &Path) -> io::Result<Self> {
         Ok(Self::of(&fs::metadata(path)?))
     }
+
+    pub fn identity(self) -> FileIdentity {
+        FileIdentity {
+            device: self.device,
+            inode: self.inode,
+        }
+    }
 }
 
 pub struct TextFile {
-    pub id: DocumentId,
+    pub identity: FileIdentity,
     pub path: PathBuf,
     pub text: String,
     pub bytes: usize,
@@ -667,7 +674,7 @@ pub fn text_file(root: Option<&Path>, path: &Path) -> io::Result<TextFile> {
         return Err(io::Error::other(Restricted::LongLine));
     }
     Ok(TextFile {
-        id: DocumentId {
+        identity: FileIdentity {
             device: metadata.dev(),
             inode: metadata.ino(),
         },
@@ -742,8 +749,10 @@ mod tests {
         );
         std::os::unix::fs::symlink(&outside, root.join("selected-link")).unwrap();
         assert_eq!(
-            text_file(None, &root.join("selected-link")).unwrap().id,
-            text_file(None, &outside).unwrap().id
+            text_file(None, &root.join("selected-link"))
+                .unwrap()
+                .identity,
+            text_file(None, &outside).unwrap().identity
         );
         assert!(open_beneath(&root, Path::new("alias/中文 main.rs")).is_err());
         assert!(text_file(Some(&root), &root.join("binary")).is_err());

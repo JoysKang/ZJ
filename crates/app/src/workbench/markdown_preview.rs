@@ -484,6 +484,9 @@ impl Workbench {
         if doc.markdown.is_some() != (language == "markdown") {
             // A buffer that becomes Markdown by Save As keeps showing its source.
             doc.markdown = MarkdownPreview::for_language(language, true, cx);
+        } else if let Some(md) = &mut doc.markdown {
+            md.task = None;
+            md.parsed = None;
         }
     }
 

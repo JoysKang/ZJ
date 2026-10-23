@@ -365,3 +365,82 @@ async fn a_snapshot_of_the_restored_active_tab_comes_back(cx: &mut TestAppContex
     });
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[gpui_kit::test]
+async fn quitting_removes_snapshots_whose_removal_is_still_pending(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let base = temp("pending-removal");
+    let store = base.join("recovery");
+    cx.update(|cx| super::install(store.clone(), cx));
+    let record = Record {
+        key: "pending-key".into(),
+        path: base.join("a.txt"),
+        untitled: false,
+        root: None,
+        text: "discarded".into(),
+        written_at: 1,
+    };
+    recovery::apply(&store, &Op::Write(record.clone())).unwrap();
+    // This is the queue state after forget_snapshot clears the document key but before
+    // the worker applies its Remove. Quit must finish that removal synchronously.
+    cx.update(|cx| {
+        cx.global::<super::RecoveryQueue>()
+            .state
+            .lock()
+            .unwrap()
+            .pending_removals
+            .insert(record.key.clone(), 2);
+        // Remove(k), Write(k), Remove(k): the first completed removal must not
+        // forget the second one that is still queued after the newer write.
+        cx.global::<super::RecoveryQueue>()
+            .state
+            .lock()
+            .unwrap()
+            .removed(&record.key);
+        super::forget_everything(cx);
+    });
+    assert!(recovery::load_all(&store).0.is_empty());
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[gpui_kit::test]
+async fn a_recovery_hard_link_uses_the_existing_buffers_stable_id(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let base = temp("hardlink-existing");
+    let (path, alias) = (base.join("a.txt"), base.join("alias.txt"));
+    std::fs::write(&path, "disk").unwrap();
+    std::fs::hard_link(&path, &alias).unwrap();
+    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(path.clone(), None, window, cx));
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let id = this.read_with(cx, |p, _| p.documents[0].id);
+    let record = Record {
+        key: recovery::file_key(&alias),
+        path: alias,
+        untitled: false,
+        root: None,
+        text: "recovered through alias".into(),
+        written_at: 1,
+    };
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.restore_record(record, window, cx));
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, cx| {
+            p.document(id).unwrap().editor.read(cx).text() == "recovered through alias"
+        })
+    });
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.documents.len(), 1);
+        assert!(p.document(id).unwrap().dirty);
+        assert!(p.document(id).unwrap().recovered);
+        assert!(!p.message.contains("上限"));
+    });
+    let _ = std::fs::remove_dir_all(base);
+}

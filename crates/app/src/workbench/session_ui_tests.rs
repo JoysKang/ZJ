@@ -91,3 +91,52 @@ async fn closing_windows_falls_back_to_an_empty_window_and_never_quits(cx: &mut 
     assert_eq!(roots(&path), [None, Some(a)]);
     let _ = std::fs::remove_dir_all(base);
 }
+
+#[gpui_kit::test]
+async fn save_as_records_the_new_path_without_switching_tabs(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let base = std::env::temp_dir().join(format!("zj-session-save-as-{}", std::process::id()));
+    std::fs::create_dir_all(&base).unwrap();
+    let base = std::fs::canonicalize(base).unwrap();
+    let session = base.join("session.json");
+    let owners = cx.update(|cx| {
+        let owners = install_globals(cx, crate::settings::Settings::default(), empty_store());
+        session::track_at(Some(session.clone()), cx);
+        owners
+    });
+    let (window, this) = cx.update(|cx| {
+        new_window(
+            cx,
+            None,
+            owners,
+            Bounds::new(Point::default(), size(px(1400.), px(900.))),
+        )
+    });
+    let a = base.join("a.txt");
+    let b = base.join("b.txt");
+    let id = cx
+        .update_window(window, |_, window, cx| {
+            this.update(cx, |p, cx| p.new_untitled(window, cx))
+        })
+        .unwrap();
+    let saved = cx
+        .update_window(window, |_, window, cx| {
+            this.update(cx, |p, cx| p.write_as(id, a.clone(), window, cx))
+        })
+        .unwrap();
+    assert!(saved.await);
+    assert_eq!(
+        session::load_from(&session)[0].tabs,
+        std::slice::from_ref(&a)
+    );
+    let saved = cx
+        .update_window(window, |_, window, cx| {
+            this.update(cx, |p, cx| p.write_as(id, b.clone(), window, cx))
+        })
+        .unwrap();
+    assert!(saved.await);
+    let saved = session::load_from(&session);
+    assert_eq!(saved[0].tabs, std::slice::from_ref(&b));
+    assert_eq!(saved[0].active, Some(b));
+    let _ = std::fs::remove_dir_all(base);
+}

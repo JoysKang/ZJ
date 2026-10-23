@@ -1509,14 +1509,20 @@ impl Workbench {
             let _ = this.update_in(cx, |this, window, cx| {
                 let opened = match result {
                     Ok((loaded, indent)) => {
-                        let (id, path) = (loaded.id, loaded.path.clone());
+                        let path = loaded.path.clone();
+                        let identity = loaded.identity;
                         // Opened meanwhile (a restored tab and a crash snapshot of the same
                         // file at launch): the callers want that tab.
                         this.install_loaded(loaded, indent, false, window, cx)
                             .or_else(|| {
                                 this.documents
                                     .iter()
-                                    .find(|doc| doc.id == id || doc.path == path)
+                                    .find(|doc| {
+                                        doc.path == path
+                                            || doc.disk.is_some_and(|disk| {
+                                                disk.stamp.identity() == identity
+                                            })
+                                    })
                                     .map(|doc| doc.id)
                             })
                             .ok_or_else(|| "已达到打开文件的上限".to_string())
@@ -1642,8 +1648,8 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> Option<DocumentId> {
         let this = self;
-        let id = loaded.id;
-        if documents::target_is_saving(&loaded.path, loaded.id, cx) {
+        let identity = loaded.identity;
+        if documents::target_is_saving(&loaded.path, identity, cx) {
             this.message = "该文件正在另存为，请完成后再打开".into();
             cx.notify();
             return None;
@@ -1652,9 +1658,9 @@ impl Workbench {
         // the id a tab was opened with: Save As and atomic saves move a tab to another inode.
         let same_file = |doc: &Document| {
             doc.path == loaded.path
-                || doc.disk.is_some_and(|disk| {
-                    disk.stamp.device == id.device && disk.stamp.inode == id.inode
-                })
+                || doc
+                    .disk
+                    .is_some_and(|disk| disk.stamp.identity() == identity)
         };
         if let Some(existing) = this
             .documents
@@ -1674,7 +1680,14 @@ impl Workbench {
             .owners
             .borrow()
             .iter()
-            .find(|(_, owner)| owner.path == loaded.path)
+            .filter(|(_, owner)| owner.view.entity_id() != cx.entity_id())
+            .find(|(id, owner)| {
+                owner.path == loaded.path
+                    || owner
+                        .view
+                        .upgrade()
+                        .is_some_and(|view| view.read(cx).document(**id).is_some_and(same_file))
+            })
             .map(|(id, owner)| (*id, owner.clone()));
         if let Some((existing, owner)) = owner {
             if cx
@@ -1705,6 +1718,7 @@ impl Workbench {
             cx.notify();
             return None;
         }
+        let id = DocumentId::allocate();
         let path_for_pending = loaded.path.clone();
         let (language, language_name) = language_for(&loaded.path);
         let path = loaded.path.clone();

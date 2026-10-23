@@ -656,6 +656,24 @@ async fn after_save_as_the_original_file_opens_in_its_own_tab(cx: &mut TestAppCo
         this.read_with(cx, |p, _| p.documents.len() == 2)
     });
     this.read_with(cx, |p, _| assert!(p.documents.iter().any(|d| d.path == a)));
+    this.read_with(cx, |p, _| {
+        assert_ne!(p.documents[0].id, p.documents[1].id);
+        assert_eq!(p.active_document().unwrap().0, a);
+        assert_eq!(p.owners.borrow().len(), 2);
+    });
+    let close = cx
+        .update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                let original = p.documents.iter().find(|doc| doc.path == a).unwrap().id;
+                p.confirm_close(vec![original], true, window, cx)
+            })
+        })
+        .unwrap();
+    assert!(close.await);
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.documents.len(), 1);
+        assert_eq!(p.documents[0].path, b);
+    });
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -757,4 +775,117 @@ async fn a_change_on_disk_during_a_save_is_looked_at_afterwards(cx: &mut TestApp
         editor.read_with(cx, |s, _| s.text().to_string()) == "two\n"
     });
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[gpui_kit::test]
+async fn save_as_keeps_both_windows_in_quit_validation(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-save-as-owners-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let (a, b) = (root.join("a.txt"), root.join("b.txt"));
+    std::fs::write(&a, "original").unwrap();
+    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(a.clone(), None, window, cx));
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let id = this.read_with(cx, |p, _| p.documents[0].id);
+    let saved = cx
+        .update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| p.write_as(id, b.clone(), window, cx))
+        })
+        .unwrap();
+    assert!(saved.await);
+    let (other_window, other) = second_window(cx);
+    cx.update_window(other_window, |_, window, cx| {
+        other.update(cx, |p, cx| p.open_file(a.clone(), None, window, cx));
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        other.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let editor = this.read_with(cx, |p, _| p.document(id).unwrap().editor.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        editor.update(cx, |state, cx| {
+            state.replace_text_in_range(Some(0..0), "unsaved", window, cx)
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(this.read_with(cx, |p, _| p.document(id).unwrap().dirty));
+    assert!(!cx.update(|cx| documents::quit_is_approved(&std::collections::HashMap::new(), cx)));
+    this.read_with(cx, |p, _| assert_eq!(p.owners.borrow().len(), 2));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn manual_reload_keeps_edits_made_before_its_completion(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-reload-later-edit-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("a.txt");
+    std::fs::write(&path, "disk").unwrap();
+    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(path, None, window, cx));
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let (id, editor) = this.read_with(cx, |p, _| {
+        (p.documents[0].id, p.documents[0].editor.clone())
+    });
+    // The reload completion cannot enter the workbench until this foreground update ends.
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.reload_from_disk(id, window, cx));
+        editor.update(cx, |state, cx| {
+            state.replace_text_in_range(Some(0..0), "later ", window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| p.message.contains("重新加载期间"))
+    });
+    this.read_with(cx, |p, cx| {
+        let doc = p.document(id).unwrap();
+        assert_eq!(doc.editor.read(cx).text().to_string(), "later disk");
+        assert!(doc.dirty);
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn a_hard_link_opened_elsewhere_keeps_one_editable_owner(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-hardlink-owner-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let (path, alias) = (root.join("a.txt"), root.join("alias.txt"));
+    std::fs::write(&path, "original").unwrap();
+    std::fs::hard_link(&path, &alias).unwrap();
+    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(path, None, window, cx));
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let (other_window, other) = second_window(cx);
+    cx.update_window(other_window, |_, window, cx| {
+        other.update(cx, |p, cx| p.open_file(alias, None, window, cx));
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        other.read_with(cx, |p, _| p.message.contains("另一窗口"))
+    });
+    other.read_with(cx, |p, _| {
+        assert!(p.documents.is_empty());
+        assert_eq!(p.owners.borrow().len(), 1);
+    });
+    let _ = std::fs::remove_dir_all(root);
 }
