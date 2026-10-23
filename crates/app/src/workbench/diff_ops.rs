@@ -134,6 +134,16 @@ pub fn changed_lines(
     (old, new)
 }
 
+/// The same monotonic old/new line anchors used to display both Diff layouts.
+fn patch_alignment(doc: &DiffDoc) -> impl Iterator<Item = (Option<u32>, Option<u32>)> + '_ {
+    doc.rows.iter().map(|row| {
+        (
+            row.old.map(|line| doc.old.lines[line as usize].number),
+            row.new.map(|line| doc.new.lines[line as usize].number),
+        )
+    })
+}
+
 impl Workbench {
     pub(super) fn diff_staged(&self) -> bool {
         self.diff
@@ -300,7 +310,7 @@ impl Workbench {
             HunkAction::Unstage => (Direction::Undo, true),
             HunkAction::Revert => (Direction::Undo, false),
         };
-        let Some(patch) = raw.select(&selected, direction) else {
+        let Some(patch) = raw.select_aligned(&selected, direction, patch_alignment(doc)) else {
             return;
         };
         let Some(tab_request) = tab.request() else {
@@ -348,9 +358,158 @@ impl Workbench {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockKind, DiffDoc, HashSet, blocks, changed_lines};
+    use super::{BlockKind, DiffDoc, HashSet, blocks, changed_lines, patch_alignment};
     use crate::diff_doc::ChangeColors;
+    use crate::partial_patch::{self, Direction};
     use gpui_kit::component::highlighter::HighlightTheme;
+    use std::{
+        fs,
+        io::Write,
+        process::{Command, Stdio},
+    };
+
+    #[test]
+    fn partial_writes_follow_displayed_alignment_with_unequal_replacements() {
+        for trailing_newline in [false, true] {
+            for insertion in [false, true] {
+                let root = std::env::temp_dir().join(format!(
+                    "zj-aligned-patch-{}-{trailing_newline}-{insertion}",
+                    std::process::id()
+                ));
+                fs::create_dir_all(&root).unwrap();
+                let git = |args: &[&str], input: Option<&str>| {
+                    let mut child = Command::new("git")
+                        .arg("-C")
+                        .arg(&root)
+                        .args(args)
+                        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                        .env("GIT_CONFIG_NOSYSTEM", "1")
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                        .unwrap();
+                    if let Some(input) = input {
+                        child
+                            .stdin
+                            .take()
+                            .unwrap()
+                            .write_all(input.as_bytes())
+                            .unwrap();
+                    }
+                    drop(child.stdin.take());
+                    let output = child.wait_with_output().unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    String::from_utf8(output.stdout).unwrap()
+                };
+                git(&["init", "-q", "-b", "main"], None);
+                git(&["config", "user.name", "Test"], None);
+                git(&["config", "user.email", "test@example.invalid"], None);
+                let before = "let first = 1;\nlet second = 2;";
+                let after = "inserted();\nlet first = 10;\nlet second = 20;";
+                let finish =
+                    |text: &str| format!("{text}{}", if trailing_newline { "\n" } else { "" });
+                let (before, after) = if insertion {
+                    (finish(before), finish(after))
+                } else {
+                    (finish(after), finish(before))
+                };
+                fs::write(root.join("f"), &before).unwrap();
+                git(&["add", "f"], None);
+                git(&["commit", "-qm", "base"], None);
+                fs::write(root.join("f"), &after).unwrap();
+                let patch = git(&["diff", "--unified=1000000"], None);
+                let colors = ChangeColors {
+                    inserted_text: gpui_kit::Hsla::default(),
+                    removed_text: gpui_kit::Hsla::default(),
+                };
+                let doc =
+                    DiffDoc::parse(&patch, None, &HighlightTheme::default_dark(), colors).unwrap();
+                let row = doc
+                    .rows
+                    .iter()
+                    .position(|row| {
+                        row.old.is_some_and(|line| {
+                            doc.old.line_text(line as usize).starts_with("let first")
+                        }) && row.new.is_some_and(|line| {
+                            doc.new.line_text(line as usize).starts_with("let first")
+                        })
+                    })
+                    .unwrap();
+                for inline in [false, true] {
+                    let selected_rows: Vec<_> = if inline {
+                        doc.inline
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(i, line)| {
+                                let text = match line.kind {
+                                    super::LineKind::Removed => {
+                                        doc.old.line_text(line.line as usize)
+                                    }
+                                    super::LineKind::Added => doc.new.line_text(line.line as usize),
+                                    _ => return None,
+                                };
+                                text.starts_with("let first").then_some(i)
+                            })
+                            .collect()
+                    } else {
+                        vec![row]
+                    };
+                    let (old, new) = changed_lines(&doc, inline, selected_rows.into_iter());
+                    let selected = |line: &partial_patch::RawLine| {
+                        line.kind == b'-' && line.old.is_some_and(|n| old.contains(&n))
+                            || line.kind == b'+' && line.new.is_some_and(|n| new.contains(&n))
+                    };
+                    let raw = partial_patch::parse(&patch).unwrap();
+                    let stage = raw
+                        .select_aligned(&selected, Direction::Apply, patch_alignment(&doc))
+                        .unwrap();
+                    git(&["restore", "--staged", "f"], None);
+                    git(&["apply", "--cached", "-"], Some(&stage));
+                    let expected_stage = before.replace(
+                        if insertion {
+                            "first = 1;"
+                        } else {
+                            "first = 10;"
+                        },
+                        if insertion {
+                            "first = 10;"
+                        } else {
+                            "first = 1;"
+                        },
+                    );
+                    assert_eq!(git(&["show", ":f"], None), expected_stage);
+                    git(&["add", "f"], None);
+                    let undo = raw
+                        .select_aligned(&selected, Direction::Undo, patch_alignment(&doc))
+                        .unwrap();
+                    git(&["apply", "--cached", "-"], Some(&undo));
+                    let expected_undo = after.replace(
+                        if insertion {
+                            "first = 10;"
+                        } else {
+                            "first = 1;"
+                        },
+                        if insertion {
+                            "first = 1;"
+                        } else {
+                            "first = 10;"
+                        },
+                    );
+                    assert_eq!(git(&["show", ":f"], None), expected_undo);
+                    fs::write(root.join("f"), &after).unwrap();
+                    git(&["apply", "-"], Some(&undo));
+                    assert_eq!(fs::read_to_string(root.join("f")).unwrap(), expected_undo);
+                    fs::write(root.join("f"), &after).unwrap();
+                }
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
 
     #[test]
     fn blocks_and_changed_lines_follow_both_layouts() {

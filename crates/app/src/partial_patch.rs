@@ -159,17 +159,19 @@ impl RawPatch {
     }
 
     /// The patch text for the selected lines, or `None` when nothing changes.
-    pub fn select(
+    pub fn select_aligned(
         &self,
         selected: &dyn Fn(&RawLine) -> bool,
         direction: Direction,
+        alignment: impl IntoIterator<Item = (Option<u32>, Option<u32>)>,
     ) -> Option<String> {
         if self.whole_file_only {
             return None;
         }
         let mut ops = Vec::with_capacity(self.lines.len());
         let mut changes = 0;
-        for line in &self.lines {
+        let mut take = |line| {
+            let line: &RawLine = line;
             let chosen = line.kind != b' ' && selected(line);
             let (taken, kept) = match direction {
                 Direction::Apply => (b'-', b'+'),
@@ -193,6 +195,50 @@ impl RawPatch {
                 }
                 _ => {}
             }
+        };
+        // Use the displayed monotonic alignment, including filler rows. Re-pairing by
+        // ordinal would move a replacement past an unselected insertion or deletion.
+        let (mut old_count, mut new_count) = (0, 0);
+        for (old, new) in alignment {
+            let lookup = |number: u32, index: &[u32]| {
+                self.lines
+                    .get(*index.get(number.checked_sub(1)? as usize)? as usize)
+            };
+            let old = match old {
+                Some(number) => {
+                    if number != old_count + 1 {
+                        return None;
+                    }
+                    old_count = number;
+                    Some(lookup(number, &self.old_index)?)
+                }
+                None => None,
+            };
+            let new = match new {
+                Some(number) => {
+                    if number != new_count + 1 {
+                        return None;
+                    }
+                    new_count = number;
+                    Some(lookup(number, &self.new_index)?)
+                }
+                None => None,
+            };
+            match (old, new) {
+                (Some(old), Some(new)) if std::ptr::eq(old, new) => take(old),
+                (old, new) => {
+                    if let Some(line) = old {
+                        take(line);
+                    }
+                    if let Some(line) = new {
+                        take(line);
+                    }
+                }
+            }
+        }
+        if old_count as usize != self.old_index.len() || new_count as usize != self.new_index.len()
+        {
+            return None;
         }
         if changes == 0 {
             return None;
@@ -245,6 +291,10 @@ impl RawPatch {
         };
         let mut patch = String::new();
         for line in &self.header {
+            // A selected text range must not stage or undo an existing file's mode change.
+            if line.starts_with("old mode ") || line.starts_with("new mode ") {
+                continue;
+            }
             match direction {
                 // Undoing part of a new file edits the file that now exists.
                 Direction::Undo if self.created && line.starts_with("new file mode") => continue,
@@ -282,6 +332,33 @@ impl RawPatch {
 mod tests {
     use super::*;
     use std::{fs, path::Path, process::Command};
+
+    // These pure fixtures pair replacement positions directly. UI integration tests supply
+    // DiffDoc's similarity alignment to select_aligned instead.
+    impl RawPatch {
+        fn select(
+            &self,
+            selected: &dyn Fn(&RawLine) -> bool,
+            direction: Direction,
+        ) -> Option<String> {
+            let mut alignment = Vec::new();
+            for block in self.lines.chunk_by(|a, b| a.kind != b' ' && b.kind != b' ') {
+                if block[0].kind == b' ' {
+                    alignment.push((block[0].old, block[0].new));
+                    continue;
+                }
+                let split = block.partition_point(|line| line.kind == b'-');
+                let (old, new) = block.split_at(split);
+                for index in 0..old.len().max(new.len()) {
+                    alignment.push((
+                        old.get(index).and_then(|l| l.old),
+                        new.get(index).and_then(|l| l.new),
+                    ));
+                }
+            }
+            self.select_aligned(selected, direction, alignment)
+        }
+    }
 
     fn git(root: &Path, args: &[&str], input: Option<&str>) -> String {
         let mut command = Command::new("git");
@@ -448,6 +525,131 @@ mod tests {
             .unwrap();
         git(&root, &["apply", "--cached", "-"], Some(&unstage));
         assert_eq!(git(&root, &["show", ":new.txt"], None), "1\n");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn adjacent_replacements_keep_selected_lines_in_place() {
+        for selected_line in [1, 2] {
+            let root = repo(&format!("adjacent-{selected_line}"));
+            fs::write(root.join("f.txt"), "one\ntwo\n").unwrap();
+            git(&root, &["add", "."], None);
+            git(&root, &["commit", "-qm", "init"], None);
+            fs::write(root.join("f.txt"), "ONE\nTWO\n").unwrap();
+            let selected =
+                |line: &RawLine| line.old == Some(selected_line) || line.new == Some(selected_line);
+            let stage = diff(&root, false)
+                .select(&selected, Direction::Apply)
+                .unwrap();
+            git(&root, &["apply", "--cached", "-"], Some(&stage));
+            let staged = if selected_line == 1 {
+                "ONE\ntwo\n"
+            } else {
+                "one\nTWO\n"
+            };
+            let undone = if selected_line == 1 {
+                "one\nTWO\n"
+            } else {
+                "ONE\ntwo\n"
+            };
+            assert_eq!(git(&root, &["show", ":f.txt"], None), staged);
+            git(&root, &["add", "f.txt"], None);
+            let unstage = diff(&root, true)
+                .select(&selected, Direction::Undo)
+                .unwrap();
+            git(&root, &["apply", "--cached", "-"], Some(&unstage));
+            assert_eq!(git(&root, &["show", ":f.txt"], None), undone);
+            git(&root, &["restore", "--staged", "f.txt"], None);
+            let revert = diff(&root, false)
+                .select(&selected, Direction::Undo)
+                .unwrap();
+            git(&root, &["apply", "-"], Some(&revert));
+            assert_eq!(fs::read_to_string(root.join("f.txt")).unwrap(), undone);
+            fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    #[test]
+    fn selected_text_keeps_existing_index_and_worktree_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for (base_mode, changed_mode) in [(0o644, 0o755), (0o755, 0o644)] {
+            let root = repo(&format!("mode-{base_mode}"));
+            let path = root.join("f.txt");
+            git(&root, &["config", "core.filemode", "true"], None);
+            fs::write(&path, "one\nkeep\ntwo\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(base_mode)).unwrap();
+            git(&root, &["add", "."], None);
+            git(&root, &["commit", "-qm", "init"], None);
+            fs::write(&path, "ONE\nkeep\nTWO\n").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(changed_mode)).unwrap();
+            let index_mode = || {
+                git(&root, &["ls-files", "--stage", "f.txt"], None)
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .to_string()
+            };
+            let mode = |value| format!("100{value:o}");
+            let first = |line: &RawLine| line.old == Some(1) || line.new == Some(1);
+            let stage = diff(&root, false).select(&first, Direction::Apply).unwrap();
+            git(&root, &["apply", "--cached", "-"], Some(&stage));
+            assert_eq!(git(&root, &["show", ":f.txt"], None), "ONE\nkeep\ntwo\n");
+            assert_eq!(index_mode(), mode(base_mode));
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                changed_mode
+            );
+
+            // Stage the mode too, then undo only the first text change.
+            git(&root, &["add", "f.txt"], None);
+            let unstage = diff(&root, true).select(&first, Direction::Undo).unwrap();
+            git(&root, &["apply", "--cached", "-"], Some(&unstage));
+            assert_eq!(git(&root, &["show", ":f.txt"], None), "one\nkeep\nTWO\n");
+            assert_eq!(index_mode(), mode(changed_mode));
+
+            // Restore the index baseline so reverting the text also sees a mode difference.
+            git(&root, &["restore", "--staged", "f.txt"], None);
+            let revert = diff(&root, false).select(&first, Direction::Undo).unwrap();
+            git(&root, &["apply", "-"], Some(&revert));
+            assert_eq!(fs::read_to_string(&path).unwrap(), "one\nkeep\nTWO\n");
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                changed_mode
+            );
+            assert_eq!(index_mode(), mode(base_mode));
+            fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    /// The creation mode is needed when staging part of a new executable file.
+    #[test]
+    fn new_executable_keeps_its_mode_when_staged_and_unstaged_in_parts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = repo("new-mode");
+        git(&root, &["config", "core.filemode", "true"], None);
+        git(&root, &["commit", "--allow-empty", "-qm", "init"], None);
+        let path = root.join("script.sh");
+        fs::write(&path, "one\ntwo\nthree\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        git(&root, &["add", "-N", "script.sh"], None);
+        let stage = diff(&root, false)
+            .select(&|line| matches!(line.new, Some(1 | 3)), Direction::Apply)
+            .unwrap();
+        assert!(stage.contains("new file mode 100755"));
+        git(&root, &["apply", "--cached", "-"], Some(&stage));
+        assert_eq!(git(&root, &["show", ":script.sh"], None), "one\nthree\n");
+        let unstage = diff(&root, true)
+            .select(&|line| line.new == Some(2), Direction::Undo)
+            .unwrap();
+        git(&root, &["apply", "--cached", "-"], Some(&unstage));
+        assert_eq!(git(&root, &["show", ":script.sh"], None), "one\n");
+        assert!(git(&root, &["ls-files", "--stage", "script.sh"], None).starts_with("100755 "));
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 
