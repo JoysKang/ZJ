@@ -41,6 +41,147 @@ fn rows(cx: &mut TestAppContext, this: &Entity<Workbench>) -> Vec<(String, Vec<S
 }
 
 #[gpui_kit::test]
+async fn file_search_never_confirms_results_from_the_previous_query(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-picker-query-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let first = root.join("alpha.rs");
+    let second = root.join("beta.rs");
+    std::fs::write(&first, "// alpha\n").unwrap();
+    std::fs::write(&second, "// beta\n").unwrap();
+    let (handle, this) = open(cx, root.clone());
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.index.is_some())
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_quick_open_with("alpha", window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            p.quick_open
+                .as_ref()
+                .is_some_and(|q| q.results == [first.clone()])
+        })
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_quick_open_with("beta", window, cx));
+        this.read_with(cx, |p, _| {
+            assert!(
+                p.quick_open.as_ref().unwrap().results.is_empty(),
+                "previous query results remain selectable"
+            );
+        });
+        window.render_frame(cx);
+        assert_eq!(
+            window.find("quick-open-note").label(),
+            Some("正在匹配文件…")
+        );
+        window.press("enter", cx);
+        this.read_with(cx, |p, cx| {
+            let quick = p
+                .quick_open
+                .as_ref()
+                .expect("pending search closed on Enter");
+            assert!(quick.input.focus_handle(cx).is_focused(window));
+            assert!(p.documents.is_empty());
+        });
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            p.quick_open
+                .as_ref()
+                .is_some_and(|q| q.results == [second.clone()])
+        })
+    });
+    press(cx, handle, "enter");
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            p.documents.len() == 1 && p.documents[0].path == second
+        })
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_quick_open_with("", window, cx));
+        this.read_with(cx, |p, _| {
+            assert_eq!(
+                p.quick_open.as_ref().unwrap().results.as_slice(),
+                std::slice::from_ref(&second)
+            )
+        });
+        this.update(cx, |p, cx| {
+            p.open_quick_open_with("no-such-file", window, cx)
+        });
+    })
+    .unwrap();
+    // A no-match query stays open, so the user can correct it without reopening ⌘P.
+    settle(cx, Some(handle), |cx| {
+        cx.update_window(handle.into(), |_, window, _| {
+            window
+                .try_find("quick-open-note")
+                .is_some_and(|note| note.label() == Some("没有匹配的文件"))
+        })
+        .unwrap()
+    });
+    press(cx, handle, "enter");
+    this.read_with(cx, |p, _| assert!(p.quick_open.is_some()));
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_quick_open_with("beta", window, cx);
+            p.open_quick_open_with(">", window, cx);
+        });
+    })
+    .unwrap();
+    assert_eq!(rows(cx, &this).len(), commands::COMMANDS.len());
+    press(cx, handle, "escape");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn cancelling_pickers_restores_the_original_input(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-picker-focus-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let (handle, this) = open(cx, root.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.find_in_files(window, cx);
+            p.search
+                .query
+                .update(cx, |input, cx| input.set_value("draft", window, cx));
+        });
+        window.render_frame(cx);
+        for nested in [false, true] {
+            this.update(cx, |p, cx| {
+                p.search
+                    .query
+                    .update(cx, |input, cx| input.focus(window, cx));
+                p.open_quick_open_with(">", window, cx);
+                if nested {
+                    p.open_picker(Vec::new(), "选择项目".into(), "无项目", window, cx);
+                    p.open_picker(Vec::new(), "下一步".into(), "无项目", window, cx);
+                    p.open_quick_open_with("", window, cx);
+                }
+            });
+            window.render_frame(cx);
+            window.press("escape", cx);
+            this.read_with(cx, |p, cx| {
+                assert!(p.quick_open.is_none());
+                assert!(p.search.query.focus_handle(cx).is_focused(window));
+                assert_eq!(p.search.query.read(cx).value().as_str(), "draft");
+            });
+        }
+        window.input("more", cx);
+        this.read_with(cx, |p, cx| {
+            assert!(p.search.query.read(cx).value().contains("more"))
+        });
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
 async fn shift_cmd_p_runs_commands_and_remembers_recent(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = std::env::temp_dir().join(format!("zj-commands-{}", std::process::id()));
@@ -227,6 +368,44 @@ async fn command_results_and_footer_stay_visible_in_a_low_window(cx: &mut TestAp
         assert_eq!(selected.size.height, theme::QUICK_OPEN_ROW_HEIGHT);
     })
     .unwrap();
+    for width in [480., 320., 760.] {
+        cx.simulate_window_resize(handle.into(), size(px(width), px(480.)));
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(window.viewport_size().width, px(width));
+            let panel = window.find("quick-open").bounds();
+            let footer = window.find("quick-open-footer").bounds();
+            let selected = window
+                .find(("pick-row", commands::COMMANDS.len() - 1))
+                .bounds();
+            assert!(
+                panel.left() >= theme::ROW_INSET * 2.,
+                "picker escapes left edge: {panel:?}"
+            );
+            assert!(
+                panel.right() <= px(width) - theme::ROW_INSET * 2.,
+                "picker escapes right edge: {panel:?}"
+            );
+            assert!(panel.size.width <= theme::QUICK_OPEN_WIDTH);
+            if width > 600. {
+                assert_eq!(panel.size.width, theme::QUICK_OPEN_WIDTH);
+            }
+            assert!(selected.left() >= panel.left() && selected.right() <= panel.right());
+            assert!(selected.bottom() <= footer.top());
+            assert!(footer.bottom() <= window.viewport_size().height);
+            let help = window.find("quick-open-help").bounds();
+            let count = window.find("quick-open-count").bounds();
+            assert!(help.size.height <= theme::ROW_HEIGHT);
+            assert!(count.size.height <= theme::ROW_HEIGHT);
+            assert!(help.right() <= count.left());
+            assert!(count.size.width > theme::FIND_BUTTON);
+            assert!(count.right() <= footer.right());
+        })
+        .unwrap();
+    }
+    press(cx, handle, "escape");
+    this.read_with(cx, |p, _| assert!(p.quick_open.is_none()));
 }
 
 #[gpui_kit::test]

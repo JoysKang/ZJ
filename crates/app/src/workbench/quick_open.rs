@@ -12,6 +12,7 @@ use gpui_kit::{
     component::{
         Sizable, h_flex,
         input::{Input, InputEvent, InputState, RopeExt},
+        tooltip::Tooltip,
         v_flex,
     },
     prelude::FluentBuilder,
@@ -113,7 +114,7 @@ pub(super) struct QuickOpen {
     mode: LauncherMode,
     /// Keycap labels of each command's shortcut, resolved when the panel opened.
     command_keys: Vec<Vec<String>>,
-    /// What had focus when the panel opened; a command is dispatched with it restored.
+    /// Restored on cancellation or before command dispatch, preserved across picker steps.
     previous_focus: Option<FocusHandle>,
     pub(super) results: Vec<PathBuf>,
     /// `Some` for a symbol / location / command list: the items and the matching indexes.
@@ -152,7 +153,10 @@ impl Workbench {
             return;
         }
         // Shortcut labels and command dispatch need the focus the panel takes away.
-        let previous_focus = window.focused(cx);
+        let previous_focus = match &self.quick_open {
+            Some(quick) => quick.previous_focus.clone(),
+            None => window.focused(cx),
+        };
         let command_keys = super::commands::shortcut_keys(window, cx);
         let input = cx.new(|cx| {
             let mut input = InputState::new(window, cx)
@@ -197,7 +201,10 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.quick_open = None;
+        let previous_focus = match self.quick_open.take() {
+            Some(quick) => quick.previous_focus,
+            None => window.focused(cx),
+        };
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         input.update(cx, |input, cx| input.focus(window, cx));
         let subscription = cx.subscribe_in(
@@ -215,7 +222,7 @@ impl Workbench {
             launcher: false,
             mode: LauncherMode::Files,
             command_keys: Vec::new(),
-            previous_focus: None,
+            previous_focus,
             results: Vec::new(),
             items: Some((items, all)),
             empty_note,
@@ -437,9 +444,10 @@ impl Workbench {
             cx.notify();
             return;
         }
+        quick.results.clear();
+        quick.task = None;
         let Some(index) = index else {
             // build_index re-runs this when the index is ready.
-            quick.results.clear();
             cx.notify();
             return;
         };
@@ -456,6 +464,7 @@ impl Workbench {
                     && quick.generation == generation
                 {
                     quick.results = result.paths;
+                    quick.task = None;
                     cx.notify();
                 }
             });
@@ -464,8 +473,11 @@ impl Workbench {
     }
 
     pub(super) fn close_quick_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.quick_open.take().is_some() {
-            self.focus_active_editor(window, cx);
+        if let Some(quick) = self.quick_open.take() {
+            match quick.previous_focus {
+                Some(focus) => focus.focus(window, cx),
+                None => self.focus_active_editor(window, cx),
+            }
             cx.notify();
         }
     }
@@ -616,11 +628,11 @@ impl Workbench {
             .quick_open
             .as_ref()
             .and_then(|quick| quick.results.get(index.unwrap_or(quick.selected)).cloned());
+        let Some(path) = path else {
+            return;
+        };
         self.quick_open = None;
-        match path {
-            Some(path) => self.open_file(path, self.root.clone(), window, cx),
-            None => self.focus_active_editor(window, cx),
-        }
+        self.open_file(path, self.root.clone(), window, cx);
         cx.notify();
     }
 
@@ -743,6 +755,8 @@ impl Workbench {
             Some("输入文件名或路径片段")
         } else if self.index.is_none() {
             Some("正在建立文件索引…")
+        } else if quick.task.is_some() {
+            Some("正在匹配文件…")
         } else {
             Some("没有匹配的文件")
         };
@@ -750,7 +764,9 @@ impl Workbench {
             .id("quick-open")
             .test_support()
             .key_context("QuickOpen")
-            .w(theme::QUICK_OPEN_WIDTH)
+            .w_full()
+            .max_w(theme::QUICK_OPEN_WIDTH)
+            .min_w_0()
             .overflow_hidden()
             .rounded(theme::RADIUS_OVERLAY)
             .border_1()
@@ -781,6 +797,9 @@ impl Workbench {
             .when_some(note, |panel, note| {
                 panel.child(
                     div()
+                        .id("quick-open-note")
+                        .aria_label(note)
+                        .test_support()
                         .px_3()
                         .h(theme::QUICK_OPEN_EMPTY_HEIGHT)
                         .flex()
@@ -818,8 +837,26 @@ impl Workbench {
                     .border_color(colors.card_border)
                     .text_size(theme::TEXT_CAPTION)
                     .text_color(colors.muted)
-                    .child(div().flex_1().child("↑↓ 选择 · Enter 打开 · Esc 关闭"))
-                    .child(format!("{count} 项")),
+                    .child(
+                        div()
+                            .id("quick-open-help")
+                            .test_support()
+                            .flex_1()
+                            .min_w_0()
+                            .text_ellipsis()
+                            .tooltip(|window, cx| {
+                                Tooltip::new("↑↓ 选择 · Enter 打开 · Esc 关闭").build(window, cx)
+                            })
+                            .child("↑↓ 选择 · Enter 打开 · Esc 关闭"),
+                    )
+                    .child(
+                        div()
+                            .id("quick-open-count")
+                            .test_support()
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
+                            .child(format!("{count} 项")),
+                    ),
             );
         Some(
             div()
@@ -828,6 +865,7 @@ impl Workbench {
                 .left_0()
                 .size_full()
                 .pt(theme::TITLE_HEIGHT + theme::QUICK_OPEN_TOP)
+                .px_2()
                 .flex()
                 .justify_center()
                 .items_start()
