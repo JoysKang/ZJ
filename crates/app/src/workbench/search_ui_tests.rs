@@ -94,6 +94,50 @@ async fn search_results_open_near_the_top_with_the_match_selected(cx: &mut TestA
 }
 
 #[gpui_kit::test]
+async fn file_actions_stay_visible_and_remove_only_search_results(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-search-actions-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("a.txt");
+    std::fs::write(&path, "needle\n").unwrap();
+    let (handle, this) = open(cx, root.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.find_in_files(window, cx);
+            p.search
+                .query
+                .update(cx, |input, cx| input.set_value("needle", window, cx));
+            p.search
+                .replace
+                .input
+                .update(cx, |input, cx| input.set_value("replacement", window, cx));
+            p.schedule_search(Duration::ZERO, window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| p.search.matches == 1)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.hover("search-case", cx);
+        for id in ["search-file-ignore", "search-file-replace"] {
+            assert!(window.find((id, 0usize)).visible());
+        }
+        window.click(("search-file-ignore", 0usize), cx);
+        this.read_with(cx, |p, _| {
+            assert!(p.search.results.is_empty());
+            assert!(!p.search.replace.running);
+        });
+    })
+    .unwrap();
+    assert!(!cx.has_pending_prompt());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "needle\n");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
 async fn replacing_in_an_edited_buffer_follows_the_results(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = std::env::temp_dir().join(format!("zj-search-replace-{}", std::process::id()));

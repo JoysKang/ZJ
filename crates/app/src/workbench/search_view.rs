@@ -506,6 +506,7 @@ impl Workbench {
             .icon(IconName::CaseUpper)
             .selected(replace.preserve_case)
             .tooltip("保留大小写")
+            .accessibility_label("保留大小写")
             .on_click(cx.listener(|this, _, _, cx| {
                 this.search.replace.preserve_case = !this.search.replace.preserve_case;
                 cx.notify();
@@ -514,7 +515,14 @@ impl Workbench {
             .small()
             .ghost()
             .icon(IconName::ReplaceAll)
-            .tooltip("全部替换")
+            .tooltip(if replace.running {
+                "正在替换，请稍候"
+            } else if search.results.is_empty() {
+                "没有可替换的搜索结果"
+            } else {
+                "替换所有搜索结果"
+            })
+            .accessibility_label("替换所有搜索结果")
             .disabled(search.results.is_empty() || replace.running)
             .on_click(cx.listener(|this, _, window, cx| this.confirm_replace_all(window, cx)));
         // Everything stays open: the query, the replacement, the files to include and exclude.
@@ -714,7 +722,7 @@ impl Workbench {
                         Self::row_button(
                             ("search-file-replace", f),
                             IconName::ReplaceAll,
-                            "全部替换",
+                            "替换此文件中的所有结果",
                         )
                         .disabled(busy)
                         .on_click(
@@ -725,8 +733,12 @@ impl Workbench {
                     );
                 }
                 buttons.push(
-                    Self::row_button(("search-file-ignore", f), IconName::Close, "忽略")
-                        .on_click(cx.listener(move |this, _, _, cx| this.ignore_file(f, cx))),
+                    Self::row_button(
+                        ("search-file-ignore", f),
+                        IconName::Close,
+                        "从搜索结果中移除此文件",
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.ignore_file(f, cx))),
                 );
                 base.pl(theme::ROW_INSET)
                     .role(Role::TreeItem)
@@ -755,7 +767,13 @@ impl Workbench {
                             .text_color(colors.muted)
                             .child(folder),
                     )
-                    .child(self.row_actions(group, buttons))
+                    .child(
+                        h_flex()
+                            .flex_shrink_0()
+                            .gap_1()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .children(buttons),
+                    )
                     .child(super::scm::count_badge(file.count, colors))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.search.collapsed.remove(&path) {
@@ -814,8 +832,12 @@ impl Workbench {
                     );
                 }
                 buttons.push(
-                    Self::row_button(("search-line-ignore", index), IconName::Close, "忽略")
-                        .on_click(cx.listener(move |this, _, _, cx| this.ignore_line(f, l, cx))),
+                    Self::row_button(
+                        ("search-line-ignore", index),
+                        IconName::Close,
+                        "从搜索结果中移除此行",
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.ignore_line(f, l, cx))),
                 );
                 base.pl(theme::TREE_BASE + theme::TREE_STEP * 3.)
                     .role(Role::Button)
