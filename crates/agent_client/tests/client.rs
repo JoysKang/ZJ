@@ -613,6 +613,54 @@ fn stopping_does_not_wait_for_a_silent_editor() {
 }
 
 #[test]
+fn a_pending_file_read_does_not_hold_cancel_or_other_sessions() {
+    let ws = Workspace::new("read-dispatch");
+    let pool = Arc::new(AgentPool::new());
+    let (asked, was_asked) = async_channel::bounded(4);
+    let mut opts = pooled(&ws, &pool, &[]);
+    opts.buffers = Some(Arc::new(Silent { asked }));
+    opts.cancel_grace = Duration::from_millis(50);
+    let client = AgentClient::start(opts).unwrap();
+    let events = Events::of(&client);
+    client
+        .prompt(text(&format!("read {}", ws.path("src/a.rs").display())))
+        .unwrap();
+    was_asked.recv_blocking().unwrap();
+    let other_ws = Workspace::new("read-dispatch-other");
+    let other = AgentClient::start(pooled(&other_ws, &pool, &[])).unwrap();
+    other.prompt(text("echo available")).unwrap();
+    let mut other_events = Events::of(&other);
+    other_events.deadline = Duration::from_secs(2);
+    assert_eq!(message(&other_events.turn()), "available");
+    client.cancel();
+    let mut events = events;
+    events.deadline = Duration::from_secs(2);
+    let seen = events.turn();
+    assert!(matches!(
+        outcome(&seen),
+        TurnOutcome::Cancelled | TurnOutcome::Failed(_)
+    ));
+    pool.shutdown();
+}
+
+#[test]
+fn stopping_a_write_waiting_for_a_snapshot_does_not_write_late() {
+    let ws = Workspace::new("stopped-write");
+    let path = ws.path("src/a.rs");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let (asked, was_asked) = async_channel::bounded(4);
+    let mut opts = options(&ws, &[]);
+    opts.buffers = Some(Arc::new(Silent { asked }));
+    let client = AgentClient::start(opts).unwrap();
+    client
+        .prompt(text(&format!("write {} late", path.display())))
+        .unwrap();
+    was_asked.recv_blocking().unwrap();
+    client.shutdown();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+}
+
+#[test]
 fn reads_prefer_open_buffers_and_stay_in_the_workspace() {
     let ws = Workspace::new("read");
     std::fs::write(ws.path("src/b.rs"), "on disk\n").unwrap();

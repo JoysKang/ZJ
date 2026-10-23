@@ -266,6 +266,26 @@ impl SessionState {
         }
     }
 
+    /// Disk I/O must not hold the shared host thread. Dropping this wait on stop does not
+    /// cancel an OS read (for example on a stalled network filesystem).
+    async fn disk_text(&self, path: &Path) -> io::Result<String> {
+        if self.is_stopped() {
+            return Err(io::Error::other("Agent 客户端已关闭"));
+        }
+        let path = path.to_path_buf();
+        let read = blocking::unblock(move || read_disk(&path));
+        let result = self.bounded(read, BUFFER_TIMEOUT).await;
+        if self.is_stopped() {
+            return Err(io::Error::other("Agent 客户端已关闭"));
+        }
+        result.unwrap_or_else(|| {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "没有及时读到磁盘上的文件",
+            ))
+        })
+    }
+
     /// Records `path` as it is now, once: the unsaved buffer when the editor has one (that is
     /// what the agent read and edits), otherwise the disk. Unreadable or oversized files are
     /// skipped.
@@ -277,7 +297,7 @@ impl SessionState {
         }
         let before = match self.buffer_text(path).await {
             Ok(Some(text)) => Some(text),
-            Ok(None) | Err(_) => match read_disk(path) {
+            Ok(None) | Err(_) => match self.disk_text(path).await {
                 Ok(text) => Some(text),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => None,
                 Err(e) => {
@@ -319,7 +339,7 @@ impl SessionState {
         if !self.snapshot_wanted(path).await {
             return;
         }
-        let current = match read_disk(path) {
+        let current = match self.disk_text(path).await {
             Ok(text) => Some(text),
             Err(e) if e.kind() == io::ErrorKind::NotFound => None,
             // Says why in the thread.
@@ -1791,7 +1811,7 @@ pub(crate) async fn handle_read(
     let path = shared.workspace.resolve(&request.path).map_err(fs_error)?;
     let text = match shared.buffer_text(&path).await.map_err(fs_error)? {
         Some(text) => text,
-        None => read_disk(&path).map_err(fs_error)?,
+        None => shared.disk_text(&path).await.map_err(fs_error)?,
     };
     Ok(acp::ReadTextFileResponse::new(window(
         text,
@@ -1809,6 +1829,9 @@ pub(crate) async fn handle_write(
     }
     let path = shared.workspace.resolve(&request.path).map_err(fs_error)?;
     shared.snapshot(&path).await;
+    if shared.is_stopped() {
+        return Err(sdk::Error::invalid_params().data("Agent 客户端已关闭"));
+    }
     write_atomic(&path, &request.content).map_err(fs_error)?;
     shared.emit(AgentEvent::FileWritten { path }).await;
     Ok(acp::WriteTextFileResponse::new())

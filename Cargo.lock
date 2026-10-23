@@ -9309,6 +9309,7 @@ dependencies = [
  "agent-client-protocol",
  "async-channel",
  "async-io",
+ "blocking",
  "futures",
  "libc",
  "serde",

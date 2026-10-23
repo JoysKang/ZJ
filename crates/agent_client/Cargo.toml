@@ -10,6 +10,7 @@ agent-client-protocol = { version = "=2.2.0", default-features = false }
 # Already in the tree through GPUI Kit / the ACP crate.
 async-channel = "=2.5.0"
 async-io = "2"
+blocking = "=1.7.0"
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

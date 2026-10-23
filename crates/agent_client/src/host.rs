@@ -471,12 +471,15 @@ async fn connect(
         .on_receive_request(
             async move |request: acp::ReadTextFileRequest,
                         responder: Responder<acp::ReadTextFileResponse>,
-                        _cx: ConnectionTo<Agent>| {
-                let result = match on_read.route(&request.session_id.to_string()) {
-                    Some(session) => client::handle_read(&session, &request).await,
-                    None => Err(unknown_session()),
+                        cx: ConnectionTo<Agent>| {
+                let Some(session) = on_read.route(&request.session_id.to_string()) else {
+                    return responder.respond_with_result(Err(unknown_session()));
                 };
-                responder.respond_with_result(result)
+                // Buffer and disk waits must leave the dispatcher free for other sessions.
+                cx.spawn(async move {
+                    let result = client::handle_read(&session, &request).await;
+                    responder.respond_with_result(result)
+                })
             },
             sdk::on_receive_request!(),
         )

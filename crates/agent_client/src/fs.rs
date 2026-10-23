@@ -2,8 +2,8 @@
 
 use std::{
     fs, io,
-    io::Write,
-    os::unix::fs::PermissionsExt,
+    io::{Read, Write},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Component, Path, PathBuf},
 };
 
@@ -84,17 +84,41 @@ impl Workspace {
     }
 }
 
-/// Reads a text file from disk with ACP's 1-based `line` and `limit` window.
+fn too_large(path: &Path) -> io::Error {
+    io::Error::other(format!(
+        "{} 超过 {} MB，不读取",
+        path.display(),
+        READ_LIMIT / 1024 / 1024
+    ))
+}
+
+/// Reads only regular text files, checking the opened file and bounding the actual bytes.
 pub(crate) fn read_disk(path: &Path) -> io::Result<String> {
-    let meta = fs::metadata(path)?;
-    if meta.len() > READ_LIMIT {
-        return Err(io::Error::other(format!(
-            "{} 超过 {} MB，不读取",
-            path.display(),
-            READ_LIMIT / 1024 / 1024
-        )));
+    // Opening first avoids trusting metadata for a path that may have been replaced. A FIFO
+    // must not block in open before we can inspect the handle and reject it.
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} 不是普通文件，不读取", path.display()),
+        ));
     }
-    let bytes = fs::read(path)?;
+    if meta.len() > READ_LIMIT {
+        return Err(too_large(path));
+    }
+    read_bounded(file, path)
+}
+
+fn read_bounded(reader: impl Read, path: &Path) -> io::Result<String> {
+    let mut bytes = Vec::new();
+    reader.take(READ_LIMIT + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > READ_LIMIT {
+        return Err(too_large(path));
+    }
     String::from_utf8(bytes).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -130,20 +154,25 @@ pub fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
+    write_atomic_to(path, text, &tmp)
+}
+
+fn write_atomic_to(path: &Path, text: &str, tmp: &Path) -> io::Result<()> {
+    // A failed create does not give this write ownership of an existing temporary file.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp)?;
     let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         if let Ok(meta) = fs::metadata(path) {
-            fs::set_permissions(&tmp, fs::Permissions::from_mode(meta.permissions().mode()))?;
+            fs::set_permissions(tmp, fs::Permissions::from_mode(meta.permissions().mode()))?;
         }
-        fs::rename(&tmp, path)
+        fs::rename(tmp, path)
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_file(tmp);
     }
     result
 }
@@ -174,6 +203,58 @@ mod tests {
         std::os::unix::fs::symlink("/etc", root.join("escape")).unwrap();
         assert!(ws.resolve(&root.join("escape/passwd")).is_err());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reads_reject_special_files_and_enforce_the_byte_limit() {
+        let root = std::env::temp_dir().join(format!("zj-read-guard-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        assert_eq!(
+            read_disk(&root).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        let pipe = root.join("pipe");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&pipe)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            read_disk(&pipe).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        let path = root.join("large.txt");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(READ_LIMIT + 1).unwrap();
+        assert!(read_disk(&path).unwrap_err().to_string().contains("超过"));
+        // The reader can produce more bytes than metadata promised (a file grew after open).
+        let bytes = io::repeat(b'x').take(READ_LIMIT + 2);
+        assert!(
+            read_bounded(bytes, &path)
+                .unwrap_err()
+                .to_string()
+                .contains("超过")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_temp_creation_preserves_existing_files() {
+        let root = std::env::temp_dir().join(format!("zj-write-guard-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("target.txt");
+        let tmp = root.join("existing-temp");
+        fs::write(&path, "original").unwrap();
+        fs::write(&tmp, "owned by another writer").unwrap();
+        assert_eq!(
+            write_atomic_to(&path, "new", &tmp).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        assert_eq!(fs::read_to_string(&tmp).unwrap(), "owned by another writer");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
