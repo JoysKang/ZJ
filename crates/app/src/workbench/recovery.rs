@@ -219,7 +219,7 @@ impl Workbench {
             untitled: doc.untitled,
             root,
             text: doc.editor.read(cx).text().to_string(),
-            written_at: workspace_editor_agent_history::now_ms(),
+            written_at: crate::time::now_ms(),
         };
         // Saved under another name (untitled → file): the old snapshot goes.
         if let Some(old) = doc.snapshot_on_disk.replace(key.clone())

@@ -1,7 +1,7 @@
 //! ⌘, opens the settings file (created if missing; in tests a temporary file); saving it puts
 //! it into effect, and a file that does not parse leaves the settings in use.
 
-use super::test_support::{empty_store, loaded, new_window, open_window, settle};
+use super::test_support::{loaded, new_window, open_window, settle};
 use super::*;
 use crate::settings::Settings;
 #[allow(unused_imports)]
@@ -13,7 +13,7 @@ async fn the_settings_file_opens_and_applies_when_saved(cx: &mut TestAppContext)
     cx.executor().allow_parking();
     let path = Settings::path().unwrap();
     let _ = std::fs::remove_file(&path);
-    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (window, this) = open_window(cx, None, Settings::default());
     cx.update_window(window.into(), |_, window, cx| {
         this.update(cx, |p, cx| p.open_settings_file(window, cx));
     })
@@ -106,7 +106,7 @@ async fn old_settings_are_completed_as_an_undoable_unsaved_edit(cx: &mut TestApp
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let original = "{\n  \"未知设置\": {\"说明\": \"保留原值\"},\n  \"editor_font_size\": 17\n}\n";
     std::fs::write(&path, original).unwrap();
-    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (window, this) = open_window(cx, None, Settings::default());
     cx.update_window(window.into(), |_, window, cx| {
         this.update(cx, |p, cx| p.open_settings_file(window, cx));
     })
@@ -281,7 +281,7 @@ async fn saving_hidden_rules_refreshes_both_windows_without_toggling_show_hidden
     let root = std::fs::canonicalize(root).unwrap();
     let hidden = root.join("hide.txt");
     let kept = root.join("keep.txt");
-    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    let (window, this) = open_window(cx, Some(root.clone()), Settings::default());
     let (other_window, other) = another_settings_window(cx, Some(root));
     for (handle, view) in [(window, &this), (other_window, &other)] {
         settle(cx, Some(handle), |cx| {
@@ -299,7 +299,7 @@ async fn saving_hidden_rules_refreshes_both_windows_without_toggling_show_hidden
     settle(cx, Some(window), |cx| {
         this.read_with(cx, |p, _| p.documents.len() == 1)
     });
-    // Keep all three result lists open while the settings are saved.
+    // Keep both result lists open while the settings are saved.
     for (handle, view) in [(window, &this), (other_window, &other)] {
         cx.update_window(handle.into(), |_, window, cx| {
             view.update(cx, |p, cx| {
@@ -308,11 +308,6 @@ async fn saving_hidden_rules_refreshes_both_windows_without_toggling_show_hidden
                     .update(cx, |input, cx| input.set_value("txt", window, cx));
                 p.schedule_search(Duration::ZERO, window, cx);
                 p.open_quick_open_with("txt", window, cx);
-                p.agent.composer.update(cx, |input, cx| {
-                    input.set_value("@txt", window, cx);
-                    input.set_selected_range(4..4, cx);
-                });
-                p.agent_composer_changed(window, cx);
             });
         })
         .unwrap();
@@ -324,22 +319,14 @@ async fn saving_hidden_rules_refreshes_both_windows_without_toggling_show_hidden
                 view.read_with(cx, |p, _| {
                     p.search.matches == 2
                         && p.quick_open.as_ref().is_some_and(|q| q.results.len() == 2)
-                        && p.agent
-                            .mention
-                            .as_ref()
-                            .is_some_and(|m| m.results.len() == 2)
                 })
             },
             |cx| {
                 view.read_with(cx, |p, _| {
                     format!(
-                        "before save: search={}; quick={:?}; mention={:?}; index={}",
+                        "before save: search={}; quick={:?}; index={}",
                         p.search.matches,
                         p.quick_open.as_ref().map(|q| &q.results),
-                        p.agent.mention.as_ref().map(|m| (
-                            &m.query,
-                            m.results.iter().map(|e| &e.path).collect::<Vec<_>>()
-                        )),
                         p.index.is_some()
                     )
                 })
@@ -372,10 +359,6 @@ async fn saving_hidden_rules_refreshes_both_windows_without_toggling_show_hidden
                     && p.quick_open
                         .as_ref()
                         .is_some_and(|q| q.results == [kept.clone()])
-                    && p.agent
-                        .mention
-                        .as_ref()
-                        .is_some_and(|m| m.results.len() == 1 && m.results[0].path == kept)
             })
         });
     }
@@ -426,10 +409,6 @@ async fn saving_hidden_rules_refreshes_both_windows_without_toggling_show_hidden
                     && p.explorer.rows.iter().any(|r| r.entry.path == hidden)
                     && p.search.matches == 2
                     && p.quick_open.as_ref().is_some_and(|q| q.results.len() == 2)
-                    && p.agent
-                        .mention
-                        .as_ref()
-                        .is_some_and(|m| m.results.len() == 2)
             })
         });
     }
@@ -446,7 +425,7 @@ async fn completion_waits_for_user_edits(cx: &mut TestAppContext, mode: crate::s
         auto_save: mode,
         ..Settings::default()
     };
-    let (handle, this) = open_window(cx, None, settings, empty_store());
+    let (handle, this) = open_window(cx, None, settings);
     cx.update_window(handle.into(), |_, window, cx| {
         this.update(cx, |p, cx| p.open_settings_file(window, cx));
     })

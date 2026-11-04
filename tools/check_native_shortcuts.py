@@ -117,7 +117,7 @@ def run(binary, output):
                 "auto_input_source": False, "auto_save": "off", "hidden_files": [],
             }))
             env = dict(os.environ, ZJ_SETTINGS=str(base / "settings.json"),
-                       ZJ_SESSION=str(base / "session.json"), ZJ_AGENT_DB=str(base / "agent.db"))
+                       ZJ_SESSION=str(base / "session.json"))
             with log_path.open("w") as log:
                 app = subprocess.Popen([str(binary), str(workspace), str(document)],
                                        env=env, stdout=log, stderr=log)

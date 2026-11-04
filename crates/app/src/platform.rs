@@ -35,14 +35,6 @@ pub fn select_input_source(id: Option<&str>) -> bool {
     imp::select_input_source(id)
 }
 
-/// The first enabled non-ASCII keyboard input source (an input method). Main thread only.
-pub fn non_ascii_input_source() -> Option<String> {
-    if cfg!(test) {
-        return None;
-    }
-    imp::non_ascii_input_source()
-}
-
 /// The optional Dock icon blink (`dock_icon_blink`): every 530 ms the Dock shows the icon
 /// without its cursor, then the bundle icon again. One timer for the whole app, only while the
 /// setting is on; macOS only.
@@ -95,9 +87,7 @@ impl DockBlink {
 
 #[cfg(target_os = "macos")]
 mod imp {
-    pub use super::tis::{
-        current as input_source, non_ascii as non_ascii_input_source, select as select_input_source,
-    };
+    pub use super::tis::{current as input_source, select as select_input_source};
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject, Bool};
 
@@ -305,10 +295,6 @@ mod tis {
             }
         }
     }
-
-    pub fn non_ascii() -> Option<String> {
-        with_enabled(|_, d| (!d.ascii).then(|| d.id.clone()))
-    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -325,9 +311,5 @@ mod imp {
 
     pub fn select_input_source(_: Option<&str>) -> bool {
         false
-    }
-
-    pub fn non_ascii_input_source() -> Option<String> {
-        None
     }
 }

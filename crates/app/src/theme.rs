@@ -6,9 +6,9 @@
 //! Editor match.
 
 use gpui_kit::{
-    App, BoxShadow, Hsla, Pixels, Rems, Window, WindowAppearance,
+    App, BoxShadow, Hsla, Pixels, Window, WindowAppearance,
     component::{Theme, ThemeColor, ThemeMode},
-    point, px, rems, rgb,
+    point, px, rgb,
 };
 use serde_json::{Value, json};
 
@@ -30,8 +30,6 @@ pub const TAB_INDICATOR_INSET: Pixels = px(12.);
 pub const TAB_ACTIVE_INDICATOR_HEIGHT: Pixels = px(2.);
 pub const DIRTY_DOT: Pixels = px(8.);
 pub const KEYCAP: Pixels = px(20.);
-/// Minimum width of a shortcut key cap in the agent empty-state hints, so their text lines up.
-pub const HINT_KEYCAP_MIN_WIDTH: Pixels = px(32.);
 pub const WELCOME_WIDTH: Pixels = px(340.);
 /// Welcome page logo (`assets/logo/zj-sprig*.svg`, 640 × 600 artwork at a quarter scale) and
 /// its cursor, placed where the artwork's `#zj-cursor` rect was (x 678, y 612, 26 × 190, from
@@ -72,7 +70,6 @@ pub const DIMMED_OPACITY: f32 = 0.5;
 pub const TERMINAL_DIM_ALPHA: f32 = 0.66;
 pub const DECORATION_WIDTH: Pixels = px(16.);
 pub const BADGE_SIZE: Pixels = px(16.);
-pub const BADGE_OFFSET: Pixels = px(-3.);
 pub const COMMAND_CENTER_HEIGHT: Pixels = px(28.);
 pub const COMMAND_CENTER_WIDTH: Pixels = px(340.);
 pub const QUICK_OPEN_WIDTH: Pixels = px(600.);
@@ -85,10 +82,6 @@ pub const QUICK_OPEN_INPUT_HEIGHT: Pixels = px(48.);
 pub const MENU_MIN_WIDTH: Pixels = px(144.);
 pub const MENU_MAX_WIDTH: Pixels = px(360.);
 pub const CODE_HEADER_HEIGHT: Pixels = px(28.);
-pub const CODE_BLOCK_BODY_TOP: Pixels = px(36.);
-pub const AGENT_PERMISSION_COLLAPSED_MAX: Pixels = px(72.);
-pub const SELECTION_ACTIONS_WIDTH: Pixels = px(320.);
-pub const SELECTION_ACTIONS_HEIGHT: Pixels = px(36.);
 pub const RADIUS: Pixels = px(6.);
 pub const RADIUS_LARGE: Pixels = px(8.);
 /// Rounded surfaces inside the workbench shell.
@@ -119,8 +112,6 @@ pub const SIDEBAR_WIDTH: Pixels = px(300.);
 pub const SIDEBAR_MIN: Pixels = px(200.);
 pub const SIDEBAR_MAX: Pixels = px(520.);
 pub const EDITOR_MIN: Pixels = px(320.);
-/// Editor minimum when the sidebar, editor and Agent panel are all visible.
-pub const EDITOR_COMPACT_MIN: Pixels = px(240.);
 pub const EDITOR_MAX: Pixels = px(4000.);
 
 // Icons and text.
@@ -220,69 +211,7 @@ pub const GRAPH_TIME: Pixels = px(84.);
 /// The details view under the graph never takes more than this much height.
 pub const GRAPH_DETAILS_MAX: Pixels = px(300.);
 
-// Agent panel (docs/决策/0004-Agent与历史.md, design in ZJ-agent-ui-design.md).
-/// Below this width the panel switches to the compact density (direction C).
-pub const AGENT_COMPACT_WIDTH: Pixels = px(360.);
-pub const AGENT_PANEL_MIN: Pixels = px(crate::settings::AGENT_PANEL_WIDTH_MIN);
-pub const AGENT_PANEL_MAX: Pixels = px(crate::settings::AGENT_PANEL_WIDTH_MAX);
-pub const AGENT_GLYPH: Pixels = px(18.);
-pub const AGENT_GLYPH_SMALL: Pixels = px(16.);
-pub const AGENT_GLYPH_ICON: Pixels = px(12.);
-pub const AGENT_GLYPH_RADIUS: Pixels = px(5.);
-pub const STATUS_DOT: Pixels = px(8.);
-/// The pale halo around the waiting-for-approval dot.
-pub const STATUS_HALO: Pixels = px(14.);
-/// Optical alignment of the running loader with the status text.
-pub const AGENT_RUNNING_ICON_OFFSET: Pixels = px(1.);
-pub const AGENT_TOOL_ROW: Pixels = px(30.);
-pub const AGENT_CARD_HEAD: Pixels = px(32.);
-pub const AGENT_FILE_ROW: Pixels = px(26.);
-pub const AGENT_FILE_INDENT: Pixels = px(24.);
-pub const AGENT_CHIP: Pixels = px(20.);
-pub const AGENT_COMPOSER_BAR: Pixels = px(28.);
-pub const AGENT_SELECTOR_MAX: Pixels = px(120.);
-/// Four editable lines plus the textarea padding; the composer grows through eight lines.
-pub const AGENT_COMPOSER_MIN: Pixels = px(96.);
-/// Four editable rows fill the composer minimum after its vertical input padding.
-pub const AGENT_COMPOSER_LINE: Pixels = px(20.);
-pub const AGENT_QUOTA_WIDTH: Pixels = px(320.);
-pub const AGENT_IMAGE_WIDTH: Pixels = px(104.);
-pub const AGENT_IMAGE_HEIGHT: Pixels = px(72.);
-pub const AGENT_IMAGE_PREVIEW_WIDTH: Pixels = px(960.);
-pub const AGENT_IMAGE_PREVIEW_HEIGHT: Pixels = px(640.);
-pub const AGENT_IMAGE_PREVIEW_MARGIN: Pixels = px(32.);
-pub const AGENT_PLAN_BAR: Pixels = px(3.);
-pub const AGENT_PLAN_BAR_WIDTH: Pixels = px(160.);
-pub const AGENT_LINE: Pixels = px(22.);
-/// Keep approval controls visible while the full command can be scrolled and copied.
-pub const AGENT_PERMISSION_BODY_MAX: Pixels = px(176.);
-/// The widest a user message gets, as a share of the thread: it sits to the right, apart from
-/// the full-width replies.
-pub const AGENT_USER_WIDTH: f32 = 0.85;
-/// Between the paragraphs, lists and code blocks of a reply (8 px at the default rem).
-pub const AGENT_PARAGRAPH_GAP: Rems = rems(0.5);
-pub const AGENT_FILTER_CHIP: Pixels = px(22.);
-pub const AGENT_SEARCH_INPUT: Pixels = px(28.);
-/// 接受 / 拒绝 at the top right of a change block: kept clear of the overlay scrollbar.
-pub const AGENT_HUNK_ACTIONS_INSET: Pixels = px(16.);
-/// Two-line session rows in the history list.
-pub const AGENT_HISTORY_ROW: Pixels = px(52.);
-pub const AGENT_HISTORY_ROW_COMPACT: Pixels = px(32.);
-pub const AGENT_STRIP_ROW: Pixels = px(32.);
-pub const AGENT_GROUP_HEADER: Pixels = px(28.);
-pub const AGENT_MENTION_ROWS: usize = 8;
-/// Thread bubbles and cards never get wider than this, whatever the panel width.
-pub const AGENT_THREAD_MAX: Pixels = px(760.);
-/// ⌘J search overlay.
-pub const AGENT_OVERLAY_WIDTH: Pixels = px(680.);
-pub const AGENT_OVERLAY_TOP: Pixels = px(8.);
-/// The ⌘J overlay's footer.
-pub const AGENT_OVERLAY_FOOTER: Pixels = px(32.);
-pub const AGENT_OVERLAY_INPUT: Pixels = px(44.);
-pub const AGENT_OVERLAY_ROW: Pixels = px(80.);
-pub const AGENT_OVERLAY_ROWS: usize = 7;
 pub const RADIUS_OVERLAY: Pixels = px(12.);
-pub const TEXT_OVERLAY_INPUT: Pixels = px(13.);
 /// The workspace name flashed when switching between ZJ windows (`workbench/switch_hud.rs`):
 /// gray text on a feathered halo of the editor's color, no box, a little above the middle.
 pub const SWITCH_HUD_TEXT: Pixels = px(100.);
@@ -296,9 +225,6 @@ pub const SWITCH_HUD_TOP: f32 = 0.3;
 pub const SWITCH_HUD_MAX_WIDTH: f32 = 0.9;
 /// Its opacity at full strength: see-through, the code stays visible.
 pub const SWITCH_HUD_OPACITY: f32 = 0.6;
-/// The diff editor's agent toolbar ("Claude Code 建议的修改 … 接受此文件").
-pub const AGENT_REVIEW_BAR: Pixels = px(32.);
-
 // Window geometry.
 pub const WINDOW_WIDTH: Pixels = px(1280.);
 pub const WINDOW_HEIGHT: Pixels = px(800.);
@@ -315,7 +241,7 @@ pub const TRAFFIC_LIGHT_Y: Pixels = px(9.5);
 pub struct Palette {
     /// Editor and welcome page.
     pub editor: u32,
-    /// Sidebar and Agent panel.
+    /// Sidebar.
     pub panel: u32,
     /// Title/status bars and workbench shell.
     pub title: u32,
@@ -369,28 +295,12 @@ pub struct Palette {
     pub diff_red: u32,
     pub diff_line_alpha: f32,
     pub diff_text_alpha: f32,
-    /// Agent panel: waiting for approval (yellow), done but unread (blue), running spinner.
-    pub attention: u32,
-    pub attention_halo: u32,
-    pub unread: u32,
-    pub running: u32,
-    /// The user's messages in the agent panel: tinted apart from replies (plain on the panel)
-    /// and from cards and code blocks.
-    pub user_bubble: u32,
-    /// Cards inside the agent panel and their borders; `strong_border` frames inputs.
+    /// Incoming side of a merge conflict.
+    pub incoming: u32,
+    /// Floating cards and their borders; `strong_border` frames inputs.
     pub card: u32,
     pub card_border: u32,
     pub strong_border: u32,
-    /// Search hit highlight in the session search (background color and alpha, text).
-    pub mark: u32,
-    pub mark_alpha: f32,
-    pub mark_fg: u32,
-    /// Monochrome agent glyphs: Claude, Codex, DeepSeek, Gemini, user-defined.
-    pub glyph_claude: u32,
-    pub glyph_codex: u32,
-    pub glyph_deepseek: u32,
-    pub glyph_gemini: u32,
-    pub glyph_generic: u32,
     /// The terminal's 16 ANSI colors (black … white, then the bright ones).
     pub terminal: [u32; 16],
 }
@@ -439,23 +349,11 @@ pub const DARK: Palette = Palette {
     diff_red: 0xdc322f,
     diff_line_alpha: 0.16,
     diff_text_alpha: 0.38,
-    attention: 0xb58900,
-    attention_halo: 0xb58900,
-    unread: 0x268bd2,
-    running: 0x2aa198,
+    incoming: 0x268bd2,
     // Solarized blue at 20% over the panel.
-    user_bubble: 0x08364c,
     card: 0x002b36,
     card_border: 0x0a3c49,
     strong_border: 0x0e4250,
-    mark: 0xb58900,
-    mark_alpha: 0.30,
-    mark_fg: 0xf0d78c,
-    glyph_claude: 0xcb4b16,
-    glyph_codex: 0x268bd2,
-    glyph_deepseek: 0x6c71c4,
-    glyph_gemini: 0xd33682,
-    glyph_generic: 0x93a1a1,
     // VS Code's Solarized Dark `terminal.ansi*`: the bright colors are Solarized's base tones.
     terminal: [
         0x073642, 0xdc322f, 0x859900, 0xb58900, 0x268bd2, 0xd33682, 0x2aa198, 0xeee8d5, 0x586e75,
@@ -505,23 +403,11 @@ pub const LIGHT: Palette = Palette {
     diff_red: 0xbf616a,
     diff_line_alpha: 0.26,
     diff_text_alpha: 0.5,
-    attention: 0x8a5226,
-    attention_halo: 0xd08770,
-    unread: 0x315fb1,
-    running: 0x326443,
+    incoming: 0x315fb1,
     // A Nord snow-storm tint separates user messages from the panel.
-    user_bubble: 0xdde4ed,
     card: 0xfafbfc,
     card_border: 0xe1e4e8,
     strong_border: 0xbfc2c4,
-    mark: 0xebcb8b,
-    mark_alpha: 0.55,
-    mark_fg: 0x242629,
-    glyph_claude: 0x96593a,
-    glyph_codex: 0x315fb1,
-    glyph_deepseek: 0x81587a,
-    glyph_gemini: 0x2f6f6d,
-    glyph_generic: 0x60666d,
     // Nord with the aurora colors darkened (as for the git decorations) so text in them stays
     // readable on snow storm; white is a light gray, as on any light terminal theme.
     terminal: [
@@ -695,36 +581,15 @@ pub struct Colors {
     pub find_match: Hsla,
     pub find_current: Hsla,
     pub shadow: Hsla,
-    pub attention: Hsla,
-    pub attention_bg: Hsla,
-    pub attention_border: Hsla,
-    pub unread: Hsla,
-    pub running: Hsla,
-    pub user_bubble: Hsla,
     pub card: Hsla,
     pub card_border: Hsla,
     pub strong_border: Hsla,
-    pub mark_bg: Hsla,
-    pub mark_fg: Hsla,
     /// Small icon buttons inside list rows (VS Code `toolbar.hoverBackground` /
     /// `toolbar.activeBackground`): the text color, faint, so they show on a hovered row too.
     pub control_hover: Hsla,
     pub control_active: Hsla,
-    /// Secondary text and tag chips on a selected (accent) row, and the focused composer's
-    /// border.
-    pub selected_muted: Hsla,
-    pub selected_chip: Hsla,
     /// The feathered halo behind the window switch's name.
     pub switch_halo: Hsla,
-    /// Selection in Kit's TextView (agent replies), which paints it over the text: see-through,
-    /// unlike the editor's, which sits under the text.
-    pub text_selection: Hsla,
-    pub focus_border: Hsla,
-    /// Selected filter chips: accent tint and border.
-    pub chip_on: Hsla,
-    pub chip_on_border: Hsla,
-    /// Glyph color and its tinted tile, indexed like [`Glyph`](workspace_editor_agent::Glyph).
-    pub glyphs: [(Hsla, Hsla); 5],
     /// The editor's "file changed on disk" banner: the git-modified hue, faint.
     pub banner: Hsla,
     /// Merge conflicts in the editor, as VS Code's merge.current / incoming backgrounds: the
@@ -793,37 +658,15 @@ impl Palette {
             find_match: hsla(self.accent).opacity(0.3),
             find_current: hsla(self.find_current).opacity(self.find_current_alpha),
             shadow: hsla(0x000000).opacity(self.shadow_alpha),
-            attention: hsla(self.attention),
-            attention_bg: hsla(self.attention_halo).opacity(0.14),
-            attention_border: hsla(self.attention).opacity(0.45),
-            unread: hsla(self.unread),
-            running: hsla(self.running),
-            user_bubble: hsla(self.user_bubble),
             card: hsla(self.card),
             card_border: hsla(self.card_border),
             strong_border: hsla(self.strong_border),
-            mark_bg: hsla(self.mark).opacity(self.mark_alpha),
-            mark_fg: hsla(self.mark_fg),
-            chip_on: hsla(self.accent).opacity(0.1),
-            selected_muted: hsla(self.selected_fg).opacity(0.82),
-            selected_chip: hsla(self.selected_fg).opacity(0.14),
             switch_halo: hsla(self.editor).opacity(0.85),
-            text_selection: hsla(self.accent).opacity(0.12),
-            focus_border: hsla(self.accent).opacity(0.7),
             control_hover: hsla(self.foreground).opacity(0.12),
             control_active: hsla(self.foreground).opacity(0.2),
-            chip_on_border: hsla(self.accent).opacity(0.45),
-            glyphs: [
-                self.glyph_claude,
-                self.glyph_codex,
-                self.glyph_deepseek,
-                self.glyph_gemini,
-                self.glyph_generic,
-            ]
-            .map(|c| (hsla(c), hsla(c).opacity(0.18))),
             banner: hsla(self.modified).opacity(0.16),
             conflict_ours: hsla(self.diff_green).opacity(self.diff_line_alpha),
-            conflict_theirs: hsla(self.unread).opacity(self.diff_line_alpha),
+            conflict_theirs: hsla(self.incoming).opacity(self.diff_line_alpha),
             conflict_marker: hsla(self.foreground).opacity(0.12),
             // Git Graph's palette works on both dark and light backgrounds.
             graph_lanes: [
@@ -1047,6 +890,7 @@ mod tests {
                 ("hover", p.hover),
                 ("active line", p.active_line),
                 ("keycap", p.keycap),
+                ("card", p.card),
             ] {
                 let fg = contrast(p.foreground, bg);
                 let muted = contrast(p.muted, bg);
@@ -1135,71 +979,17 @@ mod tests {
     }
 
     #[test]
-    fn accent_and_translucent_states_remain_readable() {
-        let composite =
-            |color: Hsla, background: u32| u32::from(rgb(background).blend(color.to_rgb())) >> 8;
+    fn accent_remains_readable() {
         for (name, p) in [("dark", DARK), ("light", LIGHT)] {
-            let colors = p.colors();
             for (surface, bg) in [
                 ("editor", p.editor),
                 ("panel", p.panel),
                 ("input", p.input_bg),
                 ("card", p.card),
-                ("user bubble", p.user_bubble),
             ] {
                 let accent = contrast(p.accent, bg);
                 assert!(accent >= 4.5, "{name} accent on {surface}: {accent:.2}");
-                // TextView paints selection over both the glyphs and their surface.
-                let selection = contrast(
-                    composite(colors.text_selection, p.foreground),
-                    composite(colors.text_selection, bg),
-                );
-                assert!(
-                    selection >= 7.0,
-                    "{name} selected text on {surface}: {selection:.2}"
-                );
             }
-            let chip = composite(colors.chip_on, p.panel);
-            assert!(
-                contrast(p.foreground, chip) >= 7.0,
-                "{name} active chip text"
-            );
-            assert!(
-                contrast(p.muted, chip) >= 4.5,
-                "{name} active chip secondary text"
-            );
-            let focus = contrast(composite(colors.focus_border, p.input_bg), p.input_bg);
-            assert!(focus >= 3.0, "{name} input focus border: {focus:.2}");
-        }
-    }
-
-    #[test]
-    fn agent_colors_are_readable() {
-        for (name, p) in [("dark", DARK), ("light", LIGHT)] {
-            for (what, color) in [
-                ("attention", p.attention),
-                ("unread", p.unread),
-                ("running", p.running),
-                ("claude", p.glyph_claude),
-                ("codex", p.glyph_codex),
-                ("deepseek", p.glyph_deepseek),
-                ("gemini", p.glyph_gemini),
-                ("generic", p.glyph_generic),
-            ] {
-                for (surface, bg) in [("panel", p.panel), ("card", p.card)] {
-                    let ratio = contrast(color, bg);
-                    // Glyphs and dots are non-text UI: WCAG 1.4.11 asks for 3:1.
-                    assert!(ratio >= 3.0, "{name} {what} on {surface}: {ratio:.2}");
-                }
-            }
-            for (surface, bg) in [("card", p.card), ("user bubble", p.user_bubble)] {
-                let fg = contrast(p.foreground, bg);
-                let muted = contrast(p.muted, bg);
-                assert!(fg >= 7.0, "{name} foreground on {surface}: {fg:.2}");
-                assert!(muted >= 4.5, "{name} muted on {surface}: {muted:.2}");
-            }
-            let attention = contrast(p.attention, p.panel);
-            assert!(attention >= 4.5, "{name} 待批准 text: {attention:.2}");
         }
     }
 

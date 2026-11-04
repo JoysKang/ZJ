@@ -1,6 +1,6 @@
 //! The Markdown live preview in a headless window, on a temporary folder.
 
-use super::test_support::{empty_store, loaded, open_window, settle};
+use super::test_support::{loaded, open_window, settle};
 use super::*;
 #[allow(unused_imports)]
 use core::prelude::v1::test;
@@ -8,7 +8,7 @@ use gpui_kit::{TestAppContext, base::Root, test::TestWindowExt};
 
 /// Renders while it waits, unlike `test_support::open`.
 fn open(cx: &mut TestAppContext, root: PathBuf) -> (WindowHandle<Root>, Entity<Workbench>) {
-    let (window, this) = open_window(cx, Some(root), Default::default(), empty_store());
+    let (window, this) = open_window(cx, Some(root), Default::default());
     settle(cx, Some(window), |cx| loaded(cx, &this));
     (window, this)
 }
@@ -321,7 +321,7 @@ async fn a_block_is_not_edited_from_a_split_of_older_text(cx: &mut TestAppContex
     let (id, editor) = this.read_with(cx, |p, _| {
         (p.documents[0].id, p.documents[0].editor.clone())
     });
-    // Text arrives from elsewhere (an agent, a reload); the click comes before the new split.
+    // Text arrives from elsewhere (an external edit, a reload); the click comes before the new split.
     cx.update_window(window.into(), |_, window, cx| {
         editor.update(cx, |s, cx| {
             s.replace_text_in_range(Some(0..0), "zero\n\n", window, cx)

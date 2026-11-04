@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measure ZJ against the resource budget in CLAUDE.md, on macOS.
 
-Runs the dist binary on temporary folders (settings, session, recovery and agent history in a
+Runs the dist binary on temporary folders (settings, session and recovery in a
 temporary directory too) and reports:
 
   1. cold start to first frame (median of --runs launches);
@@ -208,7 +208,6 @@ def environment(base):
     env = dict(os.environ)
     env["ZJ_SETTINGS"] = str(base / "data/settings.json")
     env["ZJ_SESSION"] = str(base / "data/session.json")
-    env["ZJ_AGENT_DB"] = str(base / "data/agent.db")
     return env
 
 

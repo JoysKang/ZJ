@@ -135,7 +135,7 @@ impl Workbench {
         });
         let has_head =
             status.is_some_and(|s| !matches!(s.oid.as_deref(), None | Some("(initial)")));
-        let commit_idle = idle && self.groups[g].commit_generation.is_none();
+        let commit_idle = idle;
         // Items run after the menu opened: find the repository again by id, not by row.
         let repo = self.groups[g].repo.id.clone();
         let refresh = view.clone();
@@ -705,8 +705,6 @@ impl Workbench {
         let group = &self.groups[g];
         if group.write_pending {
             Some("Git 操作进行中，请稍候")
-        } else if group.commit_generation.is_some() {
-            Some("正在生成提交信息，可在输入框右侧取消")
         } else {
             match &group.status {
                 Some(Ok(status))
@@ -724,16 +722,11 @@ impl Workbench {
         }
     }
 
-    /// The repository's message box and AI action, under the repository header.
+    /// The repository's message box, under the repository header.
     fn scm_commit_row(&self, g: usize, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
         let group = &self.groups[g];
         let id = group.repo.id.clone();
-        let status = group.status.as_ref().and_then(|s| s.as_ref().ok());
-        // With nothing staged, 提交 offers to stage everything first (smart commit).
-        let can_commit = status.is_some_and(|s| {
-            !s.changes.is_empty() && !s.changes.iter().any(|c| c.kind == ChangeKind::Conflict)
-        });
         let name = group
             .repo
             .worktree
@@ -742,8 +735,6 @@ impl Workbench {
             .to_string_lossy()
             .replace(SINGLE_LINE, "⏎");
         let pending = group.write_pending;
-        let generating = group.commit_generation.is_some();
-        let generate_id = id.clone();
         v_flex()
             .w_full()
             .pl(theme::ROW_INSET + theme::ICON_SIZE)
@@ -789,30 +780,6 @@ impl Workbench {
                                     .disabled(pending)
                                     .aria_label(format!("{name} 的提交消息")),
                             ),
-                    )
-                    .child(
-                        div().flex_shrink_0().pr_1().child(
-                            action(
-                                ("scm-generate-message", g),
-                                if generating {
-                                    IconName::Square
-                                } else {
-                                    IconName::Sparkle
-                                },
-                                if generating {
-                                    "取消生成提交信息"
-                                } else {
-                                    "AI 生成提交信息"
-                                },
-                                cx,
-                            )
-                            .disabled(pending || (!generating && !can_commit))
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.scm_generate_message(generate_id.clone(), window, cx);
-                                },
-                            )),
-                        ),
                     ),
             )
             .when(!group.write_message.is_empty(), |view| {
@@ -999,7 +966,7 @@ impl Workbench {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
         let ms = commit.time.saturating_mul(1000);
-        let time = crate::agent_model::relative_time(ms, now, crate::agent_model::local_offset(ms));
+        let time = crate::time::relative_time(ms, now, crate::time::local_offset(ms));
         let subject = commit.subject.replace(SINGLE_LINE, "⏎");
         let empty = subject.trim().is_empty();
         let tooltip = format!("{} {}", commit.short, commit.subject);

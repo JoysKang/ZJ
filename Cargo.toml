@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/app", "crates/core", "crates/git_service", "crates/agent_client", "crates/agent_bridge", "crates/agent_history"]
+members = ["crates/app", "crates/core", "crates/git_service"]
 default-members = ["crates/app"]
 # 打过补丁的 GPUI macOS 渲染 / 窗口 crate，不作为工作区成员（不跑本项目的 fmt / clippy）。
 exclude = ["vendor"]
@@ -13,9 +13,6 @@ publish = false
 [workspace.dependencies]
 workspace-editor-core = { path = "crates/core" }
 workspace-editor-git = { path = "crates/git_service" }
-workspace-editor-agent = { path = "crates/agent_client" }
-workspace-editor-agent-history = { path = "crates/agent_history" }
-workspace-editor-agent-bridge = { path = "crates/agent_bridge" }
 gpui-kit = { version = "=0.7.1", features = [
     # 首批（ADR 0001）：Rust、Markdown、Diff、Python、TOML、YAML、Bash、JS/TS/TSX、Go、HTML、CSS，
     # 以及批次 4 的 C / C++ / Java / SQL。
@@ -67,6 +64,3 @@ debug = 1
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 gpui-base = { path = "vendor/gpui-base" }
-
-# Agent 相关依赖原来单独按体积优化（docs/决策/0004-Agent与历史.md）：dist 已整体 opt-level = "s"，
-# 逐包覆盖不再需要。

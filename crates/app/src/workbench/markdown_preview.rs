@@ -254,7 +254,7 @@ impl Workbench {
     }
 
     /// After any change to the buffer: a block edit's own keystroke is left alone; anything
-    /// else (the source view, a reload, an agent) ends the edit, since its range is no longer
+    /// else (the source view or a reload) ends the edit, since its range is no longer
     /// known, and splits again.
     pub(super) fn markdown_buffer_changed(&mut self, id: DocumentId, cx: &mut Context<Self>) {
         let Some(doc) = self.document(id) else {
@@ -286,7 +286,7 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Blocks split from an older text (a split still running after a reload, an agent's
+        // Blocks split from an older text (a split still running after a reload, an external
         // write or the source view) would put the typing at the wrong bytes. During a block
         // edit the split lags on purpose and the edit keeps the ranges.
         if let Some(doc) = self.document(id)

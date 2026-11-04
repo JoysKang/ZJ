@@ -8,7 +8,6 @@
 //!   「要保存对 X 的更改吗？」.
 //! - **External changes:** an unedited open file follows the disk silently; an edited one gets
 //!   a banner (重新加载 / 比较 / 保留我的). A file deleted on disk keeps its buffer, marked 已删除.
-//! - **Agent layer:** [`buffer_text`] and [`on_buffer_saved`].
 
 use super::{
     DiffSource, DiffTab, Document, DocumentOwner, DocumentOwners, Pane, Workbench, language_for,
@@ -32,7 +31,6 @@ use gpui_kit::{
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
-    rc::Rc,
     sync::{Arc, Mutex},
 };
 use workspace_editor_core::{DocumentId, FileIdentity};
@@ -56,7 +54,7 @@ gpui_kit::actions!(
 // VS Code's 查看: 切换自动换行.
 gpui_kit::actions!(view, [ToggleSoftWrap]);
 
-/// All open documents of all windows, for the agent layer.
+/// All open documents of all windows, for ownership and quit confirmation.
 pub struct OpenDocuments(pub DocumentOwners);
 impl Global for OpenDocuments {}
 
@@ -142,50 +140,6 @@ pub(super) fn quit_is_approved(approvals: &HashMap<EntityId, CloseApproval>, cx:
                 })
             })
         })
-}
-
-type SavedHook = Rc<dyn Fn(&Path, &mut App)>;
-/// Callbacks run after any buffer is written to disk.
-#[derive(Default)]
-struct SavedHooks(Vec<SavedHook>);
-impl Global for SavedHooks {}
-
-/// The text of `path` if it is open with unsaved edits in any window (what an agent should
-/// read instead of the file on disk). Remembers which version the agent saw.
-pub fn buffer_text(path: &Path, cx: &mut App) -> Option<String> {
-    let owners = cx.try_global::<OpenDocuments>()?.0.clone();
-    let views: Vec<_> = owners
-        .borrow()
-        .values()
-        .filter(|owner| owner.path == path)
-        .filter_map(|owner| owner.view.upgrade())
-        .collect();
-    views.into_iter().find_map(|view| {
-        view.update(cx, |this, cx| {
-            let doc = this
-                .documents
-                .iter_mut()
-                .find(|doc| doc.path == path && doc.dirty)?;
-            doc.agent_read = Some(doc.version);
-            Some(doc.editor.read(cx).text().to_string())
-        })
-    })
-}
-
-/// Runs `hook` with the path of every buffer saved to disk from now on (each workbench window
-/// registers one for its agent sessions; hooks of closed windows do nothing).
-pub fn on_buffer_saved(cx: &mut App, hook: impl Fn(&Path, &mut App) + 'static) {
-    cx.default_global::<SavedHooks>().0.push(Rc::new(hook));
-}
-
-fn notify_saved(path: &Path, cx: &mut App) {
-    let hooks = cx
-        .try_global::<SavedHooks>()
-        .map(|hooks| hooks.0.clone())
-        .unwrap_or_default();
-    for hook in hooks {
-        hook(path, cx);
-    }
 }
 
 /// The file on disk changed while its buffer has edits: the banner offers these.
@@ -537,11 +491,7 @@ impl Workbench {
         }
         let text = doc.editor.read(cx).text().to_string();
         let bytes = save::encode(&text, doc.crlf, doc.bom);
-        let expected = if overwrite || doc.deleted {
-            None
-        } else {
-            doc.disk
-        };
+        let expected = if overwrite || doc.deleted { None } else { doc.disk };
         let path = doc.path.clone();
         let version = doc.version;
         if let Some(doc) = self.document_mut(id) {
@@ -623,7 +573,6 @@ impl Workbench {
         }
         self.schedule_blame(cx);
         self.apply_saved_settings(id, cx);
-        notify_saved(path, cx);
         cx.notify();
         true
     }
@@ -1277,38 +1226,6 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.reload_from_disk_at(id, None, window, cx);
-    }
-
-    /// An agent wrote the file after reading this buffer's unsaved text, so its version
-    /// contains the edits: the buffer follows it, unless something was typed meanwhile (then
-    /// the usual banner asks).
-    pub(super) fn follow_agent_write(
-        &mut self,
-        id: DocumentId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(doc) = self.document(id) else {
-            return;
-        };
-        if doc.dirty && doc.agent_read == Some(doc.version) {
-            self.reload_from_disk_at(id, Some(doc.version), window, cx);
-        } else {
-            let paths = BTreeSet::from([doc.path.clone()]);
-            self.check_disk(Some(&paths), window, cx);
-        }
-    }
-
-    /// `only_at`: reload only if the buffer is still at this version; otherwise the change
-    /// goes through [`Self::check_disk`].
-    fn reload_from_disk_at(
-        &mut self,
-        id: DocumentId,
-        only_at: Option<u64>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
         let Some(doc) = self.document(id) else {
             return;
         };
@@ -1318,10 +1235,6 @@ impl Workbench {
             return;
         }
         let (path, version, known) = (doc.path.clone(), doc.version, doc.disk);
-        if only_at.is_some_and(|expected| expected != version) {
-            self.check_disk(Some(&BTreeSet::from([path])), window, cx);
-            return;
-        }
         let requested = path.clone();
         let work = cx.background_spawn(async move {
             refuse_too_large(&path)?;
@@ -1604,7 +1517,6 @@ impl Document {
             deleted: false,
             unedited_when_deleted: None,
             banner: None,
-            agent_read: None,
             auto_save: Default::default(),
             auto_save_task: None,
             settings_completion_version: None,

@@ -451,6 +451,7 @@ fn similarity(a: &[&str], b: &[&str]) -> f32 {
     (2 * common) as f32 / total as f32
 }
 
+#[cfg(test)]
 pub(crate) fn highlight(
     language: &str,
     text: &str,

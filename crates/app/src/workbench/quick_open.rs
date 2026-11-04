@@ -566,7 +566,7 @@ impl Workbench {
                     self.command_history.insert(0, command.name);
                     self.command_history.truncate(20);
                     // Restore the focus the panel took, so context-sensitive commands
-                    // (editor commands, the Agent panel) dispatch where the user was.
+                    // (editor commands) dispatch where the user was.
                     match focus {
                         Some(focus) => focus.focus(window, cx),
                         None => self.focus_active_editor(window, cx),

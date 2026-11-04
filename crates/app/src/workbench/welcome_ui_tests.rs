@@ -1,7 +1,7 @@
 //! A double click on the welcome page opens a new untitled file (as in VS Code); a single
 //! click does nothing.
 
-use super::test_support::{empty_store, install_globals, new_window, open_window};
+use super::test_support::{install_globals, new_window, open_window};
 use super::*;
 use crate::settings::Settings;
 #[allow(unused_imports)]
@@ -28,7 +28,7 @@ fn click(cx: &mut VisualTestContext, position: Point<Pixels>, click_count: usize
 
 #[gpui_kit::test]
 async fn a_double_click_on_the_welcome_page_opens_an_untitled_file(cx: &mut TestAppContext) {
-    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (window, this) = open_window(cx, None, Settings::default());
     cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
         .unwrap();
     let cx = &mut VisualTestContext::from_window(window.into(), cx);
@@ -48,7 +48,7 @@ async fn a_double_click_on_the_welcome_page_opens_an_untitled_file(cx: &mut Test
 
 #[gpui_kit::test]
 async fn restored_tabs_stay_in_sight_on_the_welcome_page(cx: &mut TestAppContext) {
-    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (window, this) = open_window(cx, None, Settings::default());
     // Never read: the paths only have to name files.
     let tabs = vec![
         PathBuf::from("/zj-test/a.txt"),
@@ -84,7 +84,7 @@ async fn restored_tabs_stay_in_sight_on_the_welcome_page(cx: &mut TestAppContext
 #[gpui_kit::test]
 async fn editor_backgrounds_do_not_fill_the_workbench_corners(cx: &mut TestAppContext) {
     use gpui_kit::component::{Theme, ThemeMode};
-    let (handle, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (handle, this) = open_window(cx, None, Settings::default());
     for mode in [ThemeMode::Light, ThemeMode::Dark] {
         for tabs in 0..3 {
             cx.update_window(handle.into(), |_, window, cx| {
@@ -154,14 +154,12 @@ async fn editor_backgrounds_do_not_fill_the_workbench_corners(cx: &mut TestAppCo
 #[gpui_kit::test]
 async fn workbench_seams_stay_quiet_and_dividers_still_resize(cx: &mut TestAppContext) {
     use gpui_kit::component::{Theme, ThemeMode};
-    let (handle, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (handle, this) = open_window(cx, None, Settings::default());
     for mode in [ThemeMode::Light, ThemeMode::Dark] {
         cx.update_window(handle.into(), |_, window, cx| {
             Theme::change(mode, Some(window), cx);
             this.update(cx, |p, cx| {
                 p.sidebar_visible = true;
-                p.agent.visible = true;
-                p.agent.width = px(300.);
                 cx.notify();
             });
             window.simulate_mouse_move(point(px(0.), px(0.)), cx);
@@ -169,14 +167,10 @@ async fn workbench_seams_stay_quiet_and_dividers_still_resize(cx: &mut TestAppCo
             window.render_frame(cx);
             let sidebar = window.find("workbench-sidebar").bounds();
             let editor = window.find("workbench-editor").bounds();
-            let agent = window.find("agent-panel").bounds();
             let scale = window.scale_factor();
             let colors = theme::colors(cx);
             let divider_color = Theme::global(cx).border;
-            let seams = [
-                (sidebar.right() + editor.left()) / 2.,
-                (editor.right() + agent.left()) / 2.,
-            ];
+            let seams = [(sidebar.right() + editor.left()) / 2.];
             let quads = window.painted_quads();
             for x in seams {
                 let probe = point(x + px(0.5), editor.top() + px(80.)).scale(scale);
@@ -201,9 +195,8 @@ async fn workbench_seams_stay_quiet_and_dividers_still_resize(cx: &mut TestAppCo
                 "title bar paints a full-width bottom border in {mode:?}"
             );
             assert_eq!(sidebar.left(), px(2.));
-            assert_eq!(window.viewport_size().width - agent.right(), px(2.));
+            assert_eq!(window.viewport_size().width - editor.right(), px(2.));
             assert_eq!(editor.left() - sidebar.right(), px(4.));
-            assert_eq!(agent.left() - editor.right(), px(4.));
             let command_center = window.find("command-center").bounds();
             assert_eq!(command_center.top(), px(2.5));
             assert_eq!(editor.top() - command_center.bottom(), px(2.5));
@@ -213,10 +206,8 @@ async fn workbench_seams_stay_quiet_and_dividers_still_resize(cx: &mut TestAppCo
             );
             assert_eq!(sidebar.top(), editor.top());
             assert_eq!(sidebar.bottom(), editor.bottom());
-            assert_eq!(agent.top(), editor.top());
-            assert_eq!(agent.bottom(), editor.bottom());
 
-            let divider = point(seams[1], editor.center().y);
+            let divider = point(seams[0], editor.center().y);
             window.simulate_mouse_move(divider, cx);
             window.render_frame(cx);
             window.render_frame(cx);
@@ -234,12 +225,8 @@ async fn workbench_seams_stay_quiet_and_dividers_still_resize(cx: &mut TestAppCo
             window.drag(divider, divider - point(px(40.), px(0.)), cx);
             window.render_frame(cx);
             window.render_frame(cx);
-            let resized = window.find("agent-panel").bounds();
-            assert!(resized.size.width > agent.size.width + px(20.));
-            assert!(
-                f32::from(resized.size.width - this.read(cx).agent.width).abs() < 1.,
-                "divider drag did not persist the visible Agent width"
-            );
+            let resized = window.find("workbench-sidebar").bounds();
+            assert!(resized.size.width < sidebar.size.width - px(20.));
         })
         .unwrap();
     }
@@ -249,10 +236,10 @@ async fn workbench_seams_stay_quiet_and_dividers_still_resize(cx: &mut TestAppCo
 async fn workbench_panels_fit_small_windows_with_every_visibility_combination(
     cx: &mut TestAppContext,
 ) {
-    let documents = cx.update(|cx| install_globals(cx, Settings::default(), empty_store()));
+    let documents = cx.update(|cx| install_globals(cx, Settings::default()));
     for width in [760., 1024.] {
-        for (sidebar, agent) in [(true, true), (true, false), (false, true), (false, false)] {
-            let (handle, this) = cx.update(|cx| {
+        for sidebar in [true, false] {
+            let (handle, _this) = cx.update(|cx| {
                 let (handle, this) = new_window(
                     cx,
                     None,
@@ -261,8 +248,6 @@ async fn workbench_panels_fit_small_windows_with_every_visibility_combination(
                 );
                 this.update(cx, |p, cx| {
                     p.sidebar_visible = sidebar;
-                    p.agent.visible = agent;
-                    p.agent.width = theme::AGENT_PANEL_MIN;
                     cx.notify();
                 });
                 (handle, this)
@@ -278,15 +263,6 @@ async fn workbench_panels_fit_small_windows_with_every_visibility_combination(
                 if sidebar {
                     let bounds = window.find("workbench-sidebar").bounds();
                     assert!(bounds.right() < editor.left(), "sidebar overlaps editor");
-                    panels.push(bounds);
-                }
-                if agent {
-                    let bounds = window.find("agent-panel").bounds();
-                    assert!(editor.right() < bounds.left(), "editor overlaps Agent");
-                    assert!(
-                        f32::from(bounds.size.width - this.read(cx).agent.width).abs() < 1.,
-                        "stored Agent width differs from its visible panel",
-                    );
                     panels.push(bounds);
                 }
                 for bounds in panels {

@@ -214,9 +214,9 @@ impl Workbench {
                 None,
             ),
             Ok(blame) => {
-                let now = workspace_editor_agent_history::now_ms();
-                let offset = crate::agent_model::local_offset(now);
-                let age = crate::agent_model::relative_time(blame.time * 1000, now, offset);
+                let now = crate::time::now_ms();
+                let offset = crate::time::local_offset(now);
+                let age = crate::time::relative_time(blame.time * 1000, now, offset);
                 let short: String = blame.commit.chars().take(7).collect();
                 (
                     format!("{}，{age} · {}", blame.author, blame.summary)

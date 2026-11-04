@@ -28,16 +28,6 @@ use workspace_editor_git::{
     WriteOperation, WriteRequest,
 };
 
-mod agent;
-pub use agent::{
-    AddSelectionToAgent, NewAgentSession, NextApproval, SearchSessions, ToggleAgentPanel,
-    init_notifications as init_agent_notifications, init_store as init_agent_store,
-};
-mod agent_history;
-mod agent_panel;
-mod agent_review;
-pub use agent_review::{AcceptAgentChange, RejectAgentChange};
-mod agent_search;
 mod blame;
 mod chrome;
 mod commands;
@@ -104,15 +94,9 @@ pub(crate) mod recovery;
 mod reopen_ui_tests;
 mod scm;
 mod scm_actions;
-mod scm_message;
 mod scm_tree;
 mod search_replace;
 mod search_view;
-mod selection_actions;
-pub use selection_actions::ShowSelectionActions;
-#[cfg(test)]
-#[path = "workbench/selection_actions_ui_tests.rs"]
-mod selection_actions_ui_tests;
 #[cfg(test)]
 #[path = "workbench/session_ui_tests.rs"]
 mod session_ui_tests;
@@ -232,9 +216,6 @@ struct Document {
     unedited_when_deleted: Option<u64>,
     /// The file changed on disk while the buffer had edits.
     banner: Option<documents::Banner>,
-    /// `version` when an agent last read the unsaved text: if nothing was typed since, the
-    /// file the agent writes back replaces the buffer instead of raising the banner.
-    agent_read: Option<u64>,
     auto_save: crate::save::Debounce,
     auto_save_task: Option<Task<()>>,
     /// Automatic settings completion stays unsaved until a user edit or explicit save.
@@ -268,8 +249,6 @@ enum DiffSource {
     Git(Request),
     /// A full-context patch built in the app (the Search view's replace preview).
     Local(Arc<str>),
-    /// An agent's changes to review (built from the client's snapshot or proposal).
-    Agent(agent_review::AgentDiff),
 }
 
 impl DiffTab {
@@ -277,14 +256,7 @@ impl DiffTab {
     fn request(&self) -> Option<&Request> {
         match &self.source {
             DiffSource::Git(request) => Some(request),
-            DiffSource::Local(_) | DiffSource::Agent(_) => None,
-        }
-    }
-
-    fn agent(&self) -> Option<&agent_review::AgentDiff> {
-        match &self.source {
-            DiffSource::Agent(diff) => Some(diff),
-            _ => None,
+            DiffSource::Local(_) => None,
         }
     }
 }
@@ -306,7 +278,6 @@ struct Group {
     staged_folders_collapsed: HashSet<PathBuf>,
     changes_folders_collapsed: HashSet<PathBuf>,
     commit_input: Entity<TextareaState>,
-    commit_generation: Option<scm_message::Generation>,
     _commit_subscription: Subscription,
     write_task: Option<Task<()>>,
     write_pending: bool,
@@ -425,7 +396,6 @@ pub struct Workbench {
     sidebar: Sidebar,
     sidebar_visible: bool,
     quick_open: Option<quick_open::QuickOpen>,
-    selection_actions: Option<selection_actions::SelectionActions>,
     /// 命令面板里最近执行的命令名称，新的在前（只在内存，不持久化）。
     command_history: Vec<&'static str>,
     active: Pane,
@@ -489,8 +459,6 @@ pub struct Workbench {
     refresh_task: Option<Task<()>>,
     /// File watching: the shared subscription, the debounce task and refreshes waiting for a quiet moment.
     watch: workspace_refresh::WatchState,
-    /// The agent panel: sessions, thread view, history and the ⌘J search.
-    agent: agent::AgentPanel,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -526,7 +494,6 @@ impl Workbench {
             if this.diff.tab.is_some() {
                 this.load_diff(window, cx);
             }
-            this.agent_rehighlight(cx);
         });
         // Another window (or this one) changed a setting that changes what is listed.
         let settings =
@@ -550,21 +517,11 @@ impl Workbench {
                         this.schedule_search(Duration::ZERO, window, cx);
                     }
                     this.update_quick_open(window, cx);
-                    if this.agent.mention.is_some() {
-                        this.agent_composer_changed(window, cx);
-                    }
                 }
-                this.agent_follow_settings(cx);
             });
-        // Sessions deleted from the history (here or in another window).
-        let deletions = cx.observe_global::<agent::history::HistoryDeletions>(|this, cx| {
-            this.agent_forget_deleted(cx)
-        });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.switch_hud_activation(window, cx);
             this.input_area_activation(window, cx);
-            this.agent_update_spin(window, cx);
-            this.agent_reclaim_idle(cx);
             if window.is_window_active() {
                 // Files opened from outside the workspace are not watched: look on activation.
                 this.check_disk(None, window, cx);
@@ -577,21 +534,6 @@ impl Workbench {
             }
         });
         crate::session::remember(window, root.as_deref(), true, cx);
-        // A buffer saved in any window may be a file an agent here changed: its review and
-        // line counts compare against what is on disk now.
-        let saved_view = cx.weak_entity();
-        let saved_window = window.window_handle();
-        documents::on_buffer_saved(cx, move |path, cx| {
-            let path = path.to_path_buf();
-            let saved_view = saved_view.clone();
-            // Deferred: the saving window's workbench is still being updated here.
-            cx.defer(move |cx| {
-                let _ = saved_window.update(cx, |_, window, cx| {
-                    let _ =
-                        saved_view.update(cx, |this, cx| this.agent_file_saved(&path, window, cx));
-                });
-            });
-        });
         let frame = cx.observe_window_bounds(window, |this, window, cx| {
             crate::session::remember(window, this.root.as_deref(), false, cx);
         });
@@ -620,7 +562,6 @@ impl Workbench {
         window.set_window_title(&format!("ZJ · {name}"));
         let search = search_view::SearchState::new(window, cx);
         let find = find_widget::FindState::new(window, cx);
-        let agent = agent::AgentPanel::new(window, cx);
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             root,
@@ -632,7 +573,6 @@ impl Workbench {
             sidebar: Sidebar::Explorer,
             sidebar_visible: true,
             quick_open: None,
-            selection_actions: None,
             command_history: Vec::new(),
             active: Pane::Welcome,
             documents: Vec::new(),
@@ -712,7 +652,6 @@ impl Workbench {
                 task: None,
                 pending_place: None,
             },
-            // Top / bottom by default: the right side of the window is kept for an agent panel.
             graph: None,
             large: None,
             tab_menu_focus: None,
@@ -742,17 +681,12 @@ impl Workbench {
                 remote_manual: false,
                 last_remote_check: None,
             },
-            agent,
-            _subscriptions: vec![appearance, activation, settings, deletions, frame],
+            _subscriptions: vec![appearance, activation, settings, frame],
         };
         this.start_watching(window, cx);
         this.refresh_tree(window, cx);
         this.focus_handle.focus(window, cx);
         this.refresh(window, cx);
-        if this.agent.visible {
-            this.agent_ensure_session(cx);
-            this.agent_sync_quota_timer(cx);
-        }
         // Snapshots an abnormal exit left: first each window takes its folder's, then (one
         // round later, once every window has had its turn) the first takes the rest.
         crate::perf::first_frame(window);
@@ -988,9 +922,6 @@ impl Workbench {
                 }
                 this.resume_search(window, cx);
                 this.update_quick_open(window, cx);
-                if this.agent.mention.is_some() {
-                    this.agent_composer_changed(window, cx);
-                }
                 this.flush_workspace_refresh(window, cx);
             });
         }));
@@ -1200,7 +1131,6 @@ impl Workbench {
         {
             self.auto_save_on_focus_change(Some(previous), window, cx);
         }
-        self.selection_actions = None;
         self.active = pane;
         self.explorer.reveal_pending = self.active_document().map(|(path, _)| path.clone());
         self.clear_tree_selection_for(pane);
@@ -1256,54 +1186,6 @@ impl Workbench {
                 .scroll
                 .scroll_to_item(index, ScrollStrategy::Nearest);
             self.explorer.reveal_pending = None;
-        }
-    }
-
-    /// A directory link reuses a workspace that contains it, or opens another workspace.
-    fn open_directory_link(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if self
-            .root
-            .as_ref()
-            .is_some_and(|root| path.starts_with(root))
-        {
-            self.show_directory(path, window, cx);
-            return;
-        }
-        let existing = cx
-            .windows()
-            .into_iter()
-            .filter_map(|handle| {
-                let view = handle
-                    .downcast::<gpui_kit::base::Root>()?
-                    .read(cx)
-                    .ok()?
-                    .view()
-                    .clone()
-                    .downcast::<Workbench>()
-                    .ok()?;
-                if view.entity_id() == cx.entity_id() {
-                    return None;
-                }
-                let depth = view
-                    .read(cx)
-                    .root
-                    .as_ref()
-                    .filter(|root| path.starts_with(root))?
-                    .components()
-                    .count();
-                Some((depth, handle, view))
-            })
-            .max_by_key(|(depth, _, _)| *depth);
-        if let Some((_, handle, view)) = existing {
-            if let Err(error) = handle.update(cx, |_, window, cx| {
-                view.update(cx, |this, cx| this.show_directory(path, window, cx));
-                window.activate_window();
-            }) {
-                self.message = format!("无法打开工作区：{error}");
-                cx.notify();
-            }
-        } else {
-            self.open_directory(path, window, cx);
         }
     }
 
@@ -2026,18 +1908,7 @@ impl Workbench {
                                         let subscription = cx.subscribe_in(
                                             &commit_input,
                                             window,
-                                            move |this, input, event: &InputEvent, _, cx| {
-                                                if matches!(event, InputEvent::Change)
-                                                    && let Some(group) = this
-                                                        .groups
-                                                        .iter_mut()
-                                                        .find(|g| g.commit_input == *input)
-                                                    && group.commit_generation.take().is_some()
-                                                {
-                                                    group.write_message =
-                                                        "已取消生成，保留手动编辑的提交信息".into();
-                                                    this.rebuild_rows();
-                                                }
+                                            move |_, _, _: &InputEvent, _, cx| {
                                                 cx.notify();
                                             },
                                         );
@@ -2053,7 +1924,6 @@ impl Workbench {
                                             staged_folders_collapsed: HashSet::new(),
                                             changes_folders_collapsed: HashSet::new(),
                                             commit_input,
-                                            commit_generation: None,
                                             _commit_subscription: subscription,
                                             write_task: None,
                                             write_pending: false,
@@ -2390,11 +2260,6 @@ impl Workbench {
             timing.mark("skipped");
             return;
         };
-        if diff.agent().is_some() {
-            timing.mark("agent");
-            self.load_agent_diff(None, window, cx);
-            return;
-        }
         let mut source = diff.source.clone();
         let title = diff.label.clone();
         self.diff.cancel.store(true, Ordering::Relaxed);
@@ -2442,8 +2307,6 @@ impl Workbench {
                     timing.mark("local");
                     patch
                 }
-                // Agent reviews load in `load_agent_diff`.
-                DiffSource::Agent(_) => return Err(std::io::Error::other("Agent 审阅不经过 Git")),
             };
             if cancel.load(Ordering::Relaxed) {
                 timing.mark("cancelled");
@@ -2606,76 +2469,42 @@ impl Render for Workbench {
                 .child(content)
                 .into_any_element()
         };
-        let agent_panel = self.agent.visible.then(|| self.render_agent_panel(cx));
-        let workbench = if self.sidebar_visible || agent_panel.is_some() {
-            // One layout per combination, so a hidden panel does not leave its size behind.
-            let id = match (self.sidebar_visible, agent_panel.is_some()) {
-                (true, true) => "workbench-panels-agent",
-                (false, true) => "workbench-editor-agent",
-                _ => "workbench-panels",
-            };
-            let mut group = h_resizable(id).with_handle_appearance(Rc::new(|handle, _, cx| {
-                // None restores Kit's full divider; an empty element keeps it quiet.
-                Some(
-                    div()
-                        .h_full()
-                        .w(theme::INDICATOR)
-                        .flex()
-                        .items_center()
-                        .when(
-                            handle.state() != gpui_kit::base::ResizeHandleState::Idle,
-                            |divider| {
-                                divider.child(
-                                    div()
-                                        .w(theme::INDICATOR)
-                                        .h(theme::TAB_HEIGHT)
-                                        .rounded_full()
-                                        .bg(theme::colors(cx).muted),
-                                )
-                            },
-                        )
-                        .into_any_element(),
-                )
-            }));
-            if self.sidebar_visible {
-                group = group.child(
-                    resizable_panel()
-                        .size(theme::SIDEBAR_WIDTH)
-                        .size_range(theme::SIDEBAR_MIN..theme::SIDEBAR_MAX)
-                        .child(inset(self.render_sidebar(cx))),
-                );
-            }
+        let workbench = if self.sidebar_visible {
+            let mut group =
+                h_resizable("workbench-panels").with_handle_appearance(Rc::new(|handle, _, cx| {
+                    // None restores Kit's full divider; an empty element keeps it quiet.
+                    Some(
+                        div()
+                            .h_full()
+                            .w(theme::INDICATOR)
+                            .flex()
+                            .items_center()
+                            .when(
+                                handle.state() != gpui_kit::base::ResizeHandleState::Idle,
+                                |divider| {
+                                    divider.child(
+                                        div()
+                                            .w(theme::INDICATOR)
+                                            .h(theme::TAB_HEIGHT)
+                                            .rounded_full()
+                                            .bg(theme::colors(cx).muted),
+                                    )
+                                },
+                            )
+                            .into_any_element(),
+                    )
+                }));
             group = group.child(
                 resizable_panel()
-                    .size_range(
-                        if self.sidebar_visible && agent_panel.is_some() {
-                            theme::EDITOR_COMPACT_MIN
-                        } else {
-                            theme::EDITOR_MIN
-                        }..theme::EDITOR_MAX,
-                    )
+                    .size(theme::SIDEBAR_WIDTH)
+                    .size_range(theme::SIDEBAR_MIN..theme::SIDEBAR_MAX)
+                    .child(inset(self.render_sidebar(cx))),
+            );
+            group = group.child(
+                resizable_panel()
+                    .size_range(theme::EDITOR_MIN..theme::EDITOR_MAX)
                     .child(inset(editor)),
             );
-            if let Some(panel) = agent_panel {
-                let weak = cx.weak_entity();
-                group = group
-                    .child(
-                        resizable_panel()
-                            .size(self.agent.width + theme::WORKBENCH_INSET * 2.)
-                            .size_range(
-                                (theme::AGENT_PANEL_MIN + theme::WORKBENCH_INSET * 2.)
-                                    ..(theme::AGENT_PANEL_MAX + theme::WORKBENCH_INSET * 2.),
-                            )
-                            .child(inset(panel)),
-                    )
-                    .on_resize(move |state, window, cx| {
-                        let Some(width) = state.read(cx).sizes().last().copied() else {
-                            return;
-                        };
-                        let width = width - theme::WORKBENCH_INSET * 2.;
-                        let _ = weak.update(cx, |this, cx| this.agent_resized(width, window, cx));
-                    });
-            }
             group.into_any_element()
         } else {
             inset(editor)
@@ -2830,24 +2659,6 @@ impl Render for Workbench {
                     this.navigate_forward(window, cx)
                 }),
             )
-            .on_action(cx.listener(|this, _: &ToggleAgentPanel, window, cx| {
-                this.toggle_agent_panel(window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &SearchSessions, window, cx| {
-                this.agent_open_search(window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &AddSelectionToAgent, window, cx| {
-                this.agent_add_selection(window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &ShowSelectionActions, window, cx| {
-                this.show_selection_actions(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &NextApproval, window, cx| {
-                this.agent_next_approval(window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &commands::ReviewAgentChanges, window, cx| {
-                this.agent_review_first(window, cx)
-            }))
             .bg(colors.title)
             .text_color(colors.foreground)
             .child(self.render_title_bar(window, cx))
@@ -2861,8 +2672,6 @@ impl Render for Workbench {
             )
             .child(self.render_status_bar(cx))
             .children(self.render_quick_open(window, cx))
-            .children(self.render_agent_search(cx))
             .children(self.render_switch_hud(cx))
-            .children(self.render_selection_actions(window, cx))
     }
 }

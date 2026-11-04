@@ -158,7 +158,7 @@ impl Workbench {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{empty_store, new_window, open_window};
+    use super::super::test_support::{new_window, open_window};
     use super::frame;
     use super::*;
     use crate::settings::Settings;
@@ -170,7 +170,7 @@ mod tests {
 
     #[gpui_kit::test]
     async fn only_a_switch_between_zj_windows_shows_the_name(cx: &mut TestAppContext) {
-        let (wa, a) = open_window(cx, None, Settings::default(), empty_store());
+        let (wa, a) = open_window(cx, None, Settings::default());
         let (wb, b) = cx.update(|cx| {
             let documents = cx.global::<OpenDocuments>().0.clone();
             let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1400.), px(900.)));

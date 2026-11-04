@@ -242,13 +242,13 @@ async fn batch_close_preserves_readonly_and_restored_tabs_on_cancel(cx: &mut Tes
 
 #[gpui_kit::test]
 async fn narrow_tabs_wrap_and_keep_their_close_behavior_in_both_themes(cx: &mut TestAppContext) {
-    use super::test_support::{empty_store, install_globals, loaded, new_window};
+    use super::test_support::{install_globals, loaded, new_window};
     use gpui_kit::component::{Theme, ThemeMode};
 
     cx.executor().allow_parking();
     let root = fixture("wrapped");
     let (window, this) = cx.update(|cx| {
-        let documents = install_globals(cx, crate::settings::Settings::default(), empty_store());
+        let documents = install_globals(cx, crate::settings::Settings::default());
         let (handle, this) = new_window(
             cx,
             Some(root.clone()),
@@ -257,7 +257,6 @@ async fn narrow_tabs_wrap_and_keep_their_close_behavior_in_both_themes(cx: &mut 
         );
         this.update(cx, |p, cx| {
             p.sidebar_visible = false;
-            p.agent.visible = false;
             cx.notify();
         });
         (handle.downcast::<Root>().unwrap(), this)

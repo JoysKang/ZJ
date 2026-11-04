@@ -796,7 +796,7 @@ impl Workbench {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
         let ms = commit.time.saturating_mul(1000);
-        let time = crate::agent_model::relative_time(ms, now, crate::agent_model::local_offset(ms));
+        let time = crate::time::relative_time(ms, now, crate::time::local_offset(ms));
         h_flex()
             .id(("graph-row", index))
             .w_full()
@@ -1481,7 +1481,7 @@ impl Workbench {
             "{} <{}> · {}",
             details.author,
             details.email,
-            crate::agent_model::relative_time(at, now, crate::agent_model::local_offset(at))
+            crate::time::relative_time(at, now, crate::time::local_offset(at))
         );
         let committed = (details.committer != details.author
             || details.committer_email != details.email)
@@ -1491,11 +1491,7 @@ impl Workbench {
                     "提交者 {} <{}> · {}",
                     details.committer,
                     details.committer_email,
-                    crate::agent_model::relative_time(
-                        ct,
-                        now,
-                        crate::agent_model::local_offset(ct)
-                    )
+                    crate::time::relative_time(ct, now, crate::time::local_offset(ct))
                 )
             });
         // The message repeats the subject; show the body only.
@@ -1738,7 +1734,7 @@ fn ref_chip(reference: &GraphRef, lane: Hsla, colors: theme::Colors) -> AnyEleme
         })
         .children(icon.map(|icon| {
             Icon::new(icon)
-                .size(theme::AGENT_GLYPH_ICON)
+                .size(theme::TEXT_CAPTION)
                 .when(!reference.head, |icon| icon.text_color(lane))
         }))
         .child(label)

@@ -1,6 +1,5 @@
 //! Headless windows and polling shared by the `*_ui_tests` modules.
 
-use super::agent::AgentStore;
 use super::*;
 use crate::settings::Settings;
 use gpui_kit::{TestAppContext, WindowBounds, WindowOptions, base::Root, test::TestWindowExt};
@@ -8,29 +7,16 @@ use gpui_kit::{TestAppContext, WindowBounds, WindowOptions, base::Root, test::Te
 /// Fake time per poll: views poll background work on 50 ms timers.
 pub(super) const TICK: Duration = Duration::from_millis(50);
 /// Polls before giving up. With `PAUSE` this allows at least 4 s of real time, enough for real
-/// Git calls, a shell on a pty and the fake agent child process.
+/// Git calls, a shell on a pty.
 const TRIES: usize = 400;
 const PAUSE: Duration = Duration::from_millis(10);
 
-pub(super) fn empty_store() -> AgentStore {
-    AgentStore {
-        history: None,
-        default_workspace: None,
-    }
-}
-
 /// Initializes Kit and sets the globals a window needs; returns the shared documents.
-pub(super) fn install_globals(
-    cx: &mut App,
-    settings: Settings,
-    store: AgentStore,
-) -> DocumentOwners {
+pub(super) fn install_globals(cx: &mut App, settings: Settings) -> DocumentOwners {
     gpui_kit::init(cx);
     cx.set_app_identity("local.zj.editor", "ZJ");
-    super::init_agent_notifications(cx);
     cx.set_global(settings);
     cx.set_global(crate::watch::WatchService::default());
-    cx.set_global(store);
     let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
     cx.set_global(OpenDocuments(documents.clone()));
     documents
@@ -60,10 +46,9 @@ pub(super) fn open_window(
     cx: &mut TestAppContext,
     root: Option<PathBuf>,
     settings: Settings,
-    store: AgentStore,
 ) -> (WindowHandle<Root>, Entity<Workbench>) {
     cx.update(|cx| {
-        let documents = install_globals(cx, settings, store);
+        let documents = install_globals(cx, settings);
         let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1400.), px(900.)));
         let (window, this) = new_window(cx, root, documents, bounds);
         (window.downcast::<Root>().unwrap(), this)
@@ -75,7 +60,7 @@ pub(super) fn open(
     cx: &mut TestAppContext,
     root: PathBuf,
 ) -> (WindowHandle<Root>, Entity<Workbench>) {
-    let (window, this) = open_window(cx, Some(root), Settings::default(), empty_store());
+    let (window, this) = open_window(cx, Some(root), Settings::default());
     wait(
         cx,
         Some(TICK),

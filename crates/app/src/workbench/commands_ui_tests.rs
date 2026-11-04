@@ -274,54 +274,10 @@ async fn shift_cmd_p_runs_commands_and_remembers_recent(cx: &mut TestAppContext)
 }
 
 #[gpui_kit::test]
-async fn review_current_session_command_reports_empty_states(cx: &mut TestAppContext) {
-    use super::test_support::{empty_store, install_globals, new_window};
-    let (handle, this) = cx.update(|cx| {
-        let owners = install_globals(cx, crate::settings::Settings::default(), empty_store());
-        let (handle, this) = new_window(
-            cx,
-            None,
-            owners,
-            Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(800.))),
-        );
-        (handle.downcast::<Root>().unwrap(), this)
-    });
-    for has_session in [false, true] {
-        cx.update_window(handle.into(), |_, window, cx| {
-            this.update(cx, |p, cx| {
-                if has_session {
-                    p.agent_ensure_session(cx);
-                } else {
-                    p.agent.current = None;
-                }
-                p.open_quick_open_with(">审阅当前会话修改", window, cx);
-            });
-            window.render_frame(cx);
-        })
-        .unwrap();
-        let matching = rows(cx, &this);
-        assert_eq!(matching, [("Agent: 审阅当前会话修改".into(), Vec::new())]);
-        press(cx, handle, "enter");
-        this.read_with(cx, |p, _| {
-            assert!(p.quick_open.is_none());
-            assert!(p.diff.tab.is_none());
-            assert_eq!(
-                p.message,
-                if has_session {
-                    "当前会话没有待审阅的修改"
-                } else {
-                    "没有当前 Agent 会话可审阅"
-                }
-            );
-        });
-    }
-}
-
-#[gpui_kit::test]
 async fn command_results_and_footer_stay_visible_in_a_low_window(cx: &mut TestAppContext) {
-    use super::test_support::{empty_store, install_globals, new_window};
+    use super::test_support::{install_globals, new_window};
     let (handle, this) = cx.update(|cx| {
-        let owners = install_globals(cx, crate::settings::Settings::default(), empty_store());
+        let owners = install_globals(cx, crate::settings::Settings::default());
         let (handle, this) = new_window(
             cx,
             None,
@@ -412,12 +368,11 @@ async fn command_results_and_footer_stay_visible_in_a_low_window(cx: &mut TestAp
 async fn the_command_center_is_centered_in_the_window_and_still_opens_search(
     cx: &mut TestAppContext,
 ) {
-    use super::test_support::{empty_store, install_globals, new_window};
+    use super::test_support::{install_globals, new_window};
     use gpui_kit::component::{Theme, ThemeMode};
     for width in [760., 1400., 1728.] {
         let (handle, this) = cx.update(|cx| {
-            let documents =
-                install_globals(cx, crate::settings::Settings::default(), empty_store());
+            let documents = install_globals(cx, crate::settings::Settings::default());
             let bounds = Bounds::new(point(px(120.), px(80.)), size(px(width), px(900.)));
             let (window, this) = new_window(cx, None, documents, bounds);
             (window.downcast::<Root>().unwrap(), this)
@@ -433,7 +388,6 @@ async fn the_command_center_is_centered_in_the_window_and_still_opens_search(
                     for visible in [true, false] {
                         this.update(cx, |p, cx| {
                             p.sidebar_visible = visible;
-                            p.agent.visible = visible;
                             cx.notify();
                         });
                         window.render_frame(cx);
@@ -441,7 +395,7 @@ async fn the_command_center_is_centered_in_the_window_and_still_opens_search(
                         let midpoint = window.viewport_size().width / 2.;
                         assert!((center.center().x - midpoint).abs() <= px(0.5),
                             "search is not centered: width={width}, fullscreen={fullscreen}, visible={visible}, bounds={center:?}, midpoint={midpoint:?}");
-                        for id in ["new-window", "toggle-sidebar", "toggle-terminal", "toggle-agent"] {
+                        for id in ["new-window", "toggle-sidebar", "toggle-terminal"] {
                             let control = window.find(id).bounds();
                             assert!(control.left() >= center.right(), "{id} overlaps search");
                             assert!(control.right() <= window.viewport_size().width);

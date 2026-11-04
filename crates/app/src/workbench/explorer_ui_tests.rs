@@ -1429,11 +1429,8 @@ async fn narrow_sidebar_keeps_navigation_badge_actions_and_search_focus(cx: &mut
         fs::write(root.join(format!("change-{index}.txt")), "change").unwrap();
     }
     let (handle, this) = cx.update(|cx| {
-        let documents = super::test_support::install_globals(
-            cx,
-            crate::settings::Settings::default(),
-            super::test_support::empty_store(),
-        );
+        let documents =
+            super::test_support::install_globals(cx, crate::settings::Settings::default());
         let service = GitService::new(1, Duration::from_secs(5)).unwrap();
         let mut this = None;
         let (handle, _) = gpui_kit::open_window(

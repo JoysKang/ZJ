@@ -1,6 +1,6 @@
 //! Diff navigation uses the displayed version, not the on-disk file.
 use super::diff_navigation::Caret;
-use super::test_support::{empty_store, open_window, settle};
+use super::test_support::{open_window, settle};
 use super::*;
 #[allow(unused_imports)]
 use core::prelude::v1::test;
@@ -55,12 +55,7 @@ const PATCH: &str = "--- a/a.py\n+++ b/a.py\n@@ -1,4 +1,5 @@\n+value = 1\n def h
 #[gpui_kit::test]
 async fn diff_ctrl_g_selects_the_clicked_side_and_history_returns(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let (handle, this) = open_window(
-        cx,
-        None,
-        crate::settings::Settings::default(),
-        empty_store(),
-    );
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
     cx.update(|cx| {
         cx.bind_keys([KeyBinding::new(
             "ctrl-g",
@@ -170,12 +165,7 @@ async fn diff_ctrl_g_selects_the_clicked_side_and_history_returns(cx: &mut TestA
 #[gpui_kit::test]
 async fn diff_cmd_click_and_f12_use_each_versions_definition(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let (handle, this) = open_window(
-        cx,
-        None,
-        crate::settings::Settings::default(),
-        empty_store(),
-    );
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
     cx.update(|cx| {
         cx.bind_keys([KeyBinding::new(
             "f12",
@@ -257,12 +247,7 @@ async fn diff_multiple_definitions_keep_version_routing_and_reject_stale_picker(
     cx: &mut TestAppContext,
 ) {
     cx.executor().allow_parking();
-    let (handle, this) = open_window(
-        cx,
-        None,
-        crate::settings::Settings::default(),
-        empty_store(),
-    );
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
     let patch = "--- a/a.py\n+++ b/a.py\n@@ -1,5 +1,5 @@\n helper()\n def helper():\n-    return 0\n+    return 1\n def helper():\n     return 2\n";
     for replace_doc in [false, true] {
         show(cx, handle, &this, patch);
@@ -310,12 +295,7 @@ async fn diff_multiple_definitions_keep_version_routing_and_reject_stale_picker(
 #[gpui_kit::test]
 async fn diff_delayed_definition_does_not_change_a_new_comparison(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let (handle, this) = open_window(
-        cx,
-        None,
-        crate::settings::Settings::default(),
-        empty_store(),
-    );
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
     show(cx, handle, &this, PATCH);
     cx.update_window(handle.into(), |_, window, cx| {
         this.update(cx, |p, cx| {
@@ -351,12 +331,7 @@ async fn diff_definition_in_another_file_opens_the_file_and_returns_to_diff(
     std::fs::write(&target, "def helper(x):\n    return x\n").unwrap();
     let index =
         crate::symbol_index::SymbolIndex::build(vec![target.clone()], &AtomicBool::new(false));
-    let (handle, this) = open_window(
-        cx,
-        None,
-        crate::settings::Settings::default(),
-        empty_store(),
-    );
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
     show(
         cx,
         handle,
@@ -400,12 +375,7 @@ async fn diff_definition_in_another_file_opens_the_file_and_returns_to_diff(
 #[gpui_kit::test]
 async fn deleted_file_definition_stays_in_original_inline_version(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let (handle, this) = open_window(
-        cx,
-        None,
-        crate::settings::Settings::default(),
-        empty_store(),
-    );
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
     let patch = "--- a/a.py\n+++ /dev/null\n@@ -1,4 +0,0 @@\n-def helper(x):\n-    return x\n-\n-helper(0)\n";
     show(cx, handle, &this, patch);
     cx.update_window(handle.into(), |_, window, cx| {
@@ -416,7 +386,7 @@ async fn deleted_file_definition_stays_in_original_inline_version(cx: &mut TestA
                 line: 3,
                 column: 1,
             });
-            // Agent / local comparisons also work when only the source patch is retained.
+            // Local comparisons also work when only the source patch is retained.
             p.diff.raw = None;
             p.diff_go_to_definition(window, cx);
         })
@@ -438,12 +408,7 @@ async fn diff_ctrl_g_counts_original_characters_before_f12_with_or_without_raw(
     cx: &mut TestAppContext,
 ) {
     cx.executor().allow_parking();
-    let (handle, this) = open_window(
-        cx,
-        None,
-        crate::settings::Settings::default(),
-        empty_store(),
-    );
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
     cx.update(|cx| {
         cx.bind_keys([
             KeyBinding::new("ctrl-g", navigation::GoToLine, Some("WorkspaceEditor")),
@@ -502,12 +467,7 @@ async fn diff_ctrl_g_counts_original_characters_before_f12_with_or_without_raw(
 #[gpui_kit::test]
 async fn diff_history_survives_generation_change_and_skips_replaced_docs(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let (handle, this) = open_window(
-        cx,
-        None,
-        crate::settings::Settings::default(),
-        empty_store(),
-    );
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
     show(cx, handle, &this, PATCH);
     let stale = cx
         .update_window(handle.into(), |_, window, cx| {
@@ -571,12 +531,7 @@ async fn renamed_diff_original_side_uses_original_language_and_current_tab_route
     cx: &mut TestAppContext,
 ) {
     cx.executor().allow_parking();
-    let (handle, this) = open_window(
-        cx,
-        None,
-        crate::settings::Settings::default(),
-        empty_store(),
-    );
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
     for commit in [false, true] {
         show(cx, handle, &this, PATCH);
         cx.update_window(handle.into(), |_, window, cx| {
@@ -639,12 +594,7 @@ async fn diff_navigation_reveals_columns_and_returns_from_horizontal_scroll(
     cx: &mut TestAppContext,
 ) {
     cx.executor().allow_parking();
-    let (handle, this) = open_window(
-        cx,
-        None,
-        crate::settings::Settings::default(),
-        empty_store(),
-    );
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
     let long = format!("{}界🙂", "x".repeat(300));
     let patch = format!(
         "--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,2 @@\n def helper(): return 1 # {long}\n-helper() # {long}\n+helper() # {long} changed\n"

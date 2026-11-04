@@ -1,7 +1,7 @@
 //! 保存与自动保存，在无头窗口里、临时文件夹上：自动保存不会把磁盘上已删除的文件重新写回来；
-//! 手动保存写入磁盘并经过保存钩子（钩子延后执行，不在保存窗口更新期间重入）。
+//! 手动保存写入磁盘，保存或关闭期间的新编辑仍受版本校验保护。
 
-use super::test_support::{TICK, empty_store, loaded, open_window, settle, wait};
+use super::test_support::{TICK, loaded, open_window, settle, wait};
 use super::*;
 use crate::save::AutoSave;
 use crate::settings::Settings;
@@ -52,7 +52,7 @@ fn open_edited_buffer(
         auto_save: mode,
         ..Settings::default()
     };
-    let (window, this) = open_window(cx, Some(root.to_path_buf()), settings, empty_store());
+    let (window, this) = open_window(cx, Some(root.to_path_buf()), settings);
     wait(
         cx,
         Some(TICK),
@@ -86,7 +86,7 @@ async fn a_save_result_for_the_previous_path_keeps_the_buffer_dirty(cx: &mut Tes
     let root = std::env::temp_dir().join(format!("zj-save-moved-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let root = std::fs::canonicalize(root).unwrap();
-    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (window, this) = open_window(cx, None, Settings::default());
     let id = edited_untitled(cx, window.into(), &this);
     let old = root.join("old.txt");
     let task = cx
@@ -137,7 +137,7 @@ async fn save_as_refuses_a_hard_link_to_another_windows_open_file(cx: &mut TestA
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let root = std::fs::canonicalize(root).unwrap();
-    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (window, this) = open_window(cx, None, Settings::default());
     let first = edited_untitled(cx, window.into(), &this);
     let path = root.join("original.txt");
     let task = cx
@@ -167,7 +167,7 @@ async fn save_as_refuses_a_hard_link_to_another_windows_open_file(cx: &mut TestA
 #[gpui_kit::test]
 async fn quit_rechecks_earlier_discard_approvals_and_new_windows(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (window, this) = open_window(cx, None, Settings::default());
     let first = edited_untitled(cx, window.into(), &this);
     let approval = cx
         .update_window(window.into(), |_, window, cx| {
@@ -215,7 +215,7 @@ async fn quit_rechecks_earlier_discard_approvals_and_new_windows(cx: &mut TestAp
 #[gpui_kit::test]
 async fn closing_tabs_rechecks_files_edited_while_the_prompt_is_open(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (window, this) = open_window(cx, None, Settings::default());
     let (first, second) = cx
         .update_window(window.into(), |_, window, cx| {
             this.update(cx, |p, cx| {
@@ -252,7 +252,7 @@ async fn closing_tabs_rechecks_files_edited_while_the_prompt_is_open(cx: &mut Te
 #[gpui_kit::test]
 async fn closing_a_window_rechecks_new_dirty_tabs(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (window, this) = open_window(cx, None, Settings::default());
     let add_edited = |cx: &mut TestAppContext| {
         let editor = cx
             .update_window(window.into(), |_, window, cx| {
@@ -290,7 +290,7 @@ async fn save_as_serializes_the_same_buffer_and_reserves_its_destination(cx: &mu
     let root = std::env::temp_dir().join(format!("zj-save-as-race-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let root = std::fs::canonicalize(root).unwrap();
-    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (window, this) = open_window(cx, None, Settings::default());
     let (first, second) = cx
         .update_window(window.into(), |_, window, cx| {
             this.update(cx, |p, cx| {
@@ -344,7 +344,7 @@ async fn saving_before_close_keeps_edits_made_after_an_earlier_file_was_saved(
     let root = std::env::temp_dir().join(format!("zj-close-save-edit-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let root = std::fs::canonicalize(root).unwrap();
-    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (window, this) = open_window(cx, None, Settings::default());
     let mut ids = Vec::new();
     for name in ["a.txt", "b.txt"] {
         let (id, task) = cx
@@ -369,20 +369,28 @@ async fn saving_before_close_keeps_edits_made_after_an_earlier_file_was_saved(
         p.documents.iter().all(|doc| doc.dirty && doc.version > 0)
     }));
     let edited = this.read_with(cx, |p, _| p.document(ids[0]).unwrap().editor.clone());
-    let saved_path = root.join("a.txt");
-    cx.update(|cx| {
-        documents::on_buffer_saved(cx, move |path, cx| {
-            if path == saved_path {
-                let edited = edited.clone();
-                cx.defer(move |cx| {
-                    cx.update_window(window.into(), |_, window, cx| {
-                        edited.update(cx, |state, cx| {
-                            state.replace_text_in_range(Some(0..0), "later ", window, cx)
-                        });
-                    })
-                    .unwrap();
-                });
+    let first = ids[0];
+    let _saved = cx.update(|cx| {
+        let mut injected = false;
+        cx.observe(&this, move |view, cx| {
+            if injected
+                || view
+                    .read(cx)
+                    .document(first)
+                    .is_none_or(|doc| doc.dirty || doc.saving)
+            {
+                return;
             }
+            injected = true;
+            let edited = edited.clone();
+            cx.defer(move |cx| {
+                cx.update_window(window.into(), |_, window, cx| {
+                    edited.update(cx, |state, cx| {
+                        state.replace_text_in_range(Some(0..0), "later ", window, cx)
+                    });
+                })
+                .unwrap();
+            });
         })
     });
     let close = cx
@@ -420,7 +428,7 @@ async fn focus_change_auto_save_leaves_a_deleted_file_deleted(cx: &mut TestAppCo
         auto_save: AutoSave::OnFocusChange,
         ..Settings::default()
     };
-    let (window, this) = open_window(cx, Some(root.clone()), settings, empty_store());
+    let (window, this) = open_window(cx, Some(root.clone()), settings);
     wait(
         cx,
         Some(TICK),
@@ -449,7 +457,7 @@ async fn focus_change_auto_save_leaves_a_deleted_file_deleted(cx: &mut TestAppCo
     });
     assert!(this.read_with(cx, |p, _| p.documents[0].dirty));
 
-    // Losing editor focus to the Agent composer must not recreate it.
+    // Losing editor focus to search must not recreate it.
     let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
     cx.update_window(window.into(), |_, window, cx| {
         window.activate_window();
@@ -460,9 +468,9 @@ async fn focus_change_auto_save_leaves_a_deleted_file_deleted(cx: &mut TestAppCo
     cx.run_until_parked();
     cx.update_window(window.into(), |_, window, cx| {
         this.update(cx, |p, cx| {
-            p.agent.visible = true;
-            p.agent
-                .composer
+            p.sidebar = Sidebar::Search;
+            p.search
+                .query
                 .update(cx, |state, cx| state.focus(window, cx));
         });
         window.render_frame(cx);
@@ -495,9 +503,9 @@ async fn editor_blur_auto_saves_without_a_tab_or_window_change(cx: &mut TestAppC
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\n");
     cx.update_window(window.into(), |_, window, cx| {
         this.update(cx, |p, cx| {
-            p.agent.visible = true;
-            p.agent
-                .composer
+            p.sidebar = Sidebar::Search;
+            p.search
+                .query
                 .update(cx, |state, cx| state.focus(window, cx));
         });
         window.render_frame(cx);
@@ -511,8 +519,8 @@ async fn editor_blur_auto_saves_without_a_tab_or_window_change(cx: &mut TestAppC
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "twoone\n");
     this.read_with(cx, |p, _| assert_eq!(p.active, Pane::Document(id)));
     cx.update_window(window.into(), |_, window, cx| {
-        let composer = this.read(cx).agent.composer.read(cx).focus_handle(cx);
-        assert!(composer.is_focused(window));
+        let search = this.read(cx).search.query.read(cx).focus_handle(cx);
+        assert!(search.is_focused(window));
     })
     .unwrap();
     let _ = std::fs::remove_dir_all(&root);
@@ -542,9 +550,9 @@ async fn editor_blur_does_not_save_in_other_modes(cx: &mut TestAppContext) {
         cx.run_until_parked();
         cx.update_window(window.into(), |_, window, cx| {
             this.update(cx, |p, cx| {
-                p.agent.visible = true;
-                p.agent
-                    .composer
+                p.sidebar = Sidebar::Search;
+                p.search
+                    .query
                     .update(cx, |state, cx| state.focus(window, cx));
             });
             window.render_frame(cx);
@@ -612,15 +620,15 @@ async fn switching_auto_save_off_cancels_the_pending_delay(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
-async fn saving_an_edited_buffer_writes_it_and_runs_the_saved_hooks(cx: &mut TestAppContext) {
+async fn saving_an_edited_buffer_writes_it_and_marks_it_clean(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let root = std::env::temp_dir().join(format!("zj-save-hook-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("zj-save-clean-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let root = std::fs::canonicalize(root).unwrap();
     let path = root.join("a.rs");
     std::fs::write(&path, "fn main() {}\n").unwrap();
-    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    let (window, this) = open_window(cx, Some(root.clone()), Settings::default());
     wait(
         cx,
         Some(TICK),
@@ -666,7 +674,7 @@ async fn a_save_during_another_save_waits_and_writes_the_newer_text(cx: &mut Tes
     let root = std::fs::canonicalize(root).unwrap();
     let path = root.join("a.rs");
     std::fs::write(&path, "one\n").unwrap();
-    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    let (window, this) = open_window(cx, Some(root.clone()), Settings::default());
     wait(
         cx,
         Some(TICK),
@@ -729,7 +737,7 @@ async fn an_open_ignored_file_follows_changes_on_disk(cx: &mut TestAppContext) {
     std::fs::write(root.join(".gitignore"), ".env\n").unwrap();
     let path = root.join(".env");
     std::fs::write(&path, "A=1\n").unwrap();
-    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    let (window, this) = open_window(cx, Some(root.clone()), Settings::default());
     wait(
         cx,
         Some(TICK),
@@ -769,7 +777,7 @@ async fn a_focused_editor_is_still_when_nothing_happens(cx: &mut TestAppContext)
     let root = std::fs::canonicalize(root).unwrap();
     let path = root.join("a.rs");
     std::fs::write(&path, "fn main() {}\n").unwrap();
-    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    let (window, this) = open_window(cx, Some(root.clone()), Settings::default());
     wait(
         cx,
         Some(TICK),
@@ -814,7 +822,7 @@ async fn after_save_as_the_original_file_opens_in_its_own_tab(cx: &mut TestAppCo
     let root = std::fs::canonicalize(root).unwrap();
     let (a, b) = (root.join("a.rs"), root.join("b.rs"));
     std::fs::write(&a, "fn a() {}\n").unwrap();
-    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    let (window, this) = open_window(cx, Some(root.clone()), Settings::default());
     wait(
         cx,
         Some(TICK),
@@ -877,7 +885,7 @@ async fn a_file_deleted_and_restored_unchanged_leaves_its_tab_clean(cx: &mut Tes
     let root = std::fs::canonicalize(root).unwrap();
     let path = root.join("x.rs");
     std::fs::write(&path, "fn x() {}\n").unwrap();
-    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    let (window, this) = open_window(cx, Some(root.clone()), Settings::default());
     wait(
         cx,
         Some(TICK),
@@ -923,7 +931,7 @@ async fn a_change_on_disk_during_a_save_is_looked_at_afterwards(cx: &mut TestApp
     let root = std::fs::canonicalize(root).unwrap();
     let path = root.join("a.txt");
     std::fs::write(&path, "one\n").unwrap();
-    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    let (window, this) = open_window(cx, Some(root.clone()), Settings::default());
     wait(
         cx,
         Some(TICK),
@@ -976,7 +984,7 @@ async fn save_as_keeps_both_windows_in_quit_validation(cx: &mut TestAppContext) 
     let root = std::fs::canonicalize(root).unwrap();
     let (a, b) = (root.join("a.txt"), root.join("b.txt"));
     std::fs::write(&a, "original").unwrap();
-    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (window, this) = open_window(cx, None, Settings::default());
     cx.update_window(window.into(), |_, window, cx| {
         this.update(cx, |p, cx| p.open_file(a.clone(), None, window, cx));
     })
@@ -1020,7 +1028,7 @@ async fn manual_reload_keeps_edits_made_before_its_completion(cx: &mut TestAppCo
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("a.txt");
     std::fs::write(&path, "disk").unwrap();
-    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (window, this) = open_window(cx, None, Settings::default());
     cx.update_window(window.into(), |_, window, cx| {
         this.update(cx, |p, cx| p.open_file(path, None, window, cx));
     })
@@ -1058,7 +1066,7 @@ async fn a_hard_link_opened_elsewhere_keeps_one_editable_owner(cx: &mut TestAppC
     let (path, alias) = (root.join("a.txt"), root.join("alias.txt"));
     std::fs::write(&path, "original").unwrap();
     std::fs::hard_link(&path, &alias).unwrap();
-    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (window, this) = open_window(cx, None, Settings::default());
     cx.update_window(window.into(), |_, window, cx| {
         this.update(cx, |p, cx| p.open_file(path, None, window, cx));
     })

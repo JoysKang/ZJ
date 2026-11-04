@@ -371,16 +371,6 @@ impl Workbench {
             ))
             .on_action(cx.listener(|this, _: &CopyDiff, _, cx| this.copy_diff_selection(cx)))
             .on_action(cx.listener(|this, _: &SelectAllDiff, _, cx| this.diff_select_all(cx)))
-            .on_action(cx.listener(
-                |this, _: &super::agent_review::AcceptAgentChange, window, cx| {
-                    this.agent_review_current(true, window, cx)
-                },
-            ))
-            .on_action(cx.listener(
-                |this, _: &super::agent_review::RejectAgentChange, window, cx| {
-                    this.agent_review_current(false, window, cx)
-                },
-            ))
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _, _, _| this.diff.dragging = false),
@@ -468,8 +458,6 @@ impl Workbench {
         );
         // Block actions sit in the gutter of the list that shows the new text.
         let actions = kind != DiffList::Original && self.diff_partial_ok();
-        // Agent reviews: 接受 / 拒绝 instead of staging (the right list in side-by-side).
-        let agent_actions = kind != DiffList::Original && self.diff_is_agent_review();
         let staged = self.diff_staged();
         let list = uniform_list(
             id,
@@ -479,12 +467,6 @@ impl Workbench {
                     return Vec::new();
                 };
                 let colors = paint.colors;
-                // Rows are laid out after the list settles its scroll offset and bounds, so
-                // these are this frame's values.
-                let viewport = agent_actions.then(|| {
-                    let handle = &this.diff.scroll.0.borrow().base_handle;
-                    (handle.offset().x, handle.bounds().size.width)
-                });
                 range
                     .filter_map(|index| {
                         let selected = this.diff.selection.is_some_and(|s| s.contains(kind, index));
@@ -526,15 +508,14 @@ impl Workbench {
                             }),
                         }?;
                         let group: SharedString = format!("{id}-{index}").into();
-                        let block = (actions || agent_actions)
+                        let block = actions
                             .then(|| {
                                 blocks
                                     .binary_search_by_key(&index, |b| b.start)
                                     .ok()
-                                    .map(|i| (i, blocks[i]))
+                                    .map(|i| blocks[i])
                             })
                             .flatten();
-                        let current_change = this.diff.change;
                         let caret = super::diff_navigation::row_caret(&doc, kind, index);
                         Some(
                             row.id((id, index))
@@ -574,22 +555,8 @@ impl Workbench {
                                     MouseButton::Left,
                                     cx.listener(|this, _, _, _| this.diff.dragging = false),
                                 )
-                                .when_some(block, |row, (i, block)| {
-                                    if agent_actions {
-                                        row.child(super::agent_review::agent_block_actions(
-                                            id,
-                                            i,
-                                            block.start,
-                                            current_change == Some(i),
-                                            viewport.unwrap_or_default(),
-                                            colors,
-                                            cx,
-                                        ))
-                                    } else {
-                                        row.child(block_actions(
-                                            id, block, staged, group, colors, cx,
-                                        ))
-                                    }
+                                .when_some(block, |row, block| {
+                                    row.child(block_actions(id, block, staged, group, colors, cx))
                                 })
                                 .map(|row| {
                                     #[cfg(test)]

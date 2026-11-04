@@ -1,6 +1,6 @@
 //! Closing windows and the window record, in headless windows.
 
-use super::test_support::{empty_store, install_globals, new_window};
+use super::test_support::{install_globals, new_window};
 use super::*;
 use crate::session::{self, SavedWindow};
 #[allow(unused_imports)]
@@ -41,7 +41,7 @@ async fn closing_windows_falls_back_to_an_empty_window_and_never_quits(cx: &mut 
     let path = base.join("session.json");
     let service = GitService::new(1, Duration::from_secs(5)).unwrap();
     let documents = cx.update(|cx| {
-        let documents = install_globals(cx, crate::settings::Settings::default(), empty_store());
+        let documents = install_globals(cx, crate::settings::Settings::default());
         session::track_at(Some(path.clone()), cx);
         let service = service.clone();
         cx.on_window_closed(move |cx, id| crate::window_closed(id, service.clone(), cx))
@@ -100,7 +100,7 @@ async fn save_as_records_the_new_path_without_switching_tabs(cx: &mut TestAppCon
     let base = std::fs::canonicalize(base).unwrap();
     let session = base.join("session.json");
     let owners = cx.update(|cx| {
-        let owners = install_globals(cx, crate::settings::Settings::default(), empty_store());
+        let owners = install_globals(cx, crate::settings::Settings::default());
         session::track_at(Some(session.clone()), cx);
         owners
     });

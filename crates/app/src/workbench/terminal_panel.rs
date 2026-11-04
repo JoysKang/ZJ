@@ -255,7 +255,7 @@ impl Workbench {
                 self.terminals.subscribe(pane.entity_id(), subscription);
                 let focus = pane.read(cx).focus_handle(cx);
                 let entered = cx.on_focus_in(&focus, window, |this, window, cx| {
-                    this.input_area_entered(crate::input_switch::Area::Terminal, window, cx)
+                    this.input_terminal_entered(window, cx)
                 });
                 self.terminals.subscribe(pane.entity_id(), entered);
                 Some(pane)

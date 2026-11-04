@@ -1,5 +1,3 @@
-mod agent_images;
-mod agent_model;
 mod assets;
 mod conflicts;
 mod diff_doc;
@@ -15,18 +13,15 @@ mod indent;
 mod input_switch;
 mod languages;
 mod large_file;
-mod markdown;
 mod markdown_blocks;
 mod md_images;
 mod partial_patch;
 mod perf;
 mod platform;
-mod quota;
 mod recovery;
 mod refresh_plan;
 mod replace;
 mod save;
-mod secrets;
 mod session;
 mod settings;
 mod symbol_index;
@@ -34,6 +29,7 @@ mod symbols;
 mod terminal;
 mod text_search;
 mod theme;
+mod time;
 mod watch;
 mod workbench;
 use gpui_kit::component::input::GoToDefinition;
@@ -146,15 +142,6 @@ fn window_closed(id: WindowId, service: GitService, cx: &mut App) {
 
 #[allow(clippy::print_stdout)] // --help output belongs on stdout.
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    // The Claude Code / Codex bridge runs as this executable, before anything GPUI (ADR 0009).
-    let mut raw = std::env::args_os().skip(1);
-    if raw
-        .next()
-        .is_some_and(|a| a == workspace_editor_agent_bridge::FLAG)
-    {
-        let args: Vec<String> = raw.map(|a| a.to_string_lossy().into_owned()).collect();
-        std::process::exit(workspace_editor_agent_bridge::run(&args));
-    }
     perf::mark_start();
     let mut roots = Vec::new();
     let mut files = Vec::new();
@@ -174,7 +161,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             windows = Some(count);
         } else if arg == "--help" {
             println!(
-                "ZJ [--windows 1..5] [工作区根目录 | 文件 ...]\n轻量代码编辑器：多仓库源代码管理、并排 / 内联 Diff、文件编辑与保存。\n文件在包含它的工作区窗口里打开，否则在第一个窗口。"
+                "ZJ [--windows 1..5] [工作区根目录 | 文件 ...]\n项目查看与 Diff 工具：多仓库源代码管理、并排 / 内联 Diff、文件编辑与保存。\n文件在包含它的工作区窗口里打开，否则在第一个窗口。"
             );
             return Ok(());
         } else {
@@ -212,10 +199,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     app.run(move |cx| {
         gpui_kit::init(cx);
         cx.set_app_identity("local.zj.editor", "ZJ");
-        workbench::init_agent_notifications(cx);
         cx.set_global(settings::Settings::load());
         cx.set_global(watch::WatchService::default());
-        workbench::init_agent_store(cx);
         diff_syntax::register();
         languages::register();
         platform::DockBlink::apply(cx);
@@ -316,17 +301,6 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             KeyBinding::new("shift-f12", nav::FindReferences, Some("WorkspaceEditor")),
             KeyBinding::new("secondary-c", workbench::CopyDiff, Some("DiffEditor")),
             KeyBinding::new("secondary-a", workbench::SelectAllDiff, Some("DiffEditor")),
-            // Agent reviews (design): accept / reject the current change.
-            KeyBinding::new(
-                "secondary-y",
-                workbench::AcceptAgentChange,
-                Some("DiffEditor"),
-            ),
-            KeyBinding::new(
-                "secondary-backspace",
-                workbench::RejectAgentChange,
-                Some("DiffEditor"),
-            ),
             KeyBinding::new("ctrl--", nav::NavigateBack, Some("WorkspaceEditor")),
             KeyBinding::new(
                 "ctrl-shift--",
@@ -437,38 +411,6 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             KeyBinding::new("cmd-+", workbench::ZoomIn, Some("WorkspaceEditor")),
             KeyBinding::new("cmd--", workbench::ZoomOut, Some("WorkspaceEditor")),
             KeyBinding::new("cmd-0", workbench::ZoomReset, Some("WorkspaceEditor")),
-            // Agent panel: ⌥⌘B as VS Code's secondary side bar; ⌘J / ⌘L / ⌘⇧A as in the
-            // design (session search, add the selection, next approval).
-            KeyBinding::new(
-                "alt-cmd-b",
-                workbench::ToggleAgentPanel,
-                Some("WorkspaceEditor"),
-            ),
-            KeyBinding::new(
-                "secondary-j",
-                workbench::SearchSessions,
-                Some("WorkspaceEditor"),
-            ),
-            KeyBinding::new(
-                "secondary-l",
-                workbench::AddSelectionToAgent,
-                Some("WorkspaceEditor"),
-            ),
-            KeyBinding::new(
-                "alt-secondary-l",
-                workbench::ShowSelectionActions,
-                Some("DocumentEditor > Input"),
-            ),
-            KeyBinding::new(
-                "secondary-shift-a",
-                workbench::NextApproval,
-                Some("WorkspaceEditor"),
-            ),
-            KeyBinding::new(
-                "secondary-n",
-                workbench::NewAgentSession,
-                Some("AgentPanel"),
-            ),
             // Finder's shortcut for hidden files.
             KeyBinding::new(
                 "cmd-shift-.",
@@ -589,8 +531,6 @@ fn app_menus(auto_save: save::AutoSave) -> [Menu; 4] {
             MenuItem::separator(),
             MenuItem::action("显示 / 隐藏点文件", workbench::ToggleHiddenFiles),
             MenuItem::separator(),
-            MenuItem::action("Agent 面板", workbench::ToggleAgentPanel),
-            MenuItem::action("搜索 Agent 会话…", workbench::SearchSessions),
         ]),
         Menu::new("转到").items([
             MenuItem::action("返回", nav::NavigateBack),

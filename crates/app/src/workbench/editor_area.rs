@@ -23,7 +23,7 @@ struct TabSpec {
     label: String,
     tooltip: String,
     dirty: bool,
-    /// Muted text after the label ("Agent 建议").
+    /// Muted text after the label.
     note: Option<&'static str>,
     /// The file was deleted on disk (VS Code strikes the name through).
     deleted: bool,
@@ -262,7 +262,7 @@ impl Workbench {
                 label: diff.label.clone(),
                 tooltip: diff.tooltip.clone(),
                 dirty: false,
-                note: diff.agent().map(|_| "Agent 修改"),
+                note: None,
                 deleted: false,
                 pending: None,
             });
@@ -361,10 +361,9 @@ impl Workbench {
                     .h(theme::TAB_HEIGHT)
                     .flex_shrink_0()
                     .children(self.render_markdown_toggle(cx))
-                    .when(
-                        self.active == Pane::Diff && !self.diff_is_agent_review(),
-                        |bar| bar.child(self.render_diff_actions(cx)),
-                    ),
+                    .when(self.active == Pane::Diff, |bar| {
+                        bar.child(self.render_diff_actions(cx))
+                    }),
             )
             .into_any_element()
     }
@@ -518,17 +517,7 @@ impl Workbench {
                 Some(doc) => div()
                     .key_context(super::edit_commands::CONTEXT)
                     .size_full()
-                    .child(
-                        Editor::new(&doc.editor)
-                            .bordered(false)
-                            .size_full()
-                            .context_menu({
-                                let editor = doc.editor.clone();
-                                move |menu, _, cx| {
-                                    super::selection_actions::editor_menu(editor.read(cx), menu)
-                                }
-                            }),
-                    )
+                    .child(Editor::new(&doc.editor).bordered(false).size_full())
                     .into_any_element(),
                 None => div().into_any_element(),
             },
@@ -539,9 +528,6 @@ impl Workbench {
             .min_h_0()
             // The shell paints the surface; rectangular child fills leak past its corners.
             .child(self.render_tabs(cx))
-            .when(self.active == Pane::Diff, |area| {
-                area.children(self.render_agent_review_bar(cx))
-            })
             .children(self.render_disk_banner(cx))
             .children(self.render_conflict_bar(cx))
             .child(

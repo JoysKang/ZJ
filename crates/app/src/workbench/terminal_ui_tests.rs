@@ -1,13 +1,13 @@
 //! The terminal panel in a headless window, running `/bin/sh` on a real pty.
 
-use super::test_support::{TICK, empty_store, open_window, wait};
+use super::test_support::{TICK, open_window, wait};
 use super::*;
 #[allow(unused_imports)]
 use core::prelude::v1::test;
 use gpui_kit::{TestAppContext, base::Root, test::TestWindowExt};
 
 fn open(cx: &mut TestAppContext, root: PathBuf) -> (WindowHandle<Root>, Entity<Workbench>) {
-    let (window, this) = open_window(cx, Some(root), Default::default(), empty_store());
+    let (window, this) = open_window(cx, Some(root), Default::default());
     this.update(cx, |p, _| {
         p.terminals.set_shell(Some(crate::terminal::Shell::new(
             "/bin/sh".into(),

@@ -123,20 +123,6 @@ impl Workbench {
                     .on_click(
                         cx.listener(|this, _, window, cx| this.toggle_terminal_panel(window, cx)),
                     ),
-            )
-            .child(
-                Button::new("toggle-agent")
-                    .xsmall()
-                    .ghost()
-                    .icon(Icon::empty().path(if self.agent.visible {
-                        "icons/agent-panel-on.svg"
-                    } else {
-                        "icons/agent-panel-off.svg"
-                    }))
-                    .tooltip("切换 Agent 面板（⌥⌘B）")
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.toggle_agent_panel(window, cx)),
-                    ),
             );
         // Center against the whole window, including the traffic-light area.
         TitleBar::new()
@@ -185,24 +171,6 @@ impl Workbench {
         (0..self.groups.len())
             .filter(|g| path.starts_with(&self.groups[*g].repo.worktree))
             .max_by_key(|g| self.groups[*g].repo.worktree.as_os_str().len())
-    }
-
-    /// (waiting for approval and the agent's name when there is one, running, done unread).
-    fn agent_status_counts(&self) -> ((usize, Option<String>), usize) {
-        use crate::agent_model::RowStatus;
-        let mut awaiting = (0, None);
-        let mut unread = 0;
-        for session in &self.agent.sessions {
-            match session.row_status() {
-                RowStatus::Awaiting => {
-                    awaiting.0 += 1;
-                    awaiting.1 = Some(session.preset.display_name.clone());
-                }
-                RowStatus::Unread => unread += 1,
-                _ => {}
-            }
-        }
-        (awaiting, unread)
     }
 
     pub(super) fn render_status_bar(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -310,46 +278,9 @@ impl Workbench {
                         .child(self.message.clone()),
                 )
             });
-        let (awaiting, unread) = self.agent_status_counts();
         let right = h_flex()
             .h_full()
             .flex_shrink_0()
-            .when(awaiting.0 > 0, |bar| {
-                let label = match (&awaiting.1, awaiting.0) {
-                    (Some(agent), 1) => format!("{agent} · 待批准"),
-                    (_, n) => format!("{n} 待批准"),
-                };
-                bar.child(
-                    status_item("status-agent-awaiting", colors)
-                        .child(super::agent_panel::status_mark(
-                            crate::agent_model::RowStatus::Awaiting,
-                            0,
-                            colors,
-                        ))
-                        .child(div().text_color(colors.foreground).child(label))
-                        .tooltip(|window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new("跳到下一个待批准（⌘⇧A）")
-                                .build(window, cx)
-                        })
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.agent_next_approval(window, cx)),
-                        ),
-                )
-            })
-            .when(unread > 0 && !self.agent.visible, |bar| {
-                bar.child(
-                    status_item("status-agent-unread", colors)
-                        .child(super::agent_panel::status_mark(
-                            crate::agent_model::RowStatus::Unread,
-                            0,
-                            colors,
-                        ))
-                        .child(format!("{unread} 完成未读"))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.set_agent_panel(true, window, cx);
-                        })),
-                )
-            })
             .when_some(self.cursor, |bar, (line, column)| {
                 bar.child(status_item("status-cursor", colors).child(format!(
                     "行 {}，列 {}",

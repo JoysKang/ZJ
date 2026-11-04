@@ -478,9 +478,6 @@ impl Workbench {
         let Some(group) = self.groups.iter().find(|g| g.repo.id == id) else {
             return;
         };
-        if group.commit_generation.is_some() {
-            return;
-        }
         let Some(Ok(status)) = &group.status else {
             return;
         };
@@ -776,8 +773,8 @@ impl Workbench {
                     cx.notify();
                 }
                 Ok(stashes) => {
-                    let now = workspace_editor_agent_history::now_ms();
-                    let offset = crate::agent_model::local_offset(now);
+                    let now = crate::time::now_ms();
+                    let offset = crate::time::local_offset(now);
                     let items = stashes
                         .into_iter()
                         .map(|stash| PickItem {
@@ -785,7 +782,7 @@ impl Workbench {
                             detail: format!(
                                 "stash@{{{}}} · {}",
                                 stash.index,
-                                crate::agent_model::relative_time(stash.time * 1000, now, offset)
+                                crate::time::relative_time(stash.time * 1000, now, offset)
                             ),
                             icon: PickIcon::Lucide(IconName::Archive),
                             keys: Vec::new(),

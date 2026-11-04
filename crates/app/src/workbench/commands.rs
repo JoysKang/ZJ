@@ -5,7 +5,7 @@
 //! 没有收进来的 action：
 //! - 资源管理器（NewFile、Rename、Delete、CopyFiles 等）：动作挂在 `Explorer` 键上下文的
 //!   节点上，作用对象是树里选中的行；从面板分发时焦点不在资源管理器，全部是空操作。
-//! - Diff 编辑器（CopyDiff、SelectAllDiff、AcceptAgentChange、RejectAgentChange）：处理函数
+//! - Diff 编辑器（CopyDiff、SelectAllDiff）：处理函数
 //!   挂在 `DiffEditor` 节点上，且复制依赖鼠标拖出的选区。
 //! - 查找浮层内（ReplaceOne、ReplaceAll、ToggleFindCase 等 6 个）：只在 `FindWidget` 上下
 //!   文里、浮层打开时有意义。
@@ -32,7 +32,7 @@ macro_rules! command {
     };
 }
 
-gpui_kit::actions!(commands, [ShowAllCommands, ReviewAgentChanges]);
+gpui_kit::actions!(commands, [ShowAllCommands]);
 
 pub(super) const COMMANDS: &[Command] = &[
     command!("文件: 新建文件", NewUntitled),
@@ -64,7 +64,6 @@ pub(super) const COMMANDS: &[Command] = &[
     command!("视图: 缩小", ZoomOut),
     command!("视图: 重置缩放", ZoomReset),
     command!("视图: 显示 / 隐藏点文件", ToggleHiddenFiles),
-    command!("视图: 切换 Agent 面板", ToggleAgentPanel),
     command!("转到: 转到行/列…", GoToLine),
     command!("转到: 转到文件中的符号…", GoToSymbol),
     command!("转到: 转到定义", GoToDefinition),
@@ -87,12 +86,6 @@ pub(super) const COMMANDS: &[Command] = &[
     command!("终端: 切换终端", ToggleTerminal),
     command!("终端: 拆分终端", SplitTerminal),
     command!("终端: 关闭终端", KillTerminal),
-    command!("Agent: 新建会话", NewAgentSession),
-    command!("Agent: 搜索会话…", SearchSessions),
-    command!("Agent: 附加当前文件或选区", AddSelectionToAgent),
-    command!("Agent: 选区操作…", ShowSelectionActions),
-    command!("Agent: 下一个待审批", NextApproval),
-    command!("Agent: 审阅当前会话修改", ReviewAgentChanges),
 ];
 
 /// 打开面板时按当时的焦点解析每个命令的最高优先级绑定；没有焦点时用当前上下文栈。

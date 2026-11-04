@@ -296,12 +296,9 @@ async fn the_ignored_files_switch_stays_in_the_column_and_toggles(cx: &mut TestA
     std::fs::create_dir_all(&root).unwrap();
     let root = std::fs::canonicalize(root).unwrap();
     // The window where the old in-input button was pushed out of the sidebar.
-    let mut settings = crate::settings::Settings::default();
-    settings.agent.panel_visible = true;
-    settings.agent.panel_width = 539.5;
+    let settings = crate::settings::Settings::default();
     let (window, this) = cx.update(|cx| {
-        let documents =
-            super::test_support::install_globals(cx, settings, super::test_support::empty_store());
+        let documents = super::test_support::install_globals(cx, settings);
         let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1728.), px(1084.)));
         let (window, this) =
             super::test_support::new_window(cx, Some(root.clone()), documents, bounds);

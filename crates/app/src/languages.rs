@@ -343,7 +343,6 @@ mod tests {
                         tokens[index]
                     );
                 }
-                assert_eq!(crate::markdown::highlight(language, source, &theme), runs);
             }
         }
     }

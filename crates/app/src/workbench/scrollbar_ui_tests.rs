@@ -1,5 +1,5 @@
 //! Horizontal scrollbars must sit below the visible code viewport.
-use super::test_support::{empty_store, open_window};
+use super::test_support::open_window;
 use super::*;
 use crate::{
     diff_doc::{ChangeColors, DiffDoc},
@@ -24,7 +24,7 @@ fn patch() -> String {
 #[gpui_kit::test]
 async fn diff_horizontal_scrollbars_do_not_cover_visible_code(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
-    let (handle, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (handle, this) = open_window(cx, None, Settings::default());
     let patch: Arc<str> = patch().into();
     for mode in [ThemeMode::Light, ThemeMode::Dark] {
         cx.update_window(handle.into(), |_, window, cx| {

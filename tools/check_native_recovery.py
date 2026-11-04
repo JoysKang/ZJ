@@ -24,7 +24,7 @@ def run(binary, output):
         original = 'fn main() {}\n'
         file.write_text(original)
         (base / 'settings.json').write_text(json.dumps({'auto_save': 'off', 'auto_input_source': False, 'hidden_files': []}))
-        env = dict(os.environ, ZJ_SETTINGS=str(base / 'settings.json'), ZJ_SESSION=str(base / 'session.json'), ZJ_AGENT_DB=str(base / 'agent.db'))
+        env = dict(os.environ, ZJ_SETTINGS=str(base / 'settings.json'), ZJ_SESSION=str(base / 'session.json'))
         app = None
         handles = []
         def launch(label):

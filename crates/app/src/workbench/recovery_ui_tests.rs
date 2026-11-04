@@ -1,6 +1,6 @@
 //! Edit recovery in headless windows, with snapshots in a temporary directory.
 
-use super::super::test_support::{TICK, empty_store, loaded, open_window, settle, wait};
+use super::super::test_support::{TICK, loaded, open_window, settle, wait};
 use super::super::*;
 use crate::recovery::{self, Op, Record};
 use crate::settings::Settings;
@@ -35,7 +35,7 @@ async fn a_snapshot_failure_is_visible_without_another_edit(cx: &mut TestAppCont
     cx.update(|cx| super::install(store.clone(), cx));
     // The destination becomes unusable after startup, before the first snapshot.
     std::fs::write(&store, "not a directory").unwrap();
-    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (window, this) = open_window(cx, None, Settings::default());
     cx.update_window(window.into(), |_, window, cx| {
         let editor = this.update(cx, |p, cx| {
             let id = p.new_untitled(window, cx);
@@ -99,7 +99,7 @@ async fn an_edit_is_snapshotted_after_a_pause_and_forgotten_once_saved(cx: &mut 
         auto_save: crate::save::AutoSave::Off,
         ..Settings::default()
     };
-    let (window, this) = open_window(cx, Some(root.clone()), settings, empty_store());
+    let (window, this) = open_window(cx, Some(root.clone()), settings);
     wait(
         cx,
         Some(TICK),
@@ -190,7 +190,7 @@ async fn snapshots_left_by_a_crash_come_back_and_can_be_discarded(cx: &mut TestA
     recovery::apply(&store, &Op::Write(file.clone())).unwrap();
     recovery::apply(&store, &Op::Write(untitled.clone())).unwrap();
     cx.update(|cx| super::install(store.clone(), cx));
-    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    let (window, this) = open_window(cx, Some(root.clone()), Settings::default());
     settle(cx, Some(window), |cx| {
         this.read_with(cx, |p, _| p.documents.len() == 3)
     });
@@ -252,7 +252,7 @@ async fn restored_tabs_open_the_active_one_and_read_the_rest_when_chosen(cx: &mu
     for name in ["a.txt", "b.txt", "c.txt"] {
         std::fs::write(root.join(name), name).unwrap();
     }
-    let (window, this) = open_window(cx, Some(root.clone()), Settings::default(), empty_store());
+    let (window, this) = open_window(cx, Some(root.clone()), Settings::default());
     wait(
         cx,
         Some(TICK),
@@ -328,8 +328,7 @@ async fn a_snapshot_of_the_restored_active_tab_comes_back(cx: &mut TestAppContex
     cx.update(|cx| super::install(store.clone(), cx));
     // As main.rs does: the window restores its tabs right as it is built.
     let this = cx.update(|cx| {
-        let documents =
-            super::super::test_support::install_globals(cx, Settings::default(), empty_store());
+        let documents = super::super::test_support::install_globals(cx, Settings::default());
         let service = GitService::new(1, Duration::from_secs(5)).unwrap();
         let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1400.), px(900.)));
         let active = path.clone();
@@ -416,7 +415,7 @@ async fn a_recovery_hard_link_uses_the_existing_buffers_stable_id(cx: &mut TestA
     let (path, alias) = (base.join("a.txt"), base.join("alias.txt"));
     std::fs::write(&path, "disk").unwrap();
     std::fs::hard_link(&path, &alias).unwrap();
-    let (window, this) = open_window(cx, None, Settings::default(), empty_store());
+    let (window, this) = open_window(cx, None, Settings::default());
     cx.update_window(window.into(), |_, window, cx| {
         this.update(cx, |p, cx| p.open_file(path.clone(), None, window, cx));
     })
