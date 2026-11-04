@@ -74,6 +74,7 @@ mod markdown_preview;
 #[path = "workbench/markdown_ui_tests.rs"]
 mod markdown_ui_tests;
 mod menu_style;
+pub use explorer_ops::key_bindings as explorer_key_bindings;
 pub use explorer_ops::{
     CopyFiles, CopyPath, CopyRelativePath, CutFiles, Delete as DeleteFile, FindInFolder, NewFile,
     NewFolder, PasteFiles, Rename as RenameFile, RevealInFinder, SelectAllFiles,
@@ -404,6 +405,8 @@ pub struct Workbench {
     command_history: Vec<&'static str>,
     active: Pane,
     documents: Vec<Document>,
+    /// Most recently activated first; IDs follow Save As and moves without reordering tabs.
+    recent_documents: Vec<DocumentId>,
     owners: DocumentOwners,
     /// The Explorer: the visible tree, expanded folders, selection and inline rename, and its folder listings.
     explorer: sidebar::Explorer,
@@ -581,6 +584,7 @@ impl Workbench {
             command_history: Vec::new(),
             active: Pane::Welcome,
             documents: Vec::new(),
+            recent_documents: Vec::new(),
             owners,
             explorer: sidebar::Explorer {
                 rows: Vec::new(),
@@ -1122,12 +1126,17 @@ impl Workbench {
         }
     }
 
-    /// The user chose a tab: a file still being opened is not wanted any more.
-    fn select_pane(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+    /// A later navigation choice makes an unfinished user open obsolete.
+    fn cancel_file_open(&mut self) {
         self.file_generation += 1;
         if self.file_task.take().is_some() && self.message.starts_with("正在打开") {
             self.message.clear();
         }
+    }
+
+    /// The user chose a tab: a file still being opened is not wanted any more.
+    fn select_pane(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_file_open();
         self.show_pane(pane, window, cx);
     }
 
@@ -1140,6 +1149,10 @@ impl Workbench {
             self.auto_save_on_focus_change(Some(previous), window, cx);
         }
         self.active = pane;
+        if let Pane::Document(id) = pane {
+            self.recent_documents.retain(|recent| *recent != id);
+            self.recent_documents.insert(0, id);
+        }
         self.explorer.reveal_pending = self.active_document().map(|(path, _)| path.clone());
         self.clear_tree_selection_for(pane);
         self.find_update(false, cx);
@@ -1664,6 +1677,7 @@ impl Workbench {
         // Closed after its edits were saved or discarded: nothing to recover.
         self.forget_snapshot(id, cx);
         self.documents.retain(|doc| doc.id != id);
+        self.recent_documents.retain(|recent| *recent != id);
         self.owners.borrow_mut().remove(&id);
         self.remember_tabs(true, window, cx);
         if self.active == Pane::Document(id) {
@@ -2183,12 +2197,12 @@ impl Workbench {
         self.diff.tab = None;
         self.diff.stale = false;
         if self.active == Pane::Diff {
-            self.active = self
+            let pane = self
                 .documents
                 .last()
                 .map(|doc| Pane::Document(doc.id))
                 .unwrap_or(Pane::Welcome);
-            self.focus_active_editor(window, cx);
+            self.show_pane(pane, window, cx);
         }
         cx.notify();
     }

@@ -364,14 +364,14 @@ impl Workbench {
             graph.details_cancel.store(true, Ordering::Relaxed);
         }
         if self.active == Pane::Graph {
-            self.active = self
+            let pane = self
                 .diff
                 .tab
                 .as_ref()
                 .map(|_| Pane::Diff)
                 .or_else(|| self.documents.last().map(|doc| Pane::Document(doc.id)))
                 .unwrap_or(Pane::Welcome);
-            self.focus_active_editor(window, cx);
+            self.show_pane(pane, window, cx);
         }
         cx.notify();
     }

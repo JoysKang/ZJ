@@ -59,6 +59,31 @@ fn act(cx: &mut TestAppContext, window: WindowHandle<Root>, action: impl Action)
 }
 
 #[gpui_kit::test]
+async fn terminal_accepts_the_native_menu_paste_action(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-terminal-menu-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let (window, this) = open(cx, root.clone());
+    act(cx, window, ToggleTerminal);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        cx.write_to_clipboard(ClipboardItem::new_string(
+            "printf '%s_%s\\n' MENU PASTE_OK\n".into(),
+        ));
+    })
+    .unwrap();
+    act(cx, window, gpui_kit::component::input::Paste);
+    settle(cx, window, &this, |cx| {
+        focused_text(cx, &this).contains("MENU_PASTE_OK")
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.kill_terminal(window, cx));
+    })
+    .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui_kit::test]
 async fn many_terminal_groups_keep_header_actions_inside_the_panel(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = std::env::temp_dir().join(format!("zj-terminal-header-{}", std::process::id()));

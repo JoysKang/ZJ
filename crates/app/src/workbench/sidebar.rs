@@ -380,10 +380,10 @@ impl Workbench {
                     .child(self.explorer_more()),
             )
             .on_click(cx.listener(|this, _, window, cx| {
-                if this.explorer.edit.is_none() {
-                    this.explorer
-                        .set_selected(this.root.clone().into_iter().collect());
-                    this.explorer.focus.focus(window, cx);
+                if this.explorer.edit.is_none()
+                    && let Some(root) = this.root.clone()
+                {
+                    this.select_tree_path(root, window, cx);
                 }
                 this.explorer.collapsed = !this.explorer.collapsed;
                 cx.notify();
@@ -391,9 +391,9 @@ impl Workbench {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _, window, cx| {
-                    this.explorer
-                        .set_selected(this.root.clone().into_iter().collect());
-                    this.explorer.focus.focus(window, cx);
+                    if let Some(root) = this.root.clone() {
+                        this.select_tree_path(root, window, cx);
+                    }
                     cx.notify();
                 }),
             );
@@ -477,9 +477,9 @@ impl Workbench {
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| {
                         if this.explorer.edit.is_none() {
-                            this.explorer
-                                .set_selected(this.root.clone().into_iter().collect());
-                            this.explorer.focus.focus(window, cx);
+                            if let Some(root) = this.root.clone() {
+                                this.select_tree_path(root, window, cx);
+                            }
                             cx.notify();
                         }
                     }),
@@ -487,9 +487,9 @@ impl Workbench {
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(|this, _, window, cx| {
-                        this.explorer
-                            .set_selected(this.root.clone().into_iter().collect());
-                        this.explorer.focus.focus(window, cx);
+                        if let Some(root) = this.root.clone() {
+                            this.select_tree_path(root, window, cx);
+                        }
                         cx.notify();
                     }),
                 )
@@ -751,7 +751,7 @@ impl Workbench {
                         this.select_tree_path(path.clone(), window, cx);
                     } else {
                         this.explorer.selection = Some(path.clone());
-                        this.explorer.focus.focus(window, cx);
+                        this.focus_tree_selection(window, cx);
                     }
                 })
             })
@@ -792,8 +792,7 @@ impl Workbench {
                                 this.select_tree_path(path.clone(), window, cx);
                             } else {
                                 this.explorer.selection = Some(path.clone());
-                                this.explorer.focus.focus(window, cx);
-                                cx.notify();
+                                this.focus_tree_selection(window, cx);
                             }
                             *dragged.paths.borrow_mut() = this.selected_file_paths();
                         });

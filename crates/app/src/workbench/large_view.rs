@@ -104,12 +104,12 @@ impl Workbench {
     pub(super) fn close_large(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.large = None;
         if self.active == Pane::Large {
-            self.active = self
+            let pane = self
                 .documents
                 .last()
                 .map(|doc| Pane::Document(doc.id))
                 .unwrap_or(Pane::Welcome);
-            self.focus_active_editor(window, cx);
+            self.show_pane(pane, window, cx);
         }
         cx.notify();
     }
@@ -562,6 +562,11 @@ impl Workbench {
                     .min_h_0()
                     .key_context(CONTEXT)
                     .track_focus(&large.focus)
+                    .on_action(
+                        cx.listener(|this, _: &gpui_kit::component::input::Copy, _, cx| {
+                            this.large_copy(cx)
+                        }),
+                    )
                     .on_action(cx.listener(|this, _: &CopyLargeLines, _, cx| this.large_copy(cx)))
                     .child(body),
             )

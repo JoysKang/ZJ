@@ -369,6 +369,16 @@ impl Workbench {
                     this.diff_go_to_definition(window, cx)
                 },
             ))
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Copy, _, cx| {
+                    this.copy_diff_selection(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::component::input::SelectAll, _, cx| {
+                    this.diff_select_all(cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &CopyDiff, _, cx| this.copy_diff_selection(cx)))
             .on_action(cx.listener(|this, _: &SelectAllDiff, _, cx| this.diff_select_all(cx)))
             .on_mouse_up_out(

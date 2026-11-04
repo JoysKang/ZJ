@@ -190,22 +190,8 @@ impl TerminalView {
                 return false;
             }
             match keystroke.key.as_str() {
-                "c" => {
-                    let text = self.terminal.term.lock().selection_to_string();
-                    match text {
-                        Some(text) if !text.is_empty() => {
-                            cx.write_to_clipboard(ClipboardItem::new_string(text))
-                        }
-                        _ => return false,
-                    }
-                }
-                "v" => {
-                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        self.scroll_to_bottom();
-                        self.terminal.paste(&text);
-                        cx.notify();
-                    }
-                }
+                "c" => return self.copy(cx),
+                "v" => self.paste(cx),
                 "left" => self.input(b"\x01".to_vec(), cx),
                 "right" => self.input(b"\x05".to_vec(), cx),
                 "backspace" => self.input(b"\x15".to_vec(), cx),
@@ -220,6 +206,24 @@ impl TerminalView {
                 true
             }
             None => false,
+        }
+    }
+
+    fn copy(&self, cx: &mut Context<Self>) -> bool {
+        let text = self.terminal.term.lock().selection_to_string();
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            true
+        } else {
+            false
+        }
+    }
+
+    fn paste(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            self.scroll_to_bottom();
+            self.terminal.paste(&text);
+            cx.notify();
         }
     }
 
@@ -681,6 +685,14 @@ impl Render for TerminalView {
             .size_full()
             .key_context("Terminal")
             .track_focus(&self.focus)
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Copy, _, cx| {
+                    this.copy(cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Paste, _, cx| this.paste(cx)),
+            )
             .child(
                 canvas(
                     move |bounds, window, cx| prepaint(&view, bounds, window, cx),

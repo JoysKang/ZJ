@@ -36,9 +36,24 @@ gpui_kit::actions!(
         CopyRelativePath,
         RevealInFinder,
         FindInFolder,
-        SelectAllFiles
+        SelectAllFiles,
+        TreeNext,
+        TreePrevious,
+        TreeExpand,
+        TreeCollapse,
+        TreeOpen
     ]
 );
+
+pub fn key_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("down", TreeNext, Some("Explorer && !Input")),
+        KeyBinding::new("up", TreePrevious, Some("Explorer && !Input")),
+        KeyBinding::new("right", TreeExpand, Some("Explorer && !Input")),
+        KeyBinding::new("left", TreeCollapse, Some("Explorer && !Input")),
+        KeyBinding::new("cmd-down", TreeOpen, Some("Explorer && !Input")),
+    ]
+}
 
 /// Copied or cut Explorer entries, shared by all windows.
 #[derive(Default)]
@@ -260,6 +275,12 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         self.explorer.set_selected(vec![path]);
+        self.focus_tree_selection(window, cx);
+    }
+
+    pub(super) fn focus_tree_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_file_open();
+        self.explorer.focus_on_open = false;
         self.explorer.focus.focus(window, cx);
         cx.notify();
     }
@@ -307,8 +328,107 @@ impl Workbench {
         } else {
             self.explorer.set_selected(vec![path]);
         }
-        self.explorer.focus.focus(window, cx);
-        cx.notify();
+        self.focus_tree_selection(window, cx);
+    }
+
+    fn select_tree_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.explorer.reveal_pending = None;
+        self.select_tree_path(self.explorer.rows[index].entry.path.clone(), window, cx);
+        if index > 0 {
+            self.explorer
+                .scroll
+                .scroll_to_item(index - 1, ScrollStrategy::Nearest);
+        }
+    }
+
+    fn tree_selection_index(&self) -> Option<usize> {
+        self.explorer.rows.iter().position(|row| {
+            !row.pending && Some(&row.entry.path) == self.explorer.selection.as_ref()
+        })
+    }
+
+    fn move_tree_row(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.explorer.edit.is_some() || self.explorer.rows.is_empty() {
+            return;
+        }
+        let current = self.tree_selection_index();
+        let index = if self.explorer.collapsed {
+            0
+        } else if let Some(current) = current {
+            if forward {
+                (current + 1..self.explorer.rows.len())
+                    .find(|index| !self.explorer.rows[*index].pending)
+            } else {
+                (0..current)
+                    .rev()
+                    .find(|index| !self.explorer.rows[*index].pending)
+            }
+            .unwrap_or(current)
+        } else {
+            0
+        };
+        self.select_tree_row(index, window, cx);
+    }
+
+    fn tree_branch(&mut self, expand: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.explorer.edit.is_some() {
+            return;
+        }
+        let Some(index) = self.tree_selection_index() else {
+            return;
+        };
+        if self.explorer.collapsed {
+            self.select_tree_row(0, window, cx);
+            self.explorer.collapsed = !expand;
+            cx.notify();
+            return;
+        }
+        let row = &self.explorer.rows[index];
+        let expanded =
+            row.entry.directory && (index == 0 || self.explorer.expanded.contains(&row.entry.path));
+        if row.entry.directory && expand != expanded {
+            if index == 0 {
+                self.explorer.collapsed = true;
+                cx.notify();
+            } else {
+                self.toggle_directory(index, window, cx);
+            }
+        } else if expand && expanded {
+            if let Some(child) = self.explorer.rows.get(index + 1)
+                && !child.pending
+                && child.depth > row.depth
+            {
+                self.select_tree_row(index + 1, window, cx);
+            }
+        } else if !expand {
+            let depth = row.depth;
+            if let Some(parent) = (0..index)
+                .rev()
+                .find(|i| self.explorer.rows[*i].depth < depth)
+            {
+                self.select_tree_row(parent, window, cx);
+            }
+        }
+    }
+
+    fn open_tree_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.explorer.edit.is_some() || self.explorer.selected.len() != 1 {
+            return;
+        }
+        let Some(index) = self.tree_selection_index() else {
+            return;
+        };
+        if self.explorer.rows[index].entry.directory {
+            self.tree_branch(true, window, cx);
+        } else if !self.explorer.collapsed {
+            self.explorer.focus_on_open = false;
+            self.open_file(
+                self.explorer.rows[index].entry.path.clone(),
+                self.root.clone(),
+                window,
+                cx,
+            );
+        }
     }
 
     pub(super) fn selected_file_paths(&self) -> Vec<PathBuf> {
@@ -1030,24 +1150,65 @@ impl Workbench {
         .detach();
     }
 
+    fn select_all_tree_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.explorer.edit.is_none() && !self.explorer.collapsed {
+            let paths = self
+                .explorer
+                .rows
+                .iter()
+                .skip(1)
+                .filter(|row| !row.pending)
+                .map(|row| row.entry.path.clone())
+                .collect();
+            self.explorer.set_selected(paths);
+            self.focus_tree_selection(window, cx);
+        }
+    }
+
     /// The Explorer's key context: shortcuts act on the selected row.
     pub(super) fn explorer_actions(&self, element: Div, cx: &mut Context<Self>) -> Div {
         element
             .key_context("Explorer")
-            .on_action(cx.listener(|this, _: &SelectAllFiles, _, cx| {
-                if this.explorer.edit.is_none() && !this.explorer.collapsed {
-                    let paths = this
-                        .explorer
-                        .rows
-                        .iter()
-                        .skip(1)
-                        .filter(|row| !row.pending)
-                        .map(|row| row.entry.path.clone())
-                        .collect();
-                    this.explorer.set_selected(paths);
-                    cx.notify();
-                }
+            .on_action(
+                cx.listener(|this, _: &TreeNext, window, cx| this.move_tree_row(true, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &TreePrevious, window, cx| {
+                this.move_tree_row(false, window, cx)
             }))
+            .on_action(
+                cx.listener(|this, _: &TreeExpand, window, cx| this.tree_branch(true, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &TreeCollapse, window, cx| {
+                    this.tree_branch(false, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &TreeOpen, window, cx| this.open_tree_selection(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &SelectAllFiles, window, cx| {
+                this.select_all_tree_files(window, cx)
+            }))
+            .on_action(cx.listener(
+                |this, _: &gpui_kit::component::input::SelectAll, window, cx| {
+                    this.select_all_tree_files(window, cx)
+                },
+            ))
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Copy, _, cx| {
+                    this.copy_selection(false, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Cut, _, cx| {
+                    this.copy_selection(true, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Paste, window, cx| {
+                    this.paste_files(window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &NewFile, window, cx| {
                 if let Some(dir) = this.target_folder() {
                     this.start_tree_edit(EditKind::NewFile(dir), window, cx);

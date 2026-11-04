@@ -424,9 +424,13 @@ impl Workbench {
             return;
         }
         let recent: Vec<PathBuf> = self
-            .documents
+            .recent_documents
             .iter()
-            .rev()
+            .filter_map(|id| {
+                self.documents
+                    .iter()
+                    .find(|doc| doc.id == *id && !doc.untitled)
+            })
             .map(|doc| doc.path.clone())
             .collect();
         let index = self.index.clone();

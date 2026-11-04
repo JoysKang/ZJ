@@ -44,6 +44,146 @@ fn selected(cx: &TestAppContext, this: &Entity<Workbench>) -> Vec<PathBuf> {
 }
 
 #[gpui_kit::test]
+async fn explorer_keyboard_open_cannot_replace_a_later_tab_choice(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let base = fixture("keyboard-cancel");
+    let root = base.join("workspace");
+    let (handle, this) = open(cx, root.clone());
+    cx.update(|cx| cx.bind_keys(explorer_ops::key_bindings()));
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_now(root.join("b.txt"), window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let id = this.read_with(cx, |p, _| p.documents[0].id);
+    for tree_choice in [false, true] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.select_tree_path(root.join("a.txt"), window, cx)
+            });
+            window.render_frame(cx);
+            window.press("cmd-down", cx);
+            let this = this.clone();
+            // Queue the next choice after the open action, before background reads run.
+            cx.defer(move |cx| {
+                cx.update_window(handle.into(), |_, window, cx| {
+                    if tree_choice {
+                        window.press("down", cx);
+                    } else {
+                        this.update(cx, |p, cx| p.select_pane(Pane::Document(id), window, cx));
+                    }
+                })
+                .unwrap();
+            });
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.read_with(cx, |p, cx| {
+                assert!(
+                    p.active == Pane::Document(id),
+                    "old tree open replaced the later choice (tree={tree_choice})"
+                );
+                assert_eq!(p.documents.len(), 1);
+                if tree_choice {
+                    assert!(p.explorer.focus.is_focused(window));
+                    assert_eq!(p.explorer.selection.as_ref(), Some(&root.join("b.txt")));
+                } else {
+                    assert!(p.documents[0].editor.focus_handle(cx).is_focused(window));
+                }
+            });
+        })
+        .unwrap();
+    }
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[gpui_kit::test]
+async fn explorer_keyboard_navigates_folders_and_opens_without_renaming(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let base = fixture("keyboard");
+    let root = base.join("workspace");
+    let folder = root.join("dest");
+    let child = folder.join("child.txt");
+    fs::write(&child, "child").unwrap();
+    let (handle, this) = open(cx, root.clone());
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.explorer.rows.len() == 6)
+    });
+    cx.update(|cx| {
+        cx.bind_keys(explorer_ops::key_bindings());
+        cx.bind_keys([KeyBinding::new("enter", RenameFile, Some("Explorer"))]);
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.select_tree_path(root.clone(), window, cx));
+    })
+    .unwrap();
+    let press = |cx: &mut TestAppContext, key: &str| {
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.press(key, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    };
+    press(cx, "down");
+    assert_eq!(selected(cx, &this), std::slice::from_ref(&folder));
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.dispatch_action(Box::new(gpui_kit::component::input::Copy), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update(|cx| {
+        assert_eq!(
+            cx.global::<explorer_ops::FileClipboard>().paths,
+            std::slice::from_ref(&folder)
+        )
+    });
+    press(cx, "right");
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            p.explorer.rows.iter().any(|r| r.entry.path == child)
+        })
+    });
+    press(cx, "right");
+    assert_eq!(selected(cx, &this), std::slice::from_ref(&child));
+    press(cx, "cmd-down");
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            p.documents.len() == 1 && p.documents[0].path == child
+        })
+    });
+    this.read_with(cx, |p, _| assert!(p.explorer.edit.is_none()));
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.explorer.focus.focus(window, cx));
+    })
+    .unwrap();
+    press(cx, "left");
+    assert_eq!(selected(cx, &this), std::slice::from_ref(&folder));
+    press(cx, "left");
+    this.read_with(cx, |p, _| assert!(!p.explorer.expanded.contains(&folder)));
+    press(cx, "up");
+    assert_eq!(selected(cx, &this), std::slice::from_ref(&root));
+    press(cx, "left");
+    this.read_with(cx, |p, _| assert!(p.explorer.collapsed));
+    press(cx, "down");
+    assert_eq!(selected(cx, &this), [root]);
+    press(cx, "right");
+    press(cx, "down");
+    press(cx, "down");
+    assert_eq!(selected(cx, &this), [base.join("workspace/a.txt")]);
+    press(cx, "enter");
+    this.read_with(cx, |p, _| assert!(p.explorer.edit.is_some()));
+    press(cx, "left");
+    press(cx, "down");
+    assert_eq!(selected(cx, &this), [base.join("workspace/a.txt")]);
+    press(cx, "escape");
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[gpui_kit::test]
 async fn explorer_clicks_select_ranges_and_batch_commands_use_the_whole_selection(
     cx: &mut TestAppContext,
 ) {

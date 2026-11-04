@@ -24,6 +24,89 @@ fn input(cx: &mut TestAppContext, window: WindowHandle<Root>, text: &str) {
     cx.run_until_parked();
 }
 
+#[gpui_kit::test]
+async fn edit_menu_actions_follow_the_focused_input(cx: &mut TestAppContext) {
+    let (handle, this) =
+        super::test_support::open_window(cx, None, crate::settings::Settings::default());
+    cx.update(crate::install_menus);
+    let actions = cx.update(|cx| {
+        let menus = cx.get_menus().unwrap();
+        let edit = menus
+            .iter()
+            .find(|menu| menu.name == "编辑")
+            .expect("missing native edit menu");
+        edit.items
+            .iter()
+            .filter_map(|item| match item {
+                OwnedMenuItem::Action { name, action, .. } => {
+                    Some((name.clone(), action.boxed_clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        actions
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["撤销", "重做", "剪切", "复制", "粘贴", "全选"]
+    );
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.find_in_files(window, cx));
+        window.render_frame(cx);
+        window.input("query", cx);
+    })
+    .unwrap();
+    for (name, expected) in [
+        ("全选", "query"),
+        ("复制", "query"),
+        ("剪切", ""),
+        ("粘贴", "query"),
+        ("撤销", ""),
+        ("重做", "query"),
+    ] {
+        let action = &actions.iter().find(|(label, _)| label == name).unwrap().1;
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.dispatch_action(action.boxed_clone(), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        if name == "复制" {
+            assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), "query");
+        }
+        this.read_with(cx, |p, cx| {
+            assert_eq!(
+                p.search.query.read(cx).value().as_str(),
+                expected,
+                "menu action: {name}"
+            );
+            assert!(p.documents.is_empty());
+        });
+    }
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.new_untitled(window, cx));
+        window.render_frame(cx);
+        window.input("source", cx);
+        cx.write_to_clipboard(ClipboardItem::new_string("pasted".into()));
+    })
+    .unwrap();
+    for name in ["全选", "粘贴"] {
+        let action = &actions.iter().find(|(label, _)| label == name).unwrap().1;
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.dispatch_action(action.boxed_clone(), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+    this.read_with(cx, |p, cx| {
+        assert_eq!(p.documents[0].editor.read(cx).value().as_str(), "pasted");
+        assert_eq!(p.search.query.read(cx).value().as_str(), "query");
+    });
+}
+
 /// The rows the panel lists: (label, keycap labels).
 fn rows(cx: &mut TestAppContext, this: &Entity<Workbench>) -> Vec<(String, Vec<String>)> {
     this.read_with(cx, |p, _| {
@@ -38,6 +121,95 @@ fn rows(cx: &mut TestAppContext, this: &Entity<Workbench>) -> Vec<(String, Vec<S
             .map(|i| (items[*i].label.clone(), items[*i].keys.clone()))
             .collect()
     })
+}
+
+#[gpui_kit::test]
+async fn quick_open_orders_open_files_by_activation_without_reordering_tabs(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-picker-mru-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let paths: Vec<_> = ["a.rs", "b.rs", "c.rs"]
+        .iter()
+        .map(|name| root.join(name))
+        .collect();
+    for path in &paths {
+        std::fs::write(path, "// file\n").unwrap();
+    }
+    let (handle, this) = open(cx, root.clone());
+    for path in &paths {
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| p.open_now(path.clone(), window, cx));
+        })
+        .unwrap();
+        settle(cx, Some(handle), |cx| {
+            this.read_with(cx, |p, _| {
+                p.active_document()
+                    .is_some_and(|(active, _)| &active == path)
+            })
+        });
+    }
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.select_pane(Pane::Document(p.documents[0].id), window, cx);
+            p.open_quick_open_with("", window, cx);
+            assert_eq!(
+                p.quick_open.as_ref().unwrap().results,
+                [paths[0].clone(), paths[2].clone(), paths[1].clone()]
+            );
+            assert_eq!(
+                p.documents
+                    .iter()
+                    .map(|d| d.path.clone())
+                    .collect::<Vec<_>>(),
+                paths
+            );
+            p.close_quick_open(window, cx);
+            for pane in [Pane::Diff, Pane::Graph, Pane::Large] {
+                p.select_pane(pane, window, cx);
+                match pane {
+                    Pane::Diff => p.dismiss_preview(window, cx),
+                    Pane::Graph => p.close_graph(window, cx),
+                    Pane::Large => p.close_large(window, cx),
+                    _ => unreachable!(),
+                }
+                p.open_quick_open_with("", window, cx);
+                assert_eq!(p.quick_open.as_ref().unwrap().results[0], paths[2]);
+                p.close_quick_open(window, cx);
+                p.select_pane(Pane::Document(p.documents[0].id), window, cx);
+            }
+        });
+    })
+    .unwrap();
+    let renamed = root.join("renamed.rs");
+    let task = cx
+        .update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.write_as(p.documents[0].id, renamed.clone(), window, cx)
+            })
+        })
+        .unwrap();
+    assert!(task.await);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_quick_open_with("", window, cx);
+            assert_eq!(
+                p.quick_open.as_ref().unwrap().results,
+                [renamed, paths[2].clone(), paths[1].clone()]
+            );
+            p.close_quick_open(window, cx);
+            let second = p.documents[1].id;
+            p.remove_document(second, window, cx);
+            p.new_untitled(window, cx);
+            p.open_quick_open_with("", window, cx);
+            assert_eq!(p.quick_open.as_ref().unwrap().results.len(), 2);
+            assert!(!p.quick_open.as_ref().unwrap().results.contains(&paths[1]));
+        });
+    })
+    .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[gpui_kit::test]

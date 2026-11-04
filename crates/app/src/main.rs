@@ -421,6 +421,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         // ⌘/ and the other line editing keys on document editors (workbench/edit_commands.rs).
         cx.bind_keys(workbench::edit_key_bindings());
         cx.bind_keys(workbench::search_key_bindings());
+        cx.bind_keys(workbench::explorer_key_bindings());
         install_menus(cx);
         let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
         cx.set_global(workbench::OpenDocuments(documents.clone()));
@@ -488,7 +489,7 @@ fn install_menus(cx: &mut App) {
     .detach();
 }
 
-fn app_menus(auto_save: save::AutoSave) -> [Menu; 4] {
+fn app_menus(auto_save: save::AutoSave) -> [Menu; 5] {
     [
         Menu::new("ZJ").items([
             MenuItem::action("设置…", workbench::OpenSettingsFile),
@@ -520,6 +521,16 @@ fn app_menus(auto_save: save::AutoSave) -> [Menu; 4] {
                         .checked(auto_save == save::AutoSave::OnFocusChange),
                 ]),
             ),
+        ]),
+        Menu::new("编辑").items([
+            MenuItem::action("撤销", gpui_kit::component::input::Undo),
+            MenuItem::action("重做", gpui_kit::component::input::Redo),
+            MenuItem::separator(),
+            MenuItem::action("剪切", gpui_kit::component::input::Cut),
+            MenuItem::action("复制", gpui_kit::component::input::Copy),
+            MenuItem::action("粘贴", gpui_kit::component::input::Paste),
+            MenuItem::separator(),
+            MenuItem::action("全选", gpui_kit::component::input::SelectAll),
         ]),
         Menu::new("查看").items([
             MenuItem::action("命令面板…", workbench::ShowAllCommands),
