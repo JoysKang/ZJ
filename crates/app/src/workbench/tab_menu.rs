@@ -65,6 +65,7 @@ impl ClosedTabs {
 }
 
 type PaneAction = fn(&mut Workbench, Pane, &mut Window, &mut Context<Workbench>);
+type TabPathAction = fn(&mut Workbench, Pane, PathBuf, &mut Window, &mut Context<Workbench>);
 
 impl Workbench {
     /// The file a tab shows: the document, the diffed file, the graph's repository.
@@ -89,13 +90,13 @@ impl Workbench {
         menu: PopupMenu,
         view: Entity<Self>,
     ) -> PopupMenu {
-        let path = self.pane_path(pane);
+        let path = pending.clone().or_else(|| self.pane_path(pane));
         let tabs = self.documents.len()
             + self.pending_tabs.len()
             + usize::from(self.diff.tab.is_some())
             + usize::from(self.graph.is_some())
             + usize::from(self.large.is_some());
-        let in_tree = matches!(pane, Pane::Document(_))
+        let in_tree = (pending.is_some() || matches!(pane, Pane::Document(_)))
             && path
                 .as_ref()
                 .zip(self.root.as_ref())
@@ -106,6 +107,18 @@ impl Workbench {
                 .action(action)
                 .on_click(move |_, window, cx| {
                     view.update(cx, |this, cx| run(this, pane, window, cx));
+                })
+        };
+        let path_item = |label: &'static str, action: Box<dyn Action>, run: TabPathAction| {
+            let view = view.clone();
+            let path = path.clone();
+            PopupMenuItem::new(label)
+                .action(action)
+                .disabled(path.is_none())
+                .on_click(move |_, window, cx| {
+                    if let Some(path) = path.clone() {
+                        view.update(cx, |this, cx| run(this, pane, path, window, cx));
+                    }
                 })
         };
         menu.action_context(self.focus_handle.clone())
@@ -142,36 +155,27 @@ impl Workbench {
                 |this, _, window, cx| this.close_all_panes(window, cx),
             ))
             .separator()
-            .item(
-                item(
-                    "复制路径",
-                    Box::new(CopyActivePath),
-                    |this, pane, _, cx| this.copy_pane_path(pane, false, cx),
-                )
-                .disabled(path.is_none()),
-            )
-            .item(
-                item(
-                    "复制相对路径",
-                    Box::new(CopyActiveRelativePath),
-                    |this, pane, _, cx| this.copy_pane_path(pane, true, cx),
-                )
-                .disabled(path.is_none()),
-            )
+            .item(path_item(
+                "复制路径",
+                Box::new(CopyActivePath),
+                |this, _, path, _, cx| this.copy_tab_path(&path, false, cx),
+            ))
+            .item(path_item(
+                "复制相对路径",
+                Box::new(CopyActiveRelativePath),
+                |this, _, path, _, cx| this.copy_tab_path(&path, true, cx),
+            ))
             .separator()
+            .item(path_item(
+                REVEAL_LABEL,
+                Box::new(RevealActiveInFinder),
+                |this, _, path, _, cx| this.reveal_in_finder(path, cx),
+            ))
             .item(
-                item(
-                    REVEAL_LABEL,
-                    Box::new(RevealActiveInFinder),
-                    |this, pane, _, cx| this.reveal_pane_in_finder(pane, cx),
-                )
-                .disabled(path.is_none()),
-            )
-            .item(
-                item(
+                path_item(
                     "在资源管理器视图中显示",
                     Box::new(RevealActiveInExplorer),
-                    Workbench::reveal_pane_in_explorer,
+                    Workbench::reveal_tab_in_explorer,
                 )
                 .disabled(!in_tree),
             )
@@ -239,8 +243,9 @@ impl Workbench {
                     if keep != Pane::Large && this.large.is_some() {
                         this.close_large(window, cx);
                     }
-                    this.pending_tabs.retain(|path| !pending.contains(path));
-                    this.tab_order.retain(|path| !pending.contains(path));
+                    for path in pending {
+                        this.remove_pending_tab(&path);
+                    }
                     if let Some(path) = keep_pending {
                         this.open_pending_tab(path, window, cx);
                     } else {
@@ -263,11 +268,14 @@ impl Workbench {
     }
 
     pub(super) fn copy_pane_path(&mut self, pane: Pane, relative: bool, cx: &mut Context<Self>) {
-        let Some(path) = self.pane_path(pane) else {
-            return;
-        };
+        if let Some(path) = self.pane_path(pane) {
+            self.copy_tab_path(&path, relative, cx);
+        }
+    }
+
+    fn copy_tab_path(&mut self, path: &std::path::Path, relative: bool, cx: &mut Context<Self>) {
         let text = if relative {
-            self.relative(&path).display().to_string()
+            self.relative(path).display().to_string()
         } else {
             path.display().to_string()
         };
@@ -296,9 +304,21 @@ impl Workbench {
         let Some(path) = self.pane_path(pane) else {
             return;
         };
+        self.reveal_tab_in_explorer(pane, path, window, cx);
+    }
+
+    fn reveal_tab_in_explorer(
+        &mut self,
+        pane: Pane,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.sidebar = Sidebar::Explorer;
         self.sidebar_visible = true;
-        self.select_pane(pane, window, cx);
+        if matches!(pane, Pane::Document(_)) {
+            self.select_pane(pane, window, cx);
+        }
         self.select_tree_path(path, window, cx);
     }
 

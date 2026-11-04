@@ -841,6 +841,48 @@ fn tags_are_created_pushed_and_deleted() {
 }
 
 #[test]
+fn push_distinguishes_unpublished_pruned_recreated_and_rejected_branches() {
+    common::hermetic();
+    let fixture = fixture();
+    let root = fixture.0.join("a");
+    let bare = fixture.0.join("remote.git");
+    fs::create_dir(&bare).unwrap();
+    git(&bare, &["init", "--bare", "-b", "main"]);
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-qm", "base"]);
+    git(&root, &["remote", "add", "origin", bare.to_str().unwrap()]);
+    let service = GitService::new(2, Duration::from_secs(10)).unwrap();
+    let missing = write(&service, &root, WriteOperation::Push).unwrap_err();
+    assert!(missing.to_string().contains("尚未配置上游"));
+    assert!(git(&bare, &["for-each-ref", "refs/heads/main"]).is_empty());
+
+    git(&root, &["push", "-u", "origin", "main"]);
+    // A deleted server branch can be recreated while its local tracking ref remains.
+    git(&bare, &["update-ref", "-d", "refs/heads/main"]);
+    write(&service, &root, WriteOperation::Push).unwrap();
+    assert_eq!(
+        git(&bare, &["rev-parse", "refs/heads/main"]),
+        git(&root, &["rev-parse", "HEAD"])
+    );
+
+    // Once fetch prunes the tracking ref, the service reports failure instead of success.
+    git(&bare, &["update-ref", "-d", "refs/heads/main"]);
+    git(&root, &["fetch", "--prune", "origin"]);
+    assert!(write(&service, &root, WriteOperation::Push).is_err());
+    assert!(git(&bare, &["for-each-ref", "refs/heads/main"]).is_empty());
+
+    git(&root, &["push", "-u", "origin", "main"]);
+    let before = git(&bare, &["rev-parse", "refs/heads/main"]);
+    fs::write(root.join("src/main.rs"), "rejected\n").unwrap();
+    git(&root, &["commit", "-qam", "rejected"]);
+    let hook = bare.join("hooks/pre-receive");
+    fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(write(&service, &root, WriteOperation::Push).is_err());
+    assert_eq!(git(&bare, &["rev-parse", "refs/heads/main"]), before);
+}
+
+#[test]
 fn patches_keep_a_b_prefixes_whatever_the_user_config_says() {
     common::hermetic();
     let fixture = fixture();

@@ -491,7 +491,7 @@ impl Workbench {
         }
         let text = doc.editor.read(cx).text().to_string();
         let bytes = save::encode(&text, doc.crlf, doc.bom);
-        let expected = if overwrite || doc.deleted { None } else { doc.disk };
+        let expected = if overwrite { None } else { doc.disk };
         let path = doc.path.clone();
         let version = doc.version;
         if let Some(doc) = self.document_mut(id) {
@@ -747,6 +747,8 @@ impl Workbench {
         let text = doc.editor.read(cx).text().to_string();
         let bytes = save::encode(&text, doc.crlf, doc.bom);
         let version = doc.version;
+        let indent_version = doc.indent_version;
+        let root = self.root.clone();
         self.document_mut(id).unwrap().saving = true;
         let resolve = cx.background_spawn(async move { canonical_save_target(&path) });
         cx.spawn_in(window, async move |this, cx| {
@@ -812,9 +814,12 @@ impl Workbench {
             // Keep the reservation until both the writer and the UI completion are done,
             // including when the caller or window disappears while filesystem I/O runs.
             let writer = reservation.clone();
-            let work = cx
-                .background_executor()
-                .spawn(async move { save::write(&writer.path, &bytes, None) });
+            let work = cx.background_executor().spawn(async move {
+                let state = save::write(&writer.path, &bytes, None)?;
+                let root = root.filter(|root| writer.path.starts_with(root));
+                let indent = indent::resolve(&writer.path, root.as_deref(), &text);
+                Ok::<_, save::SaveError>((state, indent))
+            });
             let result = work.await;
             this.update_in(cx, |this, window, cx| {
                 let Some(doc) = this.document_mut(id) else {
@@ -822,7 +827,7 @@ impl Workbench {
                 };
                 doc.saving = false;
                 let saved = match result {
-                    Ok(state) => {
+                    Ok((state, indent)) => {
                         let (language, language_name) = language_for(&path);
                         let old_path = this.document(id).unwrap().path.clone();
                         this.pending_tabs.retain(|tab| *tab != path);
@@ -841,9 +846,14 @@ impl Workbench {
                             doc.untitled = false;
                             doc.language = language_name;
                         }
-                        // An untitled buffer only had the plain-text default; now it has a language.
+                        if this.document(id).is_some_and(|doc| {
+                            doc.path == path
+                                && doc.version == version
+                                && doc.indent_version == indent_version
+                        }) {
+                            this.set_indent(id, indent, cx);
+                        }
                         if was_untitled {
-                            this.set_indent(id, indent::language_default(&path), cx);
                             this.set_soft_wrap(id, soft_wrap_default(language), window, cx);
                         }
                         this.document_path_changed(id, cx);
@@ -1370,6 +1380,7 @@ impl Workbench {
             return;
         };
         doc.indent = indent;
+        doc.indent_version += 1;
         doc.editor
             .update(cx, |state, cx| state.set_tab_size(tab_size(indent), cx));
         eprintln!(
@@ -1508,6 +1519,7 @@ impl Document {
             crlf: false,
             bom: false,
             indent,
+            indent_version: 0,
             soft_wrap: soft_wrap_default(language_id),
             disk: None,
             untitled: true,

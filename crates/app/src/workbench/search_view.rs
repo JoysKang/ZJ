@@ -40,6 +40,36 @@ const EXCLUDE_SAVE_DELAY: Duration = Duration::from_secs(1);
 /// How often a running search hands its results to the view.
 const POLL: Duration = Duration::from_millis(100);
 
+gpui_kit::actions!(
+    search,
+    [
+        FocusSearchResults,
+        SearchResultsNext,
+        SearchResultsPrevious,
+        SearchResultsOpen,
+        SearchResultsExpand,
+        SearchResultsCollapse,
+        SearchQueryFocus
+    ]
+);
+
+pub fn key_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("down", FocusSearchResults, Some("SearchQuery > Input")),
+        KeyBinding::new("down", SearchResultsNext, Some("SearchResults")),
+        KeyBinding::new("up", SearchResultsPrevious, Some("SearchResults")),
+        KeyBinding::new("enter", SearchResultsOpen, Some("SearchResults")),
+        KeyBinding::new("right", SearchResultsExpand, Some("SearchResults")),
+        KeyBinding::new("left", SearchResultsCollapse, Some("SearchResults")),
+        KeyBinding::new("escape", SearchQueryFocus, Some("SearchResults")),
+    ]
+}
+
+struct SearchSelection {
+    path: PathBuf,
+    line: Option<u32>,
+}
+
 #[derive(Clone, Copy)]
 enum SearchRow {
     File(usize),
@@ -58,6 +88,8 @@ pub(super) struct SearchState {
     pub results: Vec<FileMatches>,
     pub collapsed: HashSet<PathBuf>,
     rows: Vec<SearchRow>,
+    selection: Option<SearchSelection>,
+    focus: FocusHandle,
     pub matches: usize,
     truncated: bool,
     /// Excludes off and too many ignored files: some were not searched.
@@ -136,6 +168,8 @@ impl SearchState {
             results: Vec::new(),
             collapsed: HashSet::new(),
             rows: Vec::new(),
+            selection: None,
+            focus: cx.focus_handle(),
             matches: 0,
             truncated: false,
             files_capped: false,
@@ -163,6 +197,39 @@ impl SearchState {
                     .extend((0..file.lines.len()).map(|l| SearchRow::Line(f, l)));
             }
         }
+        if self.selected_row().is_none() {
+            self.selection = None;
+        }
+    }
+
+    fn row_is_selected(&self, row: SearchRow) -> bool {
+        let Some(selected) = &self.selection else {
+            return false;
+        };
+        let (file, line) = match row {
+            SearchRow::File(file) => (file, None),
+            SearchRow::Line(file, line) => (file, Some(self.results[file].lines[line].line)),
+        };
+        self.results[file].path == selected.path && line == selected.line
+    }
+
+    fn selected_row(&self) -> Option<usize> {
+        self.selection.as_ref()?;
+        self.rows.iter().position(|row| self.row_is_selected(*row))
+    }
+
+    fn select_row(&mut self, index: usize) {
+        if let Some(row) = self.rows.get(index) {
+            let (file, line) = match *row {
+                SearchRow::File(file) => (file, None),
+                SearchRow::Line(file, line) => (file, Some(self.results[file].lines[line].line)),
+            };
+            self.selection = Some(SearchSelection {
+                path: self.results[file].path.clone(),
+                line,
+            });
+            self.scroll.scroll_to_item(index, ScrollStrategy::Nearest);
+        }
     }
 }
 
@@ -175,8 +242,6 @@ impl Drop for SearchState {
 impl Workbench {
     /// ⌘⇧F: the Search view with the query focused (and the selection, if any, as the query).
     pub(super) fn find_in_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.sidebar = super::Sidebar::Search;
-        self.sidebar_visible = true;
         let selected = self
             .active_editor()
             .map(|editor| editor.read(cx).selected_text().to_string());
@@ -185,6 +250,14 @@ impl Workbench {
                 .query
                 .update(cx, |input, cx| input.set_value(text, window, cx));
         }
+        self.open_search(window, cx);
+    }
+
+    /// Reopening ordinary search replaces the query on typing, without reusing replace mode.
+    pub(super) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar = super::Sidebar::Search;
+        self.sidebar_visible = true;
+        self.search.replace.expanded = false;
         self.search.query.update(cx, |input, cx| {
             input.focus(window, cx);
             input.select_all(window, cx);
@@ -257,18 +330,21 @@ impl Workbench {
         search.task = None;
         search.error = None;
         search.waiting_for_index = false;
+        // Results and replace targets must belong to the query currently shown, even if invalid.
+        search.results.clear();
+        search.rows.clear();
+        search.selection = None;
+        search.matches = 0;
+        search.finder = None;
+        search.matcher = None;
+        search.truncated = false;
+        search.files_capped = false;
+        search.running = false;
         let options = self.search_options(cx);
         let Some(root) = self.root.clone() else {
             return;
         };
         if options.pattern.is_empty() {
-            let search = &mut self.search;
-            search.results.clear();
-            search.rows.clear();
-            search.matches = 0;
-            search.truncated = false;
-            search.files_capped = false;
-            search.running = false;
             cx.notify();
             return;
         }
@@ -392,6 +468,93 @@ impl Workbench {
         };
         self.remember(cx);
         self.go(path, place, window, cx);
+    }
+
+    fn focus_search_results(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search.rows.is_empty() {
+            return;
+        }
+        let index = self.search.selected_row().unwrap_or(0);
+        self.search.select_row(index);
+        self.search.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn move_search_result(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if !self.search.rows.is_empty() {
+            let index = self
+                .search
+                .selected_row()
+                .unwrap_or(0)
+                .saturating_add_signed(delta)
+                .min(self.search.rows.len() - 1);
+            self.search.select_row(index);
+            cx.notify();
+        }
+    }
+
+    fn expand_search_result(&mut self, expand: bool, cx: &mut Context<Self>) {
+        let Some(index) = self.search.selected_row() else {
+            return;
+        };
+        let file = match self.search.rows[index] {
+            SearchRow::File(file) => {
+                let path = self.search.results[file].path.clone();
+                if expand {
+                    if !self.search.collapsed.remove(&path)
+                        && matches!(self.search.rows.get(index + 1), Some(SearchRow::Line(f, _)) if *f == file)
+                    {
+                        self.search.select_row(index + 1);
+                    }
+                } else {
+                    self.search.collapsed.insert(path);
+                }
+                self.search.rebuild_rows();
+                cx.notify();
+                return;
+            }
+            SearchRow::Line(file, _) if !expand => file,
+            SearchRow::Line(_, _) => return,
+        };
+        if let Some(parent) = self
+            .search
+            .rows
+            .iter()
+            .position(|row| matches!(row, SearchRow::File(f) if *f == file))
+        {
+            self.search.select_row(parent);
+            cx.notify();
+        }
+    }
+
+    fn activate_search_result(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(row) = self.search.rows.get(index).copied() else {
+            return;
+        };
+        self.search.select_row(index);
+        match row {
+            SearchRow::File(file) => {
+                let path = self.search.results[file].path.clone();
+                if !self.search.collapsed.remove(&path) {
+                    self.search.collapsed.insert(path);
+                }
+                self.search.rebuild_rows();
+                self.search.focus.focus(window, cx);
+                cx.notify();
+            }
+            SearchRow::Line(file, line) => {
+                if self.search.replace.expanded {
+                    self.preview_replace(file, window, cx);
+                } else {
+                    self.open_match(file, line, window, cx);
+                }
+            }
+        }
     }
 
     fn toggle_option(
@@ -525,30 +688,63 @@ impl Workbench {
             .accessibility_label("替换所有搜索结果")
             .disabled(search.results.is_empty() || replace.running)
             .on_click(cx.listener(|this, _, window, cx| this.confirm_replace_all(window, cx)));
-        // Everything stays open: the query, the replacement, the files to include and exclude.
+        let replace_label = if replace.expanded {
+            "收起替换"
+        } else {
+            "展开替换"
+        };
+        let toggle_replace = Button::new("search-toggle-replace")
+            .small()
+            .ghost()
+            .icon(if replace.expanded {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
+            .tooltip(replace_label)
+            .accessibility_label(replace_label)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.search.replace.expanded = !this.search.replace.expanded;
+                let input = if this.search.replace.expanded {
+                    &this.search.replace.input
+                } else {
+                    &this.search.query
+                };
+                input.update(cx, |input, cx| input.focus(window, cx));
+                cx.notify();
+            }));
         let inputs = v_flex()
             .gap_1()
             .child(
-                div().debug_selector(|| "search-query".into()).child(
-                    Input::new(&search.query)
-                        .text_size(theme::TEXT_BODY)
-                        .small()
-                        .suffix(query_options),
-                ),
-            )
-            .child(
                 h_flex()
+                    .debug_selector(|| "search-query".into())
+                    .key_context("SearchQuery")
                     .gap_1()
+                    .child(toggle_replace)
                     .child(
                         div().flex_1().min_w_0().child(
-                            Input::new(&replace.input)
+                            Input::new(&search.query)
                                 .text_size(theme::TEXT_BODY)
                                 .small()
-                                .suffix(preserve_case),
+                                .suffix(query_options),
                         ),
-                    )
-                    .child(replace_all),
-            );
+                    ),
+            )
+            .when(replace.expanded, |inputs| {
+                inputs.child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            div().flex_1().min_w_0().child(
+                                Input::new(&replace.input)
+                                    .text_size(theme::TEXT_BODY)
+                                    .small()
+                                    .suffix(preserve_case),
+                            ),
+                        )
+                        .child(replace_all),
+                )
+            });
         let replace_summary = replace.summary.clone().map(|(text, warn)| {
             h_flex()
                 .gap_1()
@@ -577,6 +773,19 @@ impl Workbench {
         v_flex()
             .size_full()
             .min_h_0()
+            .on_action(cx.listener(|this, _: &FocusSearchResults, window, cx| this.focus_search_results(window, cx)))
+            .on_action(cx.listener(|this, _: &SearchResultsNext, _, cx| this.move_search_result(1, cx)))
+            .on_action(cx.listener(|this, _: &SearchResultsPrevious, _, cx| this.move_search_result(-1, cx)))
+            .on_action(cx.listener(|this, _: &SearchResultsExpand, _, cx| this.expand_search_result(true, cx)))
+            .on_action(cx.listener(|this, _: &SearchResultsCollapse, _, cx| this.expand_search_result(false, cx)))
+            .on_action(cx.listener(|this, _: &SearchResultsOpen, window, cx| {
+                if let Some(index) = this.search.selected_row() {
+                    this.activate_search_result(index, window, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SearchQueryFocus, window, cx| {
+                this.search.query.update(cx, |input, cx| input.focus(window, cx));
+            }))
             .child(
                 v_flex()
                     .px(theme::TREE_BASE)
@@ -644,18 +853,27 @@ impl Workbench {
                     .children(replace_summary),
             )
             .child(
-                uniform_list(
-                    "search-results",
-                    search.rows.len(),
-                    cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                        range
-                            .map(|index| this.search_row(index, cx))
-                            .collect::<Vec<_>>()
-                    }),
-                )
-                .track_scroll(&search.scroll)
-                .flex_1()
-                .w_full(),
+                v_flex()
+                    .id("search-result-tree")
+                    .track_focus(&search.focus)
+                    .key_context("SearchResults")
+                    .role(Role::Tree)
+                    .aria_label("搜索结果")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(
+                        uniform_list(
+                            "search-results",
+                            search.rows.len(),
+                            cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                                range.map(|index| this.search_row(index, cx)).collect::<Vec<_>>()
+                            }),
+                        )
+                        .track_scroll(&search.scroll)
+                        .flex_1()
+                        .w_full(),
+                    ),
             )
             .into_any_element()
     }
@@ -685,10 +903,12 @@ impl Workbench {
     fn search_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
         let group: SharedString = format!("search-row-{index}").into();
-        let replacing = self.search.replace.active(cx);
+        let replacing = self.search.replace.expanded;
         let busy = self.search.replace.running;
+        let selected = self.search.row_is_selected(self.search.rows[index]);
         let base = h_flex()
             .id(("search-row", index))
+            .test_support()
             .group(group.clone())
             .w_full()
             .h(theme::ROW_HEIGHT)
@@ -699,6 +919,8 @@ impl Workbench {
             .whitespace_nowrap()
             .text_size(theme::TEXT_BODY)
             .cursor_pointer()
+            .aria_selected(selected)
+            .when(selected, |row| row.bg(colors.selected))
             .hover(|row| row.bg(colors.hover));
         let row = match self.search.rows[index] {
             SearchRow::File(f) => {
@@ -715,7 +937,6 @@ impl Workbench {
                     .map(|p| p.to_string_lossy().replace(SINGLE_LINE, "⏎"))
                     .unwrap_or_default();
                 let expanded = !self.search.collapsed.contains(&file.path);
-                let path = file.path.clone();
                 let mut buttons = Vec::new();
                 if replacing {
                     buttons.push(
@@ -775,12 +996,8 @@ impl Workbench {
                             .children(buttons),
                     )
                     .child(super::scm::count_badge(file.count, colors))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !this.search.collapsed.remove(&path) {
-                            this.search.collapsed.insert(path.clone());
-                        }
-                        this.search.rebuild_rows();
-                        cx.notify();
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.activate_search_result(index, window, cx);
                     }))
             }
             SearchRow::Line(f, l) => {
@@ -840,7 +1057,7 @@ impl Workbench {
                     .on_click(cx.listener(move |this, _, _, cx| this.ignore_line(f, l, cx))),
                 );
                 base.pl(theme::TREE_BASE + theme::TREE_STEP * 3.)
-                    .role(Role::Button)
+                    .role(Role::TreeItem)
                     .aria_label(format!("第 {} 行：{}", line.line + 1, line.preview))
                     .child(
                         div()
@@ -852,11 +1069,7 @@ impl Workbench {
                     )
                     .child(self.row_actions(group, buttons))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        if this.search.replace.active(cx) {
-                            this.preview_replace(f, window, cx)
-                        } else {
-                            this.open_match(f, l, window, cx)
-                        }
+                        this.activate_search_result(index, window, cx);
                     }))
             }
         };

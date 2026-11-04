@@ -77,6 +77,76 @@ const COPY_RELATIVE_PATH: usize = 5;
 const REVEAL_IN_EXPLORER: usize = 8;
 
 #[gpui_kit::test]
+async fn unloaded_tabs_can_be_reopened_after_single_and_batch_close(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = fixture("pending-reopen");
+    let (handle, this) = open(cx, root.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.restore_tabs(
+                vec![root.join("a.txt"), root.join("b.txt")],
+                None,
+                window,
+                cx,
+            )
+        });
+    })
+    .unwrap();
+    menu_click(cx, handle, &this, usize::MAX / 2, CLOSE);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.reopen_closed_tab(window, cx));
+    })
+    .unwrap();
+    cx.run_until_parked();
+    settle(cx, Some(handle), |cx| names(cx, &this) == ["a.txt"]);
+    menu_click(cx, handle, &this, 0, CLOSE_OTHERS);
+    this.read_with(cx, |p, _| assert!(p.pending_tabs.is_empty()));
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.reopen_closed_tab(window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        names(cx, &this) == ["a.txt", "b.txt"]
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn unloaded_tab_path_actions_do_not_read_the_file(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = fixture("pending-path");
+    let path = root.join("sub/c.txt");
+    let (handle, this) = open(cx, root.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.restore_tabs(vec![path.clone()], None, window, cx)
+        });
+    })
+    .unwrap();
+    menu_click(cx, handle, &this, usize::MAX / 2, COPY_PATH);
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some(path.display().to_string())
+    );
+    menu_click(cx, handle, &this, usize::MAX / 2, COPY_RELATIVE_PATH);
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("sub/c.txt".into())
+    );
+    menu_click(cx, handle, &this, usize::MAX / 2, REVEAL_IN_EXPLORER);
+    this.read_with(cx, |p, _| {
+        assert!(
+            p.documents.is_empty(),
+            "path actions must not load a pending tab"
+        );
+        assert_eq!(p.pending_tabs, vec![path.clone()]);
+        assert_eq!(p.explorer.selection.as_ref(), Some(&path));
+        assert!(p.sidebar == Sidebar::Explorer);
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
 async fn close_others_removes_restored_tabs_that_have_not_been_opened(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = fixture("restored-others");

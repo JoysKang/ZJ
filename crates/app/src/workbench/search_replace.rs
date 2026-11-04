@@ -24,6 +24,7 @@ use std::{ops::Range, path::PathBuf};
 
 pub(super) struct ReplaceState {
     pub input: Entity<InputState>,
+    pub expanded: bool,
     pub preserve_case: bool,
     pub running: bool,
     task: Option<Task<()>>,
@@ -59,6 +60,7 @@ impl ReplaceState {
         });
         Self {
             input,
+            expanded: false,
             preserve_case: false,
             running: false,
             task: None,
@@ -66,11 +68,6 @@ impl ReplaceState {
             summary: None,
             _subscription: subscription,
         }
-    }
-
-    /// The replacement has text: results show what replacing would do instead of opening.
-    pub fn active(&self, cx: &App) -> bool {
-        !self.input.read(cx).value().is_empty()
     }
 
     pub fn has_undo(&self) -> bool {

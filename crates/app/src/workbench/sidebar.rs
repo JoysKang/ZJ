@@ -181,9 +181,7 @@ impl Workbench {
                     this.request_remote_check(false, window, cx);
                 }
                 if view == Sidebar::Search {
-                    this.search
-                        .query
-                        .update(cx, |input, cx| input.focus(window, cx));
+                    this.open_search(window, cx);
                 }
                 cx.notify();
             }))
@@ -199,6 +197,7 @@ impl Workbench {
         };
         v_flex()
             .id("workbench-sidebar")
+            .track_focus(&self.sidebar_focus)
             .size_full()
             .min_h_0()
             .bg(colors.panel)

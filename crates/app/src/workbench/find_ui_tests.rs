@@ -7,6 +7,76 @@ use core::prelude::v1::test;
 use gpui_kit::{TestAppContext, test::TestWindowExt};
 
 #[gpui_kit::test]
+async fn repeated_find_shortcuts_replace_the_previous_query(cx: &mut TestAppContext) {
+    fn press(cx: &mut TestAppContext, handle: AnyWindowHandle, key: &str) {
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.press(key, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+    fn input(cx: &mut TestAppContext, handle: AnyWindowHandle, text: &str) {
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.input(text, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+    }
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-repeat-find-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("main.txt");
+    std::fs::write(&path, "old new old new\n").unwrap();
+    let (handle, this) = open(cx, root.clone());
+    let window: AnyWindowHandle = handle.into();
+    cx.update(|cx| {
+        cx.bind_keys([
+            KeyBinding::new("cmd-f", FindInFile, Some("WorkspaceEditor")),
+            KeyBinding::new("cmd-shift-f", FindInFiles, Some("WorkspaceEditor")),
+            KeyBinding::new("cmd-shift-f", FindInFiles, Some("Input")),
+        ]);
+    });
+    let folder = Some(root.clone());
+    cx.update_window(window, |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(path, folder, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    for workspace in [false, true] {
+        let shortcut = if workspace { "cmd-shift-f" } else { "cmd-f" };
+        for return_to_editor in [false, true] {
+            press(cx, window, shortcut);
+            input(cx, window, "old");
+            if return_to_editor {
+                cx.update_window(window, |_, window, cx| {
+                    this.update(cx, |p, cx| p.focus_active_editor(window, cx));
+                })
+                .unwrap();
+            }
+            press(cx, window, shortcut);
+            input(cx, window, "new");
+            let query = this.read_with(cx, |p, cx| {
+                if workspace {
+                    p.search.query.read(cx).value().to_string()
+                } else {
+                    p.find.query.read(cx).value().to_string()
+                }
+            });
+            assert_eq!(
+                query, "new",
+                "{shortcut}, return_to_editor={return_to_editor}"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
 async fn find_controls_fit_a_narrow_editor(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = std::env::temp_dir().join(format!("zj-find-width-{}", std::process::id()));

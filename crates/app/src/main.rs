@@ -420,6 +420,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         ]);
         // ⌘/ and the other line editing keys on document editors (workbench/edit_commands.rs).
         cx.bind_keys(workbench::edit_key_bindings());
+        cx.bind_keys(workbench::search_key_bindings());
         install_menus(cx);
         let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
         cx.set_global(workbench::OpenDocuments(documents.clone()));

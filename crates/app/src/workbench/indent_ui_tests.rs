@@ -74,6 +74,75 @@ fn menu_click(cx: &mut TestAppContext, window: WindowHandle<Root>, item: usize) 
     cx.run_until_parked();
 }
 
+#[gpui_kit::test]
+async fn save_as_uses_the_target_directory_editorconfig(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = fixture("save-as");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(
+        root.join(".editorconfig"),
+        "root = true\n[*.rs]\nindent_style = space\nindent_size = 2\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("sub/.editorconfig"),
+        "[*.rs]\nindent_style = tab\nindent_size = 8\n",
+    )
+    .unwrap();
+    let (handle, this) = open(cx, root.clone());
+    let id = cx
+        .update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.new_untitled(window, cx);
+                p.documents[0].id
+            })
+        })
+        .unwrap();
+    for (name, expected) in [("a.rs", Indent::spaces(2)), ("sub/b.rs", Indent::tabs(8))] {
+        let task = cx
+            .update_window(handle.into(), |_, window, cx| {
+                this.update(cx, |p, cx| p.write_as(id, root.join(name), window, cx))
+            })
+            .unwrap();
+        assert!(task.await);
+        assert_eq!(
+            indent_of(cx, &this, id),
+            expected,
+            "save-as ignored the target's rules: {name}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn save_as_keeps_indentation_chosen_while_saving(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = fixture("save-as-manual");
+    std::fs::write(
+        root.join(".editorconfig"),
+        "root = true\n[*.rs]\nindent_size = 4\n",
+    )
+    .unwrap();
+    let (handle, this) = open(cx, root.clone());
+    let task = cx
+        .update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.new_untitled(window, cx);
+                let id = p.documents[0].id;
+                let task = p.write_as(id, root.join("a.rs"), window, cx);
+                p.set_indent(id, Indent::spaces(2), cx);
+                task
+            })
+        })
+        .unwrap();
+    assert!(task.await);
+    assert_eq!(
+        this.read_with(cx, |p, _| p.documents[0].indent),
+        Indent::spaces(2)
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 const USE_SPACES: usize = 0;
 const WIDTH_8: usize = 5;
 

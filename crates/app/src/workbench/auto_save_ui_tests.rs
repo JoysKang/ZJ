@@ -81,6 +81,66 @@ fn open_edited_buffer(
 }
 
 #[gpui_kit::test]
+async fn saving_a_deleted_buffer_does_not_overwrite_an_external_recreation(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-save-recreated-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("a.txt");
+    std::fs::write(&path, "original\n").unwrap();
+    let (window, this, editor) = open_edited_buffer(cx, &root, &path, AutoSave::Off);
+    let id = this.read_with(cx, |p, _| p.documents[0].id);
+    let mine = editor.read_with(cx, |state, _| state.text().to_string());
+    std::fs::remove_file(&path).unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.check_disk(None, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.document(id).unwrap().deleted)
+    });
+    // Recreate and save in one event, before the watcher can update the deleted flag.
+    cx.update_window(window.into(), |_, window, cx| {
+        std::fs::write(&path, "external replacement\n").unwrap();
+        this.update(cx, |p, cx| p.save_document(id, false, window, cx).detach());
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| !p.document(id).unwrap().saving)
+    });
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "external replacement\n"
+    );
+    assert!(
+        cx.has_pending_prompt(),
+        "recreated content needs conflict approval"
+    );
+    cx.simulate_prompt_answer("取消");
+    cx.run_until_parked();
+    assert!(this.read_with(cx, |p, _| p.document(id).unwrap().dirty));
+    assert_eq!(
+        editor.read_with(cx, |state, _| state.text().to_string()),
+        mine
+    );
+
+    // With the path still absent, manual save must continue to recreate the buffer.
+    std::fs::remove_file(&path).unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.save_document(id, false, window, cx).detach());
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| !p.document(id).unwrap().saving)
+    });
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), mine);
+    assert!(!this.read_with(cx, |p, _| p.document(id).unwrap().dirty));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
 async fn a_save_result_for_the_previous_path_keeps_the_buffer_dirty(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = std::env::temp_dir().join(format!("zj-save-moved-{}", std::process::id()));

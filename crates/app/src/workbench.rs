@@ -97,6 +97,7 @@ mod scm_actions;
 mod scm_tree;
 mod search_replace;
 mod search_view;
+pub use search_view::key_bindings as search_key_bindings;
 #[cfg(test)]
 #[path = "workbench/session_ui_tests.rs"]
 mod session_ui_tests;
@@ -198,6 +199,8 @@ struct Document {
     bom: bool,
     /// Tab key and indent width of this buffer (the status bar can change it).
     indent: crate::indent::Indent,
+    /// Indentation changes during Save As must win over its background result.
+    indent_version: u64,
     /// Long lines wrap at the editor's width.
     soft_wrap: bool,
     /// The file as last loaded or saved (`None` for untitled buffers).
@@ -387,6 +390,7 @@ enum Event {
 
 pub struct Workbench {
     focus_handle: FocusHandle,
+    sidebar_focus: FocusHandle,
     root: Option<PathBuf>,
     service: GitService,
     groups: Vec<Group>,
@@ -564,6 +568,7 @@ impl Workbench {
         let find = find_widget::FindState::new(window, cx);
         let mut this = Self {
             focus_handle: cx.focus_handle(),
+            sidebar_focus: cx.focus_handle(),
             root,
             service,
             groups: vec![],
@@ -1060,6 +1065,9 @@ impl Workbench {
     }
 
     fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_visible && self.sidebar_focus.contains_focused(window, cx) {
+            self.focus_active_editor(window, cx);
+        }
         self.sidebar_visible = !self.sidebar_visible;
         if self.sidebar_visible {
             self.request_remote_check(false, window, cx);
@@ -1474,10 +1482,18 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.pending_tabs.retain(|tab| tab != path);
-        self.tab_order.retain(|tab| tab != path);
+        self.remove_pending_tab(path);
         self.remember_tabs(true, window, cx);
         cx.notify();
+    }
+
+    fn remove_pending_tab(&mut self, path: &std::path::Path) {
+        if let Some(index) = self.pending_tabs.iter().position(|tab| tab == path) {
+            let path = self.pending_tabs.remove(index);
+            self.tab_order.retain(|tab| *tab != path);
+            self.closed_tabs
+                .push(tab_menu::ClosedTab { path, offset: 0 });
+        }
     }
 
     /// Where a file's tab sits among the restored ones; files opened since come last.

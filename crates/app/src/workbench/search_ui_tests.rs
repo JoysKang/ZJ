@@ -8,6 +8,364 @@ use core::prelude::v1::test;
 use gpui_kit::{TestAppContext, test::TestWindowExt};
 
 #[gpui_kit::test]
+async fn search_results_support_keyboard_navigation_and_return_to_query(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    cx.update(|cx| cx.bind_keys(search_view::key_bindings()));
+    let root = std::env::temp_dir().join(format!("zj-search-keys-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("a.txt");
+    std::fs::write(&path, "needle first\nneedle second\n").unwrap();
+    let (handle, this) = open(cx, root.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.find_in_files(window, cx);
+            p.search
+                .query
+                .update(cx, |input, cx| input.set_value("needle", window, cx));
+            p.schedule_search(Duration::ZERO, window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.search.matches == 2)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("down", cx);
+        assert!(
+            !this
+                .read(cx)
+                .search
+                .query
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window),
+            "Down must leave the query and focus search results"
+        );
+        window.render_frame(cx);
+        window.press("escape", cx);
+        assert!(
+            this.read(cx)
+                .search
+                .query
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        );
+        for key in [
+            "down", "down", "down", "left", "left", "right", "down", "down", "enter",
+        ] {
+            window.render_frame(cx);
+            window.press(key, cx);
+        }
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| !p.documents.is_empty())
+    });
+    this.read_with(cx, |p, cx| {
+        let (active, editor) = p.active_document().unwrap();
+        assert_eq!(active, path);
+        assert_eq!(editor.read(cx).cursor_position().line, 1);
+        assert_eq!(editor.read(cx).selected_text().to_string(), "needle");
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn search_keyboard_selection_stays_on_the_same_result_when_files_are_removed(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    cx.update(|cx| cx.bind_keys(search_view::key_bindings()));
+    let root = std::env::temp_dir().join(format!("zj-search-selection-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    for name in ["a.txt", "b.txt"] {
+        std::fs::write(root.join(name), "needle\n").unwrap();
+    }
+    let (handle, this) = open(cx, root.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.find_in_files(window, cx);
+            p.search
+                .query
+                .update(cx, |input, cx| input.set_value("needle", window, cx));
+            p.schedule_search(Duration::ZERO, window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.search.matches == 2)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        for _ in 0..4 {
+            window.render_frame(cx);
+            window.press("down", cx);
+        }
+        this.update(cx, |p, cx| p.ignore_file(0, cx));
+        window.render_frame(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| !p.documents.is_empty())
+    });
+    assert_eq!(
+        this.read_with(cx, |p, _| p.documents[0].path.clone()),
+        root.join("b.txt")
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn hiding_the_sidebar_returns_focus_only_when_it_owned_focus(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-sidebar-focus-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("a.txt");
+    std::fs::write(&path, "source\n").unwrap();
+    let (handle, this) = open(cx, root.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(path, Some(root.clone()), window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| !p.documents.is_empty())
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.find_in_files(window, cx));
+        window.render_frame(cx);
+        this.update(cx, |p, cx| p.toggle_sidebar(window, cx));
+        assert!(
+            !this
+                .read(cx)
+                .search
+                .query
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window),
+            "hidden search input kept the keyboard focus"
+        );
+        assert!(
+            this.read(cx)
+                .active_editor()
+                .unwrap()
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        );
+        this.update(cx, |p, cx| p.toggle_sidebar(window, cx));
+        window.render_frame(cx);
+        this.update(cx, |p, cx| p.focus_handle.focus(window, cx));
+        this.update(cx, |p, cx| p.toggle_sidebar(window, cx));
+        assert!(
+            this.read(cx).focus_handle.is_focused(window),
+            "hiding an unfocused sidebar stole focus"
+        );
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn changing_to_an_invalid_query_cannot_keep_old_replace_targets(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-search-stale-query-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::write(root.join("a.txt"), "old\nnew\n").unwrap();
+    let (handle, this) = open(cx, root.clone());
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.index.is_some())
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.find_in_files(window, cx);
+            p.search
+                .query
+                .update(cx, |input, cx| input.set_value("old", window, cx));
+            p.schedule_search(Duration::ZERO, window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.search.matches == 1)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.search.regex = true;
+            p.search
+                .query
+                .update(cx, |input, cx| input.set_value("[", window, cx));
+            p.schedule_search(Duration::ZERO, window, cx);
+            assert!(
+                p.search.results.is_empty(),
+                "old search results remain actionable for a different, invalid query"
+            );
+            assert!(
+                p.search.finder.is_none(),
+                "replace still uses the previous query"
+            );
+            assert!(p.search.matcher.is_none());
+            assert_eq!(p.search.matches, 0);
+        });
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn search_interaction_sidebar_replaces_the_previous_query(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-search-reopen-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let (handle, this) = open(cx, root.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.find_in_files(window, cx));
+        window.render_frame(cx);
+        window.input("old", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("资源管理器", cx);
+        window.render_frame(cx);
+        window.click("搜索", cx);
+        window.render_frame(cx);
+        window.input("new", cx);
+    })
+    .unwrap();
+    assert_eq!(
+        this.read_with(cx, |p, cx| p.search.query.read(cx).value().to_string()),
+        "new",
+        "reopening search must replace the old query instead of appending"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn search_interaction_ordinary_search_opens_source_with_an_old_replacement(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-search-plain-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("a.txt");
+    std::fs::write(&path, "needle\n").unwrap();
+    let (handle, this) = open(cx, root.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.search.replace.input.update(cx, |input, cx| {
+                input.set_value("old replacement", window, cx)
+            });
+            p.find_in_files(window, cx);
+            p.search
+                .query
+                .update(cx, |input, cx| input.set_value("needle", window, cx));
+            p.schedule_search(Duration::ZERO, window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.search.matches == 1)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("search-row", 1usize), cx);
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.active != Pane::Welcome)
+    });
+    this.read_with(cx, |p, cx| {
+        assert!(
+            matches!(p.active, Pane::Document(_)),
+            "ordinary search opened a replacement diff"
+        );
+        assert_eq!(
+            p.search.replace.input.read(cx).value().as_ref(),
+            "old replacement"
+        );
+    });
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "needle\n");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn search_interaction_empty_replacement_deletes_only_the_chosen_line(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-search-delete-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("a.txt");
+    std::fs::write(&path, "needle one\nneedle two\n").unwrap();
+    let (handle, this) = open(cx, root.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.find_in_files(window, cx);
+            p.search
+                .query
+                .update(cx, |input, cx| input.set_value("needle", window, cx));
+            p.schedule_search(Duration::ZERO, window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.search.matches == 2)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("search-toggle-replace", cx);
+        window.render_frame(cx);
+        this.read_with(cx, |p, cx| {
+            let range = 0..6;
+            let (preview, removed, added) =
+                p.replace_preview("needle one", std::slice::from_ref(&range), cx);
+            assert_eq!(preview, "needle one");
+            assert_eq!(removed.as_slice(), std::slice::from_ref(&range));
+            assert!(added.iter().all(|range| range.is_empty()));
+        });
+        window.hover(("search-row", 1usize), cx);
+        window.render_frame(cx);
+        assert!(window.find(("search-line-replace", 1usize)).visible());
+        window.click(("search-line-replace", 1usize), cx);
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            p.search.replace.summary.is_some() && !p.search.replace.running
+        })
+    });
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        " one\nneedle two\n"
+    );
+    assert!(!cx.has_pending_prompt());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.undo_replace(window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            p.search.matches == 2 && !p.search.replace.running
+        })
+    });
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        "needle one\nneedle two\n"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
 async fn search_results_open_near_the_top_with_the_match_selected(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = std::env::temp_dir().join(format!("zj-search-placement-{}", std::process::id()));
@@ -108,6 +466,7 @@ async fn file_actions_stay_visible_and_remove_only_search_results(cx: &mut TestA
             p.search
                 .query
                 .update(cx, |input, cx| input.set_value("needle", window, cx));
+            p.search.replace.expanded = true;
             p.search
                 .replace
                 .input
@@ -264,28 +623,51 @@ async fn find_in_folder_searches_only_that_folder(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-async fn the_replacement_takes_effect_only_once_it_has_text(cx: &mut TestAppContext) {
+async fn replacement_mode_is_explicit_and_keeps_its_text_when_closed(cx: &mut TestAppContext) {
     let root = std::env::temp_dir().join(format!("zj-replace-active-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    let root = std::fs::canonicalize(root).unwrap();
-    let (window, this) = open(cx, root.clone());
-    let typed = |cx: &mut TestAppContext, text: &str| {
-        cx.update_window(window.into(), |_, window, cx| {
-            this.update(cx, |p, cx| {
-                p.search.replace.input.update(cx, |input, cx| {
-                    input.set_value(text.to_string(), window, cx)
-                });
-            });
-        })
-        .unwrap();
-        cx.run_until_parked();
-        this.read_with(cx, |p, cx| p.search.replace.active(cx))
-    };
-    // Always on screen; an empty replacement leaves results opening their files.
-    assert!(!this.read_with(cx, |p, cx| p.search.replace.active(cx)));
-    assert!(typed(cx, "y"));
-    assert!(!typed(cx, ""));
+    let (handle, this) = open(cx, root.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.find_in_files(window, cx));
+        window.render_frame(cx);
+        window.click("search-toggle-replace", cx);
+        window.render_frame(cx);
+        window.input("saved replacement", cx);
+    })
+    .unwrap();
+    assert!(this.read_with(cx, |p, _| p.search.replace.expanded));
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("search-toggle-replace", cx);
+        window.render_frame(cx);
+        window.input("query", cx);
+    })
+    .unwrap();
+    this.read_with(cx, |p, cx| {
+        assert!(!p.search.replace.expanded);
+        assert_eq!(p.search.query.read(cx).value().as_ref(), "query");
+        assert_eq!(
+            p.search.replace.input.read(cx).value().as_ref(),
+            "saved replacement"
+        );
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("search-toggle-replace", cx);
+    })
+    .unwrap();
+    this.read_with(cx, |p, cx| {
+        assert!(p.search.replace.expanded);
+        assert_eq!(
+            p.search.replace.input.read(cx).value().as_ref(),
+            "saved replacement"
+        );
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.find_in_files(window, cx));
+    })
+    .unwrap();
+    assert!(!this.read_with(cx, |p, _| p.search.replace.expanded));
     let _ = std::fs::remove_dir_all(root);
 }
 
