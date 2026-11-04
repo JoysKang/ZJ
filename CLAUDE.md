@@ -4,7 +4,13 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 ## 定位
 
-自用、小巧、低资源的 Rust 原生代码编辑器，以多工作区、多 Git 仓库为组织中心。取舍顺序：
+自用、小巧、低资源的 Rust 原生项目查看与 Diff 工具，以多工作区、多 Git 仓库为组织中心。2026-11-04 起舍弃内置 Agent，产品边界以 [README 的产品定位](README.md#产品定位2026-11-04)为准。
+
+核心流程是浏览项目、阅读代码与 Markdown、搜索和跳转、查看全部仓库 Changes 与 Diff，以及跟随外部工具的文件修改自动刷新。Agent 工作由外部工具完成，ZJ 不再承担 Agent 的启动、对话、编排、审批、会话历史、模型或额度管理，也不保留依赖 Agent 的 AI 提交信息生成。
+
+内置 Agent 代码与专属依赖已移除。保留通用 Diff、Git、文件监听与外部修改保护；不自动删除用户已有的会话历史或其他数据，旧 `agent` 设置按未知键保留。既有编辑、Git 写操作和终端能力按需评估，不以完整 IDE 为扩展目标。
+
+取舍顺序：
 
 1. **颜值**：界面统一、克制、耐看；亮色和暗色都要达到可交付的质量。
 2. **轻量**：内存低、CPU 空闲接近 0、二进制小，功能简单。
@@ -14,7 +20,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 | 指标 | 目标 | 上限 |
 | --- | --- | --- |
-| 二进制体积（aarch64，stripped）| ≤ 50 MB | 52 MB（CI 会检查，2026-10-13 实测 49.4 MB；各语法的边际增量与压缩选项见 docs/决策/0001-语法支持.md，Agent 面板见 docs/决策/0004-Agent与历史.md，Agent 桥接见 docs/决策/0009-Agent桥接.md）|
+| 二进制体积（aarch64，stripped）| ≤ 50 MB | 52 MB（CI 会检查，2026-10-13 实测 49.4 MB；各语法的边际增量与压缩选项见 docs/决策/0001-语法支持.md；Agent 移除前的数据仅作历史参考）|
 | 冷启动到首帧 | ≤ 250 ms | 400 ms |
 | 空闲 footprint，1 个窗口 | ≤ 70 MB | 100 MB |
 | 3 个窗口 + 20 个文档 | ≤ 220 MB | 300 MB |
@@ -47,20 +53,17 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 - `crates/core`：身份模型与共享常量（`RepoId`、`DocumentId`、`EXCLUDED_DIRS`、按 Git 规则校验 `.git` 的 `git_marker`），**不依赖 GPUI**。
 - `crates/git_service`：调用系统 git，负责有界输出、超时、取消、全局限流，**不依赖 GPUI**。仓库发现最多向下 4 层，跳过 `EXCLUDED_DIRS` 和上层仓库忽略的目录，无效的 `.git` 静默跳过（自动发现找不到的仓库可以手动添加，见 `settings.rs` 的 `extra_repos`）。`lib.rs` 是服务本体（进程、限流、发现、查询），解析放在各自的文件里：`status.rs`（porcelain v2）、`refs.rs`（分支）、`log.rs`（未推送的提交）、`graph.rs`（Git 图的分页和提交详情）、`ls_files.rs`（快速打开的路径）、`stash.rs`（stash 和 blame），写操作在 `write.rs`。
-- `crates/agent_client`：ACP 客户端（Agent 预设、子进程、会话、权限、`fs/*`、改动前快照与审阅、空闲退出），**不依赖 GPUI**，见 docs/决策/0004-Agent与历史.md。内置的 Claude Code / Codex 预设是 `Launch::Bridge`：只用本机的 CLI，ZJ 不安装 CLI、Node.js 或适配器；找不到或版本太旧时返回带安装命令的 `LaunchError`（docs/决策/0009-Agent桥接.md）。`client.rs` 是一个会话（`AgentClient`），其私有子模块 `steering.rs` 处理运行中追加指令、适配器续跑的结束通知和延迟响应的取消；仅在初始化声明支持时使用 `_session/steering`，不改变权限审批。`host.rs` 是 Agent 进程：同一种 Agent、同样的环境变量在整个应用里共用一个进程（`AgentPool`），请求按会话 id 分发，会话空闲时 `session/close`，没有会话时进程退出。应用退出时同步关闭进程池，停止并回收全部 Agent 进程组，拒绝晚到的启动；输出队列已满也不会阻塞退出。
-- `crates/agent_bridge`：Claude Code / Codex 的 ACP 桥接，**不依赖 GPUI**，只依赖 `serde_json`，见 docs/决策/0009-Agent桥接.md。ZJ 自己的可执行文件以 `--agent-bridge claude|codex <CLI>` 运行它（`main` 在 GPUI 之前转入），`agent_client` 把它当普通 ACP Agent 启动；`ZJ_AGENT_BRIDGE` 可指向单独构建的 `zj-agent-bridge`（开发、冒烟）。`claude.rs` 每个会话一个 `claude -p` stream-json 进程，按 `result` 回报的用户消息 uuid 判断一轮结束（追加指令会打断当前段落）；`codex.rs` 所有会话共用一个 `codex app-server`，会话就是 thread。会话 id、模式 id、模型设置 id 和引用写法都与原来的 npm 适配器一致。改了任何一边的协议处理，都要用 `crates/agent_client/examples/agent_smoke.rs` 对真实 CLI 跑一遍。
-- `crates/agent_history`：Agent 会话历史（SQLite + FTS5，后台写线程、搜索、钉住、硬删除），**不依赖 GPUI**。
 - `crates/app`：GPUI 界面。
   - `theme.rs`：唯一允许写字面尺寸和颜色的地方。
   - `assets.rs`：内嵌资源；`file_icons.rs`：文件类型到图标的映射。
   - `files.rs`：受限的文件读取、紧凑存储的快速打开路径索引；`hidden_files.rs`：可配置的文件／目录名称隐藏规则，沿用搜索的 glob 解析，编译后以 `Arc` 共用。按顺序最后匹配生效，`!` 为显示例外，隐藏父目录优先于子项例外；`fuzzy.rs`：模糊匹配打分。
   - 大文件受限查看（A18）：超过 8 MiB、有超过 256 KiB 的行或不是 UTF-8 的文件不进编辑器（`files::Restricted` 说明原因），改在只读的查看标签里打开（二进制文件仍拒绝）。`large_file.rs` 是纯逻辑：一遍扫描建稀疏行索引（每 1024 行一个偏移）、按需读几千行、过长的行只读开头 4 KB；`workbench/large_view.rs` 是标签（一次一个，像 Git 图），只持有视口附近的行，文件在磁盘上变了就重建索引；点击 / ⇧点击选中行、⌘C 复制整行，⌘F 后台逐行查找，⌃G 转到行。内存不随文件大小增长。
-  - `save.rs`：保存的纯逻辑（同目录临时文件 + fsync + rename、保留权限 / 换行符 / BOM、符号链接写到目标、多硬链接原地写、只读识别、按设备 / inode / 大小 / mtime / 内容哈希判断外部修改、退出询问的状态机、自动保存防抖、比较用的补丁）；`workbench/documents.rs`：保存、另存为、全部保存、Untitled、关闭 / 退出确认、外部修改横幅、自动保存，以及给 Agent 层的 `buffer_text` / `on_buffer_saved`。
+  - `save.rs`：保存的纯逻辑（同目录临时文件 + fsync + rename、保留权限 / 换行符 / BOM、符号链接写到目标、多硬链接原地写、只读识别、按设备 / inode / 大小 / mtime / 内容哈希判断外部修改、退出询问的状态机、自动保存防抖、比较用的补丁）；`workbench/documents.rs`：保存、另存为、全部保存、Untitled、关闭 / 退出确认、外部修改横幅和自动保存。
   - 编辑恢复（开发说明 R11 / A16）：`recovery.rs` 是快照记录的纯逻辑（每个未保存缓冲区一个带版本的 JSON，放在设置文件旁的 `recovery/`，临时文件 + rename，权限 0600）；`workbench/recovery.rs` 在编辑停顿 2 秒后经单一后台队列写快照，保存 / 重新加载 / 不保存 / 关窗时删除，退出时同步清空，启动时把异常退出留下的快照恢复进标签（带横幅，可放弃）。只在有待写快照时才有定时器。
   - `settings.rs`：所有窗口共用的设置文件（字号、显示隐藏文件、名称隐藏规则 `hidden_files`、Diff 布局、隐藏无变更仓库、搜索排除、Dock 图标闪烁、自动保存、按工作区手动添加的仓库 `extra_repos`）。⌘, 在标签里打开它，保存后在所有窗口生效，JSON 或隐藏规则写错时保留原设置并在状态栏说明。旧文件缺少 `hidden_files` 时，只向当前编辑缓冲区插入规则，保留未知键和未保存内容，可撤销，保存前不写盘；空数组不补默认值。规则修改只重载树和可见查询，不重建路径索引，`.git` 与既有索引资源限制不变。
   - `perf.rs`：给 `tools/measure_budget.py` 用的启动打点（首个绘制前回调，尚非提交完成）与 Diff 分段计时。`ZJ_LATENCY_LOG=1` 的按键计时由 vendor macOS 输入层与 Metal 渲染器记录，终点为 CPU 提交，见上方预算口径；平时只有一行首帧日志。
   - `platform.rs`：少量 macOS 系统接口（“减少动态效果”、Dock 图标替换与闪烁、键盘输入源的读取与切换），其他平台和测试里为空实现（测试不会动真实的输入法）。
-  - 输入法跟随焦点（设置 `auto_input_source`，默认开）：`input_switch.rs` 是纯逻辑（进终端总是切到英文；Agent 输入框切回上次在那里用的输入源，第一次用之前见过的中文输入法），`workbench/input_area.rs` 在终端、输入框获得焦点和窗口回到前台时调用。编辑器等其他位置不管；只在窗口在前台时切换，不轮询。
+  - 输入法跟随焦点（设置 `auto_input_source`，默认开）：`input_switch.rs` 判断终端是否需要切到英文；`workbench/input_area.rs` 在终端获得焦点和窗口回到前台时调用。编辑器等其他位置不管；只在窗口在前台时切换，不轮询。
   - `workbench/switch_hud.rs`：从另一个 ZJ 窗口切过来时，在窗口中央闪现工作区名称（放大淡入、停留、淡出，约 1 秒的一次性动画，结束后不再出帧；窗口第一次激活、从别的 App 切回时不显示；开启“减少动态效果”时不缩放、不渐变）。动画字号取整以复用有限的字体／字形缓存键，不能逐帧生成任意小数字号。
   - `file_ops.rs`：资源管理器的新建、重命名、复制、移动和移到废纸篓；`workbench/explorer_ops.rs`：右键菜单、快捷键和行内改名；`workbench/tab_menu.rs`：编辑器标签页的右键菜单、对应快捷键和 ⇧⌘T 重开已关闭标签的栈。
   - Markdown 预览：`markdown_blocks.rs` 把文件切成顶层块（纯函数）；`md_images.rs` 解析图片地址（本地图片按文件头尺寸检查解码预算，远程 / data: 不加载，纯函数），预览在后台和分块一起解析，渲染时只查表（用 Kit 基础 `TextView` 的 `image_source`）；相对链接在 ZJ 里打开；`workbench/markdown_preview.rs` 按块用 Kit `TextView` 渲染，点击的块换成源码文本框并直接写回缓冲区，⇧⌘V 切换源码。源码视图下不切分。
@@ -76,26 +79,22 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `indent.rs`：每个文件的缩进（`.editorconfig` > 按内容猜测 > 语言默认），不依赖 GPUI；`.editorconfig` 在后台打开文件时一起读，状态栏的缩进菜单只改当前文档。
   - `diff_doc.rs`：在后台把全上下文补丁还原成两侧全文，做行对齐、语法高亮和字符级差异；`workbench/diff_view.rs`：只切片现成数据的虚拟化左右 / 内联 Diff 编辑器；`workbench/diff_ops.rs`：行选择、复制、概览标尺和块 / 行级暂存；`workbench/diff_navigation.rs`：Diff 内 ⌘点击 / F12 定义与 ⌃G 转到行，后台从原补丁解析当前侧，同文件目标留在对应版本，跨文件复用工作区索引；`partial_patch.rs`：从全上下文补丁生成只含所选行的补丁。
   - `workbench/scm_actions.rs`：Git 写操作确认与结果展示，以及 stash 的选择面板和手动添加 / 移除仓库；`git_service/src/write.rs`：仓库锁内校验及有界执行（stash 的 apply / pop / drop 先确认 `stash@{n}` 仍是选中的提交）；`git_service/src/stash.rs`：stash 列表和单行 blame 的解析。
-  - `workbench/scm_message.rs`：源码管理输入框右侧的 AI 按钮，用当前选择的 Agent 独立生成提交信息；优先使用暂存区，没有暂存内容时使用磁盘改动（含未跟踪文件），diff 上限 128 KiB。复用 Agent 进程池，拒绝本次会话的 ACP 文件访问和工具审批；支持时选只读 / 规划模式。手动输入、再次点击或关闭工作区取消生成，回填前核对仓库状态；不自动暂存、提交或推送。展开的干净仓库也保留输入框和提交按钮。
   - `workbench/blame.rs`：当前行末尾的 blame（作者、时间、提交摘要，悬停看详情、点击复制哈希；光标停 400 ms 后 `git blame -L`，编辑中的缓冲区用 `--contents -`，新的请求取消旧的）。Kit 的行尾注释参与绘制、鼠标命中和横向滚动范围，不改变文本、选区或换行；长行可横向滚动查看，超长摘要限宽截断后悬停看详情，折叠或纵向不可见的行隐藏。
   - 合并冲突：`conflicts.rs` 找冲突标记和三种解决方式（纯函数）；`workbench/conflict_bar.rs` 在冲突文件编辑后后台扫描、两侧着色（`theme` 的 `conflict_*`），每处冲突标记上方显示采用当前 / 传入 / 双方和只读比较操作，随代码滚动；动作校验文档版本和冲突位置，解决完后保存并按新状态暂存。
   - `workbench/graph_view.rs`：编辑区里的 Git 图（纯函数的车道布局、分页提交列表、提交详情、打开提交 Diff）。
+  - `time.rs`：Git 图、提交、stash 与 blame 的本地时间显示，以及恢复快照的毫秒时间戳。
   - `session.rs`：重启时恢复的窗口记录（`session.json`，每个窗口的文件夹、位置大小、文件标签和激活的标签；退出时按系统窗口的前后顺序保存，重启按从后到前的顺序创建；重启时只读入激活的标签，其余标签点开时才读）。
-  - Agent 面板（docs/决策/0004-Agent与历史.md）：`agent_model.rs` 放不依赖 GPUI 的逻辑（会话分组和时间、`@` 引用、附件、从历史恢复）；回复用 Kit 的 `TextView` 渲染（可选中，代码块带复制按钮），`markdown.rs` 只管代码块的语法高亮（编辑器的语法主题），`workbench/agent/highlights.rs` 在后台算好、绘制时只查表；`quota.rs` 读取 Codex 本地记录并解析实时响应；`workbench/agent/quota.rs` 在显示会话和一轮结束时更新本地记录，Codex 对话面板显示时每 10 分钟、悬停或点击额度按钮时后台通过 `agent_client` 的短时 app-server 连接查询最新额度（不运行 Agent 回合，不由 ZJ 读凭据）；关闭面板、进入历史或切换其他 Agent 时停止定时刷新，弹层显示下次刷新时间。`agent_images.rs` 在后台校验和缩略图片，输入区显示可删除预览，发送 ACP 图片内容；执行过程折叠后仍按可见行布局；`secrets.rs` 解析 Agent 的环境变量（`$变量名` 或 macOS 钥匙串 `keychain:账户名`，设置里不存明文密钥）。`workbench/agent.rs` 是会话与面板视图的状态，其余逻辑按主题放在 `workbench/agent/`（`turns` 发送与事件泵、`permissions` 审批与模式、`composer` 引用与附件、`changes` 改动文件、`history` 会话历史、`buffers` 给 Agent 的未保存缓冲区、`highlights` 代码块高亮）；`agent_panel.rs`（标题、会话条、切换器；`agent_panel/` 下是对话行、卡片、改动文件、输入框、设置）、`agent_history.rs`（会话列表）、`agent_search.rs`（⌘J 搜索）、`agent_review.rs`（编辑区里逐处接受 / 拒绝）只做渲染和交互。转圈只在面板可见、窗口在前台、有会话运行时才有定时器。
   - `symbols.rs`：tree-sitter tags / locals 查询做定义、引用、文件大纲和局部绑定跳转（查询在 `crates/app/queries/`）；`imports.rs`：按语言读 import 语句，供跨文件候选排序；`symbol_index.rs`：首次跳转时后台建立的工作区符号索引；`workbench/navigation.rs`：转到定义、符号列表、查找引用、转到行（⌃G，命令中心里的 `:行:列`）和前进后退。编辑器文字颜色只用 Kit 的语法类别高亮，不按绑定另行着色。不跑语言服务器，见 docs/决策/0002-代码导航.md。
-- Agent 的 `@` 同时引用文件和文件夹：复用路径索引匹配文件及其祖先目录，后台按查询的父路径列一层目录以补充空文件夹；沿用隐藏与排除规则，禁止路径逃出工作区。文件夹附件显示图标和 `/` 后缀，发送 ACP `resource_link`，由 Agent 自己读取内容。
-- Agent 输出按轮次合并为一个执行过程，运行时默认展开，可手动折叠，运行中追加指令仍属于当前轮；结束时自动收起当前轮过程并单独显示最终回复。修改文件列表独立控制，每个新轮次默认收起，当前轮的更新或追加指令保留手动展开状态。待审批、待登录和会话错误直接显示；命令审批优先显示 Agent 提供的原始命令与工作目录，可选中和复制，长命令在卡片内滚动，不把通用工具标题当作命令。展开成员继续使用外层虚拟列表；停留在底部时跟随最新输出，向上阅读时保持位置，返回底部后恢复跟随。输入区不显示上下文占用圆环。
 - `vendor/`：打过补丁的 GPUI macOS 渲染器和窗口层（`gpui-pre-apple` / `gpui-pre-macos`），以及 GPUI Kit 的 `gpui-base`（编辑器光标常亮），都用 `[patch.crates-io]` 指向。改动都标 `ZJ patch`，说明在 `vendor/README.md`，理由和测量方法在 docs/决策/0005-渲染内存.md；`ZJ_GPU_LOWMEM=0` 恢复上游行为。升级 GPUI 时要先处理这里。
 - UI 的 render 回调里不做 IO、不跑 Git 命令、不做全文解析；这些都通过 `background_spawn` 执行，结果带 generation 校验。
 
 ### 异步写入与关闭约束
 
+- 用户从文件树、搜索或跳转触发的文件打开必须复用可取消的 `open_file`；只有启动／恢复等确需并行保留的请求使用 `open_now`／`open_in_background`。切换标签或继续选择文件树项目时，统一取消旧请求，不能让迟到的读取结果抢回选择和焦点；回归同时覆盖标签与文件树的后续选择。
 - 保存或重新加载完成只确认发起时的文本版本和路径；期间的新编辑保留 dirty，路径变化时不把旧结果写进新路径的磁盘状态。文档 ID 标识缓冲区生命周期，另存为或移动不改变；磁盘设备／inode 仅用于查重，不能复用为新缓冲区 ID。关闭标签、窗口和应用前重新核对当前文档；「不保存」只授权丢弃该次提示对应的版本。
 - 同一文档的保存与另存为串行。另存为在 `workbench/documents.rs` 预留规范路径和现有文件身份，跨窗口查重；预留持续到后台写入与前台结果处理都结束，异步打开也检查占用。
 - 恢复快照的后台失败通过有界事件通知界面，不等待下一次编辑。临时文件只在成功创建后才归当前写入所有，创建失败不能清理别人的临时文件。
 - `git_service` 写操作按 common directory、private git directory 的顺序加锁，使 linked worktree 的共享引用和 stash 校验、变更串行；仍不能约束外部 Git 进程。
-- `agent_client::review` 串行执行 ZJ 的审阅决策及对应读取；逐处操作用同一份内容校验显示补丁和块序号后再应用。此锁不覆盖 Agent 自有工具或外部程序写入。
-- 历史会话 id 使用 SQLite 持久的单调分配器，删除后不复用，避免晚到事件写入新会话。`/` 补全只识别消息开头的命令，允许前导空白；选择命令保留参数并把光标放到末尾。
 
 ## 视觉规则
 
@@ -127,4 +126,4 @@ python3 tools/fixtures.py /tmp/zj-fixture-f  # 生成临时夹具，目标路径
 - 日志用 `eprintln!("event=... key=value")` 这种格式，不输出文件内容和凭据。
 - 提交信息用 Conventional Commits 格式（例如 `feat(scm): …`），正文可以写中文；一个提交只做一件事，每个提交都要能构建。
 - 测试只在临时夹具里进行，不在真实仓库上做写入、重置或提交。
-- 无头 GPUI 布局测试用 `TestAppContext::simulate_window_resize` 改变视口，并断言实际 `viewport_size` 或面板宽度；`Window::resize` 在测试平台不发送尺寸回调，不能证明窄窗口布局。
+- 无头 GPUI 布局测试使用默认 test profile：`debug_bounds` 依赖 `debug_assertions`，全量测试不要加 `--release`。用 `TestAppContext::simulate_window_resize` 改变视口，并断言实际 `viewport_size` 或面板宽度；`Window::resize` 在测试平台不发送尺寸回调，不能证明窄窗口布局。
