@@ -8,11 +8,60 @@ use crate::{file_icons, theme};
 use gpui_kit::{
     assets::IconName,
     base::TestSupportExt,
-    component::{Icon, h_flex, input::Editor, menu::ContextMenuExt, v_flex},
+    component::{
+        Icon, Sizable,
+        button::{Button, ButtonVariants},
+        h_flex,
+        input::Editor,
+        menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
+        v_flex,
+    },
     prelude::FluentBuilder,
     *,
 };
-use std::path::Path;
+use std::{cell::Cell, path::Path, rc::Rc};
+
+#[derive(Default)]
+pub(super) struct Tabs {
+    pub(super) scroll: ScrollHandle,
+    /// Reveal on selection, tab count or viewport changes, without undoing manual scrolling.
+    revealed: Rc<Cell<Option<(Pane, usize, Pixels)>>>,
+    pub(super) preview: Option<Pane>,
+    pub(super) preview_request: Option<(u64, std::path::PathBuf)>,
+    pub(super) order: Vec<TabKey>,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub(super) enum TabKey {
+    File(std::path::PathBuf),
+    Pane(Pane),
+}
+
+#[derive(Clone)]
+pub(super) struct DraggedTab {
+    pub(super) origin: EntityId,
+    pub(super) key: TabKey,
+    pub(super) order: std::sync::Arc<Vec<TabKey>>,
+    label: String,
+}
+impl Render for DraggedTab {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = theme::colors(cx);
+        div()
+            .px_2()
+            .py_1()
+            .rounded(theme::RADIUS)
+            .bg(colors.selected)
+            .text_color(colors.selected_fg)
+            .child(self.label.clone())
+    }
+}
+
+impl Tabs {
+    pub(super) fn reveal_selection(&self) {
+        self.revealed.set(None);
+    }
+}
 
 struct TabSpec {
     key: usize,
@@ -22,6 +71,8 @@ struct TabSpec {
     lucide: Option<IconName>,
     label: String,
     tooltip: String,
+    /// The actual path, separate from the tab's descriptive tooltip.
+    path: std::path::PathBuf,
     dirty: bool,
     /// Muted text after the label.
     note: Option<&'static str>,
@@ -29,6 +80,16 @@ struct TabSpec {
     deleted: bool,
     /// A tab restored from the last session, not read yet: choosing it opens the file.
     pending: Option<std::path::PathBuf>,
+}
+
+impl TabSpec {
+    fn identity(&self) -> TabKey {
+        if self.pending.is_some() || matches!(self.pane, Pane::Document(_) | Pane::Image(_)) {
+            TabKey::File(self.path.clone())
+        } else {
+            TabKey::Pane(self.pane)
+        }
+    }
 }
 
 impl Workbench {
@@ -39,17 +100,30 @@ impl Workbench {
             .unwrap_or(path)
     }
 
-    fn tab(&self, spec: TabSpec, first: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn tab(
+        &self,
+        spec: TabSpec,
+        first: bool,
+        order: std::sync::Arc<Vec<TabKey>>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let colors = theme::colors(cx);
         let active = spec.pending.is_none() && self.active == spec.pane;
         let pane = spec.pane;
+        let target = spec.identity();
+        let dragged = DraggedTab {
+            origin: cx.entity_id(),
+            key: target.clone(),
+            order,
+            label: spec.label.clone(),
+        };
         let pending = spec.pending.clone();
         let close_pending = spec.pending.clone();
         let menu_pending = spec.pending.clone();
         let group: SharedString = format!("tab-{}", spec.key).into();
-        let close = div()
-            .id(("tab-close", spec.key))
-            .test_support()
+        let close = gpui_kit::base::Button::new(("tab-close", spec.key))
+            .accessibility_label(format!("关闭 {}", spec.label))
+            .focus_visible(|close| close.bg(colors.hover).text_color(colors.accent))
             .size(theme::TAB_CLOSE)
             .flex_shrink_0()
             .flex()
@@ -95,6 +169,7 @@ impl Workbench {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
+                this.focus_active_editor(window, cx);
                 if let Some(path) = &close_pending {
                     this.drop_pending_tab(path, window, cx);
                     return;
@@ -104,6 +179,8 @@ impl Workbench {
                     Pane::Diff => this.close_preview(window, cx),
                     Pane::Graph => this.close_graph(window, cx),
                     Pane::Large => this.close_large(window, cx),
+                    Pane::Image(id) => this.close_image(id, window, cx),
+                    Pane::SavedDiff(id) => this.close_saved_diff(id, window, cx),
                     Pane::Welcome => {}
                 }
             }));
@@ -112,7 +189,7 @@ impl Workbench {
             .test_support()
             .group(group.clone())
             .flex_shrink_0()
-            .max_w_full()
+            .max_w(theme::FILE_TAB_MAX_WIDTH)
             .min_w_0()
             .h(theme::TAB_HEIGHT)
             .pl_2()
@@ -161,6 +238,7 @@ impl Workbench {
                     .min_w_0()
                     .text_ellipsis()
                     .when(active, |label| label.font_weight(FontWeight::SEMIBOLD))
+                    .when(self.tabs.preview == Some(pane), |label| label.italic())
                     .when(spec.deleted, |label| label.line_through())
                     .child(spec.label)
                     .test_support(),
@@ -201,9 +279,19 @@ impl Workbench {
                     gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
                 }
             })
-            .on_click(cx.listener(move |this, _, window, cx| match &pending {
-                Some(path) => this.open_pending_tab(path.clone(), window, cx),
-                None => this.select_pane(pane, window, cx),
+            .on_drag(dragged, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
+            .drag_over::<DraggedTab>(move |style, _, _, _| style.bg(colors.selected))
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, window, cx| {
+                this.reorder_tabs(dragged, Some(target.clone()), window, cx)
+            }))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                if event.click_count() >= 2 && this.tabs.preview == Some(pane) {
+                    this.tabs.preview = None;
+                }
+                match &pending {
+                    Some(path) => this.open_pending_tab(path.clone(), window, cx),
+                    None => this.select_pane(pane, window, cx),
+                }
             }))
             .context_menu({
                 let weak = cx.weak_entity();
@@ -224,8 +312,7 @@ impl Workbench {
             .into_any_element()
     }
 
-    fn render_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
-        let colors = theme::colors(cx);
+    fn tab_specs(&self) -> Vec<TabSpec> {
         let mut specs: Vec<TabSpec> = self
             .documents
             .iter()
@@ -244,6 +331,7 @@ impl Workbench {
                     lucide: None,
                     label: name,
                     tooltip: doc.path.to_string_lossy().into_owned(),
+                    path: doc.path.clone(),
                     dirty: doc.dirty,
                     note: doc.readonly.then_some("只读"),
                     deleted: doc.deleted,
@@ -251,6 +339,28 @@ impl Workbench {
                 }
             })
             .collect();
+        for image in &self.images {
+            specs.push(TabSpec {
+                key: usize::MAX / 4 + image.id.0 as usize,
+                pane: Pane::Image(image.id),
+                icon: file_icons::for_file(
+                    &image.path.file_name().unwrap_or_default().to_string_lossy(),
+                ),
+                lucide: None,
+                label: image
+                    .path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .replace(SINGLE_LINE, "⏎"),
+                tooltip: image.path.to_string_lossy().into_owned(),
+                path: image.path.clone(),
+                dirty: false,
+                note: Some("图片"),
+                deleted: false,
+                pending: None,
+            });
+        }
         if let Some(diff) = &self.diff.tab {
             specs.push(TabSpec {
                 key: usize::MAX,
@@ -261,11 +371,31 @@ impl Workbench {
                 lucide: None,
                 label: diff.label.clone(),
                 tooltip: diff.tooltip.clone(),
+                path: diff.path.clone(),
                 dirty: false,
                 note: None,
                 deleted: false,
                 pending: None,
             });
+        }
+        for saved in &self.archived_diffs {
+            if let Some(diff) = &saved.pane.tab {
+                specs.push(TabSpec {
+                    key: usize::MAX / 8 + saved.id.0 as usize,
+                    pane: Pane::SavedDiff(saved.id),
+                    icon: file_icons::for_file(
+                        &diff.path.file_name().unwrap_or_default().to_string_lossy(),
+                    ),
+                    lucide: None,
+                    label: diff.label.clone(),
+                    tooltip: diff.tooltip.clone(),
+                    path: diff.path.clone(),
+                    dirty: false,
+                    note: Some("固定 Diff"),
+                    deleted: false,
+                    pending: None,
+                });
+            }
         }
         if let Some(graph) = &self.graph {
             specs.push(TabSpec {
@@ -275,6 +405,7 @@ impl Workbench {
                 lucide: Some(IconName::GitGraph),
                 label: "Git 图".to_string(),
                 tooltip: format!("Git 图 · {}", graph.repo.worktree.display()),
+                path: graph.repo.worktree.clone(),
                 dirty: false,
                 note: None,
                 deleted: false,
@@ -295,6 +426,7 @@ impl Workbench {
                 lucide: None,
                 label: name,
                 tooltip: format!("{}（只读）", large.path.display()),
+                path: large.path.clone(),
                 dirty: false,
                 note: Some("只读"),
                 deleted: false,
@@ -314,6 +446,7 @@ impl Workbench {
                 lucide: None,
                 label: name,
                 tooltip: path.to_string_lossy().into_owned(),
+                path: path.clone(),
                 dirty: false,
                 note: None,
                 deleted: false,
@@ -323,36 +456,145 @@ impl Workbench {
         // Restored tabs return to their saved places (stable: the rest keep their order).
         let rank = |spec: &TabSpec| match (&spec.pending, spec.pane) {
             (Some(path), _) => self.tab_rank(path),
+            (None, Pane::Image(id)) => self
+                .images
+                .iter()
+                .find(|image| image.id == id)
+                .map_or(usize::MAX, |image| self.tab_rank(&image.path)),
             (None, Pane::Document(id)) => self
                 .document(id)
                 .map_or(usize::MAX, |doc| self.tab_rank(&doc.path)),
             _ => usize::MAX,
         };
         specs.sort_by_key(rank);
+        specs.sort_by_key(|spec| {
+            self.tabs
+                .order
+                .iter()
+                .position(|key| *key == spec.identity())
+                .unwrap_or(usize::MAX)
+        });
+        specs
+    }
+
+    pub(super) fn show_remaining_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let specs = self.tab_specs();
+        if let Some(tab) = specs.iter().rev().find(|spec| spec.pending.is_none()) {
+            if let Pane::SavedDiff(id) = tab.pane {
+                self.activate_saved_diff(id, window, cx);
+            } else {
+                self.show_pane(tab.pane, window, cx);
+            }
+        } else if let Some(path) = specs.first().and_then(|spec| spec.pending.clone()) {
+            self.show_pane(Pane::Welcome, window, cx);
+            self.open_pending_tab(path, window, cx);
+        } else {
+            self.show_pane(Pane::Welcome, window, cx);
+        }
+    }
+
+    fn render_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+        let colors = theme::colors(cx);
+        let specs = self.tab_specs();
+        let order = std::sync::Arc::new(specs.iter().map(TabSpec::identity).collect::<Vec<_>>());
+        let active = self.active;
+        let selected = specs
+            .iter()
+            .position(|spec| spec.pending.is_none() && spec.pane == active);
+        let count = specs.len();
+        let weak = cx.weak_entity();
+        let menu_items: Vec<_> = specs
+            .iter()
+            .map(|spec| {
+                let path = self.relative(&spec.path);
+                let label = match spec.pane {
+                    // Keep the comparison from the visible tab label, including local previews.
+                    Pane::Diff | Pane::SavedDiff(_) => {
+                        path.parent()
+                            .unwrap_or(Path::new(""))
+                            .join(&spec.label)
+                            .to_string_lossy()
+                            .into_owned()
+                            + " · Diff"
+                    }
+                    Pane::Graph => format!("{} · Git 图", spec.path.display()),
+                    Pane::Large => format!("{} · 只读", path.display()),
+                    _ => path.display().to_string(),
+                }
+                .replace(SINGLE_LINE, "⏎");
+                let label = if spec.dirty {
+                    format!("{label} •")
+                } else {
+                    label
+                };
+                (label, spec.pane, spec.pending.clone())
+            })
+            .collect();
+        let menu = Button::new("open-tabs")
+            .ghost()
+            .xsmall()
+            .icon(IconName::ChevronDown)
+            .tooltip("已打开文件")
+            .accessibility_label("已打开文件")
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                let mut menu = super::menu_style::compact_menu(menu);
+                for (label, pane, pending) in &menu_items {
+                    let weak = weak.clone();
+                    let pane = *pane;
+                    let pending = pending.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(label.clone())
+                            .checked(pending.is_none() && pane == active)
+                            .on_click(move |_, window, cx| {
+                                let _ = weak.update(cx, |this, cx| match &pending {
+                                    Some(path) => this.open_pending_tab(path.clone(), window, cx),
+                                    None => this.select_pane(pane, window, cx),
+                                });
+                            }),
+                    );
+                }
+                menu
+            });
+        let scroll = self.tabs.scroll.clone();
+        let revealed = self.tabs.revealed.clone();
         let tabs: Vec<AnyElement> = specs
             .into_iter()
             .enumerate()
-            .map(|(index, spec)| self.tab(spec, index == 0, cx))
+            .map(|(index, spec)| self.tab(spec, index == 0, order.clone(), cx))
             .collect();
         let strip = h_flex()
+            .on_children_prepainted(move |_, window, _| {
+                let key = (active, count, scroll.bounds().size.width);
+                if revealed.replace(Some(key)) != Some(key)
+                    && let Some(selected) = selected
+                {
+                    scroll.scroll_to_item(selected);
+                    window.request_animation_frame();
+                }
+            })
             .id("tab-strip")
             .test_support()
             .flex_1()
             .min_w_0()
-            .flex_wrap()
-            .content_start()
+            .h(theme::TAB_HEIGHT)
+            .overflow_x_scroll()
+            .track_scroll(&self.tabs.scroll)
             .children(tabs)
             .child(
                 div()
                     .flex_1()
                     .h(theme::TAB_HEIGHT)
+                    .on_drop(cx.listener(|this, dragged: &DraggedTab, window, cx| {
+                        this.reorder_tabs(dragged, None, window, cx)
+                    }))
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::double_click_new_file)),
             );
         h_flex()
-            .min_h(theme::TAB_HEIGHT)
+            .id("editor-tabs")
+            .test_support()
+            .h(theme::TAB_HEIGHT)
             .w_full()
             .flex_shrink_0()
-            .items_start()
             .rounded_t(theme::WORKBENCH_RADIUS)
             .bg(colors.tabs)
             .child(strip)
@@ -360,10 +602,35 @@ impl Workbench {
                 h_flex()
                     .h(theme::TAB_HEIGHT)
                     .flex_shrink_0()
+                    .px_1()
                     .children(self.render_markdown_toggle(cx))
-                    .when(self.active == Pane::Diff, |bar| {
-                        bar.child(self.render_diff_actions(cx))
-                    }),
+                    .when(
+                        matches!(self.active, Pane::Document(_) | Pane::Diff),
+                        |toolbar| toolbar.child(self.render_review_actions(cx)),
+                    )
+                    .when(self.active == Pane::Diff, |toolbar| {
+                        toolbar.child(
+                            Button::new("pin-diff")
+                                .ghost()
+                                .xsmall()
+                                .label(if self.diff_pinned {
+                                    "取消固定"
+                                } else {
+                                    "固定"
+                                })
+                                .tooltip("固定当前比较，打开其他比较时保留此标签")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    if this.diff_pinned {
+                                        this.diff_pinned = false;
+                                        this.remember_tabs(true, window, cx);
+                                        cx.notify();
+                                    } else {
+                                        this.pin_current_diff(window, cx);
+                                    }
+                                })),
+                        )
+                    })
+                    .child(menu),
             )
             .into_any_element()
     }
@@ -495,10 +762,9 @@ impl Workbench {
             .into_any_element()
     }
 
-    /// The welcome page has no tab bar, unless restored tabs not read yet are waiting there:
-    /// hiding them made them look closed, and a new file brought them back.
+    /// All remaining tab types stay reachable, including when the welcome pane has focus.
     pub(super) fn shows_tab_bar(&self) -> bool {
-        self.active != Pane::Welcome || !self.pending_tabs.is_empty()
+        self.active != Pane::Welcome || !self.tab_specs().is_empty()
     }
 
     pub(super) fn render_editor_area(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -506,10 +772,12 @@ impl Workbench {
             return self.render_welcome(cx);
         }
         let content = match self.active {
-            Pane::Welcome => self.render_welcome(cx),
+            Pane::Welcome | Pane::SavedDiff(_) => self.render_welcome(cx),
+            Pane::Diff if self.image_diff.is_some() => self.render_image_diff(cx),
             Pane::Diff => self.render_diff(cx),
             Pane::Graph => self.render_graph(cx),
             Pane::Large => self.render_large(cx),
+            Pane::Image(id) => self.render_image(id, cx),
             Pane::Document(id) => match self.documents.iter().find(|doc| doc.id == id) {
                 Some(doc) if doc.markdown.as_ref().is_some_and(|md| !md.source) => {
                     self.render_markdown_preview(id, cx)
@@ -517,7 +785,12 @@ impl Workbench {
                 Some(doc) => div()
                     .key_context(super::edit_commands::CONTEXT)
                     .size_full()
-                    .child(Editor::new(&doc.editor).bordered(false).size_full())
+                    .child(
+                        Editor::new(&doc.editor)
+                            .readonly(doc.encoding.is_some())
+                            .bordered(false)
+                            .size_full(),
+                    )
                     .into_any_element(),
                 None => div().into_any_element(),
             },

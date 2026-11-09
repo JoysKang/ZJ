@@ -204,8 +204,9 @@ async fn quick_open_orders_open_files_by_activation_without_reordering_tabs(
             p.remove_document(second, window, cx);
             p.new_untitled(window, cx);
             p.open_quick_open_with("", window, cx);
-            assert_eq!(p.quick_open.as_ref().unwrap().results.len(), 2);
-            assert!(!p.quick_open.as_ref().unwrap().results.contains(&paths[1]));
+            assert_eq!(p.quick_open.as_ref().unwrap().results.len(), 3);
+            // Closed files remain in the bounded recent-file list; untitled buffers do not.
+            assert!(p.quick_open.as_ref().unwrap().results.contains(&paths[1]));
         });
     })
     .unwrap();

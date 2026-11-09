@@ -1,4 +1,6 @@
 mod common;
+#[path = "management/writes.rs"]
+mod management_writes;
 
 use std::{
     fs,

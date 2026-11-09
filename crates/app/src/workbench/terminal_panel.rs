@@ -18,7 +18,16 @@ use gpui_kit::{
 
 gpui_kit::actions!(
     terminal,
-    [ToggleTerminal, NewTerminal, SplitTerminal, KillTerminal]
+    [
+        ToggleTerminal,
+        NewTerminal,
+        SplitTerminal,
+        KillTerminal,
+        PreviousTerminalGroup,
+        NextTerminalGroup,
+        PreviousTerminalPane,
+        NextTerminalPane
+    ]
 );
 
 /// The panel as the workbench holds it.
@@ -376,6 +385,41 @@ impl Workbench {
         cx.notify();
     }
 
+    pub(super) fn cycle_terminal_group(
+        &mut self,
+        next: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let count = self.terminals.groups().len();
+        if count == 0 {
+            return;
+        }
+        let step = if next { 1 } else { count - 1 };
+        let group = (self.terminals.active() + step) % count;
+        self.terminals.set_visible(true);
+        self.select_terminal_group(group, window, cx);
+    }
+
+    pub(super) fn cycle_terminal_pane(
+        &mut self,
+        next: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((group, pane)) = self.terminals.target(self.focused_terminal(window, cx)) else {
+            return;
+        };
+        let count = self.terminals.active_panes().len();
+        if count == 0 {
+            return;
+        }
+        let step = if next { 1 } else { count - 1 };
+        self.terminals.set_visible(true);
+        self.focus_terminal(group, (pane + step) % count, window, cx);
+        cx.notify();
+    }
+
     pub(super) fn render_terminal_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = theme::colors(cx);
         let terminals = &self.terminals;
@@ -398,16 +442,18 @@ impl Workbench {
                 .children(terminals.groups().enumerate().map(|(g, panes)| {
                     let active = g == terminals.active();
                     let title = format!("{}: {}", g + 1, label(panes, cx));
-                    div()
-                        .id(("terminal-group", g))
-                        .test_support()
+                    gpui_kit::base::Button::new(("terminal-group", g))
+                        .accessibility_label(format!("切换终端 {title}"))
+                        .role(Role::Tab)
+                        .aria_selected(active)
+                        .focus_visible(|chip| chip.bg(colors.hover))
                         .flex_shrink_0()
                         .whitespace_nowrap()
                         .max_w(theme::TERMINAL_TAB_MAX_WIDTH)
                         .text_ellipsis()
                         .px_2()
                         .rounded(theme::RADIUS)
-                        .cursor_pointer()
+                        .cursor_default()
                         .text_size(theme::TEXT_CAPTION)
                         .map(|chip| {
                             if active {

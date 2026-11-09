@@ -111,13 +111,14 @@ async fn editor_backgrounds_do_not_fill_the_workbench_corners(cx: &mut TestAppCo
                 let scale = window.scale_factor();
                 let shell = editor.scale(scale);
                 let colors = theme::colors(cx);
-                // These points are outside the 12 px shell curve, but inside a 6 px
-                // tab curve. Rectangular overflow masks cannot hide those backgrounds.
+                // Probe outside the current shell curve; keep this valid when its radius changes.
+                // Rectangular overflow masks cannot hide child backgrounds there.
+                let inset = theme::WORKBENCH_RADIUS / 4.;
                 for (left, top) in [(true, true), (false, true), (true, false), (false, false)] {
                     if !top && tabs != 0 { continue; }
                     let probe = point(
-                        if left { editor.left() + px(3.) } else { editor.right() - px(3.) },
-                        if top { editor.top() + px(3.) } else { editor.bottom() - px(3.) },
+                        if left { editor.left() + inset } else { editor.right() - inset },
+                        if top { editor.top() + inset } else { editor.bottom() - inset },
                     ).scale(scale);
                     let offending = window.painted_quads().into_iter().find(|quad| {
                             // Kit's whole-window background is painted below the workbench.
@@ -237,7 +238,7 @@ async fn workbench_panels_fit_small_windows_with_every_visibility_combination(
     cx: &mut TestAppContext,
 ) {
     let documents = cx.update(|cx| install_globals(cx, Settings::default()));
-    for width in [760., 1024.] {
+    for width in [760., 1024., 1400., 1920.] {
         for sidebar in [true, false] {
             let (handle, _this) = cx.update(|cx| {
                 let (handle, this) = new_window(
@@ -262,6 +263,18 @@ async fn workbench_panels_fit_small_windows_with_every_visibility_combination(
                 let mut panels = vec![editor];
                 if sidebar {
                     let bounds = window.find("workbench-sidebar").bounds();
+                    eprintln!(
+                        "event=sidebar_layout_test viewport={width} sidebar={} editor={}",
+                        bounds.size.width.as_f32(),
+                        editor.size.width.as_f32()
+                    );
+                    assert_eq!(viewport.width, px(width));
+                    assert!(
+                        (bounds.size.width - (theme::SIDEBAR_WIDTH - theme::WORKBENCH_INSET * 2.))
+                            .abs()
+                            <= px(1.),
+                        "default sidebar width changed during layout: {bounds:?}"
+                    );
                     assert!(bounds.right() < editor.left(), "sidebar overlaps editor");
                     panels.push(bounds);
                 }
@@ -278,5 +291,84 @@ async fn workbench_panels_fit_small_windows_with_every_visibility_combination(
             })
             .unwrap();
         }
+    }
+}
+
+#[gpui_kit::test]
+async fn a_window_resize_keeps_the_sidebar_width_before_squeezing_it(cx: &mut TestAppContext) {
+    let documents = cx.update(|cx| install_globals(cx, Settings::default()));
+    let (handle, _this) = cx.update(|cx| {
+        new_window(
+            cx,
+            None,
+            documents,
+            Bounds::new(point(px(0.), px(0.)), size(px(1400.), px(900.))),
+        )
+    });
+    let sidebar = |cx: &mut TestAppContext| {
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.find("workbench-sidebar").bounds().size.width
+        })
+        .unwrap()
+    };
+    let editor = |cx: &mut TestAppContext| {
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.find("workbench-editor").bounds().size.width
+        })
+        .unwrap()
+    };
+    assert_eq!(sidebar(cx), px(396.));
+    // 900 px still has room: the sidebar keeps its width and the editor takes the rest.
+    cx.simulate_window_resize(handle, size(px(900.), px(900.)));
+    cx.run_until_parked();
+    assert_eq!(sidebar(cx), px(396.));
+    assert_eq!(editor(cx), px(496.));
+    // 760 px is the window minimum: the editor keeps its minimum, the sidebar its width.
+    cx.simulate_window_resize(handle, size(px(760.), px(900.)));
+    cx.run_until_parked();
+    assert_eq!(sidebar(cx), px(396.));
+    assert_eq!(editor(cx), px(356.));
+}
+
+#[gpui_kit::test]
+async fn the_sidebar_stops_before_the_editor_gets_too_narrow(cx: &mut TestAppContext) {
+    let documents = cx.update(|cx| install_globals(cx, Settings::default()));
+    for width in [760., 1400.] {
+        let (handle, _this) = cx.update(|cx| {
+            new_window(
+                cx,
+                None,
+                documents.clone(),
+                Bounds::new(point(px(0.), px(0.)), size(px(width), px(640.))),
+            )
+        });
+        cx.run_until_parked();
+        cx.update_window(handle, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            let sidebar = window.find("workbench-sidebar").bounds();
+            let editor = window.find("workbench-editor").bounds();
+            let divider = point(sidebar.right() + px(2.), editor.center().y);
+            window.simulate_mouse_move(divider, cx);
+            // Ask for more than the window can give; the contract clamps it.
+            window.drag(divider, divider + point(px(400.), px(0.)), cx);
+            window.render_frame(cx);
+            window.render_frame(cx);
+            let sidebar = window.find("workbench-sidebar").bounds();
+            let editor = window.find("workbench-editor").bounds();
+            assert!(
+                editor.size.width >= theme::EDITOR_MIN,
+                "{width}px window left the editor at {:?}",
+                editor.size.width
+            );
+            assert!(
+                sidebar.size.width <= theme::SIDEBAR_MAX - theme::WORKBENCH_INSET * 2.,
+                "{width}px window overshot the sidebar maximum: {:?}",
+                sidebar.size.width
+            );
+        })
+        .unwrap();
     }
 }

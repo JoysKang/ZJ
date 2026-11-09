@@ -1,13 +1,14 @@
 //! VS Code's line editing keys on a document's editor; the logic is in [`crate::editing`].
 //!
-//! Kit only exposes the primary selection (`selected_range` / `set_selected_range`), so these
-//! commands act on it and drop any extra cursors.
+//! Kit's ZJ selection interface retains every cursor and groups each command into one undo step.
 
-use super::{Document, Pane, Workbench};
-use crate::editing::{self, Edit};
-use crate::replace;
-use gpui_kit::{EntityInputHandler, KeyBinding, *};
-use std::ops::Range;
+#[path = "multi_edit.rs"]
+mod multi_edit;
+
+use super::{Pane, Workbench};
+use crate::editing;
+use gpui_kit::{KeyBinding, *};
+use multi_edit::Command;
 
 gpui_kit::actions!(
     editor,
@@ -43,29 +44,29 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 impl Workbench {
     /// ⌘/: comments out or uncomments the selected lines.
     pub(super) fn toggle_line_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.edit_active(window, cx, |doc, text, selection| {
-            let comment = crate::languages::comment_for(&doc.path)?;
-            editing::toggle_comment(text, selection, comment, doc.indent.width)
-        });
+        let Pane::Document(id) = self.active else {
+            return;
+        };
+        let Some(doc) = self.document(id) else {
+            return;
+        };
+        let Some(comment) = crate::languages::comment_for(&doc.path) else {
+            return;
+        };
+        self.edit_active(window, cx, Command::Comment(comment, doc.indent.width));
     }
 
     /// ⌥↑ / ⌥↓: moves the selected lines past the line above or below.
     pub(super) fn move_lines(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.edit_active(window, cx, |_, text, selection| {
-            editing::move_lines(text, selection, down)
-        });
+        self.edit_active(window, cx, Command::Move(down));
     }
 
     /// ⇧⌥↑ / ⇧⌥↓: duplicates the selected lines and selects the copy.
     pub(super) fn copy_lines(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.edit_active(window, cx, |_, text, selection| {
-            Some(editing::copy_lines(text, selection, down))
-        });
+        self.edit_active(window, cx, Command::Copy(down));
     }
 
-    /// ⌘D: selects the word at the cursor, then moves the selection to the next occurrence.
-    /// Kit cannot add a selection from outside, so this moves the one selection (VS Code's
-    /// ⌘K ⌘D) instead of adding one.
+    /// ⌘D: expand empty cursors to words, then add each next unselected occurrence.
     pub(super) fn select_next_occurrence(&mut self, cx: &mut Context<Self>) {
         let Pane::Document(id) = self.active else {
             return;
@@ -73,54 +74,70 @@ impl Workbench {
         let Some(editor) = self.document(id).map(|doc| doc.editor.clone()) else {
             return;
         };
-        let (text, selection) = {
+        let (text, mut selections) = {
             let state = editor.read(cx);
-            (state.text().to_string(), state.selected_range())
+            (state.text().to_string(), state.selected_ranges())
         };
-        let next = if selection.is_empty() {
-            let word = editing::word_at(&text, selection.start);
-            self.whole_word_selection = word.clone().map(|word| (id, word));
-            word
+        if selections.iter().any(|(range, _)| range.is_empty()) {
+            for (range, _) in &mut selections {
+                if range.start == range.end
+                    && let Some(word) = editing::word_at(&text, range.start)
+                {
+                    *range = word;
+                }
+            }
+            self.whole_word_selection = Some((id, selections[0].0.clone()));
         } else {
-            let whole_word = self.whole_word_selection == Some((id, selection.clone()));
-            let next = editing::next_occurrence(&text, selection, whole_word);
-            if whole_word && let Some(next) = &next {
+            let primary = selections[0].0.clone();
+            let whole_word = self.whole_word_selection == Some((id, primary.clone()));
+            let mut candidate = primary.clone();
+            let mut next = None;
+            for _ in 0..=selections.len() {
+                let Some(found) = editing::next_occurrence(&text, candidate, whole_word) else {
+                    break;
+                };
+                if !selections
+                    .iter()
+                    .any(|(range, _)| range.start < found.end && found.start < range.end)
+                {
+                    next = Some(found);
+                    break;
+                }
+                if found == primary {
+                    break;
+                }
+                candidate = found;
+            }
+            let Some(next) = next else {
+                return;
+            };
+            if whole_word {
                 self.whole_word_selection = Some((id, next.clone()));
             }
-            next
-        };
-        if let Some(range) = next {
-            editor.update(cx, |state, cx| state.set_selected_range(range, cx));
+            selections.insert(0, (next, false));
         }
+        editor.update(cx, |state, cx| {
+            state.set_selected_ranges(&selections, cx);
+        });
     }
 
-    /// Computes one edit from the active buffer's text and primary selection and applies it as
-    /// a single undo step.
-    fn edit_active(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        compute: impl FnOnce(&Document, &str, Range<usize>) -> Option<Edit>,
-    ) {
+    fn edit_active(&mut self, window: &mut Window, cx: &mut Context<Self>, command: Command) {
         let Pane::Document(id) = self.active else {
             return;
         };
-        let Some(doc) = self.document(id) else {
+        let Some(editor) = self.document(id).map(|doc| doc.editor.clone()) else {
             return;
         };
-        let editor = doc.editor.clone();
-        let (text, selection) = {
+        let (text, selections) = {
             let state = editor.read(cx);
-            (state.text().to_string(), state.selected_range())
+            if !state.is_editable() {
+                return;
+            }
+            (state.text().to_string(), state.selected_ranges())
         };
-        let Some(edit) = compute(doc, &text, selection) else {
-            return;
-        };
+        let (edits, after) = multi_edit::compute(&text, &selections, command);
         editor.update(cx, |state, cx| {
-            let range = replace::utf16_offset(&text, edit.range.start)
-                ..replace::utf16_offset(&text, edit.range.end);
-            state.replace_text_in_range(Some(range), &edit.text, window, cx);
-            state.set_selected_range(edit.selection, cx);
+            state.replace_ranges_with_selections(&edits, &after, window, cx);
         });
     }
 }

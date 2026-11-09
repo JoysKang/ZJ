@@ -156,6 +156,228 @@ async fn ctrl_g_goes_to_a_line_of_the_active_file(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn first_shift_f12_waits_for_cross_file_references(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    cx.update(|cx| {
+        cx.bind_keys([KeyBinding::new(
+            "shift-f12",
+            navigation::FindReferences,
+            Some("WorkspaceEditor"),
+        )])
+    });
+    let root = std::env::temp_dir().join(format!("zj-first-references-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let a = root.join("a.py");
+    let b = root.join("b.py");
+    std::fs::write(&a, "def helper(x):\n    return x\n\nhelper(2)\n").unwrap();
+    std::fs::write(&b, "from a import helper\nprint(helper(1))\n").unwrap();
+    let (window, this) = open(cx, root.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(b.clone(), Some(root.clone()), window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.activate_window();
+        let editor = this.read(cx).documents[0].editor.clone();
+        editor.update(cx, |editor, cx| {
+            editor.focus(window, cx);
+            editor.set_cursor_position(lsp_types::Position::new(1, 9), window, cx);
+        });
+        assert!(this.read(cx).nav.symbols.is_none());
+        window.render_frame(cx);
+        window.press("shift-f12", cx);
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.quick_open.is_some())
+    });
+    this.read_with(cx, |p, _| {
+        let (items, _) = p.quick_open.as_ref().unwrap().items.as_ref().unwrap();
+        let paths: Vec<_> = items
+            .iter()
+            .filter_map(|item| match &item.pick {
+                quick_open::Pick::Jump(target) => Some(target.path.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            paths.contains(&a),
+            "first ShiftF12 omitted the definition in a.py: {paths:?}"
+        );
+        assert!(paths.contains(&b));
+        assert!(
+            items.iter().any(|item| matches!(
+                &item.pick,
+                quick_open::Pick::Jump(target) if target.path == a && target.line == 3
+            )),
+            "first ShiftF12 omitted the call in a.py"
+        );
+    });
+    press(cx, window, "escape");
+    cx.update_window(window.into(), |_, window, cx| {
+        assert!(
+            this.read(cx).documents[0]
+                .editor
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        );
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn pending_references_do_not_reopen_a_cancelled_picker(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    cx.update(|cx| {
+        cx.bind_keys([KeyBinding::new(
+            "shift-f12",
+            navigation::FindReferences,
+            Some("WorkspaceEditor"),
+        )])
+    });
+    let root = std::env::temp_dir().join(format!("zj-cancel-references-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("a.py");
+    std::fs::write(&path, "def helper():\n    return helper()\n").unwrap();
+    let (handle, this) = open(cx, root.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(path.clone(), Some(root.clone()), window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.activate_window();
+        let editor = this.read(cx).documents[0].editor.clone();
+        editor.update(cx, |editor, cx| {
+            editor.focus(window, cx);
+            editor.set_cursor_position(lsp_types::Position::new(1, 12), window, cx);
+        });
+        window.render_frame(cx);
+        window.press("shift-f12", cx);
+    })
+    .unwrap();
+    let query = cx
+        .update_window(handle.into(), |_, window, cx| {
+            // A later command takes focus before either the index or references can finish.
+            this.update(cx, |p, cx| p.open_quick_open(window, cx));
+            window.render_frame(cx);
+            this.read(cx).quick_open.as_ref().unwrap().input.clone()
+        })
+        .unwrap();
+    cx.run_until_parked();
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.quick_open.as_ref().unwrap().input, query)
+    });
+    press(cx, handle, "escape");
+    assert!(this.read_with(cx, |p, _| p.quick_open.is_none()));
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.nav.symbols.is_some())
+    });
+    cx.executor().advance_clock(navigation::INDEX_POLL * 2);
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        let p = this.read(cx);
+        assert!(
+            p.quick_open.is_none(),
+            "late references reopened a cancelled picker"
+        );
+        assert!(
+            p.documents[0]
+                .editor
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        );
+        assert_ne!(p.message, "正在查找引用…");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn pending_references_do_not_follow_a_tab_switch(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    cx.update(|cx| {
+        cx.bind_keys([KeyBinding::new(
+            "shift-f12",
+            navigation::FindReferences,
+            Some("WorkspaceEditor"),
+        )])
+    });
+    let root = std::env::temp_dir().join(format!("zj-switch-references-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let a = root.join("a.py");
+    let b = root.join("b.py");
+    std::fs::write(&a, "def helper():\n    return helper()\n").unwrap();
+    std::fs::write(&b, "print('other file')\n").unwrap();
+    let (handle, this) = open(cx, root.clone());
+    for path in [a.clone(), b.clone()] {
+        let count = this.read_with(cx, |p, _| p.documents.len()) + 1;
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.open_file(path, Some(root.clone()), window, cx)
+            });
+        })
+        .unwrap();
+        settle(cx, Some(handle), |cx| {
+            this.read_with(cx, |p, _| p.documents.len() == count)
+        });
+    }
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.activate_window();
+        window.render_frame(cx);
+        window.click(("tab", 0usize), cx);
+        let editor = this.read(cx).documents[0].editor.clone();
+        editor.update(cx, |editor, cx| {
+            editor.set_cursor_position(lsp_types::Position::new(1, 12), window, cx)
+        });
+        window.render_frame(cx);
+        window.press("shift-f12", cx);
+        window.render_frame(cx);
+        window.click(("tab", 1usize), cx);
+        assert_eq!(this.read(cx).active_document().unwrap().0, b);
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.nav.symbols.is_some())
+    });
+    cx.executor().advance_clock(navigation::INDEX_POLL * 2);
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        let p = this.read(cx);
+        assert_eq!(p.active_document().unwrap().0, b);
+        assert!(
+            p.quick_open.is_none(),
+            "references from the previous tab stole focus"
+        );
+        assert!(
+            p.active_editor()
+                .unwrap()
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        );
+        assert_ne!(p.message, "正在查找引用…");
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
 async fn go_to_definition_waits_for_the_workspace_index(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = std::env::temp_dir().join(format!("zj-go-to-def-{}", std::process::id()));

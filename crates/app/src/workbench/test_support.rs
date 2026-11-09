@@ -12,7 +12,7 @@ const TRIES: usize = 400;
 const PAUSE: Duration = Duration::from_millis(10);
 
 /// Initializes Kit and sets the globals a window needs; returns the shared documents.
-pub(super) fn install_globals(cx: &mut App, settings: Settings) -> DocumentOwners {
+pub(crate) fn install_globals(cx: &mut App, settings: Settings) -> DocumentOwners {
     gpui_kit::init(cx);
     cx.set_app_identity("local.zj.editor", "ZJ");
     cx.set_global(settings);

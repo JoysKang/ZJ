@@ -2,6 +2,7 @@
 //! the query with Aa / ab / .* toggles, collapsible "包含的文件" / "排除的文件" globs with the
 //! "使用排除设置和忽略文件" switch, then matches grouped by file. File-name search stays on ⌘P.
 
+use super::find_widget::input_history::{HistoryNext, HistoryPrevious, InputHistory};
 use super::{
     SINGLE_LINE, Workbench, navigation::Placement, search_replace::ReplaceState, sidebar::chevron,
 };
@@ -55,6 +56,12 @@ gpui_kit::actions!(
 
 pub fn key_bindings() -> Vec<KeyBinding> {
     vec![
+        KeyBinding::new("alt-up", HistoryPrevious, Some("SearchQuery > Input")),
+        KeyBinding::new("alt-down", HistoryNext, Some("SearchQuery > Input")),
+        KeyBinding::new("alt-up", HistoryPrevious, Some("SearchReplace > Input")),
+        KeyBinding::new("alt-down", HistoryNext, Some("SearchReplace > Input")),
+        KeyBinding::new("alt-up", HistoryPrevious, Some("FindWidget > Input")),
+        KeyBinding::new("alt-down", HistoryNext, Some("FindWidget > Input")),
         KeyBinding::new("down", FocusSearchResults, Some("SearchQuery > Input")),
         KeyBinding::new("down", SearchResultsNext, Some("SearchResults")),
         KeyBinding::new("up", SearchResultsPrevious, Some("SearchResults")),
@@ -78,6 +85,10 @@ enum SearchRow {
 
 pub(super) struct SearchState {
     pub query: Entity<InputState>,
+    query_history: InputHistory,
+    scope: Option<(PathBuf, Options)>,
+    stats: text_search::SearchStats,
+    details_open: bool,
     /// Glob lists: they wrap and grow to a few lines, ⏎ searches (⇧⏎ breaks the line, which
     /// separates like a comma).
     pub include: Entity<TextareaState>,
@@ -149,6 +160,14 @@ impl SearchState {
             }
         }
         let subscriptions = vec![
+            cx.subscribe(
+                &query,
+                |this: &mut Workbench, input, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                        this.search.query_history.remember(&input.read(cx).value());
+                    }
+                },
+            ),
             cx.subscribe_in(&query, window, rerun),
             cx.subscribe_in(&include, window, rerun),
             cx.subscribe_in(&exclude, window, rerun),
@@ -160,6 +179,10 @@ impl SearchState {
         ];
         Self {
             query,
+            query_history: InputHistory::default(),
+            scope: None,
+            stats: text_search::SearchStats::default(),
+            details_open: false,
             include,
             exclude,
             case_sensitive: false,
@@ -241,20 +264,36 @@ impl Drop for SearchState {
 
 impl Workbench {
     /// ⌘⇧F: the Search view with the query focused (and the selection, if any, as the query).
-    pub(super) fn find_in_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Returns whether the query changed, so a caller that also changed the scope runs once.
+    pub(super) fn find_in_files(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.search
+            .query_history
+            .remember(&self.search.query.read(cx).value());
         let selected = self
             .active_editor()
             .map(|editor| editor.read(cx).selected_text().to_string());
-        if let Some(text) = selected.filter(|t| !t.is_empty() && !t.contains('\n')) {
+        let changed = if let Some(text) = selected.filter(|t| !t.is_empty() && !t.contains('\n')) {
+            let changed = self.search.query.read(cx).value().as_ref() != text.as_str();
             self.search
                 .query
                 .update(cx, |input, cx| input.set_value(text, window, cx));
-        }
+            changed
+        } else {
+            false
+        };
         self.open_search(window, cx);
+        if changed {
+            // `set_value` does not emit Change; run the query that is now shown.
+            self.schedule_search(Duration::ZERO, window, cx);
+        }
+        changed
     }
 
     /// Reopening ordinary search replaces the query on typing, without reusing replace mode.
     pub(super) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search
+            .query_history
+            .remember(&self.search.query.read(cx).value());
         self.sidebar = super::Sidebar::Search;
         self.sidebar_visible = true;
         self.search.replace.expanded = false;
@@ -262,6 +301,7 @@ impl Workbench {
             input.focus(window, cx);
             input.select_all(window, cx);
         });
+        self.remember_layout(true, cx);
         cx.notify();
     }
 
@@ -283,7 +323,33 @@ impl Workbench {
         self.search
             .include
             .update(cx, |input, cx| input.set_value(include, window, cx));
-        self.find_in_files(window, cx);
+        // `set_value` emits no Change: run the search for the new scope even when the query
+        // itself did not change (for example, finding in the workspace root clears the glob).
+        if !self.find_in_files(window, cx) {
+            self.schedule_search(Duration::ZERO, window, cx);
+        }
+    }
+
+    fn recall_search_input(&mut self, previous: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .search
+            .replace
+            .input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            self.search
+                .replace
+                .history
+                .recall(previous, &self.search.replace.input, window, cx);
+        } else {
+            self.search
+                .query_history
+                .recall(previous, &self.search.query, window, cx);
+            // Invalidate old replace targets synchronously, before the Change event is delivered.
+            self.schedule_search(DEBOUNCE, window, cx);
+        }
     }
 
     /// Keeps 排除的文件 for the next session and new windows, once typing has paused.
@@ -339,15 +405,19 @@ impl Workbench {
         search.matcher = None;
         search.truncated = false;
         search.files_capped = false;
+        search.stats = text_search::SearchStats::default();
+        search.scope = None;
         search.running = false;
         let options = self.search_options(cx);
         let Some(root) = self.root.clone() else {
+            cx.notify();
             return;
         };
         if options.pattern.is_empty() {
             cx.notify();
             return;
         }
+        self.search.scope = Some((root.clone(), options.clone()));
         let matcher = match Matcher::new(&options) {
             Ok(matcher) => Arc::new(matcher),
             Err(error) => {
@@ -392,13 +462,17 @@ impl Workbench {
                     .flat_map(|index| index.paths())
                     .filter_map(|p| p.strip_prefix(&root).ok().map(PathBuf::from))
                     .collect();
+                worker.index_incomplete.store(
+                    index.iter().any(|index| index.incomplete),
+                    Ordering::Relaxed,
+                );
                 let files = if options.use_excludes {
-                    text_search::filter(indexed, &matcher, true)
+                    text_search::filter_with_progress(indexed, &matcher, true, &worker)
                 } else {
                     let (all, complete) =
                         text_search::walk_all(&root, indexed, text_search::MAX_WALK_FILES, &stop);
                     worker.files_capped.store(!complete, Ordering::Relaxed);
-                    text_search::filter(all, &matcher, false)
+                    text_search::filter_with_progress(all, &matcher, false, &worker)
                 };
                 text_search::run(&root, files, &matcher, &worker, &stop);
             });
@@ -426,6 +500,7 @@ impl Workbench {
                         search.truncated = progress.truncated.load(Ordering::Relaxed);
                         search.files_capped = progress.files_capped.load(Ordering::Relaxed);
                         search.running = !done;
+                        search.stats = progress.snapshot();
                         search.rebuild_rows();
                         cx.notify();
                         true
@@ -437,6 +512,33 @@ impl Workbench {
             }
         }));
         cx.notify();
+    }
+
+    fn search_scope_details(&self) -> Vec<String> {
+        let Some((root, options)) = &self.search.scope else {
+            return vec!["输入查询后可查看搜索范围。".into()];
+        };
+        let stats = &self.search.stats;
+        let mut lines = vec![
+            format!("根目录：{}", root.display()),
+            format!("包含：{}", if options.include.is_empty() { "所有候选文件" } else { &options.include }),
+            format!("排除：{}", if options.exclude.is_empty() { "无" } else { &options.exclude }),
+            format!("忽略规则：{}；名称隐藏规则：{}", if options.use_excludes { ".gitignore 与默认目录排除" } else { "关闭" }, if options.use_excludes && !options.show_hidden { "启用" } else { "关闭" }),
+            format!("候选 {}；范围过滤 {}；已搜索文本 {}；尚未处理 {}", stats.candidates, stats.filtered, stats.searched, stats.unprocessed()),
+            format!("跳过 {}：无法打开 {}，读取或元数据失败 {}，非普通文件 {}，超过 2 MiB {}，二进制 {}", stats.skipped(), stats.open_failed, stats.read_failed, stats.not_regular, stats.too_large, stats.binary),
+            "预算：每文件 2 MiB；最多 10,000 个匹配；关闭忽略规则时额外遍历最多 200,000 个文件。.git 与遍历中的符号链接不进入范围。".into(),
+            "范围过滤计数只涵盖已枚举候选；索引已排除的目录、忽略文件和遍历失败的目录不计数。大文件可单独打开后查找。".into(),
+        ];
+        if stats.index_incomplete {
+            lines.push("路径索引已达上限，搜索范围不完整。".into());
+        }
+        if self.search.files_capped {
+            lines.push("额外遍历已达文件上限，搜索范围不完整。".into());
+        }
+        if self.search.truncated {
+            lines.push("匹配已达结果上限，剩余候选未完成搜索。".into());
+        }
+        lines
     }
 
     /// The file index arrived after a search was asked for.
@@ -593,6 +695,20 @@ impl Workbench {
         let use_excludes = cx.global::<crate::settings::Settings>().search_use_excludes;
         let query_options = h_flex()
             .gap_1()
+            .child(
+                Button::new("search-query-history")
+                    .small()
+                    .ghost()
+                    .icon(IconName::ChevronUp)
+                    .tooltip("查询历史（⌥↑ / ⌥↓）")
+                    .accessibility_label("查询历史（⌥↑ / ⌥↓）")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.search
+                            .query
+                            .update(cx, |input, cx| input.focus(window, cx));
+                        this.recall_search_input(true, window, cx);
+                    })),
+            )
             .child(self.option_button(
                 "search-case",
                 IconName::CaseSensitive,
@@ -733,6 +849,7 @@ impl Workbench {
             .when(replace.expanded, |inputs| {
                 inputs.child(
                     h_flex()
+                        .key_context("SearchReplace")
                         .gap_1()
                         .child(
                             div().flex_1().min_w_0().child(
@@ -741,6 +858,21 @@ impl Workbench {
                                     .small()
                                     .suffix(preserve_case),
                             ),
+                        )
+                        .child(
+                            Button::new("search-replace-history")
+                                .small()
+                                .ghost()
+                                .icon(IconName::ChevronUp)
+                                .tooltip("替换历史（⌥↑ / ⌥↓）")
+                                .accessibility_label("替换历史（⌥↑ / ⌥↓）")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.search
+                                        .replace
+                                        .input
+                                        .update(cx, |input, cx| input.focus(window, cx));
+                                    this.recall_search_input(true, window, cx);
+                                })),
                         )
                         .child(replace_all),
                 )
@@ -773,6 +905,8 @@ impl Workbench {
         v_flex()
             .size_full()
             .min_h_0()
+            .on_action(cx.listener(|this, _: &HistoryPrevious, window, cx| this.recall_search_input(true, window, cx)))
+            .on_action(cx.listener(|this, _: &HistoryNext, window, cx| this.recall_search_input(false, window, cx)))
             .on_action(cx.listener(|this, _: &FocusSearchResults, window, cx| this.focus_search_results(window, cx)))
             .on_action(cx.listener(|this, _: &SearchResultsNext, _, cx| this.move_search_result(1, cx)))
             .on_action(cx.listener(|this, _: &SearchResultsPrevious, _, cx| this.move_search_result(-1, cx)))
@@ -849,6 +983,22 @@ impl Workbench {
                                 .text_color(color)
                                 .child(text),
                         )
+                    })
+                    .child(
+                        Button::new("search-scope-details")
+                            .small()
+                            .ghost()
+                            .label(format!("搜索范围与跳过原因（{}）", search.stats.skipped()))
+                            .selected(search.details_open)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.search.details_open = !this.search.details_open;
+                                cx.notify();
+                            })),
+                    )
+                    .when(search.details_open, |panel| {
+                        panel.child(v_flex().id("search-scope-content").max_h(theme::SEARCH_GLOB_LINE * (GLOB_ROWS * 2) as f32).overflow_y_scroll().gap_1().children(self.search_scope_details().into_iter().map(|line| {
+                            div().text_size(theme::TEXT_CAPTION).text_color(colors.muted).child(line)
+                        })))
                     })
                     .children(replace_summary),
             )

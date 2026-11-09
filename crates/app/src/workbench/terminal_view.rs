@@ -182,7 +182,10 @@ impl TerminalView {
     /// the panel's; ⌘ keys are the app's except copy, paste and VS Code's line-editing ones.
     fn key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) -> bool {
         let m = &keystroke.modifiers;
-        if m.control && matches!(keystroke.key.as_str(), "`" | "~") {
+        if m.control
+            && (matches!(keystroke.key.as_str(), "`" | "~")
+                || (!m.alt && !m.shift && matches!(keystroke.key.as_str(), "pageup" | "pagedown")))
+        {
             return false;
         }
         if m.platform {

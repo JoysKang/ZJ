@@ -19,7 +19,72 @@ use gpui_kit::{
     *,
 };
 use std::{path::PathBuf, time::Duration};
-use workspace_editor_core::RepoId;
+use workspace_editor_core::{DocumentId, RepoId};
+
+/// Recently activated file paths survive closing their buffers. No filesystem work occurs here.
+#[derive(Default)]
+pub(super) struct RecentFiles {
+    entries: Vec<RecentFile>,
+}
+
+struct RecentFile {
+    document: Option<DocumentId>,
+    path: PathBuf,
+}
+
+impl RecentFiles {
+    const LIMIT: usize = 100;
+
+    pub(super) fn activate(&mut self, id: DocumentId, path: PathBuf) {
+        self.entries
+            .retain(|entry| entry.document != Some(id) && entry.path != path);
+        self.entries.insert(
+            0,
+            RecentFile {
+                document: Some(id),
+                path,
+            },
+        );
+        self.entries.truncate(Self::LIMIT);
+    }
+
+    pub(super) fn close(&mut self, id: DocumentId, path: PathBuf) {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.document == Some(id))
+        {
+            entry.path = path;
+            entry.document = None;
+        } else {
+            self.activate(id, path);
+            self.entries[0].document = None;
+        }
+        self.deduplicate();
+    }
+
+    fn deduplicate(&mut self) {
+        let mut seen = std::collections::HashSet::new();
+        self.entries.retain(|entry| seen.insert(entry.path.clone()));
+    }
+
+    pub(super) fn contains_under(&self, old: &std::path::Path) -> bool {
+        self.entries.iter().any(|entry| entry.path.starts_with(old))
+    }
+
+    pub(super) fn move_paths(&mut self, old: &std::path::Path, new: &std::path::Path) {
+        for entry in &mut self.entries {
+            if let Ok(relative) = entry.path.strip_prefix(old) {
+                entry.path = new.join(relative);
+            }
+        }
+        self.deduplicate();
+    }
+}
+
+#[cfg(test)]
+#[path = "recent_files_tests.rs"]
+mod recent_files_tests;
 
 /// A row of a symbol, location, command or branch list. `keys` are keycap labels of the
 /// command's shortcut (empty when it has none or the row is not a command).
@@ -81,6 +146,10 @@ pub(super) enum Pick {
         oid: String,
         action: StashAction,
     },
+    GitFlow {
+        repo: RepoId,
+        step: super::scm_actions::GitFlowStep,
+    },
     /// The checked-out branch: nothing to do.
     Close,
     /// `:N:C` in the file search: 0-based line and column; `None` (no file, or the line is
@@ -128,6 +197,47 @@ pub(super) struct QuickOpen {
 }
 
 impl Workbench {
+    pub(super) fn remember_recent_file(&mut self, id: DocumentId) {
+        if let Some(doc) = self
+            .documents
+            .iter()
+            .find(|doc| doc.id == id && !doc.untitled)
+        {
+            self.recent_files.activate(id, doc.path.clone());
+        }
+    }
+
+    pub(super) fn close_recent_file(&mut self, id: DocumentId) {
+        if let Some(doc) = self
+            .documents
+            .iter()
+            .find(|doc| doc.id == id && !doc.untitled)
+        {
+            self.recent_files.close(id, doc.path.clone());
+        }
+    }
+
+    /// Follow Save As without promoting an inactive document in the activation order.
+    pub(super) fn recent_file_path_changed(&mut self, id: DocumentId) {
+        if let Some(doc) = self
+            .documents
+            .iter()
+            .find(|doc| doc.id == id && !doc.untitled)
+        {
+            if let Some(entry) = self
+                .recent_files
+                .entries
+                .iter_mut()
+                .find(|entry| entry.document == Some(id))
+            {
+                entry.path = doc.path.clone();
+                self.recent_files.deduplicate();
+            } else {
+                self.remember_recent_file(id);
+            }
+        }
+    }
+
     pub(super) fn open_quick_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.quick_open.as_ref().is_some_and(|quick| quick.launcher) {
             return;
@@ -391,6 +501,9 @@ impl Workbench {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, item)| {
+                    if matches!(&item.pick, Pick::GitFlow { step, .. } if step.accepts_text()) {
+                        return Some((i32::MIN, i));
+                    }
                     if let Pick::CreateBranch { .. }
                     | Pick::TagName { .. }
                     | Pick::CreateTag { .. }
@@ -423,16 +536,24 @@ impl Workbench {
             cx.notify();
             return;
         }
-        let recent: Vec<PathBuf> = self
-            .recent_documents
+        let mut recent: Vec<PathBuf> = self
+            .recent_files
+            .entries
             .iter()
-            .filter_map(|id| {
-                self.documents
-                    .iter()
-                    .find(|doc| doc.id == *id && !doc.untitled)
+            .map(|entry| {
+                entry
+                    .document
+                    .and_then(|id| {
+                        self.documents
+                            .iter()
+                            .find(|doc| doc.id == id && !doc.untitled)
+                    })
+                    .map_or_else(|| entry.path.clone(), |doc| doc.path.clone())
             })
-            .map(|doc| doc.path.clone())
             .collect();
+        let mut seen = std::collections::HashSet::new();
+        recent.retain(|path| seen.insert(path.clone()));
+        recent.truncate(RecentFiles::LIMIT);
         let index = self.index.clone();
         let show_hidden = self.explorer.show_hidden;
         let hidden_files = self.explorer.hidden_files.clone();
@@ -576,6 +697,10 @@ impl Workbench {
                         None => self.focus_active_editor(window, cx),
                     }
                     window.dispatch_action(action, cx);
+                }
+                Some(Pick::GitFlow { repo, step }) => {
+                    self.focus_active_editor(window, cx);
+                    self.scm_git_flow(&repo, step, query, window, cx);
                 }
                 Some(Pick::Checkout {
                     repo,

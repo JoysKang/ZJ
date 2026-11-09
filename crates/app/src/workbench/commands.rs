@@ -46,6 +46,13 @@ pub(super) const COMMANDS: &[Command] = &[
     command!("文件: 自动保存: 编辑后 1 秒", AutoSaveAfterDelay),
     command!("文件: 自动保存: 失去焦点时", AutoSaveOnFocusChange),
     command!("文件: 更改行尾序列", ToggleLineEnding),
+    command!("比较: 选择活动文件", SelectForComparison),
+    command!("比较: 与已选文件比较", CompareWithSelected),
+    command!("比较: 与剪贴板比较", CompareWithClipboard),
+    command!("Git: 文件历史", FileHistory),
+    command!("Git: 比较引用或合并基点…", CompareRevisions),
+    command!("补丁: 导入并检查…", ImportPatch),
+    command!("补丁: 导出当前比较…", ExportPatch),
     command!("文件: 关闭编辑器", CloseEditor),
     command!("文件: 关闭其他编辑器", CloseOtherEditors),
     command!("文件: 关闭所有编辑器", CloseAllEditors),
@@ -86,6 +93,10 @@ pub(super) const COMMANDS: &[Command] = &[
     command!("终端: 切换终端", ToggleTerminal),
     command!("终端: 拆分终端", SplitTerminal),
     command!("终端: 关闭终端", KillTerminal),
+    command!("终端: 上一个分组", PreviousTerminalGroup),
+    command!("终端: 下一个分组", NextTerminalGroup),
+    command!("终端: 上一个窗格", PreviousTerminalPane),
+    command!("终端: 下一个窗格", NextTerminalPane),
 ];
 
 /// 打开面板时按当时的焦点解析每个命令的最高优先级绑定；没有焦点时用当前上下文栈。

@@ -1,8 +1,11 @@
 //! Bounded, cancellable system Git operations, serialized by worktree identity.
 
+mod comparison;
+pub use comparison::{CommitSearch, Comparison, ComparisonMode, FileHistoryEntry};
 mod graph;
 mod log;
 mod ls_files;
+mod management;
 mod refs;
 mod stash;
 mod status;
@@ -13,6 +16,10 @@ pub use graph::{
 };
 pub use log::{Commit, parse_log};
 pub use ls_files::{ListedKind, parse_ls_files};
+pub use management::{
+    InProgress, LfsPointer, Remote, Submodule, Worktree, parse_lfs_pointer, push_result_summary,
+    redact_git_output,
+};
 pub use refs::{Branch, parse_branches};
 pub use stash::{Blame, Stash, parse_blame, parse_stashes};
 pub use status::{Change, ChangeKind, Status, parse_status};
@@ -266,6 +273,24 @@ impl GitService {
         self.run_bounded(root, args, cancel, allow_difference, input, OUTPUT_LIMIT)
     }
 
+    fn run_write_with_input(
+        &self,
+        root: &Path,
+        args: &[OsString],
+        cancel: &AtomicBool,
+        allow_difference: bool,
+        input: Option<&[u8]>,
+    ) -> io::Result<Vec<u8>> {
+        self.run_process(
+            root,
+            args,
+            cancel,
+            allow_difference,
+            input,
+            (OUTPUT_LIMIT, true),
+        )
+    }
+
     fn run_bounded(
         &self,
         root: &Path,
@@ -275,6 +300,19 @@ impl GitService {
         input: Option<&[u8]>,
         limit: usize,
     ) -> io::Result<Vec<u8>> {
+        self.run_process(root, args, cancel, allow_difference, input, (limit, false))
+    }
+
+    fn run_process(
+        &self,
+        root: &Path,
+        args: &[OsString],
+        cancel: &AtomicBool,
+        allow_difference: bool,
+        input: Option<&[u8]>,
+        capture: (usize, bool),
+    ) -> io::Result<Vec<u8>> {
+        let (limit, write_output) = capture;
         let _permit = self.permit(cancel)?;
         let started = Instant::now();
         let mut command = Command::new("git");
@@ -392,8 +430,23 @@ impl GitService {
             return Err(error(format!(
                 "Git 退出码 {:?}: {}",
                 status.code(),
-                String::from_utf8_lossy(&errors.bytes)
+                if write_output {
+                    format!(
+                        "{}\n{}",
+                        String::from_utf8_lossy(&output.bytes),
+                        String::from_utf8_lossy(&errors.bytes)
+                    )
+                } else {
+                    String::from_utf8_lossy(&errors.bytes).into_owned()
+                }
             )));
+        }
+        if write_output && !errors.bytes.is_empty() {
+            output.bytes.push(b'\n');
+            output.bytes.extend(errors.bytes);
+            if errors.overflow {
+                output.bytes.extend(b"\n[Git stderr truncated at 32 KiB]");
+            }
         }
         Ok(output.bytes)
     }
@@ -470,7 +523,7 @@ impl GitService {
     }
 
     fn execute_locked(&self, request: &Request, cancel: &AtomicBool) -> io::Result<Reply> {
-        let (args, allow_difference) = match &request.operation {
+        let (mut args, allow_difference) = match &request.operation {
             Operation::UntrackedDiff { path } => {
                 validate_relative_path(path)?;
                 // The selected row may have been staged since its last status snapshot.
@@ -606,6 +659,7 @@ impl GitService {
                 (args, false)
             }
         };
+        args.insert(0, "--no-lazy-fetch".into());
         let output = self.run_command(&request.repo.worktree, &args, cancel, allow_difference)?;
         Ok(Reply {
             repo: request.repo.id.clone(),

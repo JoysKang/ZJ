@@ -268,11 +268,13 @@ impl Workbench {
             },
             anchor: row,
             head: row,
+            columns: None,
         });
         self.diff.dragging = false;
+        let visible = self.diff_reveal_source(row, inline, cx);
         self.diff
             .scroll
-            .scroll_to_item_strict(row, ScrollStrategy::Center);
+            .scroll_to_item_strict(visible, ScrollStrategy::Center);
         if self.active != Pane::Diff {
             self.select_pane(Pane::Diff, window, cx);
         }

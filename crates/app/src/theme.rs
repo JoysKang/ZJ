@@ -85,7 +85,7 @@ pub const CODE_HEADER_HEIGHT: Pixels = px(28.);
 pub const RADIUS: Pixels = px(6.);
 pub const RADIUS_LARGE: Pixels = px(8.);
 /// Rounded surfaces inside the workbench shell.
-pub const WORKBENCH_RADIUS: Pixels = px(12.);
+pub const WORKBENCH_RADIUS: Pixels = px(6.);
 /// Each panel contributes 2 px to the 4 px gap between surfaces.
 pub const WORKBENCH_INSET: Pixels = px(2.);
 /// The editor's floating find / replace widget (VS Code: 419 px wide, inputs about 220 px).
@@ -103,16 +103,26 @@ pub const OVERLAY_SHADOW_BLUR: Pixels = px(16.);
 pub const STRIKE: Pixels = px(1.);
 pub const OVERLAY_SHADOW_Y: Pixels = px(4.);
 pub const STATUS_HEIGHT: Pixels = px(24.);
+/// Long branch names must leave the status bar's document information reachable.
+pub const STATUS_BRANCH_MAX_WIDTH: Pixels = px(160.);
 /// Active tab indicator thickness (VS Code's tab.activeBorderTop).
 pub const INDICATOR: Pixels = px(1.);
 
 // Widths.
 pub const TWISTY_WIDTH: Pixels = px(16.);
-pub const SIDEBAR_WIDTH: Pixels = px(300.);
+pub const SIDEBAR_WIDTH: Pixels = px(400.);
+/// Tabs stay on one row; long names leave room for the open-files menu.
+pub const FILE_TAB_MAX_WIDTH: Pixels = px(240.);
+/// A diff's path moves above its actions before either becomes unreadable.
+pub const DIFF_CONTEXT_MIN_WIDTH: Pixels = px(160.);
 pub const SIDEBAR_MIN: Pixels = px(200.);
 pub const SIDEBAR_MAX: Pixels = px(520.);
 pub const EDITOR_MIN: Pixels = px(320.);
 pub const EDITOR_MAX: Pixels = px(4000.);
+/// The space between the workbench and the status bar below it.
+pub const CHROME_GAP: Pixels = px(4.);
+/// The editor keeps at least this height while the terminal panel is open.
+pub const EDITOR_MIN_HEIGHT: Pixels = px(200.);
 
 // Icons and text.
 pub const ICON_SIZE: Pixels = px(16.);

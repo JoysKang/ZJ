@@ -1,4 +1,8 @@
 //! Source Control in a headless window, on a temporary repository.
+#[path = "scm_feedback_ui_tests.rs"]
+mod feedback_ui_tests;
+#[path = "scm_management_ui_tests.rs"]
+mod management_ui_tests;
 
 use super::super::test_support::{open, settle};
 use super::super::*;
@@ -127,9 +131,19 @@ async fn incoming_commits_have_an_explicit_pull_action(cx: &mut TestAppContext) 
         git_out(&repo, &["rev-parse", "HEAD"]),
         git_out(&repo, &["rev-parse", "origin/main"])
     );
+    assert_eq!(
+        rows(cx, &this),
+        ["repo", "message"],
+        "keep the result reachable until dismissed"
+    );
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("git-result-dismiss", 0usize), cx);
+    })
+    .unwrap();
     assert!(
         rows(cx, &this).is_empty(),
-        "fully synced clean repository should hide again"
+        "clean repositories hide after the result is dismissed"
     );
     this.update(cx, |p, cx| {
         p.hide_clean_repos = false;
@@ -1788,7 +1802,10 @@ async fn merge_conflicts_are_resolved_inline_and_marked_resolved(cx: &mut TestAp
     .unwrap();
     this.read_with(cx, |p, cx| {
         let patch = match &p.diff.tab.as_ref().unwrap().source {
-            DiffSource::Local(patch) => patch,
+            DiffSource::Local(patch, comparison) => {
+                assert_eq!(*comparison, "当前更改 → 传入的更改");
+                patch
+            }
             _ => panic!("expected a read-only local comparison"),
         };
         assert!(patch.contains("main 2 手工修改🙂") && patch.contains("feature 2"));
@@ -1976,7 +1993,7 @@ async fn staging_a_file_that_still_has_conflict_markers_asks_first(cx: &mut Test
 }
 
 #[gpui_kit::test]
-async fn failed_git_writes_prompt_without_leaving_inline_errors(cx: &mut TestAppContext) {
+async fn failed_git_writes_prompt_and_keep_copyable_details(cx: &mut TestAppContext) {
     use std::os::unix::fs::PermissionsExt;
     cx.executor().allow_parking();
     for (kind, title, reason) in [
@@ -2053,7 +2070,8 @@ async fn failed_git_writes_prompt_without_leaving_inline_errors(cx: &mut TestApp
         assert!(detail.contains(repo.to_str().unwrap()), "{detail}");
         assert!(detail.contains(reason), "{detail}");
         this.read_with(cx, |p, cx| {
-            assert!(p.groups[0].write_message.is_empty());
+            assert!(p.groups[0].write_message.contains(reason));
+            assert!(p.groups[0].write_message.contains("失败"));
             assert_eq!(
                 p.groups[0].commit_input.read(cx).value().as_ref(),
                 "feat: 保留输入"

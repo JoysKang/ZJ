@@ -24,10 +24,13 @@ use std::{ops::Range, path::PathBuf};
 
 pub(super) struct ReplaceState {
     pub input: Entity<InputState>,
+    pub history: super::find_widget::input_history::InputHistory,
     pub expanded: bool,
     pub preserve_case: bool,
     pub running: bool,
     task: Option<Task<()>>,
+    #[cfg(test)]
+    pub completion_gate: Option<async_channel::Receiver<()>>,
     /// The last replace, for 撤销.
     undo: Vec<Undo>,
     /// What the last replace (or undo) did, and whether something was skipped.
@@ -53,17 +56,29 @@ impl ReplaceState {
     pub fn new(window: &mut Window, cx: &mut Context<Workbench>) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("替换"));
         // The previews in the results follow the replacement as it is typed.
-        let subscription = cx.subscribe(&input, |_: &mut Workbench, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                cx.notify();
-            }
-        });
+        let subscription = cx.subscribe(
+            &input,
+            |this: &mut Workbench, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    this.search
+                        .replace
+                        .history
+                        .remember_replacement(&input.read(cx).value());
+                }
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            },
+        );
         Self {
             input,
+            history: Default::default(),
             expanded: false,
             preserve_case: false,
             running: false,
             task: None,
+            #[cfg(test)]
+            completion_gate: None,
             undo: Vec::new(),
             summary: None,
             _subscription: subscription,
@@ -266,6 +281,10 @@ impl Workbench {
         if self.search.replace.running {
             return;
         }
+        self.search
+            .replace
+            .history
+            .remember_replacement(&self.search.replace.input.read(cx).value());
         let replacement = self.search_replacement(cx);
         let me = cx.entity_id();
         let mut skipped: Vec<(PathBuf, String)> = Vec::new();
@@ -302,10 +321,22 @@ impl Workbench {
                 })
                 .collect::<Vec<_>>()
         });
+        #[cfg(test)]
+        let completion_gate = self.search.replace.completion_gate.take();
         self.search.replace.task = Some(cx.spawn_in(window, async move |this, cx| {
             let outcomes = work.await;
+            #[cfg(test)]
+            if let Some(gate) = completion_gate {
+                let _ = gate.recv().await;
+            }
             let _ = this.update_in(cx, |this, window, cx| {
                 this.search.replace.running = false;
+                // Each scheduled search owns a new matcher, including repeated query text.
+                let same_search = this
+                    .search
+                    .matcher
+                    .as_ref()
+                    .is_some_and(|current| std::sync::Arc::ptr_eq(current, &matcher));
                 let mut undo = Vec::new();
                 let (mut files, mut count) = (0, 0);
                 for (path, result) in outcomes {
@@ -313,7 +344,12 @@ impl Workbench {
                         Ok(done) => {
                             files += 1;
                             count += done.count;
-                            this.after_rewrite(&done, &matcher, window, cx);
+                            this.after_rewrite(
+                                &done,
+                                same_search.then_some(matcher.as_ref()),
+                                window,
+                                cx,
+                            );
                             undo.push(Undo {
                                 path: done.path,
                                 original: done.original,
@@ -323,7 +359,11 @@ impl Workbench {
                         Err(error) => skipped.push((path, error.to_string())),
                     }
                 }
-                this.rebuild_after_edit();
+                if same_search {
+                    this.rebuild_after_edit();
+                } else {
+                    this.schedule_search(std::time::Duration::ZERO, window, cx);
+                }
                 this.search.replace.undo = undo;
                 let buffers = in_buffers.len();
                 let in_editors =
@@ -344,11 +384,13 @@ impl Workbench {
     fn after_rewrite(
         &mut self,
         done: &Rewritten,
-        matcher: &Matcher,
+        matcher: Option<&Matcher>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(found) = self.search.results.iter_mut().find(|f| f.path == done.path) {
+        if let Some(matcher) = matcher
+            && let Some(found) = self.search.results.iter_mut().find(|f| f.path == done.path)
+        {
             let (lines, count) = matcher
                 .search_bytes(done.text.as_bytes(), MAX_MATCHES)
                 .unwrap_or_default();
@@ -567,7 +609,8 @@ impl Workbench {
                         label: format!("{name} ↔ 替换后"),
                         tooltip: format!("{} · 替换预览", path.display()),
                         path,
-                        source: DiffSource::Local(patch.into()),
+                        source: DiffSource::Local(patch.into(), "替换前 → 替换后"),
+                        checkpoint: None,
                     };
                     this.show_diff_tab(tab, window, cx);
                 }
@@ -587,7 +630,8 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_preview(window, cx);
+        self.prepare_new_diff(window, cx);
+        self.diff.review.comparison.snapshot = None;
         self.message.clear();
         self.diff.tab = Some(tab);
         self.active = Pane::Diff;

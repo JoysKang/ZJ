@@ -1,0 +1,47 @@
+{
+  "date": "2026-11-04",
+  "architecture": "aarch64-apple-darwin",
+  "profile": "dist",
+  "source_base": "3eb7872201fe63c7613f42f78ba73d7d354593ac",
+  "source_state": "uncommitted feature changes after both review stages",
+  "measurement_command": "GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ALLOW_PROTOCOL=file python3 tools/measure_budget.py --binary target/ZJ.app/Contents/MacOS/ZJ --runs 3 --idle-seconds 10 --skip-latency",
+  "baseline_sha256": "25fd192e6c7d21b9bb3bdc090538030af00c7512fc66b6d3e999734d010a10bf",
+  "final_sha256": "4d715e29a9b4486b6a2ae5ebc2052ab73b876119d16a926b9993596e71d44d25",
+  "dist_bundle_hashes_match": true,
+  "baseline": {
+    "binary_bytes": 46524112,
+    "cold_start_ms": 192.27645900000033,
+    "cold_start_reported_ms": 180.0,
+    "cold_start_worst_ms": 1660.9281250000001,
+    "idle_footprint_mb": 59.851856,
+    "idle_cpu_p95_percent": 0.01451614336950041,
+    "idle_welcome_footprint_mb": 54.559824,
+    "idle_welcome_cpu_p95_percent": 0.6991321752143994,
+    "three_windows_20_docs_mb": 143.623344
+  },
+  "final": {
+    "binary_bytes": 47236336,
+    "cold_start_ms": 194.45104199999986,
+    "cold_start_reported_ms": 183.0,
+    "cold_start_worst_ms": 525.637083,
+    "idle_footprint_mb": 60.40884,
+    "idle_cpu_p95_percent": 0.38297233460179475,
+    "idle_welcome_footprint_mb": 55.002144,
+    "idle_welcome_cpu_p95_percent": 0.06982952183774549,
+    "three_windows_20_docs_mb": 136.72568
+  },
+  "idle_observations": {
+    "document_frames": 0,
+    "document_display_link_wakeups": 0,
+    "welcome_frames": 0,
+    "welcome_display_link_wakeups": 0
+  },
+  "limits": {
+    "latency_skipped": true,
+    "cold_start_worst_exceeds_400_ms": true,
+    "cpu_p95_exceeds_zero_target_but_below_one_percent_limit": true,
+    "native_ime_visual_and_scanout_unverified": true,
+    "ordinary_text_fixture_only": true,
+    "real_remote_connections_tested": false
+  }
+}

@@ -8,9 +8,14 @@
 //! callbacks before it drops the windows, without calling `on_window_closed` for them.
 
 use gpui_kit::{App, Bounds, Global, Pixels, Window, WindowBounds, WindowId, point, px, size};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
+
+#[path = "review_progress.rs"]
+pub mod review_progress;
+use review_progress::ReadingSession;
 use std::{
     fs, io,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -32,6 +37,16 @@ pub enum FrameState {
     Fullscreen,
 }
 
+/// The workbench sidebar as a window left it. Fields are optional so an older record, or
+/// one the workbench cannot use, leaves the current value alone.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SidebarLayout {
+    pub width: Option<f32>,
+    pub visible: Option<bool>,
+    /// "explorer", "source_control" or "search".
+    pub view: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SavedWindow {
     /// `None`: a window without a folder.
@@ -41,6 +56,11 @@ pub struct SavedWindow {
     pub tabs: Vec<PathBuf>,
     /// The tab that was active, if it was a file.
     pub active: Option<PathBuf>,
+    pub reading: ReadingSession,
+    /// The workbench's sidebar, so a window opens as it was left.
+    pub sidebar: SidebarLayout,
+    /// Unknown window keys survive an older application's load/save cycle.
+    pub extra: Map<String, Value>,
 }
 
 pub fn path() -> Option<PathBuf> {
@@ -50,9 +70,22 @@ pub fn path() -> Option<PathBuf> {
     crate::settings::Settings::path().map(|settings| settings.with_file_name("session.json"))
 }
 
+const MAX_SESSION_BYTES: u64 = 8 * 1024 * 1024;
+
+fn read_session(path: &Path) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(MAX_SESSION_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_SESSION_BYTES {
+        return Err(io::Error::other("session.json 超过 8 MiB"));
+    }
+    Ok(bytes)
+}
+
 /// A missing, unreadable or invalid file is an empty session: the launch opens one window.
 pub fn load_from(path: &Path) -> Vec<SavedWindow> {
-    match fs::read(path) {
+    match read_session(path) {
         Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
             Ok(value) => from_json(&value),
             Err(error) => {
@@ -74,7 +107,19 @@ pub fn save_to(path: &Path, windows: &[SavedWindow]) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let temporary = path.with_extension("json.tmp");
-    let text = serde_json::to_vec_pretty(&to_json(windows)).map_err(io::Error::other)?;
+    let mut value = match read_session(path) {
+        Ok(bytes) => serde_json::from_slice::<Value>(&bytes).unwrap_or_else(|_| json!({})),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => json!({}),
+        Err(error) => return Err(error),
+    };
+    if !value.is_object() {
+        value = json!({});
+    }
+    value["windows"] = to_json(windows)["windows"].take();
+    let text = serde_json::to_vec_pretty(&value).map_err(io::Error::other)?;
+    if text.len() as u64 > MAX_SESSION_BYTES {
+        return Err(io::Error::other("session.json 超过 8 MiB"));
+    }
     fs::write(&temporary, text)?;
     fs::rename(&temporary, path)
 }
@@ -105,6 +150,50 @@ fn from_json(value: &Value) -> Vec<SavedWindow> {
                 .get("active")
                 .and_then(Value::as_str)
                 .map(PathBuf::from),
+            reading: ReadingSession::from_json(&window["reading"]),
+            sidebar: SidebarLayout {
+                width: window
+                    .get("sidebar_width")
+                    .and_then(Value::as_f64)
+                    .map(|width| width as f32)
+                    .filter(|width| {
+                        width.is_finite()
+                            && *width >= f32::from(crate::theme::SIDEBAR_MIN)
+                            && *width <= f32::from(crate::theme::SIDEBAR_MAX)
+                    }),
+                visible: window.get("sidebar_visible").and_then(Value::as_bool),
+                view: window
+                    .get("sidebar_view")
+                    .and_then(Value::as_str)
+                    .and_then(crate::workbench::Sidebar::parse)
+                    .map(|view| view.as_str().to_string()),
+            },
+            extra: window
+                .as_object()
+                .map(|object| {
+                    object
+                        .iter()
+                        .filter(|(key, _)| {
+                            !matches!(
+                                key.as_str(),
+                                "root"
+                                    | "state"
+                                    | "x"
+                                    | "y"
+                                    | "width"
+                                    | "height"
+                                    | "tabs"
+                                    | "active"
+                                    | "reading"
+                                    | "sidebar_width"
+                                    | "sidebar_visible"
+                                    | "sidebar_view"
+                            )
+                        })
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
         .collect()
 }
@@ -137,10 +226,10 @@ fn to_json(windows: &[SavedWindow]) -> Value {
     let windows: Vec<Value> = windows
         .iter()
         .map(|window| {
-            let mut value = json!({
-                // A path that is not UTF-8 cannot round-trip; it reopens as an empty window.
-                "root": window.root.as_deref().and_then(Path::to_str),
-            });
+            let mut value = Value::Object(window.extra.clone());
+            // A path that is not UTF-8 cannot round-trip; it reopens as an empty window.
+            value["root"] = json!(window.root.as_deref().and_then(Path::to_str));
+            value["reading"] = window.reading.to_json();
             if let Some(frame) = window.frame {
                 value["state"] = json!(match frame.state {
                     FrameState::Windowed => "windowed",
@@ -159,6 +248,15 @@ fn to_json(windows: &[SavedWindow]) -> Value {
             }
             if let Some(active) = window.active.as_deref().and_then(Path::to_str) {
                 value["active"] = json!(active);
+            }
+            if let Some(width) = window.sidebar.width {
+                value["sidebar_width"] = json!(width);
+            }
+            if let Some(visible) = window.sidebar.visible {
+                value["sidebar_visible"] = json!(visible);
+            }
+            if let Some(view) = &window.sidebar.view {
+                value["sidebar_view"] = json!(view);
             }
             value
         })
@@ -185,6 +283,9 @@ pub fn restorable(saved: Vec<SavedWindow>, max: usize) -> Vec<SavedWindow> {
                 .filter(|tab| tab.is_file())
                 .collect(),
             active: window.active.filter(|active| active.is_file()),
+            reading: window.reading,
+            sidebar: window.sidebar,
+            extra: window.extra,
         })
         .collect()
 }
@@ -267,12 +368,39 @@ impl Tracker {
     }
 }
 
+/// Tests without a session tracker never access the user's real review store.
+pub fn review_path(cx: &App) -> Option<PathBuf> {
+    if !cx.has_global::<Tracker>() {
+        return None;
+    }
+    cx.global::<Tracker>()
+        .path
+        .as_ref()
+        .map(|path| path.with_file_name("review-progress.json"))
+}
+
+#[derive(Default)]
+struct ReviewWrites(Vec<(WindowId, async_channel::Receiver<()>)>);
+impl Global for ReviewWrites {}
+
+/// A tail closes only after all prior writes from that window have completed.
+pub fn track_review_write(window: &Window, tail: async_channel::Receiver<()>, cx: &mut App) {
+    if !cx.has_global::<ReviewWrites>() {
+        return;
+    }
+    let id = window.window_handle().window_id();
+    let writes = &mut cx.global_mut::<ReviewWrites>().0;
+    writes.retain(|(window, receiver)| *window != id && !receiver.is_closed());
+    writes.push((id, tail));
+}
+
 /// Starts recording windows; called once at launch.
 pub fn track(cx: &mut App) {
     track_at(path(), cx);
 }
 
 pub fn track_at(path: Option<PathBuf>, cx: &mut App) {
+    cx.set_global(ReviewWrites::default());
     cx.set_global(Tracker {
         path,
         windows: Vec::new(),
@@ -291,7 +419,16 @@ pub fn track_at(path: Option<PathBuf>, cx: &mut App) {
                 tracker.save();
             }
         }
-        async {}
+        let writes = if cx.has_global::<ReviewWrites>() {
+            std::mem::take(&mut cx.global_mut::<ReviewWrites>().0)
+        } else {
+            Vec::new()
+        };
+        async move {
+            for (_, tail) in writes {
+                let _ = tail.recv().await;
+            }
+        }
     })
     .detach();
 }
@@ -393,10 +530,70 @@ pub fn remember_tabs(
         return;
     };
     if entry.tabs == tabs && entry.active == active {
+        // Pin/review context can change while the file tabs stay identical.
+        if persist {
+            tracker.save();
+        }
         return;
     }
     entry.tabs = tabs;
     entry.active = active;
+    if persist {
+        tracker.save();
+    }
+}
+
+/// Records the sidebar's width, visibility and view. Switching views only updates memory;
+/// a resize or an explicit show/hide writes the file too.
+pub fn remember_layout(id: WindowId, sidebar: SidebarLayout, persist: bool, cx: &mut App) {
+    if !cx.has_global::<Tracker>() || sidebar.width.is_some_and(|width| !width.is_finite()) {
+        return;
+    }
+    let tracker = cx.global_mut::<Tracker>();
+    let Some((_, entry)) = tracker.windows.iter_mut().find(|(window, _)| *window == id) else {
+        return;
+    };
+    if entry.sidebar == sidebar {
+        return;
+    }
+    entry.sidebar = sidebar;
+    if persist {
+        tracker.save();
+    }
+}
+
+/// Installs a restored window's extension fields before any tabs are opened.
+pub fn restore_context(window: &Window, saved: &SavedWindow, cx: &mut App) {
+    if !cx.has_global::<Tracker>() {
+        return;
+    }
+    let id = window.window_handle().window_id();
+    if let Some((_, entry)) = cx
+        .global_mut::<Tracker>()
+        .windows
+        .iter_mut()
+        .find(|(window, _)| *window == id)
+    {
+        entry.reading = saved.reading.clone();
+        entry.sidebar = saved.sidebar.clone();
+        entry.extra = saved.extra.clone();
+    }
+}
+
+/// Position changes update memory; explicit review and pin actions can persist immediately.
+pub fn remember_reading(window: &Window, reading: ReadingSession, persist: bool, cx: &mut App) {
+    if !cx.has_global::<Tracker>() {
+        return;
+    }
+    let id = window.window_handle().window_id();
+    let tracker = cx.global_mut::<Tracker>();
+    let Some((_, entry)) = tracker.windows.iter_mut().find(|(window, _)| *window == id) else {
+        return;
+    };
+    if entry.reading == reading {
+        return;
+    }
+    entry.reading = reading;
     if persist {
         tracker.save();
     }
@@ -441,6 +638,7 @@ mod tests {
                             frame: Some(frame(FrameState::Windowed)),
                             tabs: vec![dir.join(root).join("file.rs")],
                             active: Some(dir.join(root).join("file.rs")),
+                            ..Default::default()
                         },
                     )
                 })
@@ -544,6 +742,7 @@ mod tests {
                 frame: Some(frame(FrameState::Windowed)),
                 tabs: vec![dir.join("a/x.rs"), dir.join("a/y.rs")],
                 active: Some(dir.join("a/y.rs")),
+                ..Default::default()
             },
             SavedWindow {
                 root: None,
@@ -638,6 +837,47 @@ mod tests {
         );
         assert!(restored.iter().all(|w| w.frame.is_some()));
         assert_eq!(restorable(saved, 2).len(), 2);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reading_extensions_preserve_legacy_order_and_unknown_json_keys() {
+        let dir = temp("extensions");
+        let path = dir.join("session.json");
+        fs::write(&path, r#"{"future_global":{"keep":true},"windows":[{"root":null,"future_window":[1,2],"reading":{"future_reader":3}},{"root":null,"future_window":4}]}"#).unwrap();
+        let saved = load_from(&path);
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0].extra["future_window"], json!([1, 2]));
+        assert_eq!(saved[0].reading.extra["future_reader"], 3);
+        let restored = restorable(saved.clone(), 5);
+        save_to(&path, &restored).unwrap();
+        assert_eq!(load_from(&path), saved);
+        let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["future_global"]["keep"], true);
+        assert_eq!(value["windows"][1]["future_window"], 4);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sidebar_layout_json_drops_values_the_workbench_cannot_use() {
+        let dir = temp("sidebar-json");
+        let path = dir.join("session.json");
+        fs::write(
+            &path,
+            r#"{"windows":[
+                {"root":null,"sidebar_width":333.0,"sidebar_visible":false,"sidebar_view":"search"},
+                {"root":null,"sidebar_width":10.0,"sidebar_visible":true,"sidebar_view":"elsewhere"},
+                {"root":null,"sidebar_width":999.0}
+            ]}"#,
+        )
+        .unwrap();
+        let saved = load_from(&path);
+        assert_eq!(saved[0].sidebar.width, Some(333.));
+        assert_eq!(saved[0].sidebar.visible, Some(false));
+        assert_eq!(saved[0].sidebar.view.as_deref(), Some("search"));
+        assert_eq!(saved[1].sidebar.width, None);
+        assert_eq!(saved[1].sidebar.view, None);
+        assert_eq!(saved[2].sidebar.width, None);
         let _ = fs::remove_dir_all(dir);
     }
 

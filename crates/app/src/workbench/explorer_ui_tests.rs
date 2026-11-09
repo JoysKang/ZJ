@@ -335,6 +335,22 @@ async fn explorer_blank_space_opens_the_root_menu_without_reusing_the_selected_f
                     "blank menu created a file inside the previously selected folder"
                 );
             });
+            visual.update(|window, cx| {
+                window.render_frame(cx);
+                this.read_with(cx, |p, cx| {
+                    assert!(!p.explorer.collapsed, "new file input must be revealed");
+                    assert!(
+                        p.explorer
+                            .edit
+                            .as_ref()
+                            .unwrap()
+                            .input
+                            .read(cx)
+                            .focus_handle(cx)
+                            .is_focused(window)
+                    );
+                });
+            });
             this.update(cx, |p, cx| p.cancel_tree_edit(cx));
             cx.run_until_parked();
         }
@@ -1602,7 +1618,7 @@ async fn narrow_sidebar_keeps_navigation_badge_actions_and_search_focus(cx: &mut
             let sidebar = window.find("workbench-sidebar").bounds();
             assert_eq!(sidebar.size.width, theme::SIDEBAR_MIN);
             let mut previous = sidebar.left();
-            for label in ["资源管理器", "搜索", "源代码管理"] {
+            for label in ["资源管理器", "源代码管理", "搜索"] {
                 let tab = window.find(label);
                 let bounds = tab.bounds();
                 assert!(tab.visible() && bounds.size.width > px(0.));

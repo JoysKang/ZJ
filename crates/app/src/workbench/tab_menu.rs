@@ -69,7 +69,7 @@ type TabPathAction = fn(&mut Workbench, Pane, PathBuf, &mut Window, &mut Context
 
 impl Workbench {
     /// The file a tab shows: the document, the diffed file, the graph's repository.
-    fn pane_path(&self, pane: Pane) -> Option<PathBuf> {
+    pub(super) fn pane_path(&self, pane: Pane) -> Option<PathBuf> {
         match pane {
             Pane::Document(id) => self
                 .documents
@@ -79,6 +79,17 @@ impl Workbench {
             Pane::Diff => self.diff.tab.as_ref().map(|diff| diff.path.clone()),
             Pane::Graph => self.graph.as_ref().map(|graph| graph.repo.worktree.clone()),
             Pane::Large => self.large.as_ref().map(|large| large.path.clone()),
+            Pane::Image(id) => self
+                .images
+                .iter()
+                .find(|image| image.id == id)
+                .map(|image| image.path.clone()),
+            Pane::SavedDiff(id) => self
+                .archived_diffs
+                .iter()
+                .find(|saved| saved.id == id)
+                .and_then(|saved| saved.pane.tab.as_ref())
+                .map(|tab| tab.path.clone()),
             Pane::Welcome => None,
         }
     }
@@ -95,8 +106,10 @@ impl Workbench {
             + self.pending_tabs.len()
             + usize::from(self.diff.tab.is_some())
             + usize::from(self.graph.is_some())
-            + usize::from(self.large.is_some());
-        let in_tree = (pending.is_some() || matches!(pane, Pane::Document(_)))
+            + usize::from(self.large.is_some())
+            + self.images.len()
+            + self.archived_diffs.len();
+        let in_tree = (pending.is_some() || matches!(pane, Pane::Document(_) | Pane::Image(_)))
             && path
                 .as_ref()
                 .zip(self.root.as_ref())
@@ -121,7 +134,8 @@ impl Workbench {
                     }
                 })
         };
-        menu.action_context(self.focus_handle.clone())
+        let menu = menu
+            .action_context(self.focus_handle.clone())
             .item(
                 PopupMenuItem::new("关闭")
                     .action(Box::new(super::CloseEditor))
@@ -178,7 +192,12 @@ impl Workbench {
                     Workbench::reveal_tab_in_explorer,
                 )
                 .disabled(!in_tree),
-            )
+            );
+        if let Some(path) = path {
+            self.reading_file_menu(path, menu, view)
+        } else {
+            menu
+        }
     }
 
     pub(super) fn close_pane(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
@@ -187,6 +206,8 @@ impl Workbench {
             Pane::Diff => self.close_preview(window, cx),
             Pane::Graph => self.close_graph(window, cx),
             Pane::Large => self.close_large(window, cx),
+            Pane::Image(id) => self.close_image(id, window, cx),
+            Pane::SavedDiff(id) => self.close_saved_diff(id, window, cx),
             Pane::Welcome => {}
         }
     }
@@ -218,7 +239,12 @@ impl Workbench {
         if keep != Pane::Welcome && self.active != keep {
             self.select_pane(keep, window, cx);
         }
-        let others = self
+        let keep = if matches!(keep, Pane::SavedDiff(_)) {
+            Pane::Diff
+        } else {
+            keep
+        };
+        let others: Vec<_> = self
             .documents
             .iter()
             .map(|doc| doc.id)
@@ -230,10 +256,26 @@ impl Workbench {
             .filter(|path| Some(*path) != keep_pending.as_ref())
             .cloned()
             .collect();
-        let close = self.confirm_close(others, true, window, cx);
+        let close = self.confirm_close_approval(others.clone(), window, cx);
         cx.spawn_in(window, async move |this, cx| {
-            if close.await {
+            if let Some(approval) = close.await {
                 let _ = this.update_in(cx, |this, window, cx| {
+                    if others
+                        .iter()
+                        .any(|id| this.document(*id).is_some_and(|doc| !approval.allows(doc)))
+                    {
+                        return;
+                    }
+                    // Restore the kept pane before removal can activate another fixed comparison.
+                    this.select_pane(keep, window, cx);
+                    for id in others {
+                        this.remove_document(id, window, cx);
+                    }
+                    // Remove fixed comparisons before a closed active pane chooses a successor.
+                    let saved: Vec<_> = this.archived_diffs.iter().map(|saved| saved.id).collect();
+                    for id in saved {
+                        this.close_saved_diff(id, window, cx);
+                    }
                     if keep != Pane::Diff && this.diff.tab.is_some() {
                         this.close_preview(window, cx);
                     }
@@ -242,6 +284,15 @@ impl Workbench {
                     }
                     if keep != Pane::Large && this.large.is_some() {
                         this.close_large(window, cx);
+                    }
+                    let images: Vec<_> = this
+                        .images
+                        .iter()
+                        .filter(|image| Pane::Image(image.id) != keep)
+                        .map(|image| image.id)
+                        .collect();
+                    for id in images {
+                        this.close_image(id, window, cx);
                     }
                     for path in pending {
                         this.remove_pending_tab(&path);
@@ -298,9 +349,9 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Pane::Document(_) = pane else {
+        if !matches!(pane, Pane::Document(_) | Pane::Image(_)) {
             return;
-        };
+        }
         let Some(path) = self.pane_path(pane) else {
             return;
         };
@@ -316,6 +367,7 @@ impl Workbench {
     ) {
         self.sidebar = Sidebar::Explorer;
         self.sidebar_visible = true;
+        self.remember_layout(true, cx);
         if matches!(pane, Pane::Document(_)) {
             self.select_pane(pane, window, cx);
         }

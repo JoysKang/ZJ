@@ -75,10 +75,58 @@ pub struct Progress {
     pub results: Mutex<Vec<FileMatches>>,
     pub matches: AtomicUsize,
     pub files_searched: AtomicUsize,
+    pub candidates: AtomicUsize,
+    pub filtered: AtomicUsize,
+    pub open_failed: AtomicUsize,
+    pub read_failed: AtomicUsize,
+    pub not_regular: AtomicUsize,
+    pub too_large: AtomicUsize,
+    pub binary: AtomicUsize,
+    pub index_incomplete: AtomicBool,
     pub truncated: AtomicBool,
     /// Excludes off: there were more ignored files than `MAX_WALK_FILES`, some went unsearched.
     pub files_capped: AtomicBool,
     pub done: AtomicBool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SearchStats {
+    pub candidates: usize,
+    pub filtered: usize,
+    pub searched: usize,
+    pub open_failed: usize,
+    pub read_failed: usize,
+    pub not_regular: usize,
+    pub too_large: usize,
+    pub binary: usize,
+    pub index_incomplete: bool,
+}
+
+impl SearchStats {
+    pub fn skipped(&self) -> usize {
+        self.open_failed + self.read_failed + self.not_regular + self.too_large + self.binary
+    }
+
+    pub fn unprocessed(&self) -> usize {
+        self.candidates
+            .saturating_sub(self.filtered + self.searched + self.skipped())
+    }
+}
+
+impl Progress {
+    pub fn snapshot(&self) -> SearchStats {
+        SearchStats {
+            candidates: self.candidates.load(Ordering::Relaxed),
+            filtered: self.filtered.load(Ordering::Relaxed),
+            searched: self.files_searched.load(Ordering::Relaxed),
+            open_failed: self.open_failed.load(Ordering::Relaxed),
+            read_failed: self.read_failed.load(Ordering::Relaxed),
+            not_regular: self.not_regular.load(Ordering::Relaxed),
+            too_large: self.too_large.load(Ordering::Relaxed),
+            binary: self.binary.load(Ordering::Relaxed),
+            index_incomplete: self.index_incomplete.load(Ordering::Relaxed),
+        }
+    }
 }
 
 /// A comma- (or line-) separated glob list. `./x` and patterns with `/` are anchored at the root; a bare
@@ -492,29 +540,44 @@ pub fn run(
                         .custom_flags(libc::O_NONBLOCK)
                         .open(&path)
                     else {
+                        progress.open_failed.fetch_add(1, Ordering::Relaxed);
                         continue;
                     };
-                    let metadata = file.metadata().ok();
-                    if metadata
-                        .as_ref()
-                        .is_some_and(|m| !m.is_file() || m.len() > MAX_FILE_BYTES)
-                    {
+                    let metadata = match file.metadata() {
+                        Ok(metadata) => metadata,
+                        Err(_) => {
+                            progress.read_failed.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
+                    };
+                    if !metadata.is_file() {
+                        progress.not_regular.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
-                    let stamp = metadata.as_ref().map(crate::files::FileStamp::of);
+                    if metadata.len() > MAX_FILE_BYTES {
+                        progress.too_large.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    let stamp = Some(crate::files::FileStamp::of(&metadata));
                     if file
                         .take(MAX_FILE_BYTES + 1)
                         .read_to_end(&mut buffer)
                         .is_err()
                     {
+                        progress.read_failed.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
-                    progress.files_searched.fetch_add(1, Ordering::Relaxed);
+                    if buffer.len() as u64 > MAX_FILE_BYTES {
+                        progress.too_large.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
                     let used = progress.matches.load(Ordering::Relaxed);
                     let budget = MAX_MATCHES.saturating_sub(used);
                     let Some((lines, count)) = matcher.search_bytes(&buffer, budget) else {
+                        progress.binary.fetch_add(1, Ordering::Relaxed);
                         continue;
                     };
+                    progress.files_searched.fetch_add(1, Ordering::Relaxed);
                     if count == 0 {
                         continue;
                     }
@@ -581,6 +644,21 @@ pub fn walk_all(
     (files, complete)
 }
 
+pub fn filter_with_progress(
+    files: Vec<PathBuf>,
+    matcher: &Matcher,
+    use_excludes: bool,
+    progress: &Progress,
+) -> Vec<PathBuf> {
+    progress.candidates.store(files.len(), Ordering::Relaxed);
+    let filtered = filter(files, matcher, use_excludes);
+    progress.filtered.store(
+        progress.candidates.load(Ordering::Relaxed) - filtered.len(),
+        Ordering::Relaxed,
+    );
+    filtered
+}
+
 /// Files from the quick-open index (already following `.gitignore` and the excluded
 /// folders) that the include / exclude globs want.
 pub fn filter(
@@ -603,6 +681,61 @@ pub fn filter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_scope_counts_each_skip_reason_and_keeps_file_budget() {
+        let root = std::env::temp_dir().join(format!("zj-search-scope-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("text.txt"), "needle\n").unwrap();
+        fs::write(root.join("binary.bin"), b"needle\0").unwrap();
+        fs::write(root.join("filtered.log"), "needle").unwrap();
+        fs::File::create(root.join("large.txt"))
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+        fs::create_dir_all(root.join("directory")).unwrap();
+        let matcher = Matcher::new(&Options {
+            exclude: "*.log".into(),
+            ..options("needle")
+        })
+        .unwrap();
+        let progress = Progress::default();
+        let files = filter_with_progress(
+            [
+                "text.txt",
+                "binary.bin",
+                "large.txt",
+                "missing.txt",
+                "directory",
+                "filtered.log",
+            ]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
+            &matcher,
+            true,
+            &progress,
+        );
+        run(&root, files, &matcher, &progress, &AtomicBool::new(false));
+        let stats = progress.snapshot();
+        assert_eq!(
+            (stats.candidates, stats.filtered, stats.searched),
+            (6, 1, 1)
+        );
+        assert_eq!(
+            (
+                stats.open_failed,
+                stats.not_regular,
+                stats.too_large,
+                stats.binary
+            ),
+            (1, 1, 1, 1)
+        );
+        assert_eq!(stats.read_failed, 0);
+        assert_eq!(stats.unprocessed(), 0);
+        assert_eq!(progress.matches.load(Ordering::Relaxed), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn a_crowd_of_ignored_files_never_hides_the_indexed_ones() {
@@ -929,7 +1062,8 @@ mod tests {
         let results = progress.results.into_inner().unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].count, 2);
-        assert_eq!(progress.files_searched.load(Ordering::Relaxed), 3);
+        assert_eq!(progress.files_searched.load(Ordering::Relaxed), 2);
+        assert_eq!(progress.binary.load(Ordering::Relaxed), 1);
         assert!(progress.done.load(Ordering::Relaxed));
         // The cap: many matches stop the search and mark it truncated.
         fs::write(

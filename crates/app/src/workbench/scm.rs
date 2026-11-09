@@ -34,9 +34,7 @@ pub(super) fn count_badge(count: usize, colors: theme::Colors) -> impl IntoEleme
         .flex_shrink_0()
         .items_center()
         .justify_center()
-        .rounded_full()
-        .bg(colors.keycap)
-        .text_color(colors.foreground)
+        .text_color(colors.muted)
         .text_size(theme::TEXT_SECTION)
         .child(count.to_string())
 }
@@ -174,6 +172,48 @@ impl Workbench {
             .item(item("拉取", pull))
             .item(item("推送", push))
             .item(
+                PopupMenuItem::new("发布分支…")
+                    .disabled(!idle || !has_head)
+                    .on_click(on_repo(&view, &repo, |this, g, window, cx| {
+                        this.open_publish_branch(g, window, cx)
+                    })),
+            )
+            .item(
+                PopupMenuItem::new("管理远程…")
+                    .disabled(!idle)
+                    .on_click(on_repo(&view, &repo, |this, g, window, cx| {
+                        this.open_git_management(g, "remote", window, cx)
+                    })),
+            )
+            .item(
+                PopupMenuItem::new("管理分支与上游…")
+                    .disabled(!idle)
+                    .on_click(on_repo(&view, &repo, |this, g, window, cx| {
+                        this.open_git_management(g, "branch", window, cx)
+                    })),
+            )
+            .item(
+                PopupMenuItem::new("查看／继续／中止合并操作…")
+                    .disabled(!idle)
+                    .on_click(on_repo(&view, &repo, |this, g, window, cx| {
+                        this.open_git_management(g, "operation", window, cx)
+                    })),
+            )
+            .item(
+                PopupMenuItem::new("管理子模块…")
+                    .disabled(!idle)
+                    .on_click(on_repo(&view, &repo, |this, g, window, cx| {
+                        this.open_git_management(g, "submodule", window, cx)
+                    })),
+            )
+            .item(
+                PopupMenuItem::new("管理工作树…")
+                    .disabled(!idle)
+                    .on_click(on_repo(&view, &repo, |this, g, window, cx| {
+                        this.open_git_management(g, "worktree", window, cx)
+                    })),
+            )
+            .item(
                 PopupMenuItem::new("签出到…")
                     .disabled(!idle)
                     .on_click(on_repo(&view, &repo, |this, g, window, cx| {
@@ -187,6 +227,11 @@ impl Workbench {
                         this.open_create_branch(g, window, cx)
                     })),
             )
+            .item(PopupMenuItem::new("比较引用／合并基点…").on_click(on_repo(
+                &view,
+                &repo,
+                |this, g, window, cx| this.open_revision_comparison(g, window, cx),
+            )))
             .item(item("抓取", fetch))
             .item(PopupMenuItem::new("Git 图").on_click(on_repo(
                 &view,
@@ -238,6 +283,8 @@ impl Workbench {
             .dropdown_menu(move |menu, _, _| {
                 let (toggle, collapse, refresh) = (weak.clone(), weak.clone(), weak.clone());
                 let add = weak.clone();
+                let init = weak.clone();
+                let clone = weak.clone();
                 super::menu_style::compact_menu(menu)
                     .item(
                         PopupMenuItem::new("隐藏无变更的仓库")
@@ -262,6 +309,20 @@ impl Workbench {
                         let _ = refresh
                             .update(cx, |this, cx| this.request_remote_check(true, window, cx));
                     }))
+                    .item(
+                        PopupMenuItem::new("初始化新仓库…").on_click(move |_, window, cx| {
+                            let _ = init.update(cx, |this, cx| {
+                                this.open_create_repository(false, window, cx)
+                            });
+                        }),
+                    )
+                    .item(
+                        PopupMenuItem::new("克隆仓库…").on_click(move |_, window, cx| {
+                            let _ = clone.update(cx, |this, cx| {
+                                this.open_create_repository(true, window, cx)
+                            });
+                        }),
+                    )
                     .item(
                         PopupMenuItem::new("添加仓库…")
                             .disabled(!has_root)
@@ -375,10 +436,8 @@ impl Workbench {
             .into_any_element()
     }
 
-    /// A repository as a section header, VS Code's multi-repository layout: chevron, repository
-    /// icon and name on the left; branch, sync, graph, commit and "···" on the right. When the
-    /// sidebar is too narrow for one line, the right side moves under the name, and either
-    /// part wraps at `/` `-` `_` rather than being cut.
+    /// Repository identity and actions share the first line; branch and sync own a stable
+    /// second line aligned with the name. Long identifiers wrap at `/` `-` `_`.
     fn scm_repo_row(
         &self,
         index: usize,
@@ -442,7 +501,7 @@ impl Workbench {
         let expanded = group.expanded;
         let left = h_flex()
             .min_w_0()
-            .flex_shrink(1.)
+            .flex_1()
             .items_start()
             .gap_1()
             .child(
@@ -452,18 +511,6 @@ impl Workbench {
                     .items_center()
                     .flex_shrink_0()
                     .child(chevron(expanded, colors.muted)),
-            )
-            .child(
-                div()
-                    .h(theme::ROW_HEIGHT)
-                    .flex()
-                    .items_center()
-                    .flex_shrink_0()
-                    .child(
-                        Icon::new(IconName::BookMarked)
-                            .size(theme::ICON_SIZE)
-                            .text_color(colors.muted),
-                    ),
             )
             .child(
                 div()
@@ -591,9 +638,10 @@ impl Workbench {
                 })
         };
         let right = h_flex()
-            .ml_auto()
+            .w_full()
             .min_w_0()
-            .flex_shrink(1.)
+            .pl(theme::ICON_SIZE + theme::ROW_INSET)
+            .flex_wrap()
             .items_start()
             .gap_0()
             .when_some(error, |right, error| {
@@ -668,23 +716,44 @@ impl Workbench {
                         })),
                 )
             })
-            .child(actions);
-        h_flex()
+            .when(
+                status.is_some_and(|s| {
+                    s.upstream.is_none()
+                        && !matches!(s.oid.as_deref(), None | Some("(initial)"))
+                        && s.branch.as_deref() != Some("(detached)")
+                }),
+                |right| {
+                    right.child(
+                        action(("scm-publish", g), IconName::Cloud, "发布分支", cx)
+                            .disabled(pending)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.open_publish_branch(g, window, cx);
+                            })),
+                    )
+                },
+            );
+        v_flex()
             .id(("scm-row", index))
             .group(hover)
             .w_full()
             .pl(theme::ROW_INSET)
             .pr_1()
-            .flex_wrap()
             .items_start()
-            .gap_x_1()
             .rounded(theme::RADIUS)
             .cursor_pointer()
             .hover(|row| row.bg(colors.hover))
             .role(Role::TreeItem)
             .aria_label(label)
             .aria_expanded(expanded)
-            .child(left)
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_start()
+                    .child(left)
+                    .child(actions),
+            )
             .child(right)
             .tooltip(move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
@@ -737,7 +806,7 @@ impl Workbench {
         let pending = group.write_pending;
         v_flex()
             .w_full()
-            .pl(theme::ROW_INSET + theme::ICON_SIZE)
+            .pl(theme::ROW_INSET + theme::ICON_SIZE + theme::ROW_INSET)
             .pr_1()
             .pt_1()
             .pb_2()
@@ -783,15 +852,7 @@ impl Workbench {
                     ),
             )
             .when(!group.write_message.is_empty(), |view| {
-                view.child(
-                    div()
-                        .id(("git-operation-result", g))
-                        .max_h(theme::SCM_NOTICE_MAX)
-                        .overflow_y_scroll()
-                        .text_size(theme::TEXT_CAPTION)
-                        .text_color(colors.muted)
-                        .child(group.write_message.clone()),
-                )
+                view.child(self.render_git_feedback(g, cx))
             })
             .into_any_element()
     }

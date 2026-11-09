@@ -136,6 +136,26 @@ async fn the_viewer_goes_to_lines_copies_selected_lines_and_finds(cx: &mut TestA
     .unwrap();
     settle(cx, Some(window), |cx| held_line(&this, cx, 0).is_some());
 
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.select_pane(Pane::Welcome, window, cx));
+        window.render_frame(cx);
+        assert!(
+            this.read(cx).shows_tab_bar(),
+            "a remaining large-file tab must remain reachable"
+        );
+        window.click(("tab", usize::MAX - 2), cx);
+        assert!(
+            this.read(cx)
+                .large
+                .as_ref()
+                .unwrap()
+                .focus
+                .is_focused(window),
+            "returning to a large file must restore its keyboard focus"
+        );
+    })
+    .unwrap();
+
     // ⌃G's target: line 1000 is selected and shown.
     cx.update_window(window.into(), |_, window, cx| {
         this.update(cx, |p, cx| p.go_to_line(999, 0, window, cx));

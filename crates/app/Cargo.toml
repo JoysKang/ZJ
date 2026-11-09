@@ -11,6 +11,11 @@ workspace-editor-git.workspace = true
 libc = "0.2"
 # Already in the tree through GPUI Kit; used to build the syntax theme in Kit's JSON shape.
 serde_json = "1"
+# Already enabled by GPUI; bounded project image decoding and SVG rasterization.
+image = { version = "=0.25.10", default-features = false }
+resvg = { version = "=0.46.0", default-features = false }
+# Already in the dependency tree; explicit read-only legacy text decoding.
+encoding_rs = "=0.8.42"
 # Already compiled in through GPUI Kit's tree-sitter-diff feature; used to re-register the
 # diff grammar with add/remove captures.
 tree-sitter = "0.26"

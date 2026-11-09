@@ -3,11 +3,13 @@ mod conflicts;
 mod diff_doc;
 mod diff_syntax;
 mod editing;
+mod encoded_text;
 mod file_icons;
 mod file_ops;
 mod files;
 mod fuzzy;
 mod hidden_files;
+mod image_file;
 mod imports;
 mod indent;
 mod input_switch;
@@ -49,6 +51,7 @@ pub(crate) struct Startup {
     active: Option<PathBuf>,
     /// Files from the command line, read now.
     open: Vec<PathBuf>,
+    saved: Option<session::SavedWindow>,
 }
 
 /// `bounds`: a frame restored from the last session; `None` cascades from the default place.
@@ -81,6 +84,11 @@ fn open_workspace(
     gpui_kit::open_window(options, cx, |window, cx| {
         cx.new(|cx| {
             let mut workbench = Workbench::new(root, service, documents, index + 1, window, cx);
+            if let Some(saved) = &startup.saved {
+                session::restore_context(window, saved, cx);
+                workbench.restore_layout(saved);
+                workbench.restore_reading(saved.reading.clone(), window, cx);
+            }
             if !startup.tabs.is_empty() || startup.active.is_some() {
                 workbench.restore_tabs(startup.tabs, startup.active, window, cx);
             }
@@ -275,6 +283,26 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 Some("WorkspaceEditor"),
             ),
             KeyBinding::new("cmd-\\", workbench::SplitTerminal, Some("Terminal")),
+            KeyBinding::new(
+                "ctrl-pageup",
+                workbench::PreviousTerminalGroup,
+                Some("Terminal"),
+            ),
+            KeyBinding::new(
+                "ctrl-pagedown",
+                workbench::NextTerminalGroup,
+                Some("Terminal"),
+            ),
+            KeyBinding::new(
+                "alt-cmd-left",
+                workbench::PreviousTerminalPane,
+                Some("Terminal"),
+            ),
+            KeyBinding::new(
+                "alt-cmd-right",
+                workbench::NextTerminalPane,
+                Some("Terminal"),
+            ),
             // VS Code's Markdown: Open Preview, here a toggle in place.
             KeyBinding::new(
                 "shift-cmd-v",
@@ -457,13 +485,18 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             let service = service.clone();
             let documents = documents.clone();
             // Tabs come back only for the folder they were open in.
+            let saved = saved.filter(|saved| {
+                roots.get(index).is_none() || saved.root.as_ref() == roots.get(index)
+            });
             let (tabs, active) = saved
-                .filter(|saved| {
-                    roots.get(index).is_none() || saved.root.as_ref() == roots.get(index)
-                })
                 .map(|saved| (saved.tabs.clone(), saved.active.clone()))
                 .unwrap_or_default();
-            let startup = Startup { tabs, active, open };
+            let startup = Startup {
+                tabs,
+                active,
+                open,
+                saved: saved.cloned(),
+            };
             if let Err(e) = open_workspace(root, service, documents, index, bounds, startup, cx) {
                 eprintln!("event=window_open_failed error={e}");
             }

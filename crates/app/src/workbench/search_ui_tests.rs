@@ -172,6 +172,109 @@ async fn hiding_the_sidebar_returns_focus_only_when_it_owned_focus(cx: &mut Test
 }
 
 #[gpui_kit::test]
+async fn replace_completion_preserves_a_newer_query(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-replace-query-race-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let path = root.join("a.txt");
+    std::fs::write(&path, "alpha\nbeta\n").unwrap();
+    let (handle, this) = open(cx, root.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(path.clone(), Some(root.clone()), window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1 && p.index.is_some())
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.find_in_files(window, cx);
+            p.search
+                .query
+                .update(cx, |input, cx| input.set_value("alpha", window, cx));
+            p.search.replace.expanded = true;
+            p.search
+                .replace
+                .input
+                .update(cx, |input, cx| input.set_value("beta", window, cx));
+            p.schedule_search(Duration::ZERO, window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.search.matches == 1)
+    });
+    let (release, gate) = async_channel::bounded(1);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, _| p.search.replace.completion_gate = Some(gate));
+        window.render_frame(cx);
+        window.hover(("search-row", 1usize), cx);
+        window.render_frame(cx);
+        window.click(("search-line-replace", 1usize), cx);
+        assert!(this.read(cx).search.replace.running);
+    })
+    .unwrap();
+    settle(cx, Some(handle), |_| {
+        std::fs::read_to_string(&path).unwrap() == "beta\nbeta\n"
+    });
+    // B finishes after A wrote the file, before A applies its foreground result.
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.search
+                .query
+                .update(cx, |input, cx| input.set_value("beta", window, cx));
+            p.schedule_search(Duration::ZERO, window, cx);
+        });
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.search.matches == 2)
+    });
+    release.try_send(()).unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| !p.search.replace.running)
+    });
+    // Allow a current-query refresh to settle, if the completion requested one.
+    super::test_support::wait(
+        cx,
+        Some(Duration::from_millis(50)),
+        Some(handle),
+        |cx| this.read_with(cx, |p, _| p.search.matches == 2),
+        |_| "query B was overwritten by query A's replacement completion".into(),
+    );
+    this.read_with(cx, |p, cx| {
+        assert_eq!(p.search.query.read(cx).value().as_ref(), "beta");
+        assert_eq!(p.search.results[0].lines.len(), 2);
+        assert_eq!(
+            p.documents[0].editor.read(cx).text().to_string(),
+            "beta\nbeta\n"
+        );
+        assert!(!p.documents[0].dirty);
+        assert!(p.search.replace.has_undo());
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.undo_replace(window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            !p.search.replace.running && p.search.matches == 1
+        })
+    });
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "alpha\nbeta\n");
+    this.read_with(cx, |p, cx| {
+        assert_eq!(
+            p.documents[0].editor.read(cx).text().to_string(),
+            "alpha\nbeta\n"
+        )
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
 async fn changing_to_an_invalid_query_cannot_keep_old_replace_targets(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = std::env::temp_dir().join(format!("zj-search-stale-query-{}", std::process::id()));
@@ -618,6 +721,41 @@ async fn find_in_folder_searches_only_that_folder(cx: &mut TestAppContext) {
     this.read_with(cx, |p, _| {
         let found: Vec<_> = p.search.results.iter().map(|f| f.path.clone()).collect();
         assert_eq!(found, [sub.join("a.txt")]);
+    });
+    // Finding in the workspace root clears the glob; the unchanged query must still rerun.
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.find_in_folder(&root, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.search.results.len() == 2)
+    });
+    // Back to the sub-folder for the field-clearing path below.
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.find_in_folder(&sub, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.search.results.len() == 1)
+    });
+    // Clearing the folder glob in the field must widen the results, not leave the old scope.
+    let cx = &mut gpui_kit::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| window.render_frame(cx));
+    let include = cx.debug_bounds("search-include").unwrap();
+    cx.simulate_click(include.center(), Modifiers::default());
+    cx.update(|window, cx| {
+        window.press("cmd-a", cx);
+        window.press("backspace", cx);
+    });
+    this.read_with(cx, |p, cx| {
+        assert_eq!(p.search.include.read(cx).value().as_ref(), "");
+    });
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.search.results.len() == 2)
+    });
+    this.read_with(cx, |p, _| {
+        let found: Vec<_> = p.search.results.iter().map(|f| f.path.clone()).collect();
+        assert_eq!(found, [root.join("other/a.txt"), root.join("sub/a.txt")]);
     });
     let _ = std::fs::remove_dir_all(root);
 }

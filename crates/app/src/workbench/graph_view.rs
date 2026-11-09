@@ -13,6 +13,7 @@ use gpui_kit::{
         Disableable, Icon, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
+        input::{Input, InputEvent, InputState},
         menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
         v_flex,
     },
@@ -251,6 +252,9 @@ fn layout(commits: &[GraphCommit]) -> (Vec<GraphRow>, usize) {
 pub(super) struct GitGraph {
     pub repo: workspace_editor_core::Repository,
     scope: GraphScope,
+    search: workspace_editor_git::CommitSearch,
+    search_inputs: Vec<Entity<InputState>>,
+    search_subscriptions: Vec<Subscription>,
     /// The branch filter's choices, loaded with the first page.
     branches: Vec<Branch>,
     commits: Vec<GraphCommit>,
@@ -289,6 +293,9 @@ impl GitGraph {
         Self {
             repo,
             scope: GraphScope::All,
+            search: Default::default(),
+            search_inputs: Vec::new(),
+            search_subscriptions: Vec::new(),
             branches: Vec::new(),
             commits: Vec::new(),
             rows: Vec::new(),
@@ -353,7 +360,28 @@ impl Workbench {
             graph.cancel.store(true, Ordering::Relaxed);
             graph.details_cancel.store(true, Ordering::Relaxed);
         }
-        self.graph = Some(GitGraph::new(repo));
+        let mut graph = GitGraph::new(repo);
+        for placeholder in [
+            "提交信息",
+            "作者或邮箱",
+            "开始日期 YYYY-MM-DD（UTC）",
+            "结束日期 YYYY-MM-DD（UTC）",
+            "提交哈希",
+            "仓库相对路径",
+        ] {
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+            graph.search_subscriptions.push(cx.subscribe_in(
+                &input,
+                window,
+                |this: &mut Self, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.graph_apply_search(window, cx);
+                    }
+                },
+            ));
+            graph.search_inputs.push(input);
+        }
+        self.graph = Some(graph);
         self.select_pane(Pane::Graph, window, cx);
         self.graph_load(true, window, cx);
     }
@@ -364,14 +392,7 @@ impl Workbench {
             graph.details_cancel.store(true, Ordering::Relaxed);
         }
         if self.active == Pane::Graph {
-            let pane = self
-                .diff
-                .tab
-                .as_ref()
-                .map(|_| Pane::Diff)
-                .or_else(|| self.documents.last().map(|doc| Pane::Document(doc.id)))
-                .unwrap_or(Pane::Welcome);
-            self.show_pane(pane, window, cx);
+            self.show_remaining_tab(window, cx);
         }
         cx.notify();
     }
@@ -388,6 +409,7 @@ impl Workbench {
         }
         let repo = graph.repo.clone();
         let scope = graph.scope.clone();
+        let search = graph.search.clone();
         let skip = if reset { 0 } else { graph.commits.len() };
         graph.cancel.store(true, Ordering::Relaxed);
         graph.cancel = Arc::new(AtomicBool::new(false));
@@ -414,7 +436,7 @@ impl Workbench {
         let request_cancel = cancel.clone();
         let job = cx.background_spawn(async move {
             let branches = reset.then(|| service.branches(&repo, &cancel));
-            let page = service.graph(&repo, &scope, skip, PAGE, &cancel);
+            let page = service.search_commits(&repo, &scope, &search, skip, PAGE, &cancel);
             (branches, page)
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -650,8 +672,75 @@ impl Workbench {
             ),
             path: graph.repo.worktree.join(&file.path),
             source: DiffSource::Git(request),
+            checkpoint: Some(crate::session::review_progress::ComparisonSource::Commit {
+                repo: graph.repo.worktree.clone(),
+                commit: details.hash.clone(),
+                parent: details.parents.first().cloned(),
+                path: file.path.clone(),
+                original_path: file.original_path.clone(),
+            }),
         };
         self.show_diff_tab(tab, window, cx);
+    }
+
+    fn graph_apply_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(graph) = &mut self.graph else { return };
+        if graph.search_inputs.len() != 6 {
+            return;
+        }
+        let values: Vec<_> = graph
+            .search_inputs
+            .iter()
+            .map(|input| input.read(cx).value().to_string())
+            .collect();
+        graph.search = workspace_editor_git::CommitSearch {
+            message: values[0].clone(),
+            author: values[1].clone(),
+            since: values[2].clone(),
+            until: values[3].clone(),
+            hash: values[4].trim().into(),
+            path: (!values[5].is_empty()).then(|| values[5].clone().into()),
+        };
+        self.graph_load(true, window, cx);
+    }
+
+    fn graph_search_bar(&self, graph: &GitGraph, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .w_full()
+            .flex_shrink_0()
+            .flex_wrap()
+            .gap_2()
+            .p_2()
+            .children(graph.search_inputs.iter().map(|input| {
+                div()
+                    .flex_1()
+                    .min_w(theme::DIFF_CONTEXT_MIN_WIDTH)
+                    .child(Input::new(input).small())
+            }))
+            .child(
+                Button::new("graph-search")
+                    .small()
+                    .ghost()
+                    .label("搜索仓库历史")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.graph_apply_search(window, cx)),
+                    ),
+            )
+            .child(
+                Button::new("graph-search-clear")
+                    .small()
+                    .ghost()
+                    .label("清除筛选")
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(graph) = &this.graph {
+                            for input in &graph.search_inputs {
+                                input.update(cx, |input, cx| input.set_value("", window, cx));
+                            }
+                        }
+                        this.graph_apply_search(window, cx);
+                    })),
+            )
+            .into_any_element()
     }
 
     fn graph_header(&self, graph: &GitGraph, cx: &mut Context<Self>) -> AnyElement {
@@ -764,6 +853,7 @@ impl Workbench {
             .size_full()
             .bg(colors.editor)
             .child(self.graph_header(graph, cx))
+            .child(self.graph_search_bar(graph, cx))
             .child(div().flex_1().min_h_0().child(list))
             .children(
                 graph

@@ -18,6 +18,8 @@ pub struct DiffSelection {
     pub list: DiffList,
     pub anchor: usize,
     pub head: usize,
+    /// UTF-8 byte offsets in the displayed anchor/head lines; None selects whole rows.
+    pub columns: Option<(usize, usize)>,
 }
 
 impl DiffSelection {
@@ -28,6 +30,42 @@ impl DiffSelection {
     pub fn contains(&self, list: DiffList, row: usize) -> bool {
         self.list == list && self.rows().contains(&row)
     }
+
+    pub fn range(&self, list: DiffList, row: usize) -> Option<std::ops::Range<usize>> {
+        if !self.contains(list, row) {
+            return None;
+        }
+        let Some((anchor, head)) = self.columns else {
+            return Some(0..usize::MAX);
+        };
+        let (start, end) = if (self.anchor, anchor) <= (self.head, head) {
+            ((self.anchor, anchor), (self.head, head))
+        } else {
+            ((self.head, head), (self.anchor, anchor))
+        };
+        Some(
+            (if row == start.0 { start.1 } else { 0 })..(if row == end.0 {
+                end.1
+            } else {
+                usize::MAX
+            }),
+        )
+    }
+}
+
+/// Display expands each tab to four spaces. Copy keeps the original tab and UTF-8 boundaries.
+fn raw_column(text: &str, column: usize, end: bool) -> usize {
+    let mut displayed = 0;
+    for (offset, ch) in text.char_indices() {
+        if displayed >= column {
+            return offset;
+        }
+        displayed += if ch == '\t' { 4 } else { ch.len_utf8() };
+        if displayed > column {
+            return if end { offset + ch.len_utf8() } else { offset };
+        }
+    }
+    text.len()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,10 +203,12 @@ impl Workbench {
     /// the patch is older than the repository's status (a refresh is reloading it), and never
     /// for a commit's diff, which has nothing to stage.
     pub(super) fn diff_partial_ok(&self) -> bool {
-        self.diff
-            .raw
-            .as_ref()
-            .is_some_and(|raw| !raw.whole_file_only)
+        self.diff_reading_allows_writes()
+            && self
+                .diff
+                .raw
+                .as_ref()
+                .is_some_and(|raw| !raw.whole_file_only)
             && self.diff.doc.is_some()
             && !self.diff.stale
             && !self.diff.loading
@@ -196,37 +236,50 @@ impl Workbench {
         &mut self,
         list: DiffList,
         row: usize,
+        column: Option<usize>,
         extend: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.diff.focus.focus(window, cx);
-        let anchor = self
-            .diff
-            .selection
-            .filter(|s| extend && s.list == list)
-            .map_or(row, |s| s.anchor);
+        let previous = self.diff.selection.filter(|s| extend && s.list == list);
         self.diff.selection = Some(DiffSelection {
             list,
-            anchor,
+            anchor: previous.map_or(row, |s| s.anchor),
             head: row,
+            columns: column.and_then(|head| {
+                previous.map_or(Some((head, head)), |s| {
+                    s.columns.map(|(anchor, _)| (anchor, head))
+                })
+            }),
         });
         self.diff.dragging = true;
         self.diff.caret = None;
         cx.notify();
     }
 
-    pub(super) fn diff_drag_to(&mut self, list: DiffList, row: usize, cx: &mut Context<Self>) {
+    pub(super) fn diff_drag_to(
+        &mut self,
+        list: DiffList,
+        row: usize,
+        column: usize,
+        cx: &mut Context<Self>,
+    ) {
         if !self.diff.dragging {
             return;
         }
         if let Some(selection) = &mut self.diff.selection
             && selection.list == list
-            && selection.head != row
         {
-            selection.head = row;
-            self.diff.caret = None;
-            cx.notify();
+            let columns = selection.columns.map(|(anchor, _)| (anchor, column));
+            if selection.head != row || selection.columns != columns {
+                if selection.head != row {
+                    self.diff.caret = None;
+                }
+                selection.head = row;
+                selection.columns = columns;
+                cx.notify();
+            }
         }
     }
 
@@ -235,13 +288,20 @@ impl Workbench {
         let (list, count) = if self.diff_is_inline() {
             (DiffList::Inline, doc.inline.len())
         } else {
-            (DiffList::Modified, doc.rows.len())
+            (
+                self.diff
+                    .selection
+                    .filter(|s| s.list != DiffList::Inline)
+                    .map_or(DiffList::Modified, |s| s.list),
+                doc.rows.len(),
+            )
         };
         if count > 0 {
             self.diff.selection = Some(DiffSelection {
                 list,
                 anchor: 0,
                 head: count - 1,
+                columns: None,
             });
             cx.notify();
         }
@@ -252,31 +312,45 @@ impl Workbench {
         let (Some(doc), Some(selection)) = (&self.diff.doc, self.diff.selection) else {
             return;
         };
+        if selection.anchor == selection.head
+            && selection
+                .columns
+                .is_some_and(|(anchor, head)| anchor == head)
+        {
+            return;
+        }
         let raw = self.diff.raw.clone();
-        let line = |old_side: bool, index: u32| -> String {
+        let line = |old_side: bool, index: u32, row: usize| -> String {
             let side = if old_side { &doc.old } else { &doc.new };
             let number = side.lines[index as usize].number;
-            raw.as_ref()
-                .and_then(|raw| raw.text(old_side, number))
-                .map(str::to_string)
-                .unwrap_or_else(|| side.line_text(index as usize).to_string())
+            let original = raw.as_ref().and_then(|raw| raw.text(old_side, number));
+            let text = original.unwrap_or_else(|| side.line_text(index as usize));
+            let range = selection.range(selection.list, row).unwrap();
+            let offset = |column, end| {
+                if original.is_some() {
+                    raw_column(text, column, end)
+                } else {
+                    column.min(text.len())
+                }
+            };
+            text[offset(range.start, false)..offset(range.end, true)].to_string()
         };
         let mut lines = Vec::new();
         for row in selection.rows() {
             match selection.list {
                 DiffList::Inline => {
                     if let Some(r) = doc.inline.get(row) {
-                        lines.push(line(r.kind != LineKind::Added, r.line));
+                        lines.push(line(r.kind != LineKind::Added, r.line, row));
                     }
                 }
                 DiffList::Original => {
                     if let Some(o) = doc.rows.get(row).and_then(|r| r.old) {
-                        lines.push(line(true, o));
+                        lines.push(line(true, o, row));
                     }
                 }
                 DiffList::Modified => {
                     if let Some(n) = doc.rows.get(row).and_then(|r| r.new) {
-                        lines.push(line(false, n));
+                        lines.push(line(false, n, row));
                     }
                 }
             }
@@ -294,6 +368,11 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.diff_reading_allows_writes() {
+            self.message = "请恢复全部空白差异后再暂存或还原，以保留原始补丁语义".into();
+            cx.notify();
+            return;
+        }
         let (Some(doc), Some(raw), Some(tab)) =
             (&self.diff.doc, self.diff.raw.clone(), &self.diff.tab)
         else {

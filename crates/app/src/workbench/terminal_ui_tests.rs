@@ -59,6 +59,100 @@ fn act(cx: &mut TestAppContext, window: WindowHandle<Root>, action: impl Action)
 }
 
 #[gpui_kit::test]
+async fn a_narrow_window_squeezes_the_terminal_before_the_editor(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-terminal-narrow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let (handle, _this) = open(cx, root.clone());
+    let heights = |cx: &mut TestAppContext| {
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            (
+                window.find("workbench-editor").bounds().size.height,
+                window.find("terminal-pane").bounds().size.height,
+            )
+        })
+        .unwrap()
+    };
+
+    // Opening the terminal in a short window gives the editor its minimum; the terminal takes
+    // the height the window allows.
+    cx.simulate_window_resize(handle.into(), size(px(760.), px(480.)));
+    cx.run_until_parked();
+    act(cx, handle, NewTerminal);
+    let (area, terminal) = heights(cx);
+    assert_eq!(area - terminal, theme::EDITOR_MIN_HEIGHT);
+    assert!(terminal >= theme::TERMINAL_MIN);
+
+    // A tall window returns it to the preferred height; the editor takes the difference.
+    cx.simulate_window_resize(handle.into(), size(px(900.), px(900.)));
+    cx.run_until_parked();
+    let (area, terminal) = heights(cx);
+    assert_eq!(terminal, theme::TERMINAL_HEIGHT);
+    assert!(area - terminal >= theme::EDITOR_MIN_HEIGHT);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[gpui_kit::test]
+async fn keyboard_switches_existing_terminal_groups_and_split_panes(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-terminal-switch-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let (handle, this) = open(cx, root.clone());
+    cx.update(|cx| {
+        cx.bind_keys([
+            KeyBinding::new("ctrl-pageup", PreviousTerminalGroup, Some("Terminal")),
+            KeyBinding::new("ctrl-pagedown", NextTerminalGroup, Some("Terminal")),
+            KeyBinding::new("alt-cmd-left", PreviousTerminalPane, Some("Terminal")),
+            KeyBinding::new("alt-cmd-right", NextTerminalPane, Some("Terminal")),
+        ])
+    });
+    act(cx, handle, NewTerminal);
+    act(cx, handle, SplitTerminal);
+    act(cx, handle, NewTerminal);
+    assert_eq!(panes(cx, &this), [2, 1]);
+    for (key, group, pane) in [
+        ("ctrl-pageup", 0usize, 1usize),
+        ("alt-cmd-left", 0, 0),
+        ("alt-cmd-left", 0, 1),
+        ("alt-cmd-right", 0, 0),
+        ("ctrl-pagedown", 1, 0),
+        ("ctrl-pagedown", 0, 0),
+    ] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.press(key, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.read_with(cx, |p, cx| {
+                assert_eq!(p.terminals.active(), group, "{key}");
+                assert!(
+                    p.terminals
+                        .pane(group, pane)
+                        .unwrap()
+                        .focus_handle(cx)
+                        .is_focused(window),
+                    "{key} must focus the selected pane"
+                );
+            });
+        })
+        .unwrap();
+    }
+    assert_eq!(
+        panes(cx, &this),
+        [2, 1],
+        "switching must reuse existing shells"
+    );
+    for _ in 0..3 {
+        act(cx, handle, KillTerminal);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui_kit::test]
 async fn terminal_accepts_the_native_menu_paste_action(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = std::env::temp_dir().join(format!("zj-terminal-menu-{}", std::process::id()));

@@ -77,6 +77,83 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 #[gpui_kit::test]
+async fn graph_search_runs_repository_filters_and_rejects_invalid_dates(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("search");
+    let (handle, this) = open(cx, repo.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_git_graph(0, window, cx));
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| {
+            p.graph
+                .as_ref()
+                .is_some_and(|g| !g.loading && g.commits.len() == 4)
+        })
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            let inputs = p.graph.as_ref().unwrap().search_inputs.clone();
+            for (index, value) in [
+                (1, "Fixture"),
+                (2, "2024-01-01"),
+                (3, "2024-01-01"),
+                (5, "a.txt"),
+            ] {
+                inputs[index].update(cx, |input, cx| input.set_value(value, window, cx));
+            }
+            inputs[0].update(cx, |input, cx| input.focus(window, cx));
+        });
+        window.render_frame(cx);
+        window.input("one", cx);
+        window.click("graph-search", cx);
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| {
+            p.graph
+                .as_ref()
+                .is_some_and(|g| !g.loading && g.commits.len() == 1)
+        })
+    });
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.graph.as_ref().unwrap().commits[0].subject, "one")
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.graph.as_ref().unwrap().search_inputs[2]
+                .clone()
+                .update(cx, |input, cx| input.set_value("2024-02-30", window, cx));
+        });
+        window.render_frame(cx);
+        window.click("graph-search", cx);
+        assert!(this.read(cx).graph.as_ref().unwrap().commits.is_empty());
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| {
+            p.graph
+                .as_ref()
+                .is_some_and(|g| !g.loading && g.error.is_some())
+        })
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("graph-search-clear", cx);
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| {
+            p.graph
+                .as_ref()
+                .is_some_and(|g| !g.loading && g.commits.len() == 4)
+        })
+    });
+    std::fs::remove_dir_all(repo.parent().unwrap()).unwrap();
+}
+
+#[gpui_kit::test]
 async fn the_graph_shows_lanes_refs_details_and_diffs(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let repo = fixture("lanes");
@@ -174,6 +251,13 @@ async fn the_graph_shows_lanes_refs_details_and_diffs(cx: &mut TestAppContext) {
         assert!(p.graph.is_some());
         let diff = p.diff.tab.as_ref().unwrap();
         assert!(diff.label.contains("b.txt"), "{}", diff.label);
+        assert!(
+            matches!(
+                diff.checkpoint,
+                Some(crate::session::review_progress::ComparisonSource::Commit { .. })
+            ),
+            "commit Diff has no persistent source"
+        );
         let Some(request) = diff.request() else {
             panic!("the tab is not a Git diff");
         };

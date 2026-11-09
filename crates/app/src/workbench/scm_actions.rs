@@ -1,9 +1,13 @@
 //! UI intent captures repository identity, paths and the displayed version before prompting.
 use super::quick_open::{Pick, PickIcon, PickItem, StashAction};
+use super::scm_feedback::FeedbackKind;
 use super::*;
 use gpui_kit::assets::IconName;
 use std::path::Path;
 use workspace_editor_git::Branch;
+#[path = "scm_management.rs"]
+mod management_ui;
+pub(super) use management_ui::GitFlowStep;
 
 /// The 提交 button and its menu.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -227,6 +231,15 @@ impl Workbench {
                     },
                 ))
             }
+            WriteOperation::ApplyExternalPatch { path, .. } => Some((
+                "应用外部补丁？".into(),
+                format!(
+                    "仓库：{}\n文件：{}\n验证后将修改磁盘文件；不自动暂存或保存编辑缓冲区。",
+                    request.repo.worktree.display(),
+                    path.display()
+                ),
+                "应用补丁",
+            )),
             WriteOperation::ApplyPatch { cached: false, .. } => Some((
                 "还原所选更改？".to_string(),
                 format!(
@@ -278,6 +291,81 @@ impl Workbench {
                     request.expected.upstream.as_deref().unwrap_or("未配置上游")
                 ),
                 "提交并推送",
+            )),
+            WriteOperation::PublishBranch {
+                remote,
+                target,
+                expected_push_url,
+            } => Some((
+                "发布当前分支？".into(),
+                workspace_editor_git::redact_git_output(&format!(
+                    "仓库：{}\n{} → {remote}/refs/heads/{target}\n实际推送地址：{expected_push_url}\n仅推送当前 HEAD，不强推；成功后设置并回读上游。",
+                    request.repo.worktree.display(),
+                    request.expected.branch.as_deref().unwrap_or("未知")
+                )),
+                "发布分支",
+            )),
+            WriteOperation::AddRemote { name, url }
+            | WriteOperation::SetRemoteUrl { name, url, .. } => Some((
+                format!("保存远程 {name}？"),
+                workspace_editor_git::redact_git_output(&format!(
+                    "仓库：{}\nFetch 地址：{url}\n显式配置的 pushurl 保持原值，请在远程详情检查实际推送地址。",
+                    request.repo.worktree.display()
+                )),
+                "保存远程",
+            )),
+            WriteOperation::RenameBranch { name, new_name, .. } => Some((
+                format!("重命名本地分支 {name}？"),
+                format!("新名称：{new_name}\n远程分支不会重命名。"),
+                "重命名",
+            )),
+            WriteOperation::DeleteBranch { name, .. } => Some((
+                format!("安全删除本地分支 {name}？"),
+                "只执行 git branch -d；未合并、正在使用的分支会拒绝删除。远程分支保留。".into(),
+                "删除本地分支",
+            )),
+            WriteOperation::SetUpstream { branch, upstream } => Some((
+                format!("设置 {branch} 的上游？"),
+                format!("目标：{upstream}\n后续拉取与推送将使用此上游。"),
+                "设置上游",
+            )),
+            WriteOperation::AbortOperation { operation } => Some((
+                format!("中止 {}？", operation.label()),
+                format!(
+                    "仓库：{}\nGit 将尝试恢复操作前的状态；本轮冲突解决可能丢失。未保存缓冲区不会写回磁盘。",
+                    request.repo.worktree.display()
+                ),
+                "中止操作",
+            )),
+            WriteOperation::ContinueOperation { operation } => Some((
+                format!("继续 {}？", operation.label()),
+                "请确认冲突均已解决并暂存。使用已有提交信息，不打开交互编辑器。".into(),
+                "继续操作",
+            )),
+            WriteOperation::UpdateSubmodule { path, expected_url } => Some((
+                "初始化／更新此子模块？".into(),
+                workspace_editor_git::redact_git_output(&format!(
+                    "仓库：{}\n子模块：{}\n来源地址：{expected_url}\n相对地址由 Git 按父仓库远程解析。更新到父仓库记录的提交，可能连接此来源；不使用 --force 或递归更新。",
+                    request.repo.worktree.display(),
+                    path.display()
+                )),
+                "初始化／更新",
+            )),
+            WriteOperation::AddWorktree { path, branch } => Some((
+                "创建工作树？".into(),
+                format!(
+                    "分支：{branch}\n目录：{}\n目标必须尚不存在。",
+                    path.display()
+                ),
+                "创建工作树",
+            )),
+            WriteOperation::RemoveWorktree { path, .. } => Some((
+                "移除此工作树？".into(),
+                format!(
+                    "目录：{}\n仅删除此工作树目录，保留分支；有未提交内容、子模块或锁定时 Git 会拒绝。",
+                    path.display()
+                ),
+                "移除工作树",
             )),
             WriteOperation::Push => Some((
                 "推送当前分支？".to_string(),
@@ -358,25 +446,36 @@ impl Workbench {
             WriteOperation::Commit { message, .. } => Some(message.clone()),
             _ => None,
         };
-        // As in VS Code, a successful operation just shows up in the refreshed list.
-        let success = match request.operation {
-            WriteOperation::Push | WriteOperation::Commit { push: true, .. } => "已推送",
-            _ => "",
-        };
+        let branch = request.expected.branch.clone().unwrap_or_default();
+        let show_result = matches!(
+            request.operation,
+            WriteOperation::Push
+                | WriteOperation::PublishBranch { .. }
+                | WriteOperation::Sync
+                | WriteOperation::Commit { push: true, .. }
+        );
         // Progress stays in the status bar; every failed write gets one dialog.
-        let (progress, failed): (Option<String>, String) = match &request.operation {
-            WriteOperation::Fetch => (Some("正在抓取…".into()), "抓取失败".into()),
-            WriteOperation::Pull => (Some("正在拉取…".into()), "拉取失败".into()),
-            WriteOperation::Sync => (Some("正在同步…".into()), "同步失败".into()),
+        let (completed, progress, failed): (&str, Option<String>, String) = match &request.operation
+        {
+            WriteOperation::Fetch => ("抓取完成", Some("正在抓取…".into()), "抓取失败".into()),
+            WriteOperation::Pull => ("拉取完成", Some("正在拉取…".into()), "拉取失败".into()),
+            WriteOperation::Sync => ("同步完成", Some("正在同步…".into()), "同步失败".into()),
             WriteOperation::Checkout { branch, .. } => (
+                "已签出分支",
                 Some(format!("正在签出 {branch}…")),
                 format!("无法签出 {branch}"),
             ),
             WriteOperation::CreateBranch { name, .. } => (
+                "分支已创建",
                 Some(format!("正在创建分支 {name}…")),
                 format!("无法创建分支 {name}"),
             ),
             WriteOperation::CreateTag { name, push, .. } => (
+                if *push {
+                    "标签已创建并推送"
+                } else {
+                    "标签已创建"
+                },
                 Some(if *push {
                     format!("正在创建并推送标签 {name}…")
                 } else {
@@ -385,26 +484,48 @@ impl Workbench {
                 format!("无法创建标签 {name}"),
             ),
             WriteOperation::PushTag { name } => (
+                "标签已推送",
                 Some(format!("正在推送标签 {name}…")),
                 format!("无法推送标签 {name}"),
             ),
             WriteOperation::DeleteTag { name, .. } => (
+                "标签已删除",
                 Some(format!("正在删除标签 {name}…")),
                 format!("无法删除标签 {name}"),
             ),
-            WriteOperation::Stage { .. } => (None, "暂存失败".into()),
-            WriteOperation::Unstage { .. } => (None, "取消暂存失败".into()),
-            WriteOperation::Discard { .. } => (None, "放弃更改失败".into()),
-            WriteOperation::Commit { push: true, .. } => (None, "提交并推送失败".into()),
-            WriteOperation::Commit { amend: true, .. } => (None, "修改上次提交失败".into()),
-            WriteOperation::Commit { .. } => (None, "提交失败".into()),
-            WriteOperation::Push => (None, "推送失败".into()),
-            WriteOperation::ApplyPatch { cached: true, .. } => (None, "更新暂存区失败".into()),
-            WriteOperation::ApplyPatch { .. } => (None, "还原所选更改失败".into()),
-            WriteOperation::StashPush { .. } => (None, "创建 Stash 失败".into()),
-            WriteOperation::StashApply { pop: true, .. } => (None, "弹出 Stash 失败".into()),
-            WriteOperation::StashApply { .. } => (None, "应用 Stash 失败".into()),
-            WriteOperation::StashDrop { .. } => (None, "删除 Stash 失败".into()),
+            WriteOperation::Stage { .. } => ("已暂存所选更改", None, "暂存失败".into()),
+            WriteOperation::Unstage { .. } => ("已取消暂存", None, "取消暂存失败".into()),
+            WriteOperation::Discard { .. } => ("已放弃所选更改", None, "放弃更改失败".into()),
+            WriteOperation::Commit { push: true, .. } => {
+                ("已提交并推送", None, "提交并推送失败".into())
+            }
+            WriteOperation::Commit { amend: true, .. } => {
+                ("已修改上次提交", None, "修改上次提交失败".into())
+            }
+            WriteOperation::Commit { .. } => ("已提交", None, "提交失败".into()),
+            WriteOperation::Push => ("推送完成", None, "推送失败".into()),
+            WriteOperation::ApplyPatch { cached: true, .. } => {
+                ("暂存区已更新", None, "更新暂存区失败".into())
+            }
+            WriteOperation::ApplyPatch { .. } => {
+                ("已还原所选更改", None, "还原所选更改失败".into())
+            }
+            WriteOperation::StashPush { .. } => ("Stash 已创建", None, "创建 Stash 失败".into()),
+            WriteOperation::StashApply { pop: true, .. } => {
+                ("Stash 已弹出", None, "弹出 Stash 失败".into())
+            }
+            WriteOperation::StashApply { .. } => ("Stash 已应用", None, "应用 Stash 失败".into()),
+            WriteOperation::StashDrop { .. } => ("Stash 已删除", None, "删除 Stash 失败".into()),
+            WriteOperation::PublishBranch { .. } => (
+                "分支已发布",
+                Some("正在发布分支…".into()),
+                "发布分支失败".into(),
+            ),
+            _ => (
+                "Git 操作已完成",
+                Some("正在执行 Git 操作…".into()),
+                "Git 操作失败".into(),
+            ),
         };
         let progress = progress.map(|text| {
             let name = request.repo.worktree.file_name().unwrap_or_default();
@@ -414,7 +535,7 @@ impl Workbench {
             self.message = text.clone();
         }
         group.write_pending = true;
-        group.write_message.clear();
+        group.clear_git_feedback();
         let service = self.service.clone();
         // Window replacement/close is blocked while writing. Do not cancel a write on refresh.
         let job =
@@ -422,7 +543,7 @@ impl Workbench {
         group.write_task = Some(cx.spawn_in(window, async move |this, cx| {
             let result = job.await.and_then(|reply| {
                 if reply.repo == id && reply.generation == version {
-                    Ok(())
+                    Ok(reply.output)
                 } else {
                     Err(std::io::Error::other("写操作的仓库或版本不匹配"))
                 }
@@ -446,8 +567,8 @@ impl Workbench {
                 }
                 if let Some(group) = this.groups.iter_mut().find(|g| g.repo.id == id) {
                     group.write_pending = false;
-                    group.write_message = match result {
-                        Ok(()) => {
+                    match result {
+                        Ok(output) => {
                             if submitted_message.as_deref()
                                 == Some(group.commit_input.read(cx).value().as_ref())
                             {
@@ -455,10 +576,20 @@ impl Workbench {
                                     .commit_input
                                     .update(cx, |input, cx| input.set_value("", window, cx));
                             }
-                            success.into()
+                            let output = String::from_utf8_lossy(&output);
+                            let push_summary = workspace_editor_git::push_result_summary(&output);
+                            let summary = if show_result && push_summary == "远程无变化"
+                                && (completed != "同步完成" || output.contains("Already up to date")) {
+                                "远端已是最新"
+                            } else { completed };
+                            let detail_heading = if show_result { format!("{completed} · {push_summary}") } else { completed.into() };
+                            group.set_git_feedback(summary, format!("{detail_heading}\n仓库：{}\n分支：{branch}\n{output}", worktree.display()), FeedbackKind::Success);
                         }
-                        Err(_) => String::new(),
-                    };
+                        Err(error) => {
+                            group.set_git_feedback(failed, format!("失败（操作可能部分完成，请刷新检查）\n仓库：{}\n分支：{branch}\n{error}", worktree.display()), FeedbackKind::Error);
+                            group.expanded = true;
+                        }
+                    }
                 }
                 this.refresh(window, cx);
                 this.graph_reload(&id, window, cx);
@@ -486,7 +617,7 @@ impl Workbench {
         if mode != CommitMode::Amend && message.trim().is_empty() {
             let index = self.groups.iter().position(|g| g.repo.id == id);
             if let Some(group) = index.map(|index| &mut self.groups[index]) {
-                group.write_message = "请输入提交消息".into();
+                group.set_git_feedback("请输入提交消息", "请输入提交消息", FeedbackKind::Info);
                 group.expanded = true;
                 group.commit_input.focus_handle(cx).focus(window, cx);
                 self.rebuild_rows();
@@ -863,20 +994,31 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         self.open_file(path.to_path_buf(), self.root.clone(), window, cx);
+        let generation = self.file_generation;
+        let path = path.to_path_buf();
+        let inspect = path.clone();
+        let root = self.root_for(&path);
+        let job = cx.background_spawn(async move {
+            let bytes = crate::files::read_prefix(root.as_deref(), &inspect, 1025).ok()?;
+            workspace_editor_git::parse_lfs_pointer(&bytes)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(pointer) = job.await else { return; };
+            let _ = this.update_in(cx, |this, _, cx| {
+                if this.file_generation != generation { return; }
+                let detail = format!("Git LFS 指针：{}\nSHA-256：{}\n真实内容大小：{} 字节\n当前显示指针文本；ZJ 不自动下载或还原 LFS 对象。请用外部 git lfs pull 获取真实内容后重新打开；已经还原的工作区文件可正常查看。", path.display(), pointer.oid, pointer.size);
+                this.message = detail.clone();
+                if let Some(group) = this.groups.iter_mut().find(|g| path.starts_with(&g.repo.worktree)) { group.set_git_feedback("Git LFS 指针，尚未下载真实内容", detail, FeedbackKind::Info); this.rebuild_rows(); }
+                cx.notify();
+            });
+        }).detach();
     }
 }
 
 /// Whether a file (its first 8 MiB) still holds a complete conflict.
 fn has_conflict_markers(path: &Path) -> bool {
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|file| {
-            file.take(crate::files::MAX_FILE_BYTES as u64)
-                .read_to_end(&mut bytes)
-        })
-        .is_ok()
-        && !crate::conflicts::find(&String::from_utf8_lossy(&bytes)).is_empty()
+    crate::files::read_prefix(None, path, crate::files::MAX_FILE_BYTES as u64)
+        .is_ok_and(|bytes| !crate::conflicts::find(&String::from_utf8_lossy(&bytes)).is_empty())
 }
 
 fn branch_items(repo: &RepoId, branches: Vec<Branch>) -> Vec<PickItem> {

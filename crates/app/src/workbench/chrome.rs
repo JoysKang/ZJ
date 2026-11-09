@@ -5,7 +5,6 @@ use crate::indent::Indent;
 use crate::theme;
 use gpui_kit::{
     assets::IconName,
-    base::TestSupportExt,
     component::{
         Icon, Sizable, TitleBar,
         button::{Button, ButtonCustomVariant, ButtonVariants},
@@ -23,7 +22,23 @@ fn status_item(id: &'static str, colors: theme::Colors) -> Stateful<Div> {
         .px_2()
         .gap_1()
         .flex_shrink_0()
+        .text_color(colors.muted)
+}
+
+fn status_action(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    colors: theme::Colors,
+) -> gpui_kit::base::Button {
+    gpui_kit::base::Button::new(id)
+        .accessibility_label(label)
+        .h_full()
+        .px_2()
+        .gap_1()
+        .min_w_0()
+        .cursor_default()
         .hover(|item| item.bg(colors.hover).text_color(colors.foreground))
+        .focus_visible(|item| item.bg(colors.input_bg).text_color(colors.foreground))
 }
 
 impl Workbench {
@@ -45,23 +60,22 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = theme::colors(cx);
-        let command_center = h_flex()
-            .id("command-center")
+        let command_center = gpui_kit::base::Button::new("command-center")
             .w(theme::COMMAND_CENTER_WIDTH)
             .min_w_0()
             .h(theme::COMMAND_CENTER_HEIGHT)
             .px_2()
             .gap_2()
-            .rounded_full()
+            .rounded(theme::RADIUS)
             .border_1()
             .border_color(colors.command_border)
+            .focus_visible(|item| item.border_color(colors.accent))
             .bg(colors.command_bg)
             .text_size(theme::TEXT_CAPTION)
             .text_color(colors.muted)
-            .cursor_pointer()
+            .cursor_default()
             .hover(|this| this.bg(colors.hover).text_color(colors.foreground))
-            .role(Role::Button)
-            .aria_label("转到文件（⌘P）")
+            .accessibility_label("转到文件（⌘P）")
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|this, _, window, cx| this.open_quick_open(window, cx)))
             .child(
@@ -83,8 +97,7 @@ impl Workbench {
                     .flex_shrink_0()
                     .text_size(theme::TEXT_SECTION)
                     .child("⌘P"),
-            )
-            .test_support();
+            );
         let actions = h_flex()
             .flex_1()
             .justify_end()
@@ -96,6 +109,7 @@ impl Workbench {
                     .ghost()
                     .icon(Icon::empty().path("icons/new-window.svg"))
                     .tooltip("新建窗口（⌘⇧N）")
+                    .accessibility_label("新建窗口")
                     .on_click(cx.listener(|this, _, _, cx| this.new_window(cx))),
             )
             .child(
@@ -108,6 +122,11 @@ impl Workbench {
                         "icons/sidebar-off.svg"
                     }))
                     .tooltip("切换侧栏（⌘B）")
+                    .accessibility_label(if self.sidebar_visible {
+                        "隐藏侧栏"
+                    } else {
+                        "显示侧栏"
+                    })
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
             )
             .child(
@@ -120,6 +139,11 @@ impl Workbench {
                         "icons/terminal-panel-off.svg"
                     }))
                     .tooltip("切换终端面板（⌃`）")
+                    .accessibility_label(if self.terminals.is_visible() {
+                        "隐藏终端面板"
+                    } else {
+                        "显示终端面板"
+                    })
                     .on_click(
                         cx.listener(|this, _, window, cx| this.toggle_terminal_panel(window, cx)),
                     ),
@@ -165,6 +189,17 @@ impl Workbench {
             Pane::Diff => self.diff.tab.as_ref().map(|diff| diff.path.clone()),
             Pane::Graph => self.graph.as_ref().map(|graph| graph.repo.worktree.clone()),
             Pane::Large => self.large.as_ref().map(|large| large.path.clone()),
+            Pane::Image(id) => self
+                .images
+                .iter()
+                .find(|image| image.id == id)
+                .map(|image| image.path.clone()),
+            Pane::SavedDiff(id) => self
+                .archived_diffs
+                .iter()
+                .find(|saved| saved.id == id)
+                .and_then(|saved| saved.pane.tab.as_ref())
+                .map(|tab| tab.path.clone()),
             Pane::Welcome => None,
         }
         .or_else(|| self.root.clone())?;
@@ -204,20 +239,30 @@ impl Workbench {
             .min_w_0()
             .when_some(active.zip(self.active_branch()), |bar, (g, branch)| {
                 bar.child(
-                    status_item("status-branch", colors)
-                        .child(icon(IconName::GitBranch))
-                        .child(branch.clone())
-                        .tooltip(move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(format!(
-                                "{branch}，签出分支…"
-                            ))
+                    status_action(
+                        "status-branch",
+                        format!("当前分支 {branch}，签出分支"),
+                        colors,
+                    )
+                    .max_w(theme::STATUS_BRANCH_MAX_WIDTH)
+                    .child(icon(IconName::GitBranch))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(branch.clone()),
+                    )
+                    .tooltip(move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(format!("{branch}，签出分支…"))
                             .build(window, cx)
-                        })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if !this.groups.get(g).is_some_and(|g| g.write_pending) {
-                                this.open_branch_picker(g, window, cx);
-                            }
-                        })),
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if !this.groups.get(g).is_some_and(|g| g.write_pending) {
+                            this.open_branch_picker(g, window, cx);
+                        }
+                    })),
                 )
             })
             .when_some(sync, |bar, (g, upstream, behind, ahead)| {
@@ -228,7 +273,9 @@ impl Workbench {
                     None => format!("同步更改（{upstream}）"),
                 };
                 bar.child(
-                    status_item("status-sync", colors)
+                    status_action("status-sync", tooltip.clone(), colors)
+                        .disabled(pending)
+                        .flex_shrink_0()
                         .child(icon(IconName::RefreshCw))
                         .when_some(counts, |item, counts| item.child(counts))
                         .when(pending, |item| item.opacity(theme::DIMMED_OPACITY))
@@ -292,14 +339,22 @@ impl Workbench {
                 bar.child(self.render_indent_status(doc.id, doc.indent, cx))
             })
             .when_some(document, |bar, doc| {
-                bar.child(status_item("status-encoding", colors).child(if doc.bom {
-                    "UTF-8 BOM"
-                } else {
-                    "UTF-8"
-                }))
+                bar.child(
+                    status_item("status-encoding", colors).child(
+                        doc.encoding
+                            .map(|encoding| format!("{encoding} · 只读"))
+                            .unwrap_or_else(|| {
+                                if doc.bom {
+                                    "UTF-8 BOM".into()
+                                } else {
+                                    "UTF-8".into()
+                                }
+                            }),
+                    ),
+                )
                 .child(
-                    status_item("status-eol", colors)
-                        .cursor_pointer()
+                    status_action("status-eol", "切换行尾序列（LF / CRLF）", colors)
+                        .flex_shrink_0()
                         .tooltip(|window, cx| {
                             gpui_kit::component::tooltip::Tooltip::new("切换行尾序列（LF / CRLF）")
                                 .build(window, cx)

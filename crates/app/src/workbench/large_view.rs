@@ -55,7 +55,7 @@ pub(super) struct LargeView {
     generation: u64,
     _index_task: Option<Task<()>>,
     _read_task: Option<Task<()>>,
-    focus: FocusHandle,
+    pub(super) focus: FocusHandle,
     /// Selected lines: where the selection started and the line clicked last.
     pub(super) selection: Option<(usize, usize)>,
     find: Option<LargeFind>,
@@ -104,12 +104,7 @@ impl Workbench {
     pub(super) fn close_large(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.large = None;
         if self.active == Pane::Large {
-            let pane = self
-                .documents
-                .last()
-                .map(|doc| Pane::Document(doc.id))
-                .unwrap_or(Pane::Welcome);
-            self.show_pane(pane, window, cx);
+            self.show_remaining_tab(window, cx);
         }
         cx.notify();
     }

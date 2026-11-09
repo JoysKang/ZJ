@@ -30,10 +30,11 @@ fn show(
             .unwrap();
             p.diff.generation += 1;
             p.diff.tab = Some(DiffTab {
+                checkpoint: None,
                 label: "a.py".into(),
                 tooltip: "a.py".into(),
                 path: PathBuf::from("/private/tmp/zj-diff-navigation-a.py"),
-                source: DiffSource::Local(patch.clone()),
+                source: DiffSource::Local(patch.clone(), "原文 → 修改后"),
             });
             p.diff.source = Some((patch.clone(), Theme::global(cx).is_dark()));
             p.diff.raw = crate::partial_patch::parse(&patch).map(Arc::new);
@@ -53,6 +54,283 @@ fn show(
 const PATCH: &str = "--- a/a.py\n+++ b/a.py\n@@ -1,4 +1,5 @@\n+value = 1\n def helper(x):\n     return x\n \n-helper(0)\n+helper(1)\n";
 
 #[gpui_kit::test]
+async fn diff_mouse_drag_copies_only_selected_text(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
+    cx.update(|cx| {
+        cx.bind_keys([KeyBinding::new(
+            "secondary-c",
+            diff_ops::CopyDiff,
+            Some("DiffEditor"),
+        )]);
+    });
+    show(cx, handle, &this, PATCH);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let bounds = window.find(("diff-modified", 0usize)).bounds();
+        let metrics = theme::diff_metrics(Theme::global(cx).mono_font_size);
+        let start = point(
+            bounds.left() + theme::DIFF_GUTTER + theme::DIFF_INDICATOR,
+            bounds.center().y,
+        );
+        window.drag(start, start + point(metrics.column * 5., px(0.)), cx);
+        window.press("cmd-c", cx);
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("value".into()),
+            "dragging five characters must copy five characters, not the whole line"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn diff_selection_copies_each_side_inline_and_original_unicode_tabs(cx: &mut TestAppContext) {
+    use diff_view::DiffList;
+    cx.executor().allow_parking();
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
+    cx.update(|cx| {
+        cx.bind_keys([
+            KeyBinding::new("secondary-c", diff_ops::CopyDiff, Some("DiffEditor")),
+            KeyBinding::new("secondary-a", diff_ops::SelectAllDiff, Some("DiffEditor")),
+        ]);
+    });
+    let patch = "--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,2 @@\n-alpha旧🙂\tend\n-second old\n+bravo新🙂\tend\n+second new\n";
+    show(cx, handle, &this, patch);
+    for (list, expected, suffix) in [
+        (DiffList::Original, "alpha", "旧🙂\tend"),
+        (DiffList::Modified, "bravo", "新🙂\tend"),
+        (DiffList::Inline, "bravo", "新🙂\tend"),
+    ] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.diff.inline = list == DiffList::Inline;
+                p.diff.selection = None;
+                cx.notify();
+            });
+            window.render_frame(cx);
+            let doc = this.read(cx).diff.doc.as_ref().unwrap();
+            let row = if list == DiffList::Inline {
+                doc.inline
+                    .iter()
+                    .position(|r| r.kind == crate::diff_doc::LineKind::Added)
+                    .unwrap()
+            } else {
+                0
+            };
+            let id = match list {
+                DiffList::Original => "diff-original",
+                DiffList::Modified => "diff-modified",
+                DiffList::Inline => "diff-inline",
+            };
+            let bounds = window.find((id, row)).bounds();
+            let metrics = theme::diff_metrics(Theme::global(cx).mono_font_size);
+            let start = point(
+                bounds.left()
+                    + theme::DIFF_GUTTER * if list == DiffList::Inline { 2. } else { 1. }
+                    + theme::DIFF_INDICATOR,
+                bounds.center().y,
+            );
+            let fifth = start + point(metrics.column * 5.25, px(0.));
+            // Backward drag also stays within the exact character range.
+            window.drag(fifth, start, cx);
+            window.press("cmd-c", cx);
+            assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), expected);
+            window.drag(fifth, start + point(metrics.column * 40., px(0.)), cx);
+            // This is the same Copy action as the native Edit menu.
+            window.dispatch_action(Box::new(gpui_kit::component::input::Copy), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), suffix);
+        cx.update_window(handle.into(), |_, window, cx| {
+            let before = this.read(cx).diff.doc.as_ref().unwrap().new.text.clone();
+            window.input("should stay read only", cx);
+            window.press("backspace", cx);
+            assert_eq!(this.read(cx).diff.doc.as_ref().unwrap().new.text, before);
+            window.press("cmd-a", cx);
+            window.press("cmd-c", cx);
+            let copied = cx.read_from_clipboard().unwrap().text().unwrap();
+            assert!(copied.starts_with(if list == DiffList::Modified {
+                "bravo"
+            } else {
+                "alpha"
+            }));
+            assert!(copied.contains('\t'));
+        })
+        .unwrap();
+    }
+}
+
+#[gpui_kit::test]
+async fn diff_selection_crosses_lines_and_keeps_gutter_line_selection(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
+    cx.update(|cx| {
+        cx.bind_keys([KeyBinding::new(
+            "secondary-c",
+            diff_ops::CopyDiff,
+            Some("DiffEditor"),
+        )]);
+    });
+    show(
+        cx,
+        handle,
+        &this,
+        "--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,2 @@\n-alpha old\n-second old\n+alpha new\n+second new\n",
+    );
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let first = window.find(("diff-modified", 0usize)).bounds();
+        let second = window.find(("diff-modified", 1usize)).bounds();
+        let metrics = theme::diff_metrics(Theme::global(cx).mono_font_size);
+        let x = first.left() + theme::DIFF_GUTTER + theme::DIFF_INDICATOR;
+        let from = point(x + metrics.column * 2.25, first.center().y);
+        let to = point(x + metrics.column * 6.25, second.center().y);
+        for (from, to) in [(from, to), (to, from)] {
+            window.drag(from, to, cx);
+            window.press("cmd-c", cx);
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().unwrap(),
+                "pha new\nsecond"
+            );
+        }
+        // Shift-click extends the original character anchor across lines.
+        for (position, shift) in [(from, false), (to, true)] {
+            let modifiers = Modifiers {
+                shift,
+                ..Default::default()
+            };
+            window.dispatch_event(
+                MouseDownEvent {
+                    button: MouseButton::Left,
+                    position,
+                    modifiers,
+                    click_count: 1,
+                    first_mouse: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                MouseUpEvent {
+                    button: MouseButton::Left,
+                    position,
+                    modifiers,
+                    click_count: 1,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.render_frame(cx);
+        }
+        window.press("cmd-c", cx);
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "pha new\nsecond"
+        );
+        // A plain text click leaves no selection and must not overwrite the clipboard.
+        window.drag(from, from, cx);
+        window.press("cmd-c", cx);
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "pha new\nsecond"
+        );
+        let gutter = |bounds: Bounds<Pixels>| {
+            point(bounds.left() + theme::DIFF_GUTTER / 2., bounds.center().y)
+        };
+        window.drag(gutter(first), gutter(second), cx);
+        window.press("cmd-c", cx);
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "alpha new\nsecond new"
+        );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn diff_selection_layout_switch_then_select_all_uses_visible_side(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
+    cx.update(|cx| {
+        cx.bind_keys([
+            KeyBinding::new("secondary-c", diff_ops::CopyDiff, Some("DiffEditor")),
+            KeyBinding::new("secondary-a", diff_ops::SelectAllDiff, Some("DiffEditor")),
+        ]);
+    });
+    show(
+        cx,
+        handle,
+        &this,
+        "--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n",
+    );
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.click("diff-layout", cx);
+        window.render_frame(cx);
+        let bounds = window.find(("diff-inline", 1usize)).bounds();
+        let metrics = theme::diff_metrics(Theme::global(cx).mono_font_size);
+        let from = point(
+            bounds.left() + theme::DIFF_GUTTER * 2. + theme::DIFF_INDICATOR,
+            bounds.center().y,
+        );
+        window.drag(from, from + point(metrics.column * 3.25, px(0.)), cx);
+        assert!(this.read(cx).diff.selection.is_some());
+        cx.write_to_clipboard(ClipboardItem::new_string("layout-sentinel".into()));
+        window.click("diff-layout", cx);
+        this.read(cx).diff.focus.clone().focus(window, cx);
+        window.press("cmd-c", cx);
+        assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "layout-sentinel",
+            "changing layout must not copy an invisible selection"
+        );
+        window.press("cmd-a", cx);
+        window.press("cmd-c", cx);
+        assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), "x = 2");
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn diff_selection_single_line_drag_keeps_definition_navigation(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
+    cx.update(|cx| {
+        cx.bind_keys([KeyBinding::new(
+            "f12",
+            gpui_kit::component::input::GoToDefinition,
+            Some("DiffEditor"),
+        )])
+    });
+    show(cx, handle, &this, PATCH);
+    cx.update_window(handle.into(), |_, window, cx| {
+        let row = this.read(cx).diff.doc.as_ref().unwrap().rows.len() - 1;
+        let bounds = window.find(("diff-modified", row)).bounds();
+        let metrics = theme::diff_metrics(Theme::global(cx).mono_font_size);
+        let from = point(
+            bounds.left() + theme::DIFF_GUTTER + theme::DIFF_INDICATOR + metrics.column * 0.25,
+            bounds.center().y,
+        );
+        window.drag(from, from + point(metrics.column * 6., px(0.)), cx);
+        let generation = this.read(cx).nav.generation;
+        window.press("f12", cx);
+        assert!(
+            this.read(cx).nav.generation > generation,
+            "F12 must navigate after selecting a name"
+        );
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            p.diff
+                .caret
+                .is_some_and(|caret| !caret.old && caret.line == 1)
+        })
+    });
+}
+
+#[gpui_kit::test]
 async fn diff_ctrl_g_selects_the_clicked_side_and_history_returns(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
@@ -67,7 +345,8 @@ async fn diff_ctrl_g_selects_the_clicked_side_and_history_returns(cx: &mut TestA
     cx.update_window(handle.into(), |_, window, cx| {
         let row = this.read(cx).diff.doc.as_ref().unwrap().rows.len() - 1;
         let bounds = window.find(("diff-original", row)).bounds();
-        let position = point(bounds.left() + px(2.), bounds.center().y);
+        // Stay inside the line-number gutter, clear of the sidebar resize hit area.
+        let position = point(bounds.left() + theme::DIFF_GUTTER / 2., bounds.center().y);
         window.dispatch_event(
             MouseDownEvent {
                 button: MouseButton::Left,

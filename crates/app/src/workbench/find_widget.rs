@@ -9,6 +9,10 @@
 //! and Esc closes it. All matches are highlighted in the editor, and the current one more
 //! strongly. Matching and replacement rules are in [`crate::replace`].
 
+#[path = "input_history.rs"]
+pub(super) mod input_history;
+use input_history::{HistoryNext, HistoryPrevious, InputHistory};
+
 use super::{Pane, Workbench};
 use crate::replace::{self, Finder, Query, Replacement};
 use crate::theme;
@@ -57,6 +61,8 @@ pub(super) struct FindState {
     replace_open: bool,
     query: Entity<InputState>,
     replacement: Entity<InputState>,
+    query_history: InputHistory,
+    replacement_history: InputHistory,
     case_sensitive: bool,
     whole_word: bool,
     regex: bool,
@@ -83,20 +89,36 @@ impl FindState {
     pub fn new(window: &mut Window, cx: &mut Context<Workbench>) -> Self {
         let query = cx.new(|cx| InputState::new(window, cx).placeholder("查找"));
         let replacement = cx.new(|cx| InputState::new(window, cx).placeholder("替换"));
-        let subscriptions =
-            vec![
-                cx.subscribe(&query, |this: &mut Workbench, _, event: &InputEvent, cx| {
+        let subscriptions = vec![
+            cx.subscribe(
+                &query,
+                |this: &mut Workbench, input, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.find.current = None;
                         this.find_update(true, cx);
+                    } else if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        this.find.query_history.remember(&input.read(cx).value());
                     }
-                }),
-            ];
+                },
+            ),
+            cx.subscribe(
+                &replacement,
+                |this: &mut Workbench, input, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                        this.find
+                            .replacement_history
+                            .remember_replacement(&input.read(cx).value());
+                    }
+                },
+            ),
+        ];
         Self {
             open: false,
             replace_open: false,
             query,
             replacement,
+            query_history: InputHistory::default(),
+            replacement_history: InputHistory::default(),
             case_sensitive: false,
             whole_word: false,
             regex: false,
@@ -142,19 +164,26 @@ impl FindState {
 }
 
 impl Workbench {
-    fn find_document(&self) -> Option<(DocumentId, Entity<EditorState>, bool)> {
+    fn find_document(&self, cx: &App) -> Option<(DocumentId, Entity<EditorState>, bool)> {
         let Pane::Document(id) = self.active else {
             return None;
         };
-        self.documents
-            .iter()
-            .find(|doc| doc.id == id)
-            .map(|doc| (doc.id, doc.editor.clone(), false))
+        self.documents.iter().find(|doc| doc.id == id).map(|doc| {
+            (
+                doc.id,
+                doc.editor.clone(),
+                !doc.editor.read(cx).is_editable(),
+            )
+        })
     }
 
     /// ⌘F (`replace` false) / ⌥⌘F: open the widget, seeded with the selection if it is one
     /// line, and focus the find input.
     pub(super) fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active == Pane::Diff {
+            self.diff_open_find(window, cx);
+            return;
+        }
         if self.active == Pane::Large {
             self.large_open_find(window, cx);
             return;
@@ -162,9 +191,10 @@ impl Workbench {
         if let Pane::Document(id) = self.active {
             let _ = self.markdown_show_source(id, window, cx);
         }
-        let Some((_, editor, readonly)) = self.find_document() else {
+        let Some((_, editor, readonly)) = self.find_document(cx) else {
             return;
         };
+        self.remember_find_inputs(cx);
         let selected = editor.read(cx).selected_text().to_string();
         if !selected.is_empty() && !selected.contains('\n') {
             self.find
@@ -172,15 +202,14 @@ impl Workbench {
                 .update(cx, |input, cx| input.set_value(selected, window, cx));
             self.find.current = None;
         }
-        if replace && !readonly {
-            self.find.replace_open = true;
-        }
+        self.find.replace_open = !readonly && (replace || self.find.replace_open);
         self.find.open = true;
-        let focus = if replace && !self.find.query.read(cx).value().is_empty() {
-            &self.find.replacement
-        } else {
-            &self.find.query
-        };
+        let focus =
+            if replace && self.find.replace_open && !self.find.query.read(cx).value().is_empty() {
+                &self.find.replacement
+            } else {
+                &self.find.query
+            };
         focus.update(cx, |input, cx| {
             input.focus(window, cx);
             input.select_all(window, cx);
@@ -192,10 +221,42 @@ impl Workbench {
         if !self.find.open {
             return;
         }
+        self.remember_find_inputs(cx);
         self.find.open = false;
         self.clear_find_highlights(cx);
         self.focus_active_editor(window, cx);
         cx.notify();
+    }
+
+    fn remember_find_inputs(&mut self, cx: &App) {
+        self.find
+            .query_history
+            .remember(&self.find.query.read(cx).value());
+        if self.find.replace_open {
+            self.find
+                .replacement_history
+                .remember_replacement(&self.find.replacement.read(cx).value());
+        }
+    }
+
+    fn recall_find_input(&mut self, previous: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .find
+            .replacement
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            self.find
+                .replacement_history
+                .recall(previous, &self.find.replacement, window, cx);
+        } else {
+            self.find
+                .query_history
+                .recall(previous, &self.find.query, window, cx);
+            self.find.current = None;
+            self.find_update(true, cx);
+        }
     }
 
     /// Removes the match highlights and the 在选区中查找 scope.
@@ -216,7 +277,7 @@ impl Workbench {
         if !self.find.open {
             return;
         }
-        let Some((id, editor, _)) = self.find_document() else {
+        let Some((id, editor, _)) = self.find_document(cx) else {
             self.clear_find_highlights(cx);
             self.find.matches.clear();
             self.find.current = None;
@@ -336,11 +397,16 @@ impl Workbench {
 
     /// Enter / ⇧Enter, ↑ ↓, ⌘G / ⌘⇧G.
     pub(super) fn find_step(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.active == Pane::Diff {
+            self.diff_find_step(forward, cx);
+            return;
+        }
+        self.remember_find_inputs(cx);
         if self.active == Pane::Large {
             self.large_find_step(forward, cx);
             return;
         }
-        let Some((id, editor, _)) = self.find_document() else {
+        let Some((id, editor, _)) = self.find_document(cx) else {
             return;
         };
         let count = self.find.matches.len();
@@ -389,12 +455,13 @@ impl Workbench {
 
     /// 替换 (⌘⇧1, or Enter in the replace input): replaces the current match and moves on.
     pub(super) fn find_replace_one(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((_, editor, readonly)) = self.find_document() else {
+        let Some((_, editor, readonly)) = self.find_document(cx) else {
             return;
         };
         if readonly {
             return;
         }
+        self.remember_find_inputs(cx);
         self.find_catch_up(cx);
         let Some(range) = self
             .find
@@ -428,12 +495,13 @@ impl Workbench {
 
     /// 全部替换 (⌘⌥Enter): one edit, so a single undo restores everything.
     pub(super) fn find_replace_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((_, editor, readonly)) = self.find_document() else {
+        let Some((_, editor, readonly)) = self.find_document(cx) else {
             return;
         };
         if readonly {
             return;
         }
+        self.remember_find_inputs(cx);
         self.find_catch_up(cx);
         if self.find.matches.is_empty() {
             return;
@@ -487,7 +555,7 @@ impl Workbench {
         if let Some(mark) = self.find.scope_mark.take() {
             mark.dispose(cx);
         }
-        if !was_on && let Some((_, editor, _)) = self.find_document() {
+        if !was_on && let Some((_, editor, _)) = self.find_document(cx) {
             let selection = editor.read(cx).selected_range();
             if selection.start < selection.end {
                 let colors = theme::colors(cx);
@@ -538,7 +606,7 @@ impl Workbench {
 
     pub(super) fn render_find(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let find = &self.find;
-        let (_, _, readonly) = self.find_document()?;
+        let (_, _, readonly) = self.find_document(cx)?;
         if !find.open {
             return None;
         }
@@ -547,6 +615,23 @@ impl Workbench {
         let replace_open = find.replace_open && !readonly;
         let toggles = h_flex()
             .gap_1()
+            .child(
+                self.find_button(
+                    "find-query-history",
+                    IconName::ChevronUp,
+                    "查询历史（⌥↑ / ⌥↓）",
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.find
+                        .query_history
+                        .recall(true, &this.find.query, window, cx);
+                    this.find
+                        .query
+                        .update(cx, |state, cx| state.focus(window, cx));
+                    this.find.current = None;
+                    this.find_update(true, cx);
+                })),
+            )
             .child(self.find_toggle(
                 "find-case",
                 IconName::CaseSensitive,
@@ -678,6 +763,21 @@ impl Workbench {
                 ),
             )
             .child(
+                self.find_button(
+                    "find-replace-history",
+                    IconName::ChevronUp,
+                    "替换历史（⌥↑ / ⌥↓）",
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.find
+                        .replacement_history
+                        .recall(true, &this.find.replacement, window, cx);
+                    this.find
+                        .replacement
+                        .update(cx, |state, cx| state.focus(window, cx));
+                })),
+            )
+            .child(
                 self.find_button("replace-one", IconName::Replace, "替换 (⌘⇧1)")
                     .disabled(!has_matches)
                     .on_click(cx.listener(|this, _, window, cx| this.find_replace_one(window, cx))),
@@ -719,6 +819,12 @@ impl Workbench {
             h_flex()
                 .id("find-widget")
                 .key_context("FindWidget")
+                .on_action(cx.listener(|this, _: &HistoryPrevious, window, cx| {
+                    this.recall_find_input(true, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &HistoryNext, window, cx| {
+                    this.recall_find_input(false, window, cx)
+                }))
                 .occlude()
                 .absolute()
                 .top_0()
@@ -792,3 +898,11 @@ impl Workbench {
 #[cfg(test)]
 #[path = "find_ui_tests.rs"]
 mod find_ui_tests;
+
+#[cfg(test)]
+#[path = "history_ui_tests.rs"]
+mod history_ui_tests;
+
+#[cfg(test)]
+#[path = "read_only_edit_ui_tests.rs"]
+mod read_only_edit_ui_tests;

@@ -313,6 +313,8 @@ impl RenderOnce for ResizablePanel {
             .get(self.panel_ix)
             .expect("BUG: The `index` of ResizablePanel should be one of in `state`.");
         let size_range = self.size_range.clone();
+        // ZJ patch: a `.size()` is the caller's preference, recomputed on every render.
+        let pinned = self.initial_size.is_some();
 
         div()
             .id(("resizable-panel", self.panel_ix))
@@ -355,7 +357,14 @@ impl RenderOnce for ResizablePanel {
                 let state = state.clone();
                 move |bounds, _, cx| {
                     state.update(cx, |state, cx| {
-                        state.update_panel_size(self.panel_ix, bounds, self.size_range, cx)
+                        state.update_panel_size(
+                            self.panel_ix,
+                            bounds,
+                            self.size_range,
+                            pinned,
+                            self.initial_size,
+                            cx,
+                        )
                     })
                 }
             })

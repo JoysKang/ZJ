@@ -26,6 +26,51 @@ pub enum WriteOperation {
         all: bool,
     },
     Push,
+    PublishBranch {
+        remote: String,
+        target: String,
+        expected_push_url: String,
+    },
+    AddRemote {
+        name: String,
+        url: String,
+    },
+    SetRemoteUrl {
+        name: String,
+        expected_url: String,
+        url: String,
+    },
+    RenameBranch {
+        name: String,
+        new_name: String,
+        oid: String,
+    },
+    DeleteBranch {
+        name: String,
+        oid: String,
+    },
+    SetUpstream {
+        branch: String,
+        upstream: String,
+    },
+    ContinueOperation {
+        operation: InProgress,
+    },
+    AbortOperation {
+        operation: InProgress,
+    },
+    UpdateSubmodule {
+        path: PathBuf,
+        expected_url: String,
+    },
+    AddWorktree {
+        path: PathBuf,
+        branch: String,
+    },
+    RemoveWorktree {
+        path: PathBuf,
+        head: String,
+    },
     /// `git fetch --all --prune`: remote-tracking branches only, the worktree is untouched.
     Fetch,
     /// `git pull` from the configured upstream; the user's `pull.rebase` / `pull.ff` apply.
@@ -63,6 +108,10 @@ pub enum WriteOperation {
     },
     /// Applies a generated partial patch for one changed file: to the index (`cached`, stage /
     /// unstage selected lines) or to the worktree (revert selected lines).
+    ApplyExternalPatch {
+        path: PathBuf,
+        patch: String,
+    },
     ApplyPatch {
         path: PathBuf,
         patch: String,
@@ -158,6 +207,12 @@ impl GitService {
 
     pub fn write(&self, request: &WriteRequest, cancel: &AtomicBool) -> io::Result<Reply> {
         self.write_with_timeout(request, cancel, Duration::from_secs(120))
+            .map(|mut reply| {
+                reply.output =
+                    redact_git_output(&String::from_utf8_lossy(&reply.output)).into_bytes();
+                reply
+            })
+            .map_err(|e| io::Error::new(e.kind(), redact_git_output(&e.to_string())))
     }
 
     fn write_with_timeout(
@@ -179,6 +234,28 @@ impl GitService {
         };
         if self.identify(&request.repo.worktree, cancel)? != request.repo {
             return Err(error("仓库身份已变化，请重新打开工作区"));
+        }
+        let removed_worktree =
+            if let WriteOperation::RemoveWorktree { path, .. } = &request.operation {
+                let target = self.identify(path, cancel)?;
+                if target.common_dir != request.repo.common_dir || target.id == request.repo.id {
+                    return Err(error("所选目录不是此仓库的另一个工作树"));
+                }
+                Some(target)
+            } else {
+                None
+            };
+        let target_lock = removed_worktree
+            .as_ref()
+            .map(|target| self.repo_lock(&target.id));
+        let _target_guard = target_lock
+            .as_ref()
+            .map(|lock| self.lock_repo(lock, cancel))
+            .transpose()?;
+        if let Some(target) = &removed_worktree
+            && self.identify(&target.worktree, cancel)? != *target
+        {
+            return Err(error("目标工作树身份已变化"));
         }
         let current = self.status_locked(&request.repo, request.generation, cancel)?;
         // Fetching and tags only touch refs named in the request, so a stale view of files
@@ -337,6 +414,55 @@ impl GitService {
                     input = Some(message.as_bytes());
                 }
             }
+            WriteOperation::ApplyExternalPatch { path, patch } => {
+                validate_relative_path(path)?;
+                if patch.is_empty()
+                    || patch.len() > OUTPUT_LIMIT
+                    || patch.contains('\0')
+                    || conflicted
+                {
+                    return Err(error("补丁为空、过大或仓库存在冲突"));
+                }
+                let stat = writer.run_write_with_input(
+                    &request.repo.worktree,
+                    &["apply".into(), "--numstat".into(), "-z".into(), "-".into()],
+                    cancel,
+                    false,
+                    Some(patch.as_bytes()),
+                )?;
+                let fields: Vec<_> = stat.split(|b| *b == 0).collect();
+                let [record, b""] = fields.as_slice() else {
+                    return Err(error("外部补丁必须恰好修改一个普通文本文件"));
+                };
+                let columns: Vec<_> = record.splitn(3, |b| *b == b'\t').collect();
+                use std::os::unix::ffi::OsStrExt;
+                if columns.len() != 3
+                    || columns[0] == b"-"
+                    || columns[1] == b"-"
+                    || columns[2] != path.as_os_str().as_bytes()
+                    || patch.lines().any(|line| {
+                        line.starts_with("rename ")
+                            || line.starts_with("copy ")
+                            || line.starts_with("old mode ")
+                            || line.starts_with("new mode ")
+                            || line.contains("mode 120000")
+                            || line.contains("mode 160000")
+                    })
+                {
+                    return Err(error(
+                        "补丁路径与已确认文件不一致，或包含不支持的重命名／类型修改",
+                    ));
+                }
+                writer.run_write_with_input(
+                    &request.repo.worktree,
+                    &["apply".into(), "--check".into(), "-".into()],
+                    cancel,
+                    false,
+                    Some(patch.as_bytes()),
+                )?;
+                args.extend(["apply".into(), "--whitespace=nowarn".into(), "-".into()]);
+                input = Some(patch.as_bytes());
+            }
             WriteOperation::ApplyPatch {
                 path,
                 patch,
@@ -363,6 +489,20 @@ impl GitService {
                 args.push("-".into());
                 input = Some(patch.as_bytes());
             }
+            WriteOperation::PublishBranch { .. }
+            | WriteOperation::AddRemote { .. }
+            | WriteOperation::SetRemoteUrl { .. }
+            | WriteOperation::RenameBranch { .. }
+            | WriteOperation::DeleteBranch { .. }
+            | WriteOperation::SetUpstream { .. }
+            | WriteOperation::ContinueOperation { .. }
+            | WriteOperation::AbortOperation { .. }
+            | WriteOperation::UpdateSubmodule { .. }
+            | WriteOperation::AddWorktree { .. }
+            | WriteOperation::RemoveWorktree { .. } => {
+                args =
+                    writer.management_args(&request.repo, &current, &request.operation, cancel)?;
+            }
             WriteOperation::Push => {
                 args.extend(self.push_args(&request.repo, &current, cancel)?);
             }
@@ -372,7 +512,7 @@ impl GitService {
             WriteOperation::Pull | WriteOperation::Sync => {
                 if current.upstream.is_none() {
                     return Err(error(
-                        "此分支尚未配置上游。请先在终端执行 git push -u，再刷新",
+                        "此分支尚未配置上游。请使用“发布分支”选择远程和目标分支，或在“管理分支与上游”设置已有上游",
                     ));
                 }
                 if conflicted {
@@ -556,7 +696,7 @@ impl GitService {
                     let remote = self.tag_remote(&request.repo, &current, cancel)?;
                     let delete = tag_push_args(&remote, format!(":refs/tags/{name}"));
                     writer
-                        .run_with_input(&request.repo.worktree, &delete, cancel, false, None)
+                        .run_write_with_input(&request.repo.worktree, &delete, cancel, false, None)
                         .map_err(|e| {
                             error(format!("无法从远程 {remote} 删除标签，本地标签未删除：{e}"))
                         })?;
@@ -576,12 +716,12 @@ impl GitService {
             ];
             remove.extend(intent.iter().map(|p| p.as_os_str().to_owned()));
             writer
-                .run_with_input(&request.repo.worktree, &remove, cancel, false, None)
+                .run_write_with_input(&request.repo.worktree, &remove, cancel, false, None)
                 .map_err(partial)?;
         }
         if let WriteOperation::Commit { all: true, .. } = &request.operation {
             writer
-                .run_with_input(
+                .run_write_with_input(
                     &request.repo.worktree,
                     &["add".into(), "-A".into()],
                     cancel,
@@ -591,8 +731,46 @@ impl GitService {
                 .map_err(partial)?;
         }
         let mut output = writer
-            .run_with_input(&request.repo.worktree, &args, cancel, false, input)
+            .run_write_with_input(&request.repo.worktree, &args, cancel, false, input)
             .map_err(partial)?;
+        if let WriteOperation::PublishBranch { remote, target, .. } = &request.operation {
+            let branch = current
+                .branch
+                .as_deref()
+                .ok_or_else(|| partial(error("分支已变化")))?;
+            for (key, expected) in [
+                (format!("branch.{branch}.remote"), remote.clone()),
+                (
+                    format!("branch.{branch}.merge"),
+                    format!("refs/heads/{target}"),
+                ),
+            ] {
+                let value = writer
+                    .run(
+                        &request.repo.worktree,
+                        &["config".into(), "--get".into(), key.into()],
+                        cancel,
+                    )
+                    .map_err(partial)?;
+                if String::from_utf8_lossy(&value).trim() != expected {
+                    return Err(partial(error("推送已执行，但上游配置与所选目标不一致")));
+                }
+            }
+            let upstream = writer
+                .run(
+                    &request.repo.worktree,
+                    &[
+                        "rev-parse".into(),
+                        "--symbolic-full-name".into(),
+                        "@{upstream}".into(),
+                    ],
+                    cancel,
+                )
+                .map_err(|e| partial(error(format!("已推送，但上游跟踪引用无法回读：{e}"))))?;
+            output.extend(
+                format!("\n上游配置已回读：{}", String::from_utf8_lossy(&upstream)).as_bytes(),
+            );
+        }
         if let WriteOperation::Commit { push: true, .. } | WriteOperation::Sync = &request.operation
         {
             let mut push: Vec<OsString> = vec!["--literal-pathspecs".into()];
@@ -603,14 +781,14 @@ impl GitService {
             };
             output.extend(
                 writer
-                    .run_with_input(&request.repo.worktree, &push, cancel, false, None)
+                    .run_write_with_input(&request.repo.worktree, &push, cancel, false, None)
                     .map_err(|e| error(format!("{done}，但推送失败：{e}")))?,
             );
         }
         if let Some(push) = tag_push {
             output.extend(
                 writer
-                    .run_with_input(&request.repo.worktree, &push, cancel, false, None)
+                    .run_write_with_input(&request.repo.worktree, &push, cancel, false, None)
                     .map_err(|e| error(format!("已创建标签，但推送失败：{e}")))?,
             );
         }
@@ -625,7 +803,7 @@ impl GitService {
             clean.extend(untracked.iter().map(|p| p.as_os_str().to_owned()));
             output.extend(
                 writer
-                    .run_with_input(&request.repo.worktree, &clean, cancel, false, None)
+                    .run_write_with_input(&request.repo.worktree, &clean, cancel, false, None)
                     .map_err(partial)?,
             );
         }
@@ -741,7 +919,7 @@ impl GitService {
     ) -> io::Result<Vec<OsString>> {
         if current.upstream.is_none() {
             return Err(error(
-                "此分支尚未配置上游。请先在终端执行 git push -u，再刷新",
+                "此分支尚未配置上游。请使用“发布分支”选择远程和目标分支，或在“管理分支与上游”设置已有上游",
             ));
         }
         // Resolve the exact configured upstream, rather than inheriting push.default,

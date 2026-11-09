@@ -76,6 +76,14 @@ and its debug-only screenshot configuration alongside ZJ's shared atlas and draw
   through slot changes, edits and folds. Explicit scroll/reveal takes priority. Inputs and
   textareas have no slots or additional timers. ZJ uses this for merge conflict actions.
 
+- `src/input/base/state.rs`: ZJ exposes all UTF-8 selection ranges with direction
+  (active first), retains extra cursors, and applies disjoint byte edits plus selections
+  as one undo/redo transaction. Invalid byte ranges, IME composition, masked inputs,
+  read-only inputs and inline tokens refuse the edit atomically. Application line commands
+  group overlapping/adjacent selected lines once; Cmd-D adds the next unselected occurrence.
+  No new dependency or timer. Regression tests are in `workbench/edit_commands_ui_tests.rs`
+  and `workbench/multi_edit.rs`.
+
 - `src/input/base/state.rs`: `insert_text_at_preserving_selections` adds settings
   fields as one undoable insertion while keeping every cursor, selection direction,
   and line-end affinity. It refuses incomplete IME input and insertion points that
@@ -113,6 +121,15 @@ and its debug-only screenshot configuration alongside ZJ's shared atlas and draw
   file's own tests now describe the steady cursor; vendor crates are not workspace members,
   so they do not run in CI). `crates/app`'s `idle_ui_tests` checks that an idle focused
   editor leaves no timer.
+- `src/resizable/{mod,panel}.rs`: a panel created with an explicit `.size()` is pinned. When
+  the container resizes, pinned panels keep that size and the flexible panels absorb the
+  change, instead of every panel scaling proportionally. ZJ's sidebar and terminal keep the
+  width / height the user chose; the editor takes the difference. The preference is the value
+  the caller passes on the latest render: a restored sidebar too wide for the window clamps
+  until there is room again, and a terminal first opened in a short window returns to its
+  normal height when the window grows. A drag replaces the preference. Regression:
+  `workbench/welcome_ui_tests.rs`, `workbench/terminal_ui_tests.rs` and
+  `workbench/restore_ui_tests.rs`.
 - `src/input/editor/lsp/definitions.rs`: a ⌘-click with no definition found for that spot
   yet asks the definition provider right away and follows the answer (as F12 does), instead of
   being ignored. Upstream only follows a definition a ⌘-hover has already fetched, so a click

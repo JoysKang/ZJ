@@ -3105,6 +3105,140 @@ impl<M: InputModeKind> InputBaseState<M> {
         (*self.selections.active()).into()
     }
 
+    // ZJ patch: document commands operate on every selection, with direction and atomic undo.
+    /// UTF-8 ranges and their direction, active selection first.
+    pub fn selected_ranges(&self) -> Vec<(Range<usize>, bool)> {
+        self.selections
+            .iter()
+            .map(|selection| ((*selection).into(), selection.reversed))
+            .collect()
+    }
+
+    /// Set all selections; the first remains active. Empty lists and IME composition are refused.
+    pub fn set_selected_ranges(
+        &mut self,
+        ranges: &[(Range<usize>, bool)],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if ranges.is_empty()
+            || self.ime_marked_range.is_some()
+            || ranges.iter().any(|(range, _)| range.start > range.end)
+        {
+            return false;
+        }
+        self.undo_manager.break_transaction_coalescing();
+        let before: Vec<CursorSelection> = self.selections.iter().copied().collect();
+        let selections: Vec<CursorSelection> = ranges
+            .iter()
+            .enumerate()
+            .map(|(i, (range, reversed))| {
+                let range = self.normalize_token_range(range.clone());
+                let start = self.text.clip_offset(range.start, Bias::Left);
+                let end = self.text.clip_offset(
+                    range.end,
+                    if range.is_empty() {
+                        Bias::Left
+                    } else {
+                        Bias::Right
+                    },
+                );
+                let id = before
+                    .get(i)
+                    .map(|selection| selection.id)
+                    .unwrap_or_else(|| self.selections.generate_id());
+                let mut selection = CursorSelection::new(id, start, end);
+                selection.reversed = *reversed;
+                selection
+            })
+            .collect();
+        let order: Vec<_> = selections.iter().map(|selection| selection.id).collect();
+        let mut selections = selections;
+        selections.sort_by_key(|selection| (selection.start, selection.end));
+        let mut merged: Vec<CursorSelection> = Vec::new();
+        for selection in selections {
+            if let Some(existing) = merged.last_mut().filter(|existing| {
+                (existing.start == selection.start && existing.end == selection.end)
+                    || (existing.start < selection.end && selection.start < existing.end)
+            }) {
+                existing.end = existing.end.max(selection.end);
+                if selection.id == order[0] {
+                    existing.id = selection.id;
+                    existing.reversed = selection.reversed;
+                }
+            } else {
+                merged.push(selection);
+            }
+        }
+        merged.sort_by_key(|selection| order.iter().position(|id| *id == selection.id));
+        self.selections.replace_all(merged);
+        self.selected_word_range = None;
+        self.cursor_line_end_affinity = false;
+        self.update_preferred_column();
+        self.scroll_to(self.cursor(), None, cx);
+        M::hide_context_menu(self, cx);
+        M::clear_inline_completion(self, cx);
+        cx.notify();
+        true
+    }
+
+    /// Apply disjoint byte edits and explicit resulting selections as one undo/redo step.
+    /// Invalid ranges, inline tokens and unconfirmed input leave text and selections untouched.
+    pub fn replace_ranges_with_selections(
+        &mut self,
+        edits: &[(Range<usize>, String)],
+        selections: &[(Range<usize>, bool)],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.is_editable()
+            || edits.is_empty()
+            || selections.is_empty()
+            || self.ime_marked_range.is_some()
+            || !self.mask_pattern.is_none()
+            || !self.token_spans().is_empty()
+        {
+            return false;
+        }
+        let mut ranges: Vec<_> = edits.iter().map(|(range, _)| range.clone()).collect();
+        ranges.sort_by_key(|range| (range.start, range.end));
+        if ranges.iter().any(|range| {
+            range.start > range.end
+                || range.end > self.text.len()
+                || !self.text.is_char_boundary(range.start)
+                || !self.text.is_char_boundary(range.end)
+        }) || ranges
+            .windows(2)
+            .any(|pair| pair[0].end > pair[1].start || pair[0] == pair[1])
+        {
+            return false;
+        }
+        // Validate the final byte positions before beginning the transaction.
+        let mut result = self.text.to_string();
+        let mut sorted: Vec<_> = edits.iter().collect();
+        sorted.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+        for (range, text) in sorted {
+            result.replace_range(range.clone(), text);
+        }
+        if selections.iter().any(|(range, _)| {
+            range.start > range.end
+                || range.end > result.len()
+                || !result.is_char_boundary(range.start)
+                || !result.is_char_boundary(range.end)
+        }) {
+            return false;
+        }
+        let before: Vec<CursorSelection> = self.selections.iter().copied().collect();
+        self.undo_manager.begin_transaction();
+        self.undo_manager
+            .record_selections(before.clone(), before.clone());
+        self.replace_text_in_ranges(edits, window, cx);
+        self.set_selected_ranges(selections, cx);
+        let after = self.selections.iter().copied().collect();
+        self.undo_manager.record_selections(before, after);
+        self.undo_manager.commit_transaction();
+        true
+    }
+
     pub fn select_all(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.undo_manager.break_transaction_coalescing();
         self.selections.remove_all_but_active();

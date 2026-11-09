@@ -267,10 +267,11 @@ impl Workbench {
                 }
                 this.show_diff_tab(
                     DiffTab {
+                        checkpoint: None,
                         label: format!("{name}（当前 ↔ 传入）"),
                         tooltip: format!("{} · 当前更改 ↔ 传入的更改", path.display()),
                         path,
-                        source: DiffSource::Local(patch.into()),
+                        source: DiffSource::Local(patch.into(), "当前更改 → 传入的更改"),
                     },
                     window,
                     cx,

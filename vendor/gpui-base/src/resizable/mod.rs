@@ -202,6 +202,8 @@ impl ResizableState {
         panel_ix: usize,
         bounds: Bounds<Pixels>,
         size_range: Range<Pixels>,
+        pinned: bool,
+        preferred: Option<Pixels>,
         cx: &mut Context<Self>,
     ) {
         let size = bounds.size.along(self.axis);
@@ -212,8 +214,24 @@ impl ResizableState {
             self.sizes[panel_ix] = size;
             self.panels[panel_ix].size = Some(size);
         }
+        // ZJ patch: remember whether the caller gave this panel an explicit size, and what
+        // that preference is on this render. A window resize keeps it and gives the remaining
+        // space to the flexible panels; a preference that no longer fits (or fits again)
+        // redistributes right away instead of waiting for the next resize. The caller
+        // re-passes the same value every frame, so only a *changed* value replaces the live
+        // preference; a user drag sets that preference itself, and must survive the caller
+        // repeating its old default.
+        let preference_changed = self.panels[panel_ix].caller_preference != preferred;
+        self.panels[panel_ix].pinned = pinned;
+        self.panels[panel_ix].caller_preference = preferred;
+        if preference_changed {
+            self.panels[panel_ix].preferred = preferred;
+        }
         self.panels[panel_ix].bounds = bounds;
         self.panels[panel_ix].size_range = size_range;
+        if preference_changed {
+            self.adjust_to_container_size(cx);
+        }
         cx.notify();
     }
 
@@ -342,6 +360,11 @@ impl ResizableState {
         for (i, _) in old_sizes.iter().enumerate() {
             let size = new_sizes[i];
             self.panels[i].size = Some(size);
+            // ZJ patch: a drag becomes the pinned panel's live preference, so a later
+            // window resize keeps the size the user just chose.
+            if self.panels[i].pinned {
+                self.panels[i].preferred = Some(size);
+            }
         }
         self.sizes = new_sizes;
         cx.notify();
@@ -367,6 +390,49 @@ impl ResizableState {
         }
 
         let container_size = self.container_size();
+        // ZJ patch: a panel with an explicit `.size()` keeps that preference when the
+        // container changes; the flexible panels absorb the difference. This keeps the
+        // sidebar and terminal at the size the user chose instead of rescaling every panel
+        // proportionally (the editor is the flexible one in both of ZJ's groups).
+        let pinned: Vec<usize> = (0..self.panels.len())
+            .filter(|&i| self.panels[i].pinned)
+            .collect();
+        let flexible: Vec<usize> = (0..self.panels.len())
+            .filter(|&i| !self.panels[i].pinned)
+            .collect();
+        if !pinned.is_empty() && !flexible.is_empty() {
+            // ZJ patch: a pinned panel follows the preference the caller passed on this
+            // render (already clamped to the current window), not the last measured size.
+            // Otherwise the first frame that had to clamp would stay clamped forever.
+            let mut pinned_total = 0.;
+            for &i in &pinned {
+                let range = self.panels[i].size_range.clone();
+                let size = self.panels[i]
+                    .preferred
+                    .unwrap_or(self.sizes[i])
+                    .clamp(range.start, range.end);
+                self.sizes[i] = size;
+                self.panels[i].size = Some(size);
+                pinned_total += size.as_f32();
+            }
+            let remaining = px((container_size.as_f32() - pinned_total).max(0.));
+            let flexible_total = flexible
+                .iter()
+                .map(|&i| self.sizes[i].as_f32())
+                .sum::<f32>();
+            for &i in &flexible {
+                let size = if flexible_total > 0. {
+                    remaining * (self.sizes[i].as_f32() / flexible_total)
+                } else {
+                    px(remaining.as_f32() / flexible.len() as f32)
+                };
+                self.sizes[i] = size;
+                self.panels[i].size = Some(size);
+            }
+            cx.notify();
+            return;
+        }
+
         let total = self.sizes.iter().map(|s| s.as_f32()).sum::<f32>();
         if !total.is_finite() || total <= 0. {
             return;
@@ -391,6 +457,16 @@ impl EventEmitter<ResizablePanelEvent> for ResizableState {}
 pub(crate) struct ResizablePanelState {
     pub size: Option<Pixels>,
     pub size_range: Range<Pixels>,
+    /// ZJ patch: the caller supplied an explicit `.size()`. A container resize keeps it and
+    /// gives the remaining space to the flexible panels.
+    pub pinned: bool,
+    /// ZJ patch: the live preferred size. It depends on the window (a saved sidebar width, a
+    /// terminal height capped by the editor minimum), so the state cannot treat the first
+    /// measurement as the preference. A drag replaces it.
+    pub preferred: Option<Pixels>,
+    /// ZJ patch: the value the caller passed on the latest render, so a repeated default
+    /// does not overwrite a preference set by a drag.
+    caller_preference: Option<Pixels>,
     bounds: Bounds<Pixels>,
 }
 

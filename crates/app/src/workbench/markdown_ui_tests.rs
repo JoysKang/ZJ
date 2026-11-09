@@ -301,6 +301,46 @@ async fn local_images_resolve_remote_ones_do_not_and_relative_links_open_here(
 }
 
 #[gpui_kit::test]
+async fn relative_markdown_links_follow_a_document_outside_the_workspace(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-markdown-outside-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("workspace")).unwrap();
+    std::fs::create_dir_all(root.join("notes")).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::write(root.join("notes/guide.md"), "[other](other.md)").unwrap();
+    std::fs::write(root.join("notes/other.md"), "# other").unwrap();
+    let (handle, this) = open(cx, root.join("workspace"));
+    window_do(cx, handle, |window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(root.join("notes/guide.md"), None, window, cx)
+        });
+    });
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    window_do(cx, handle, |window, cx| {
+        this.update(cx, |p, cx| {
+            p.markdown_link(p.documents[0].id, "other.md", window, cx)
+        });
+    });
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            p.documents.len() == 2 || p.message.contains("失败")
+        })
+    });
+    this.read_with(cx, |p, _| {
+        assert_eq!(
+            p.documents.len(),
+            2,
+            "relative link was rejected: {}",
+            p.message
+        );
+        assert_eq!(p.active_document().unwrap().0, root.join("notes/other.md"));
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui_kit::test]
 async fn a_block_is_not_edited_from_a_split_of_older_text(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = std::env::temp_dir().join(format!("zj-markdown-stale-{}", std::process::id()));

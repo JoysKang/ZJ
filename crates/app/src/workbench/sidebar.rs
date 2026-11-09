@@ -103,10 +103,9 @@ impl Workbench {
         let caption = match view {
             Sidebar::Explorer => "文件",
             Sidebar::Search => "搜索",
-            Sidebar::SourceControl => "源码",
+            Sidebar::SourceControl => "变更",
         };
-        div()
-            .id(label)
+        gpui_kit::base::Button::new(label)
             .relative()
             .h(theme::ACTIVITY_ITEM)
             .min_w_0()
@@ -117,11 +116,13 @@ impl Workbench {
             .items_center()
             .justify_center()
             .rounded(theme::RADIUS)
-            .cursor_pointer()
+            .cursor_default()
             .role(Role::Tab)
-            .aria_label(label)
+            .accessibility_label(caption)
             .aria_selected(active)
-            .test_support()
+            .border_1()
+            .border_color(colors.panel)
+            .focus_visible(|item| item.border_color(colors.accent))
             .when(active, |item| item.bg(colors.input_bg))
             .hover(|item| {
                 item.bg(if active {
@@ -146,7 +147,7 @@ impl Workbench {
                     } else {
                         colors.muted
                     })
-                    .when(active, |caption| caption.font_weight(FontWeight::SEMIBOLD))
+                    .when(active, |caption| caption.font_weight(FontWeight::MEDIUM))
                     .child(caption),
             )
             .when(badge > 0, |item| {
@@ -167,11 +168,8 @@ impl Workbench {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded_full()
-                        .bg(colors.badge)
-                        .text_color(colors.badge_fg)
-                        .text_size(theme::TEXT_BADGE)
-                        .font_weight(FontWeight::BOLD)
+                        .text_color(colors.muted)
+                        .text_size(theme::TEXT_SECTION)
                         .child(text),
                 )
             })
@@ -183,6 +181,7 @@ impl Workbench {
                 if view == Sidebar::Search {
                     this.open_search(window, cx);
                 }
+                this.remember_layout(true, cx);
                 cx.notify();
             }))
     }
@@ -201,9 +200,6 @@ impl Workbench {
             .size_full()
             .min_h_0()
             .bg(colors.panel)
-            .border_1()
-            .border_color(colors.border)
-            .rounded(theme::WORKBENCH_RADIUS)
             .overflow_hidden()
             .child(
                 h_flex()
@@ -216,8 +212,6 @@ impl Workbench {
                             .w_full()
                             .p_1()
                             .gap_1()
-                            .rounded(theme::RADIUS_LARGE)
-                            .bg(colors.tabs)
                             .child(self.activity_item(
                                 Sidebar::Explorer,
                                 IconName::Files,
@@ -226,17 +220,17 @@ impl Workbench {
                                 cx,
                             ))
                             .child(self.activity_item(
-                                Sidebar::Search,
-                                IconName::Search,
-                                "搜索",
-                                0,
-                                cx,
-                            ))
-                            .child(self.activity_item(
                                 Sidebar::SourceControl,
                                 IconName::GitBranch,
                                 "源代码管理",
                                 changes,
+                                cx,
+                            ))
+                            .child(self.activity_item(
+                                Sidebar::Search,
+                                IconName::Search,
+                                "搜索",
+                                0,
                                 cx,
                             )),
                     ),
@@ -263,6 +257,7 @@ impl Workbench {
                                         .ghost()
                                         .icon(IconName::RefreshCw)
                                         .tooltip("刷新")
+                                        .accessibility_label("刷新仓库状态")
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.request_remote_check(true, window, cx)
                                         })),
@@ -337,6 +332,7 @@ impl Workbench {
                             .ghost()
                             .icon(IconName::FilePlus)
                             .tooltip("新建文件…")
+                            .accessibility_label("新建文件")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 cx.stop_propagation();
                                 window.dispatch_action(Box::new(super::NewFile), cx);
@@ -349,6 +345,7 @@ impl Workbench {
                             .ghost()
                             .icon(IconName::FolderPlus)
                             .tooltip("新建文件夹…")
+                            .accessibility_label("新建文件夹")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 cx.stop_propagation();
                                 window.dispatch_action(Box::new(super::NewFolder), cx);
@@ -361,6 +358,7 @@ impl Workbench {
                             .ghost()
                             .icon(IconName::RefreshCw)
                             .tooltip("刷新资源管理器")
+                            .accessibility_label("刷新资源管理器")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.refresh_tree(window, cx)
@@ -372,6 +370,7 @@ impl Workbench {
                             .ghost()
                             .icon(IconName::ChevronsDownUp)
                             .tooltip("全部折叠")
+                            .accessibility_label("全部折叠文件夹")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.collapse_tree(window, cx)
@@ -402,7 +401,10 @@ impl Workbench {
         let root_menu = move |menu: PopupMenu, _: &mut Window, cx: &mut Context<PopupMenu>| {
             let can_paste = file_clipboard(cx).is_some();
             match weak.upgrade() {
-                Some(this) => this.read(cx).explorer_menu(&root_path, can_paste, menu),
+                Some(this) => {
+                    this.read(cx)
+                        .explorer_menu(&root_path, can_paste, menu, this.clone())
+                }
                 None => menu,
             }
         };
@@ -508,6 +510,7 @@ impl Workbench {
             .ghost()
             .icon(IconName::Ellipsis)
             .tooltip("更多操作")
+            .accessibility_label("资源管理器更多操作")
             .dropdown_menu(move |menu, _, _| {
                 super::menu_style::compact_menu(menu)
                     .action_context(focus.clone())
@@ -772,7 +775,13 @@ impl Workbench {
                         // One click previews and keeps the tree focused (arrow keys, ⌘C, F2);
                         // a double click moves into the editor, as in VS Code.
                         this.explorer.focus_on_open = event.click_count() < 2;
-                        this.open_file(path.clone(), this.root.clone(), window, cx);
+                        this.open_preview_file(
+                            path.clone(),
+                            this.root.clone(),
+                            event.click_count() >= 2,
+                            window,
+                            cx,
+                        );
                     }
                 })
             });
@@ -827,7 +836,9 @@ impl Workbench {
         let row = row.context_menu(move |menu, _, cx| {
             let can_paste = file_clipboard(cx).is_some();
             match weak.upgrade() {
-                Some(this) => this.read(cx).explorer_menu(&path, can_paste, menu),
+                Some(this) => this
+                    .read(cx)
+                    .explorer_menu(&path, can_paste, menu, this.clone()),
                 None => menu,
             }
         });

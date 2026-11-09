@@ -152,6 +152,7 @@ impl Workbench {
                             .iter()
                             .filter(|doc| !doc.untitled)
                             .map(|doc| doc.path.clone())
+                            .chain(this.images.iter().map(|image| image.path.clone()))
                             .collect::<BTreeSet<_>>(),
                     )
                 }) else {

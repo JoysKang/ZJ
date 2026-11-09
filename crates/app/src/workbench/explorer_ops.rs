@@ -138,6 +138,8 @@ fn follow_moved_views(
                 .is_some_and(|large| large.path.starts_with(old))
                 || this.pending_tabs.iter().any(|path| path.starts_with(old))
                 || this.documents.iter().any(|doc| doc.path.starts_with(old))
+                || this.images.iter().any(|image| image.path.starts_with(old))
+                || this.recent_files.contains_under(old)
         };
         if affected {
             views
@@ -442,7 +444,13 @@ impl Workbench {
     }
 
     /// The right-click menu for a row, or the workspace root for the header and blank space.
-    pub(super) fn explorer_menu(&self, path: &Path, can_paste: bool, menu: PopupMenu) -> PopupMenu {
+    pub(super) fn explorer_menu(
+        &self,
+        path: &Path,
+        can_paste: bool,
+        menu: PopupMenu,
+        view: Entity<Self>,
+    ) -> PopupMenu {
         let root = self.root.as_deref() == Some(path);
         let folder = root
             || self
@@ -463,41 +471,47 @@ impl Workbench {
         } else {
             menu
         };
-        menu.item(
-            PopupMenuItem::new("剪切")
-                .disabled(root)
-                .action(Box::new(CutFiles)),
-        )
-        .item(
-            PopupMenuItem::new("复制")
-                .disabled(root)
-                .action(Box::new(CopyFiles)),
-        )
-        .item(
-            PopupMenuItem::new("粘贴")
-                .disabled(!can_paste)
-                .action(Box::new(PasteFiles)),
-        )
-        .separator()
-        .item(PopupMenuItem::new("复制路径").action(Box::new(CopyPath)))
-        .item(PopupMenuItem::new("复制相对路径").action(Box::new(CopyRelativePath)))
-        .separator()
-        .item(
-            PopupMenuItem::new("重命名…")
-                .disabled(root || self.explorer.selected.len() != 1)
-                .action(Box::new(Rename)),
-        )
-        .item(
-            PopupMenuItem::new("删除")
-                .disabled(root)
-                .action(Box::new(Delete)),
-        )
-        .separator()
-        .item(
-            PopupMenuItem::new("显示隐藏文件")
-                .checked(self.explorer.show_hidden)
-                .action(Box::new(super::ToggleHiddenFiles)),
-        )
+        let menu = menu
+            .item(
+                PopupMenuItem::new("剪切")
+                    .disabled(root)
+                    .action(Box::new(CutFiles)),
+            )
+            .item(
+                PopupMenuItem::new("复制")
+                    .disabled(root)
+                    .action(Box::new(CopyFiles)),
+            )
+            .item(
+                PopupMenuItem::new("粘贴")
+                    .disabled(!can_paste)
+                    .action(Box::new(PasteFiles)),
+            )
+            .separator()
+            .item(PopupMenuItem::new("复制路径").action(Box::new(CopyPath)))
+            .item(PopupMenuItem::new("复制相对路径").action(Box::new(CopyRelativePath)))
+            .separator()
+            .item(
+                PopupMenuItem::new("重命名…")
+                    .disabled(root || self.explorer.selected.len() != 1)
+                    .action(Box::new(Rename)),
+            )
+            .item(
+                PopupMenuItem::new("删除")
+                    .disabled(root)
+                    .action(Box::new(Delete)),
+            )
+            .separator()
+            .item(
+                PopupMenuItem::new("显示隐藏文件")
+                    .checked(self.explorer.show_hidden)
+                    .action(Box::new(super::ToggleHiddenFiles)),
+            );
+        if folder {
+            menu
+        } else {
+            self.reading_file_menu(path.to_path_buf(), menu, view)
+        }
     }
 
     /// Starts an inline name edit: renaming the selection, or a new entry in the target folder.
@@ -584,11 +598,21 @@ impl Workbench {
                 }
             },
         );
+        let row = self.explorer.rows.iter().position(|row| match &kind {
+            EditKind::Rename(path) => row.entry.path == *path && !row.pending,
+            EditKind::NewFile(_) | EditKind::NewFolder(_) => row.pending,
+        });
         self.explorer.edit = Some(TreeEdit {
             kind,
             input,
             _subscription: subscription,
         });
+        self.explorer.collapsed = false;
+        if let Some(row) = row {
+            self.explorer
+                .scroll
+                .scroll_to_item(row, ScrollStrategy::Nearest);
+        }
         cx.notify();
     }
 
@@ -684,6 +708,8 @@ impl Workbench {
     }
 
     fn follow_document_move(&mut self, old: &Path, new: &Path, cx: &mut Context<Self>) {
+        self.recent_files.move_paths(old, new);
+        self.image_follow_move(old, new);
         let mut changed = Vec::new();
         for document in &mut self.documents {
             if let Some(path) = moved_path(&document.path, old, new) {

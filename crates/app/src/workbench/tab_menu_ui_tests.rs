@@ -54,6 +54,10 @@ fn menu_click(
 ) {
     cx.update_window(window.into(), |_, window, cx| {
         window.render_frame(cx);
+        window.render_frame(cx);
+        window.render_frame(cx);
+        this.read(cx).tabs.scroll.scroll_to_item(tab);
+        window.render_frame(cx);
         window.right_click(("tab-label", tab), cx);
     })
     .unwrap();
@@ -75,6 +79,57 @@ const CLOSE_ALL: usize = 2;
 const COPY_PATH: usize = 4;
 const COPY_RELATIVE_PATH: usize = 5;
 const REVEAL_IN_EXPLORER: usize = 8;
+
+#[gpui_kit::test]
+async fn keyboard_closing_a_background_tab_returns_focus_to_visible_content(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let root = fixture("keyboard-close-focus");
+    let (handle, this) = open(cx, root.clone());
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(root.join("a.txt"), Some(root.clone()), window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    this.update(cx, |p, cx| {
+        p.pending_tabs.push(root.join("b.txt"));
+        cx.notify();
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("资源管理器", cx);
+        for _ in 0..50 {
+            window.press("tab", cx);
+            window.render_frame(cx);
+            if window.find(("tab-close", usize::MAX / 2)).focused() == Some(true) {
+                break;
+            }
+        }
+        assert_eq!(
+            window.find(("tab-close", usize::MAX / 2)).focused(),
+            Some(true)
+        );
+        window.press("space", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.read_with(cx, |p, cx| {
+            assert!(p.pending_tabs.is_empty());
+            assert!(
+                p.documents[0].editor.focus_handle(cx).is_focused(window),
+                "keyboard close must restore the visible editor focus"
+            );
+        });
+    })
+    .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
 
 #[gpui_kit::test]
 async fn unloaded_tabs_can_be_reopened_after_single_and_batch_close(cx: &mut TestAppContext) {
@@ -311,7 +366,7 @@ async fn batch_close_preserves_readonly_and_restored_tabs_on_cancel(cx: &mut Tes
 }
 
 #[gpui_kit::test]
-async fn narrow_tabs_wrap_and_keep_their_close_behavior_in_both_themes(cx: &mut TestAppContext) {
+async fn narrow_tabs_scroll_and_keep_their_close_behavior_in_both_themes(cx: &mut TestAppContext) {
     use super::test_support::{install_globals, loaded, new_window};
     use gpui_kit::component::{Theme, ThemeMode};
 
@@ -362,10 +417,18 @@ async fn narrow_tabs_wrap_and_keep_their_close_behavior_in_both_themes(cx: &mut 
             Theme::change(mode, Some(window), cx);
             window.render_frame(cx);
             window.render_frame(cx);
+            window.render_frame(cx);
             let strip = window.find("tab-strip").bounds();
-            let first = window.find(("tab", 0usize)).bounds();
-            assert!(strip.size.height > px(36.), "tabs did not wrap");
-            let mut wrapped = false;
+            assert_eq!(strip.size.height, theme::TAB_HEIGHT);
+            assert_eq!(
+                window.find("editor-tabs").bounds().size.height,
+                theme::TAB_HEIGHT
+            );
+            let active_tab = window.find(("tab", count - 1)).bounds();
+            assert!(
+                active_tab.left() >= strip.left() && active_tab.right() <= strip.right(),
+                "active tab is outside the scroll viewport: {active_tab:?}, {strip:?}"
+            );
             for index in 0..count {
                 let tab = window.find(("tab", index)).bounds();
                 let close = window.find(("tab-close", index)).bounds();
@@ -373,18 +436,15 @@ async fn narrow_tabs_wrap_and_keep_their_close_behavior_in_both_themes(cx: &mut 
                 assert_eq!(tab.size.height, px(36.));
                 assert_eq!(close.size, size(px(20.), px(20.)));
                 assert!(
-                    tab.left() >= strip.left()
-                        && tab.right() <= strip.right()
-                        && tab.top() >= strip.top()
-                        && tab.bottom() <= strip.bottom(),
-                    "tab {index} overflows its strip: {tab:?}, {strip:?}"
+                    tab.top() == strip.top()
+                        && tab.bottom() == strip.bottom()
+                        && tab.size.width <= theme::FILE_TAB_MAX_WIDTH,
+                    "tab {index} wraps or exceeds its width: {tab:?}, {strip:?}"
                 );
                 assert!(close.left() >= tab.left() && close.right() <= tab.right());
                 assert!(close.top() >= tab.top() && close.bottom() <= tab.bottom());
                 assert!(label.right() <= close.left(), "label covers close slot");
-                wrapped |= tab.top() > first.top();
             }
-            assert!(wrapped);
             let active_bounds = window
                 .find(("tab", count - 1))
                 .bounds()
@@ -403,8 +463,70 @@ async fn narrow_tabs_wrap_and_keep_their_close_behavior_in_both_themes(cx: &mut 
         .unwrap();
     }
 
+    for index in [0, count - 1] {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.click("open-tabs", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.within("popup-menu").click(index, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        this.read_with(cx, |p, _| {
+            assert_eq!(p.active, Pane::Document(p.documents[index].id))
+        });
+    }
+    for width in [760., 360., 480.] {
+        cx.simulate_window_resize(window.into(), size(px(width), px(640.)));
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert_eq!(window.viewport_size().width, px(width));
+            let strip = window.find("tab-strip").bounds();
+            let tab = window.find(("tab", count - 1)).bounds();
+            assert_eq!(strip.size.height, theme::TAB_HEIGHT);
+            assert!(tab.left() >= strip.left() && tab.right() <= strip.right());
+            let menu = window.find("open-tabs").bounds();
+            assert!(menu.left() >= strip.right() && menu.right() <= px(width));
+            // Scrolling back to an inactive file must survive ordinary redraws.
+            this.read(cx).tabs.scroll.scroll_to_item(0);
+            window.render_frame(cx);
+            window.render_frame(cx);
+            assert!(window.find(("tab", 0usize)).bounds().left() >= strip.left());
+        })
+        .unwrap();
+    }
+
+    // Choosing the already active file must reveal it again after manual scrolling.
+    cx.update_window(window.into(), |_, window, cx| window.click("open-tabs", cx))
+        .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.within("popup-menu").click(count - 1, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.render_frame(cx);
+        window.render_frame(cx);
+        let strip = window.find("tab-strip").bounds();
+        let tab = window.find(("tab", count - 1)).bounds();
+        assert!(tab.left() >= strip.left() && tab.right() <= strip.right());
+    })
+    .unwrap();
+
     let click_close = |cx: &mut TestAppContext, index| {
         cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+            window.render_frame(cx);
+            this.read(cx).tabs.scroll.scroll_to_item(index);
             window.render_frame(cx);
             window.click(("tab-close", index), cx);
         })
@@ -443,6 +565,62 @@ async fn narrow_tabs_wrap_and_keep_their_close_behavior_in_both_themes(cx: &mut 
         assert_eq!(p.active, Pane::Document(p.documents[0].id));
     });
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[gpui_kit::test]
+async fn open_files_menu_distinguishes_source_from_its_diff(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = fixture("diff-menu-identity");
+    let (handle, this) = open(cx, root.clone());
+    open_files(cx, handle, &this, &root);
+    this.update(cx, |p, cx| {
+        p.diff.tab = Some(DiffTab {
+            checkpoint: None,
+            label: "a.txt (工作树)".into(),
+            tooltip: root.join("a.txt").display().to_string(),
+            path: root.join("a.txt"),
+            source: DiffSource::Local(Arc::from(""), "暂存区 → 工作区"),
+        });
+        cx.notify();
+    });
+    for target in [3, 0] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("open-tabs", cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            let source = window.within("popup-menu").find(0usize);
+            let diff = window.within("popup-menu").find(3usize);
+            assert_eq!(source.label(), Some("a.txt"));
+            assert_ne!(
+                source.label(),
+                diff.label(),
+                "source and Diff have the same menu label"
+            );
+            let label = diff.label().unwrap();
+            assert!(
+                label.contains("Diff") && label.contains("工作树"),
+                "Diff comparison is missing: {label}"
+            );
+            window.within("popup-menu").click(target, cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        this.read_with(cx, |p, _| {
+            assert_eq!(
+                p.active,
+                if target == 3 {
+                    Pane::Diff
+                } else {
+                    Pane::Document(p.documents[0].id)
+                }
+            );
+        });
+    }
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[gpui_kit::test]

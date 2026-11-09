@@ -9,6 +9,8 @@ pub struct Branch {
     /// The checked-out branch.
     pub head: bool,
     pub short: String,
+    /// Full tip identity, captured for safe branch management.
+    pub oid: String,
     /// `origin/main` for a local branch with an upstream.
     pub upstream: Option<String>,
     /// Committer time of the tip, Unix seconds.
@@ -18,7 +20,7 @@ pub struct Branch {
 
 /// `--format` of [`parse_branches`]: seven NUL-terminated fields per ref.
 pub(crate) const BRANCH_FORMAT: &str = "--format=%(refname)%00%(HEAD)%00%(symref)%00\
-    %(objectname:short)%00%(upstream:short)%00%(committerdate:unix)%00%(contents:subject)%00";
+    %(objectname)%00%(upstream:short)%00%(committerdate:unix)%00%(contents:subject)%00";
 
 /// for-each-ref ends every record with a newline after the last NUL. Symbolic refs
 /// (`origin/HEAD`) are left out.
@@ -47,7 +49,8 @@ pub fn parse_branches(bytes: &[u8]) -> io::Result<Vec<Branch>> {
             name: text(name),
             remote,
             head: *head == b"*",
-            short: text(short),
+            short: text(short).chars().take(7).collect(),
+            oid: text(short),
             upstream: (!upstream.is_empty()).then(|| text(upstream)),
             time: std::str::from_utf8(time)
                 .ok()

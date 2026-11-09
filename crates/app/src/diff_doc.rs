@@ -93,6 +93,144 @@ pub struct DiffDoc {
     pub removed: usize,
 }
 
+/// Reading options never modify the patch document or its source line numbers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Whitespace {
+    #[default]
+    Exact,
+    Trailing,
+    All,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayRow {
+    pub source: usize,
+    /// Exclusive source end for a collapsed region; None for an ordinary row.
+    pub folded: Option<usize>,
+    pub quiet: bool,
+}
+
+impl DiffDoc {
+    /// Builds a virtual reading layout while retaining indexes into the original document.
+    pub fn display_rows(
+        &self,
+        inline: bool,
+        whitespace: Whitespace,
+        collapse: bool,
+    ) -> Vec<DisplayRow> {
+        let equivalent = |old: u32, new: u32| {
+            let old = self.old.line_text(old as usize);
+            let new = self.new.line_text(new as usize);
+            match whitespace {
+                Whitespace::Exact => false,
+                Whitespace::Trailing => old.trim_end() == new.trim_end(),
+                Whitespace::All => old
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .eq(new.chars().filter(|c| !c.is_whitespace())),
+            }
+        };
+        let quiet_pairs: Vec<bool> = self
+            .rows
+            .iter()
+            .map(|r| {
+                r.kind == RowKind::Changed
+                    && r.old.zip(r.new).is_some_and(|(o, n)| equivalent(o, n))
+            })
+            .collect();
+        let mut quiet_old = std::collections::HashSet::new();
+        let mut quiet_new = std::collections::HashSet::new();
+        for (row, quiet) in self.rows.iter().zip(&quiet_pairs) {
+            if *quiet {
+                quiet_old.extend(row.old);
+                quiet_new.extend(row.new);
+            }
+        }
+        let ordinary: Vec<DisplayRow> = if inline {
+            self.inline
+                .iter()
+                .enumerate()
+                .filter_map(|(source, r)| {
+                    // In inline mode one copy of an ignored replacement suffices for reading.
+                    if r.kind == LineKind::Removed && quiet_old.contains(&r.line) {
+                        return None;
+                    }
+                    Some(DisplayRow {
+                        source,
+                        folded: None,
+                        quiet: r.kind == LineKind::Added && quiet_new.contains(&r.line),
+                    })
+                })
+                .collect()
+        } else {
+            quiet_pairs
+                .iter()
+                .enumerate()
+                .map(|(source, quiet)| DisplayRow {
+                    source,
+                    folded: None,
+                    quiet: *quiet,
+                })
+                .collect()
+        };
+        if !collapse {
+            return ordinary;
+        }
+        let unchanged = |row: &DisplayRow| {
+            row.quiet
+                || if inline {
+                    self.inline[row.source].kind == LineKind::Same
+                } else {
+                    self.rows[row.source].kind == RowKind::Same
+                }
+        };
+        let mut result = Vec::new();
+        let mut start = 0;
+        while start < ordinary.len() {
+            if !unchanged(&ordinary[start]) {
+                result.push(ordinary[start]);
+                start += 1;
+                continue;
+            }
+            let end = (start..ordinary.len())
+                .find(|&i| !unchanged(&ordinary[i]))
+                .unwrap_or(ordinary.len());
+            if end - start > 8 {
+                result.extend_from_slice(&ordinary[start..start + 3]);
+                result.push(DisplayRow {
+                    source: ordinary[start + 3].source,
+                    folded: Some(ordinary[end - 3].source),
+                    quiet: false,
+                });
+                result.extend_from_slice(&ordinary[end - 3..end]);
+            } else {
+                result.extend_from_slice(&ordinary[start..end]);
+            }
+            start = end;
+        }
+        result
+    }
+
+    /// Literal UTF-8 search, shared by both layouts; a result retains side and line identity.
+    pub fn find_lines(&self, query: &str, limit: usize) -> Vec<(bool, u32, Range<usize>)> {
+        if query.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let mut matches = Vec::new();
+        for (modified, side) in [(false, &self.old), (true, &self.new)] {
+            for (line, _) in side.lines.iter().enumerate() {
+                for (start, _) in side.line_text(line).match_indices(query) {
+                    matches.push((modified, line as u32, start..start + query.len()));
+                    if matches.len() == limit {
+                        return matches;
+                    }
+                }
+            }
+        }
+        matches
+    }
+}
+
 /// Colors for the changed-text overlay (VS Code `diffEditor.*TextBackground`).
 #[derive(Clone, Copy)]
 pub struct ChangeColors {
@@ -818,6 +956,57 @@ mod tests {
             .map(|(range, _)| &doc.new.line_text(1)[range.clone()])
             .collect();
         assert_eq!(changed, [", {} total", ", total"]);
+    }
+
+    #[test]
+    fn reading_options_keep_original_line_identity_and_search_both_sides() {
+        let old = format!(
+            "{}value = 1;  \nreal_old();\n{}",
+            "context\n".repeat(20),
+            "tail\n".repeat(20)
+        );
+        let new = old
+            .replace("value = 1;  ", "value = 1;")
+            .replace("real_old", "real_new");
+        let patch = crate::save::text_patch(&old, &new);
+        let doc = DiffDoc::parse(&patch, None, &HighlightTheme::default_dark(), colors()).unwrap();
+        let raw_rows = doc.rows.len();
+        let raw_changes = doc.changes.clone();
+        for inline in [false, true] {
+            let rows = doc.display_rows(inline, super::Whitespace::Trailing, true);
+            assert!(rows.iter().any(|r| r.folded.is_some()));
+            assert!(
+                rows.len()
+                    < if inline {
+                        doc.inline.len()
+                    } else {
+                        doc.rows.len()
+                    }
+            );
+            assert!(rows.iter().any(|r| r.quiet));
+            let real = rows
+                .iter()
+                .find(|r| {
+                    if inline {
+                        let line = doc.inline[r.source];
+                        line.kind == super::LineKind::Added
+                            && doc.new.line_text(line.line as usize) == "real_new();"
+                    } else {
+                        doc.rows[r.source]
+                            .new
+                            .is_some_and(|n| doc.new.line_text(n as usize) == "real_new();")
+                    }
+                })
+                .unwrap();
+            assert!(!real.quiet);
+        }
+        assert_eq!(doc.rows.len(), raw_rows);
+        assert_eq!(doc.changes, raw_changes);
+        let hits = doc.find_lines("real_", 100);
+        assert_eq!(hits.len(), 2);
+        assert_eq!((hits[0].0, hits[1].0), (false, true));
+        assert_eq!(doc.find_lines("tail", 3).len(), 3);
+        assert!(doc.find_lines("", 3).is_empty());
     }
 
     #[test]

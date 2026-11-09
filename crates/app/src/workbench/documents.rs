@@ -120,7 +120,7 @@ pub(super) struct CloseApproval {
 }
 
 impl CloseApproval {
-    fn allows(&self, doc: &Document) -> bool {
+    pub(super) fn allows(&self, doc: &Document) -> bool {
         !doc.dirty || self.discarded.get(&doc.id) == Some(&doc.version)
     }
 }
@@ -394,6 +394,8 @@ impl Workbench {
             Pane::Diff => self.close_preview(window, cx),
             Pane::Graph => self.close_graph(window, cx),
             Pane::Large => self.close_large(window, cx),
+            Pane::Image(id) => self.close_image(id, window, cx),
+            Pane::SavedDiff(id) => self.close_saved_diff(id, window, cx),
             Pane::Welcome => self.close_window_after_confirm(window, cx),
         }
     }
@@ -456,6 +458,11 @@ impl Workbench {
         let Some(doc) = self.document(id) else {
             return Task::ready(false);
         };
+        if doc.encoding.is_some() {
+            self.message = "编码只读视图不能保存，请在外部工具中转换编码后重新打开".into();
+            cx.notify();
+            return Task::ready(false);
+        }
         if doc.saving || super::explorer_ops::file_is_moving(&doc.path, cx) {
             // A save or move is in flight: wait, then save at the current path.
             // Quitting with 保存 must not fail just because the two met.
@@ -658,6 +665,11 @@ impl Workbench {
         let Some(doc) = self.document(id) else {
             return Task::ready(false);
         };
+        if doc.encoding.is_some() {
+            self.message = "编码只读视图不能另存为，请在外部工具中转换编码后重新打开".into();
+            cx.notify();
+            return Task::ready(false);
+        }
         let directory = doc
             .path
             .parent()
@@ -706,6 +718,7 @@ impl Workbench {
         if let Some(owner) = self.owners.borrow_mut().get_mut(&id) {
             owner.path = path;
         }
+        self.recent_file_path_changed(id);
         self.markdown_path_changed(id, language, cx);
         self.markdown_refresh(id, cx);
         self.schedule_blame(cx);
@@ -722,6 +735,11 @@ impl Workbench {
         let Some(doc) = self.document(id) else {
             return Task::ready(false);
         };
+        if doc.encoding.is_some() {
+            self.message = "编码只读视图不能保存，请在外部工具中转换编码后重新打开".into();
+            cx.notify();
+            return Task::ready(false);
+        }
         if doc.saving || super::explorer_ops::file_is_moving(&doc.path, cx) {
             return cx.spawn_in(window, async move |this, cx| {
                 loop {
@@ -1076,6 +1094,10 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         self.large_check_disk(paths, cx);
+        self.refresh_images(paths, window, cx);
+        self.refresh_encoded(paths, window, cx);
+        let review_paths = paths.map(|paths| paths.iter().cloned().collect::<Vec<_>>());
+        self.refresh_review(review_paths.as_deref(), window, cx);
         // A tab being saved is looked at once the save is done.
         for doc in self.documents.iter_mut() {
             if doc.saving && paths.is_none_or(|paths| paths.contains(&doc.path)) {
@@ -1085,7 +1107,7 @@ impl Workbench {
         let jobs: Vec<(DocumentId, PathBuf, DiskState)> = self
             .documents
             .iter()
-            .filter(|doc| !doc.untitled && !doc.saving)
+            .filter(|doc| !doc.untitled && !doc.saving && doc.encoding.is_none())
             .filter(|doc| paths.is_none_or(|paths| paths.contains(&doc.path)))
             .filter_map(|doc| Some((doc.id, doc.path.clone(), doc.disk?)))
             .collect();
@@ -1239,6 +1261,11 @@ impl Workbench {
         let Some(doc) = self.document(id) else {
             return;
         };
+        if doc.encoding.is_some() {
+            let paths = BTreeSet::from([doc.path.clone()]);
+            self.refresh_encoded(Some(&paths), window, cx);
+            return;
+        }
         if doc.saving || super::explorer_ops::file_is_moving(&doc.path, cx) {
             self.message = "文件正在保存或移动，请稍后重新加载".into();
             cx.notify();
@@ -1332,10 +1359,11 @@ impl Workbench {
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(patch) => {
                     let tab = DiffTab {
+                        checkpoint: None,
                         label: format!("{name}（磁盘上 ↔ 我的）"),
                         tooltip: format!("{} · 磁盘上的文件 ↔ 未保存的修改", path.display()),
                         path,
-                        source: DiffSource::Local(patch.into()),
+                        source: DiffSource::Local(patch.into(), "磁盘版本 → 未保存的修改"),
                     };
                     this.show_diff_tab(tab, window, cx);
                 }
@@ -1357,6 +1385,9 @@ impl Workbench {
         let Some(doc) = self.document_mut(id) else {
             return;
         };
+        if doc.encoding.is_some() {
+            return;
+        }
         doc.crlf = !doc.crlf;
         let crlf = doc.crlf;
         let editor = doc.editor.clone();
@@ -1514,6 +1545,8 @@ impl Document {
             editor,
             dirty: false,
             readonly: false,
+            encoding: None,
+            encoding_generation: 0,
             bytes: 0,
             language,
             crlf: false,

@@ -83,7 +83,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - 合并冲突：`conflicts.rs` 找冲突标记和三种解决方式（纯函数）；`workbench/conflict_bar.rs` 在冲突文件编辑后后台扫描、两侧着色（`theme` 的 `conflict_*`），每处冲突标记上方显示采用当前 / 传入 / 双方和只读比较操作，随代码滚动；动作校验文档版本和冲突位置，解决完后保存并按新状态暂存。
   - `workbench/graph_view.rs`：编辑区里的 Git 图（纯函数的车道布局、分页提交列表、提交详情、打开提交 Diff）。
   - `time.rs`：Git 图、提交、stash 与 blame 的本地时间显示，以及恢复快照的毫秒时间戳。
-  - `session.rs`：重启时恢复的窗口记录（`session.json`，每个窗口的文件夹、位置大小、文件标签和激活的标签；退出时按系统窗口的前后顺序保存，重启按从后到前的顺序创建；重启时只读入激活的标签，其余标签点开时才读）。
+  - `session.rs`：重启时恢复的窗口记录（`session.json`，每个窗口的文件夹、位置大小、文件标签和激活的标签、侧栏宽度/可见性/视图；退出时按系统窗口的前后顺序保存，重启按从后到前的顺序创建；重启时只读入激活的标签，其余标签点开时才读）。
   - `symbols.rs`：tree-sitter tags / locals 查询做定义、引用、文件大纲和局部绑定跳转（查询在 `crates/app/queries/`）；`imports.rs`：按语言读 import 语句，供跨文件候选排序；`symbol_index.rs`：首次跳转时后台建立的工作区符号索引；`workbench/navigation.rs`：转到定义、符号列表、查找引用、转到行（⌃G，命令中心里的 `:行:列`）和前进后退。编辑器文字颜色只用 Kit 的语法类别高亮，不按绑定另行着色。不跑语言服务器，见 docs/决策/0002-代码导航.md。
 - `vendor/`：打过补丁的 GPUI macOS 渲染器和窗口层（`gpui-pre-apple` / `gpui-pre-macos`），以及 GPUI Kit 的 `gpui-base`（编辑器光标常亮），都用 `[patch.crates-io]` 指向。改动都标 `ZJ patch`，说明在 `vendor/README.md`，理由和测量方法在 docs/决策/0005-渲染内存.md；`ZJ_GPU_LOWMEM=0` 恢复上游行为。升级 GPUI 时要先处理这里。
 - UI 的 render 回调里不做 IO、不跑 Git 命令、不做全文解析；这些都通过 `background_spawn` 执行，结果带 generation 校验。
@@ -98,6 +98,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
 
 ## 视觉规则
 
+- GPUI 界面设计、交互修整和设计审阅结合项目级 [gpui-kit-design-guides](.claude/skills/gpui-kit-design-guides/SKILL.md) 与 [unslop](.claude/skills/unslop/SKILL.md)，按同一份[联合流程](.claude/skills/unslop/references/combined-workflow.md)执行：GPUI 负责原生任务、组件与交互，unslop 负责视觉方向和九项打磨，再核对视觉与真实交互。新屏幕／重设计读完整 GPUI 指南，局部改动读基础章节与相关章节；unslop 保留原入口、清单和参考图，按任务读取。本项目的主题、尺寸、版本、静默刷新、权限和验收约束优先，不直接照搬 Web 方案或上游主分支 API，也不重复启动两轮设计。
 - 尺寸、间距、行高、颜色都从 `crates/app/src/theme.rs` 的 token 取，不要在 UI 代码里新写 `px(数字)` 或色值。
 - 布局参照 VS Code 工作台的尺寸，按用户要求默认字号 13：正文 `TEXT_BODY` 13、标题栏 `TITLE_HEIGHT` 33、标签栏 `TAB_HEIGHT` 36、列表行 `ROW_HEIGHT` 24、状态栏 `STATUS_HEIGHT` 24；常规间距用 4 px 网格（不用 `gap_0p5` 这类半格工具类，`theme.rs` 的测试会检查）；按用户要求，工作台外侧留白使用 `WORKBENCH_INSET` 2 px，标题栏在 28 px 搜索框上下各留 2.5 px。由行高推出的居中偏移 `SCM_LINE_PAD` 沿用原值。编辑器字号默认 13，可缩放，Diff 行高随之计算（`theme::diff_metrics`）。
 - 配色：工作台深色主题使用 Solarized Dark，浅色主题使用用户 VS Code 中的 Nord Light（huytd.nord-light）主表面；语法高亮映射 Solarized Dark／Nord Light，浅色低对比 token 按需调深以满足可读性。常规界面调整不得替换主题配色。只在 `theme.rs` 的 `DARK` / `LIGHT` / 语法表与 Kit 主题映射中调整颜色；不要在界面代码里写色值。控件、卡片和浮层圆角也同步到 Kit 主题。

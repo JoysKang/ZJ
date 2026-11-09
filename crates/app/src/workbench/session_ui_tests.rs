@@ -5,7 +5,7 @@ use super::*;
 use crate::session::{self, SavedWindow};
 #[allow(unused_imports)]
 use core::prelude::v1::test;
-use gpui_kit::TestAppContext;
+use gpui_kit::{TestAppContext, test::TestWindowExt};
 
 fn open(
     cx: &mut TestAppContext,
@@ -89,6 +89,129 @@ async fn closing_windows_falls_back_to_an_empty_window_and_never_quits(cx: &mut 
     std::fs::remove_file(&path).unwrap();
     cx.quit();
     assert_eq!(roots(&path), [None, Some(a)]);
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[gpui_kit::test]
+fn reading_context_is_persisted_when_file_tabs_do_not_change(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let base = std::env::temp_dir().join(format!("zj-session-reading-{}", std::process::id()));
+    std::fs::create_dir_all(&base).unwrap();
+    let path = base.join("session.json");
+    let owners = cx.update(|cx| {
+        let owners = install_globals(cx, crate::settings::Settings::default());
+        session::track_at(Some(path.clone()), cx);
+        owners
+    });
+    let window = open(
+        cx,
+        None,
+        Bounds::new(Point::default(), size(px(1400.), px(900.))),
+        &owners,
+    );
+    cx.update_window(window, |_, window, cx| {
+        let saved = SavedWindow {
+            extra: serde_json::Map::from_iter([("future_window".into(), serde_json::json!(7))]),
+            ..Default::default()
+        };
+        session::restore_context(window, &saved, cx);
+        let mut reading = session::review_progress::ReadingSession::default();
+        reading
+            .extra
+            .insert("future_reader".into(), serde_json::json!(11));
+        session::remember_reading(window, reading, false, cx);
+        // Pinning a Diff changes reading context while file tabs and active file stay equal.
+        session::remember_tabs(window, Vec::new(), None, true, cx);
+    })
+    .unwrap();
+    let saved = session::load_from(&path);
+    assert_eq!(saved[0].extra["future_window"], 7);
+    assert_eq!(saved[0].reading.extra["future_reader"], 11);
+    let _ = std::fs::remove_dir_all(base);
+}
+
+#[gpui_kit::test]
+fn sidebar_layout_is_remembered_and_restored(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let base = std::env::temp_dir().join(format!("zj-session-layout-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let session = base.join("session.json");
+    let owners = cx.update(|cx| {
+        let owners = install_globals(cx, crate::settings::Settings::default());
+        session::track_at(Some(session.clone()), cx);
+        owners
+    });
+    let (window, this) = cx.update(|cx| {
+        new_window(
+            cx,
+            Some(base.clone()),
+            owners.clone(),
+            Bounds::new(Point::default(), size(px(1400.), px(900.))),
+        )
+    });
+    cx.update_window(window, |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.sidebar_width = px(333.);
+            p.sidebar_visible = false;
+            p.sidebar = Sidebar::SourceControl;
+            p.remember_layout(true, cx);
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    let saved = session::load_from(&session).remove(0);
+    assert_eq!(saved.sidebar.width, Some(333.));
+    assert_eq!(saved.sidebar.visible, Some(false));
+    assert_eq!(saved.sidebar.view.as_deref(), Some("source_control"));
+
+    // Recording the same layout again must not rewrite the file: a save replaces it, so the
+    // inode would change.
+    use std::os::unix::fs::MetadataExt;
+    let inode = std::fs::metadata(&session).unwrap().ino();
+    cx.update_window(window, |_, _, cx| {
+        this.update(cx, |p, cx| p.remember_layout(true, cx));
+    })
+    .unwrap();
+    assert_eq!(std::fs::metadata(&session).unwrap().ino(), inode);
+
+    cx.update_window(window, |_, _, cx| {
+        this.update(cx, |p, _| {
+            p.sidebar_width = theme::SIDEBAR_WIDTH;
+            p.sidebar_visible = true;
+            p.sidebar = Sidebar::Explorer;
+            p.restore_layout(&saved);
+        });
+    })
+    .unwrap();
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.sidebar_width, px(333.));
+        assert!(!p.sidebar_visible);
+        assert!(p.sidebar == Sidebar::SourceControl);
+    });
+
+    // A restored window records the layout again even if no tab reopens before quitting.
+    let restored = cx.update(|cx| {
+        new_window(
+            cx,
+            Some(base.clone()),
+            owners,
+            Bounds::new(Point::default(), size(px(1400.), px(900.))),
+        )
+        .0
+    });
+    cx.update_window(restored, |_, window, cx| {
+        session::restore_context(window, &saved, cx);
+        session::remember(window, Some(&base), true, cx);
+    })
+    .unwrap();
+    let saved = session::load_from(&session);
+    assert_eq!(saved.last().unwrap().sidebar.width, Some(333.));
+    assert_eq!(saved.last().unwrap().sidebar.visible, Some(false));
+    assert_eq!(
+        saved.last().unwrap().sidebar.view.as_deref(),
+        Some("source_control")
+    );
     let _ = std::fs::remove_dir_all(base);
 }
 

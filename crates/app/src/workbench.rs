@@ -4,7 +4,9 @@ use gpui_kit::{
     base::TestSupportExt,
     component::{
         input::{EditorState, InputEvent, TextareaState},
-        resizable::{h_resizable, resizable_panel, v_resizable},
+        resizable::{
+            ResizablePanelEvent, ResizableState, h_resizable, resizable_panel, v_resizable,
+        },
         v_flex,
     },
     prelude::FluentBuilder as _,
@@ -68,6 +70,7 @@ mod go_to_line_ui_tests;
 mod graph_view;
 mod input_area;
 mod large_view;
+mod layout;
 pub use large_view::CopyLargeLines;
 mod markdown_preview;
 #[cfg(test)]
@@ -87,6 +90,12 @@ pub use markdown_preview::ToggleMarkdownPreview;
 #[cfg(test)]
 #[path = "workbench/auto_save_ui_tests.rs"]
 mod auto_save_ui_tests;
+mod comparison;
+mod encoded_view;
+mod feature_actions;
+#[cfg(test)]
+mod feature_ui_tests;
+mod image_view;
 pub mod navigation;
 mod quick_open;
 pub(crate) mod recovery;
@@ -95,10 +104,21 @@ pub(crate) mod recovery;
 mod reopen_ui_tests;
 mod scm;
 mod scm_actions;
+mod scm_feedback;
+mod tab_interactions;
+use feature_actions::*;
+mod diff_tabs;
+#[cfg(test)]
+#[path = "workbench/image_ui_tests.rs"]
+mod image_ui_tests;
+mod reading_state;
 mod scm_tree;
 mod search_replace;
 mod search_view;
 pub use search_view::key_bindings as search_key_bindings;
+#[cfg(test)]
+#[path = "workbench/restore_ui_tests.rs"]
+mod restore_ui_tests;
 #[cfg(test)]
 #[path = "workbench/session_ui_tests.rs"]
 mod session_ui_tests;
@@ -106,14 +126,17 @@ mod sidebar;
 mod switch_hud;
 mod tab_menu;
 mod terminal_panel;
-pub use terminal_panel::{KillTerminal, NewTerminal, SplitTerminal, ToggleTerminal};
+pub use terminal_panel::{
+    KillTerminal, NewTerminal, NextTerminalGroup, NextTerminalPane, PreviousTerminalGroup,
+    PreviousTerminalPane, SplitTerminal, ToggleTerminal,
+};
 #[cfg(test)]
 #[path = "workbench/terminal_ui_tests.rs"]
 mod terminal_ui_tests;
 mod terminal_view;
 #[cfg(test)]
 #[path = "workbench/test_support.rs"]
-mod test_support;
+pub(crate) mod test_support;
 pub use tab_menu::{
     CloseAllEditors, CloseOtherEditors, CopyActivePath, CopyActiveRelativePath, ReopenClosedEditor,
     RevealActiveInExplorer, RevealActiveInFinder,
@@ -170,16 +193,38 @@ pub struct DocumentOwner {
 pub type DocumentOwners = Rc<RefCell<HashMap<DocumentId, DocumentOwner>>>;
 
 #[derive(Clone, Copy, PartialEq)]
-enum Sidebar {
+pub(crate) enum Sidebar {
     Explorer,
     Search,
     SourceControl,
+}
+
+impl Sidebar {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Explorer => "explorer",
+            Self::Search => "search",
+            Self::SourceControl => "source_control",
+        }
+    }
+
+    /// The session value, or `None` when this version does not know the view.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "explorer" => Some(Self::Explorer),
+            "search" => Some(Self::Search),
+            "source_control" => Some(Self::SourceControl),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Pane {
     Welcome,
     Document(DocumentId),
+    Image(DocumentId),
+    SavedDiff(DocumentId),
     Diff,
     /// The Git Graph tab (one at a time, like the diff preview).
     Graph,
@@ -193,6 +238,8 @@ struct Document {
     editor: Entity<EditorState>,
     dirty: bool,
     readonly: bool,
+    encoding: Option<&'static str>,
+    encoding_generation: u64,
     bytes: usize,
     /// Display name of the language shown in the status bar.
     language: &'static str,
@@ -240,7 +287,9 @@ struct Document {
     _subscription: Subscription,
 }
 
+#[derive(Clone)]
 struct DiffTab {
+    checkpoint: Option<crate::session::review_progress::ComparisonSource>,
     label: String,
     tooltip: String,
     path: PathBuf,
@@ -251,8 +300,10 @@ struct DiffTab {
 #[derive(Clone)]
 enum DiffSource {
     Git(Request),
-    /// A full-context patch built in the app (the Search view's replace preview).
-    Local(Arc<str>),
+    /// A full-context patch built locally, with an explicit left-to-right comparison label.
+    Local(Arc<str>, &'static str),
+    /// Complete read-only historical text, not patch syntax.
+    Snapshot(Arc<str>),
 }
 
 impl DiffTab {
@@ -260,7 +311,7 @@ impl DiffTab {
     fn request(&self) -> Option<&Request> {
         match &self.source {
             DiffSource::Git(request) => Some(request),
-            DiffSource::Local(_) => None,
+            DiffSource::Local(..) | DiffSource::Snapshot(_) => None,
         }
     }
 }
@@ -286,6 +337,7 @@ struct Group {
     write_task: Option<Task<()>>,
     write_pending: bool,
     write_message: String,
+    write_feedback: Option<scm_feedback::GitFeedback>,
     /// Commits the upstream does not have, loaded with the status (empty when none).
     outgoing: Result<Vec<Commit>, String>,
     outgoing_collapsed: bool,
@@ -296,6 +348,8 @@ impl Group {
     fn clean(&self) -> bool {
         matches!(&self.status, Some(Ok(status)) if status.changes.is_empty() && status.behind == 0)
             && self.remote_error.is_none()
+            && !self.write_pending
+            && self.write_message.is_empty()
     }
 
     /// Commits ahead of the upstream (0 without one).
@@ -400,13 +454,24 @@ pub struct Workbench {
     write_generation: u64,
     sidebar: Sidebar,
     sidebar_visible: bool,
+    /// The width the user last chose; the layout clamps it to leave the editor usable.
+    sidebar_width: Pixels,
+    sidebar_resize: Entity<ResizableState>,
+    window_id: WindowId,
     quick_open: Option<quick_open::QuickOpen>,
     /// 命令面板里最近执行的命令名称，新的在前（只在内存，不持久化）。
     command_history: Vec<&'static str>,
     active: Pane,
     documents: Vec<Document>,
+    images: Vec<image_view::ImageTab>,
+    image_diff: Option<image_view::ImageComparison>,
+    archived_diffs: Vec<diff_tabs::SavedDiff>,
+    diff_pinned: bool,
+    reading: reading_state::ReadingState,
     /// Most recently activated first; IDs follow Save As and moves without reordering tabs.
     recent_documents: Vec<DocumentId>,
+    recent_files: quick_open::RecentFiles,
+    tabs: editor_area::Tabs,
     owners: DocumentOwners,
     /// The Explorer: the visible tree, expanded folders, selection and inline rename, and its folder listings.
     explorer: sidebar::Explorer,
@@ -526,6 +591,15 @@ impl Workbench {
                     this.update_quick_open(window, cx);
                 }
             });
+        if !cx.has_global::<reading_state::ReviewStoreChanged>() {
+            cx.set_global(reading_state::ReviewStoreChanged);
+        }
+        let review_store = cx.observe_global_in::<reading_state::ReviewStoreChanged>(
+            window,
+            |this, window, cx| {
+                this.load_review_progress(window, cx);
+            },
+        );
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.switch_hud_activation(window, cx);
             this.input_area_activation(window, cx);
@@ -569,6 +643,21 @@ impl Workbench {
         window.set_window_title(&format!("ZJ · {name}"));
         let search = search_view::SearchState::new(window, cx);
         let find = find_widget::FindState::new(window, cx);
+        let sidebar_resize = cx.new(|_| ResizableState::default());
+        let sidebar_resize_subscription = cx.subscribe(
+            &sidebar_resize,
+            |this: &mut Self, state, _: &ResizablePanelEvent, cx| {
+                let Some(width) = state.read(cx).sizes().first().copied() else {
+                    return;
+                };
+                if width <= px(0.) {
+                    return;
+                }
+                this.sidebar_width = width;
+                this.remember_layout(true, cx);
+            },
+        );
+        let window_id = window.window_handle().window_id();
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
@@ -580,11 +669,21 @@ impl Workbench {
             write_generation: 0,
             sidebar: Sidebar::Explorer,
             sidebar_visible: true,
+            sidebar_width: theme::SIDEBAR_WIDTH,
+            sidebar_resize,
+            window_id,
             quick_open: None,
             command_history: Vec::new(),
             active: Pane::Welcome,
             documents: Vec::new(),
+            images: Vec::new(),
+            image_diff: None,
+            archived_diffs: Vec::new(),
+            diff_pinned: false,
+            reading: Default::default(),
             recent_documents: Vec::new(),
+            recent_files: Default::default(),
+            tabs: editor_area::Tabs::default(),
             owners,
             explorer: sidebar::Explorer {
                 rows: Vec::new(),
@@ -627,26 +726,7 @@ impl Workbench {
             cursor: None,
             _cursor_observer: None,
             blame: Default::default(),
-            diff: diff_view::DiffPane {
-                tab: None,
-                title: String::new(),
-                fallback: None,
-                doc: None,
-                raw: None,
-                selection: None,
-                caret: None,
-                dragging: false,
-                focus: cx.focus_handle(),
-                source: None,
-                change: None,
-                inline: cx.global::<crate::settings::Settings>().diff_inline,
-                scroll: UniformListScrollHandle::new(),
-                stale: false,
-                loading: false,
-                task: None,
-                cancel: Arc::new(AtomicBool::new(false)),
-                generation: 0,
-            },
+            diff: diff_view::DiffPane::new(window, cx),
             nav: navigation::NavState {
                 symbols: None,
                 symbols_task: None,
@@ -690,8 +770,16 @@ impl Workbench {
                 remote_manual: false,
                 last_remote_check: None,
             },
-            _subscriptions: vec![appearance, activation, settings, frame],
+            _subscriptions: vec![
+                appearance,
+                activation,
+                settings,
+                frame,
+                review_store,
+                sidebar_resize_subscription,
+            ],
         };
+        this.load_review_progress(window, cx);
         this.start_watching(window, cx);
         this.refresh_tree(window, cx);
         this.focus_handle.focus(window, cx);
@@ -1076,6 +1164,7 @@ impl Workbench {
         if self.sidebar_visible {
             self.request_remote_check(false, window, cx);
         }
+        self.remember_layout(true, cx);
         cx.notify();
     }
 
@@ -1086,8 +1175,14 @@ impl Workbench {
                 .iter()
                 .find(|doc| doc.id == id)
                 .map(|doc| doc.editor.clone()),
-            Pane::Diff => self.diff.fallback.clone(),
-            Pane::Welcome | Pane::Graph | Pane::Large => None,
+            Pane::Diff => self
+                .diff
+                .review
+                .comparison
+                .snapshot
+                .clone()
+                .or_else(|| self.diff.fallback.clone()),
+            Pane::Welcome | Pane::Graph | Pane::Large | Pane::Image(_) | Pane::SavedDiff(_) => None,
         }
     }
 
@@ -1121,6 +1216,10 @@ impl Workbench {
             editor.update(cx, |editor, cx| editor.focus(window, cx));
         } else if self.active == Pane::Diff {
             self.diff.focus.focus(window, cx);
+        } else if self.active == Pane::Large
+            && let Some(large) = &self.large
+        {
+            large.focus.focus(window, cx);
         } else {
             self.focus_handle.focus(window, cx);
         }
@@ -1136,6 +1235,10 @@ impl Workbench {
 
     /// The user chose a tab: a file still being opened is not wanted any more.
     fn select_pane(&mut self, pane: Pane, window: &mut Window, cx: &mut Context<Self>) {
+        if let Pane::SavedDiff(id) = pane {
+            self.activate_saved_diff(id, window, cx);
+            return;
+        }
         self.cancel_file_open();
         self.show_pane(pane, window, cx);
     }
@@ -1149,9 +1252,17 @@ impl Workbench {
             self.auto_save_on_focus_change(Some(previous), window, cx);
         }
         self.active = pane;
+        self.install_preview_tab(pane, window, cx);
+        if let Pane::Image(id) = pane
+            && let Some(image) = self.images.iter().find(|image| image.id == id)
+        {
+            self.recent_files.activate(id, image.path.clone());
+        }
+        self.tabs.reveal_selection();
         if let Pane::Document(id) = pane {
             self.recent_documents.retain(|recent| *recent != id);
             self.recent_documents.insert(0, id);
+            self.remember_recent_file(id);
         }
         self.explorer.reveal_pending = self.active_document().map(|(path, _)| path.clone());
         self.clear_tree_selection_for(pane);
@@ -1215,6 +1326,7 @@ impl Workbench {
             window.set_window_title(&format!("ZJ · {}", path.display()));
             self.root = Some(path.clone());
             crate::session::remember(window, self.root.as_deref(), true, cx);
+            self.load_review_progress(window, cx);
             self.start_watching(window, cx);
             self.refresh_tree(window, cx);
             self.refresh(window, cx);
@@ -1236,6 +1348,7 @@ impl Workbench {
     fn show_directory(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar = Sidebar::Explorer;
         self.sidebar_visible = true;
+        self.remember_layout(true, cx);
         if !self.explorer.show_hidden
             && self
                 .root
@@ -1336,6 +1449,20 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if crate::image_file::supported(&path) {
+            self.open_image(path, root, window, cx);
+            return;
+        }
+        self.open_text_file(path, root, window, cx);
+    }
+
+    fn open_text_file(
+        &mut self,
+        path: PathBuf,
+        root: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.file_generation += 1;
         let generation = self.file_generation;
         let complete_settings = crate::settings::Settings::path().is_some_and(|p| p == path);
@@ -1386,6 +1513,11 @@ impl Workbench {
         then: impl FnOnce(&mut Self, Result<DocumentId, String>, &mut Window, &mut Context<Self>)
         + 'static,
     ) {
+        if crate::image_file::supported(&path) {
+            let root = self.root_for(&path);
+            self.read_image(path, root, None, window, cx, then).detach();
+            return;
+        }
         let workspace = self.root.clone();
         let requested = path.clone();
         let job = cx.background_spawn(async move {
@@ -1517,6 +1649,34 @@ impl Workbench {
             .unwrap_or(usize::MAX)
     }
 
+    /// Records the sidebar's width, visibility and view for the next launch.
+    fn remember_layout(&self, persist: bool, cx: &mut App) {
+        crate::session::remember_layout(
+            self.window_id,
+            crate::session::SidebarLayout {
+                width: Some(f32::from(self.sidebar_width)),
+                visible: Some(self.sidebar_visible),
+                view: Some(self.sidebar.as_str().to_string()),
+            },
+            persist,
+            cx,
+        );
+    }
+
+    /// Applies the sidebar from the previous session before the first render.
+    pub(crate) fn restore_layout(&mut self, saved: &crate::session::SavedWindow) {
+        if let Some(width) = saved.sidebar.width {
+            self.sidebar_width = px(width);
+        }
+        self.sidebar_visible = saved.sidebar.visible.unwrap_or(true);
+        self.sidebar = saved
+            .sidebar
+            .view
+            .as_deref()
+            .and_then(Sidebar::parse)
+            .unwrap_or(Sidebar::Explorer);
+    }
+
     /// Updates the session record of this window's tabs (written when `persist`).
     fn remember_tabs(&self, persist: bool, window: &mut Window, cx: &mut Context<Self>) {
         let mut tabs: Vec<PathBuf> = self
@@ -1525,6 +1685,7 @@ impl Workbench {
             .filter(|doc| !doc.untitled)
             .map(|doc| doc.path.clone())
             .collect();
+        tabs.extend(self.images.iter().map(|image| image.path.clone()));
         for pending in &self.pending_tabs {
             if !tabs.contains(pending) {
                 tabs.push(pending.clone());
@@ -1532,13 +1693,20 @@ impl Workbench {
         }
         tabs.sort_by_key(|path| self.tab_rank(path));
         let active = match self.active {
+            Pane::Image(id) => self
+                .images
+                .iter()
+                .find(|image| image.id == id)
+                .map(|image| image.path.clone()),
             Pane::Document(id) => self
                 .document(id)
                 .filter(|doc| !doc.untitled)
                 .map(|doc| doc.path.clone()),
             _ => None,
         };
+        self.remember_reading(false, window, cx);
         crate::session::remember_tabs(window, tabs, active, persist, cx);
+        self.remember_layout(false, cx);
     }
 
     /// A file read in the background becomes a tab (or focuses the tab that already has it,
@@ -1615,8 +1783,16 @@ impl Workbench {
             }
             this.owners.borrow_mut().remove(&existing);
         }
-        if this.documents.len() >= 20
-            || this.documents.iter().map(|doc| doc.bytes).sum::<usize>() + loaded.bytes
+        let replaced = this
+            .preview_replacement(&loaded.path)
+            .and_then(|pane| match pane {
+                Pane::Document(id) => this.document(id),
+                _ => None,
+            });
+        if this.documents.len() - usize::from(replaced.is_some()) >= 20
+            || this.documents.iter().map(|doc| doc.bytes).sum::<usize>()
+                - replaced.map_or(0, |doc| doc.bytes)
+                + loaded.bytes
                 > files::MAX_OPEN_BYTES
         {
             this.message = "已达到 20 个文件 / 20 MiB 原文的原型上限，请先关闭标签".into();
@@ -1629,16 +1805,24 @@ impl Workbench {
         let path = loaded.path.clone();
         let (editor, subscription) =
             this.document_editor(id, &path, loaded.text, indent, window, cx);
+        if loaded.encoding.is_some() {
+            editor.update(cx, |state, cx| state.set_readonly(true, cx));
+        }
         this.documents.push(Document {
             indent,
-            readonly: loaded.readonly,
+            encoding: loaded.encoding,
+            readonly: loaded.readonly || loaded.encoding.is_some(),
             bytes: loaded.bytes,
             language: language_name,
             crlf: loaded.crlf,
             bom: loaded.bom,
             disk: Some(loaded.disk),
             untitled: false,
-            markdown: markdown_preview::MarkdownPreview::for_language(language, false, cx),
+            markdown: if loaded.encoding.is_some() {
+                None
+            } else {
+                markdown_preview::MarkdownPreview::for_language(language, false, cx)
+            },
             ..Document::new(id, path, editor, subscription)
         });
         this.owners.borrow_mut().insert(
@@ -1649,6 +1833,7 @@ impl Workbench {
                 window: window.window_handle(),
             },
         );
+        this.restore_document_reading_position(id, window, cx);
         this.message.clear();
         this.markdown_refresh(id, cx);
         this.scan_conflicts(cx);
@@ -1663,6 +1848,7 @@ impl Workbench {
     }
 
     fn remove_document(&mut self, id: DocumentId, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_recent_file(id);
         // ⇧⌘T reopens closed files; untitled buffers have nothing to reopen.
         if let Some(doc) = self.documents.iter().find(|doc| doc.id == id)
             && !doc.untitled
@@ -1681,12 +1867,7 @@ impl Workbench {
         self.owners.borrow_mut().remove(&id);
         self.remember_tabs(true, window, cx);
         if self.active == Pane::Document(id) {
-            let pane = self
-                .documents
-                .last()
-                .map(|doc| Pane::Document(doc.id))
-                .unwrap_or(Pane::Welcome);
-            self.select_pane(pane, window, cx);
+            self.show_remaining_tab(window, cx);
         }
         cx.notify();
     }
@@ -1712,6 +1893,7 @@ impl Workbench {
     }
 
     fn refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_review(None, window, cx);
         self.refresh_repos(None, false, window, cx);
     }
 
@@ -1958,6 +2140,7 @@ impl Workbench {
                                             write_task: None,
                                             write_pending: false,
                                             write_message: String::new(),
+                                            write_feedback: None,
                                             outgoing: Ok(Vec::new()),
                                             outgoing_collapsed: false,
                                             remote_error: None,
@@ -2182,6 +2365,8 @@ impl Workbench {
 
     /// Clears a completed preview without cancelling a newer request to open a file.
     fn dismiss_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_image_diff(window);
+        self.diff_pinned = false;
         self.diff.cancel.store(true, Ordering::Relaxed);
         self.diff.generation += 1;
         self.diff.task = None;
@@ -2196,13 +2381,9 @@ impl Workbench {
         self.diff.title.clear();
         self.diff.tab = None;
         self.diff.stale = false;
+        self.diff_review_changed(window, cx);
         if self.active == Pane::Diff {
-            let pane = self
-                .documents
-                .last()
-                .map(|doc| Pane::Document(doc.id))
-                .unwrap_or(Pane::Welcome);
-            self.show_pane(pane, window, cx);
+            self.show_remaining_tab(window, cx);
         }
         cx.notify();
     }
@@ -2251,6 +2432,15 @@ impl Workbench {
             },
         };
         let diff_tab = DiffTab {
+            checkpoint: Some(
+                crate::session::review_progress::ComparisonSource::GitChange {
+                    repo: g.repo.worktree.clone(),
+                    path: change.path.clone(),
+                    original_path: change.original_path.clone(),
+                    staged: matches!(side, DiffSide::Staged),
+                    untracked: change.kind == ChangeKind::Untracked,
+                },
+            ),
             label: format!(
                 "{} ({})",
                 change
@@ -2267,7 +2457,8 @@ impl Workbench {
             path: g.repo.worktree.join(&change.path),
             source: DiffSource::Git(request),
         };
-        self.close_preview(window, cx);
+        self.prepare_new_diff(window, cx);
+        self.diff.review.comparison.snapshot = None;
         self.message.clear();
         self.diff.tab = Some(diff_tab);
         self.active = Pane::Diff;
@@ -2286,10 +2477,36 @@ impl Workbench {
         cx: &mut Context<Self>,
         timing: crate::perf::DiffTiming,
     ) {
-        let Some(diff) = &self.diff.tab else {
+        let Some(diff) = self.diff.tab.clone() else {
             timing.mark("skipped");
             return;
         };
+        if crate::image_file::supported(&diff.path)
+            && let DiffSource::Git(request) = &diff.source
+        {
+            self.load_image_diff(request.clone(), window, cx);
+            return;
+        }
+        if crate::image_file::supported(&diff.path) && self.reload_image_checkpoint(window, cx) {
+            return;
+        }
+        self.clear_image_diff(window);
+        if let DiffSource::Snapshot(text) = &diff.source {
+            self.diff.cancel.store(true, Ordering::Relaxed);
+            self.diff.generation += 1;
+            self.diff.task = None;
+            self.diff.loading = false;
+            self.diff.stale = false;
+            self.diff.doc = None;
+            self.diff.raw = None;
+            self.diff.source = None;
+            self.diff.title = diff.label;
+            self.diff.review.comparison.snapshot =
+                Some(cx.new(|cx| EditorState::new(window, cx).default_value(text.to_string())));
+            self.diff_review_changed(window, cx);
+            cx.notify();
+            return;
+        }
         let mut source = diff.source.clone();
         let title = diff.label.clone();
         self.diff.cancel.store(true, Ordering::Relaxed);
@@ -2333,10 +2550,11 @@ impl Workbench {
                         .map_err(std::io::Error::other)?
                         .into()
                 }
-                DiffSource::Local(patch) => {
+                DiffSource::Local(patch, _) => {
                     timing.mark("local");
                     patch
                 }
+                DiffSource::Snapshot(_) => unreachable!("snapshot installed before patch parsing"),
             };
             if cancel.load(Ordering::Relaxed) {
                 timing.mark("cancelled");
@@ -2439,6 +2657,8 @@ impl Workbench {
                                 this.diff.title = format!("Diff 加载失败: {e}");
                             }
                         }
+                        this.diff_review_changed(window, cx);
+                        this.restore_diff_reading_position(cx);
                         if this.active == Pane::Diff {
                             this.observe_cursor(cx);
                             if restore_focus {
@@ -2456,6 +2676,8 @@ impl Workbench {
 
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.promote_edited_preview();
+        self.remember_reading(false, window, cx);
         window.set_rem_size(theme::SPACING_REM);
         let colors = theme::colors(cx);
         // macOS: the dot in the window's close button.
@@ -2466,13 +2688,25 @@ impl Render for Workbench {
         }
         let mut editor = self.render_editor_area(cx);
         if self.terminals.is_shown() {
+            let viewport_height = window.viewport_size().height;
             editor = v_resizable("editor-terminal")
                 .child(resizable_panel().child(editor))
                 .child(
                     resizable_panel()
-                        .size(theme::TERMINAL_HEIGHT)
-                        .size_range(theme::TERMINAL_MIN..theme::TERMINAL_MAX)
-                        .child(self.render_terminal_panel(cx)),
+                        .size(layout::terminal_height(
+                            theme::TERMINAL_HEIGHT,
+                            viewport_height,
+                        ))
+                        .size_range(
+                            theme::TERMINAL_MIN..layout::max_terminal_height(viewport_height),
+                        )
+                        .child(
+                            div()
+                                .id("terminal-pane")
+                                .size_full()
+                                .test_support()
+                                .child(self.render_terminal_panel(cx)),
+                        ),
                 )
                 .into_any_element();
         }
@@ -2482,8 +2716,6 @@ impl Render for Workbench {
             .min_w_0()
             .min_h_0()
             .rounded(theme::WORKBENCH_RADIUS)
-            .border_1()
-            .border_color(colors.border)
             .bg(colors.editor)
             .overflow_hidden()
             .child(editor)
@@ -2500,8 +2732,11 @@ impl Render for Workbench {
                 .into_any_element()
         };
         let workbench = if self.sidebar_visible {
-            let mut group =
-                h_resizable("workbench-panels").with_handle_appearance(Rc::new(|handle, _, cx| {
+            let viewport_width = window.viewport_size().width;
+            let max_sidebar = layout::max_sidebar_width(viewport_width);
+            let mut group = h_resizable("workbench-panels")
+                .with_state(&self.sidebar_resize)
+                .with_handle_appearance(Rc::new(|handle, _, cx| {
                     // None restores Kit's full divider; an empty element keeps it quiet.
                     Some(
                         div()
@@ -2526,8 +2761,8 @@ impl Render for Workbench {
                 }));
             group = group.child(
                 resizable_panel()
-                    .size(theme::SIDEBAR_WIDTH)
-                    .size_range(theme::SIDEBAR_MIN..theme::SIDEBAR_MAX)
+                    .size(layout::sidebar_width(self.sidebar_width, viewport_width))
+                    .size_range(theme::SIDEBAR_MIN..max_sidebar)
                     .child(inset(self.render_sidebar(cx))),
             );
             group = group.child(
@@ -2549,6 +2784,13 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &OpenFile, window, cx| {
                 this.choose_path(false, window, cx);
             }))
+            .on_action(cx.listener(|this, action: &SelectForComparison, window, cx| this.run_reading_action(action, window, cx)))
+            .on_action(cx.listener(|this, action: &CompareWithSelected, window, cx| this.run_reading_action(action, window, cx)))
+            .on_action(cx.listener(|this, action: &CompareWithClipboard, window, cx| this.run_reading_action(action, window, cx)))
+            .on_action(cx.listener(|this, action: &FileHistory, window, cx| this.run_reading_action(action, window, cx)))
+            .on_action(cx.listener(|this, action: &CompareRevisions, window, cx| this.run_reading_action(action, window, cx)))
+            .on_action(cx.listener(|this, action: &ImportPatch, window, cx| this.run_reading_action(action, window, cx)))
+            .on_action(cx.listener(|this, action: &ExportPatch, window, cx| this.run_reading_action(action, window, cx)))
             .on_action(cx.listener(|this, _: &OpenFolder, window, cx| {
                 this.choose_path(true, window, cx);
             }))
@@ -2577,6 +2819,10 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, _: &KillTerminal, window, cx| {
                 this.kill_terminal(window, cx)
             }))
+            .on_action(cx.listener(|this, _: &PreviousTerminalGroup, window, cx| this.cycle_terminal_group(false, window, cx)))
+            .on_action(cx.listener(|this, _: &NextTerminalGroup, window, cx| this.cycle_terminal_group(true, window, cx)))
+            .on_action(cx.listener(|this, _: &PreviousTerminalPane, window, cx| this.cycle_terminal_pane(false, window, cx)))
+            .on_action(cx.listener(|this, _: &NextTerminalPane, window, cx| this.cycle_terminal_pane(true, window, cx)))
             .on_action(cx.listener(|this, _: &ToggleMarkdownPreview, window, cx| {
                 this.toggle_markdown_preview(window, cx)
             }))
@@ -2644,7 +2890,9 @@ impl Render for Workbench {
             )
             .on_action(cx.listener(|this, _: &ZoomReset, window, cx| this.zoom(None, window, cx)))
             .on_action(
-                cx.listener(|this, _: &FindInFiles, window, cx| this.find_in_files(window, cx)),
+                cx.listener(|this, _: &FindInFiles, window, cx| {
+                    this.find_in_files(window, cx);
+                }),
             )
             // Kit's editor leaves ⌘F to its host when it is not `searchable`.
             .on_action(cx.listener(|this, _: &gpui_kit::component::input::Search, window, cx| {
@@ -2697,7 +2945,7 @@ impl Render for Workbench {
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .pb_1()
+                    .pb(theme::CHROME_GAP)
                     .child(workbench),
             )
             .child(self.render_status_bar(cx))

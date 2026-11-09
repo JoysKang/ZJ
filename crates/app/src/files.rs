@@ -445,6 +445,8 @@ pub struct TextFile {
     pub bytes: usize,
     /// No write permission (saving needs 另存为); editing is still allowed, as in VS Code.
     pub readonly: bool,
+    /// A decoded view cannot be edited or saved as UTF-8.
+    pub encoding: Option<&'static str>,
     /// What the file looked like when it was read, for detecting external changes.
     pub disk: crate::save::DiskState,
     /// The file uses CRLF line endings (first line ending decides).
@@ -515,8 +517,8 @@ impl std::fmt::Display for Restricted {
 
 impl std::error::Error for Restricted {}
 
-// None is reserved for an explicit file-picker selection, including files outside a workspace.
-pub fn text_file(root: Option<&Path>, path: &Path) -> io::Result<TextFile> {
+// Images and text use the same confined, nonblocking file open.
+pub(crate) fn open_file(root: Option<&Path>, path: &Path) -> io::Result<(PathBuf, fs::File)> {
     let path = fs::canonicalize(path)?;
     let root = match root {
         Some(root) => fs::canonicalize(root)?,
@@ -533,6 +535,28 @@ pub fn text_file(root: Option<&Path>, path: &Path) -> io::Result<TextFile> {
     if !metadata.is_file() {
         return Err(io::Error::other("不是普通文件，未打开"));
     }
+    Ok((path, file))
+}
+
+pub(crate) fn read_prefix(root: Option<&Path>, path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    let (_, file) = open_file(root, path)?;
+    let mut bytes = Vec::new();
+    file.take(limit).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+// None is reserved for an explicit file-picker selection, including files outside a workspace.
+pub fn text_file(root: Option<&Path>, path: &Path) -> io::Result<TextFile> {
+    text_file_with_encoding(root, path, None)
+}
+
+pub fn text_file_with_encoding(
+    root: Option<&Path>,
+    path: &Path,
+    requested: Option<&'static encoding_rs::Encoding>,
+) -> io::Result<TextFile> {
+    let (path, file) = open_file(root, path)?;
+    let metadata = file.metadata()?;
     let binary = || io::Error::other("二进制文件，未打开");
     let mut bytes = Vec::new();
     if metadata.len() > MAX_FILE_BYTES as u64 {
@@ -550,12 +574,10 @@ pub fn text_file(root: Option<&Path>, path: &Path) -> io::Result<TextFile> {
         // Grew while being read.
         return Err(io::Error::other(Restricted::TooLarge));
     }
-    if bytes.contains(&0) {
-        return Err(binary());
-    }
     let size = bytes.len();
     let disk = crate::save::DiskState::of(FileStamp::of(&metadata), &bytes);
-    let text = String::from_utf8(bytes).map_err(|_| io::Error::other(Restricted::NotUtf8))?;
+    let bom = bytes.starts_with(&[0xef, 0xbb, 0xbf]);
+    let (text, encoding) = crate::encoded_text::decode(&bytes, requested)?;
     if text.split('\n').any(|line| line.len() > 256 * 1024) {
         return Err(io::Error::other(Restricted::LongLine));
     }
@@ -568,8 +590,9 @@ pub fn text_file(root: Option<&Path>, path: &Path) -> io::Result<TextFile> {
         crlf: text
             .find('\n')
             .is_some_and(|newline| text[..newline].ends_with('\r')),
-        bom: text.starts_with('\u{feff}'),
-        text: text.strip_prefix('\u{feff}').unwrap_or(&text).to_owned(),
+        bom,
+        encoding,
+        text,
         bytes: size,
         readonly: metadata.permissions().mode() & 0o222 == 0,
         disk,
@@ -579,6 +602,38 @@ pub fn text_file(root: Option<&Path>, path: &Path) -> io::Result<TextFile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_prefix_reads_refuse_fifo_without_waiting_for_a_writer() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let root = std::env::temp_dir().join(format!("zj-prefix-fifo-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("pipe");
+        let name = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        // SAFETY: name is a valid NUL-terminated path for this call.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let requested = path.clone();
+        let reader =
+            std::thread::spawn(move || sender.send(read_prefix(None, &requested, 1025)).unwrap());
+        let result = receiver.recv_timeout(std::time::Duration::from_millis(250));
+        if result.is_err() {
+            // Unblock a regressed blocking open so the failing test never leaves a stuck worker.
+            let _writer = fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&path)
+                .unwrap();
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap()
+                .unwrap_err();
+        }
+        reader.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+        assert!(result.is_ok(), "prefix read blocked on a FIFO");
+        assert!(result.unwrap().is_err());
+    }
 
     #[test]
     fn browsing_search_and_text_are_bounded_and_read_only() {
@@ -644,7 +699,9 @@ mod tests {
         assert!(text_file(Some(&root), &root.join("binary")).is_err());
         assert!(text_file(None, &root.join("binary")).is_err());
         fs::write(root.join("other-encoding"), [0xff, 0xfe]).unwrap();
-        assert!(text_file(Some(&root), &root.join("other-encoding")).is_err());
+        let utf16 = text_file(Some(&root), &root.join("other-encoding")).unwrap();
+        assert_eq!(utf16.encoding, Some("UTF-16LE"));
+        assert!(utf16.text.is_empty());
         let fifo = std::ffi::CString::new(root.join("pipe").to_str().unwrap()).unwrap();
         // SAFETY: `fifo` is a valid NUL-terminated path that outlives the call.
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);

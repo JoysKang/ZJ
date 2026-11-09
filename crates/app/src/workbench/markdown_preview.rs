@@ -486,6 +486,10 @@ impl Workbench {
         let Some(doc) = self.document_mut(id) else {
             return;
         };
+        if doc.encoding.is_some() {
+            doc.markdown = None;
+            return;
+        }
         if doc.markdown.is_some() != (language == "markdown") {
             // A buffer that becomes Markdown by Save As keeps showing its source.
             doc.markdown = MarkdownPreview::for_language(language, true, cx);
@@ -552,7 +556,8 @@ impl Workbench {
         }
         let path = base.join(target);
         if path.is_file() {
-            self.open_file(path, self.root.clone(), window, cx);
+            let root = self.root_for(&path);
+            self.open_file(path, root, window, cx);
         } else {
             self.message = format!("找不到链接的文件：{}", path.display());
             cx.notify();

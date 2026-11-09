@@ -267,6 +267,25 @@ fn references(
     found
 }
 
+async fn wait_for_symbol_index(
+    mut index: Option<Arc<SymbolIndex>>,
+    indexer: WeakEntity<Workbench>,
+    cx: &mut AsyncApp,
+) -> Result<Option<Arc<SymbolIndex>>> {
+    let deadline = std::time::Instant::now() + INDEX_WAIT;
+    while index.is_none() && std::time::Instant::now() < deadline {
+        let (now, building) = indexer.update(cx, |this, _| {
+            (this.nav.symbols.clone(), this.symbol_index_building())
+        })?;
+        index = now;
+        if index.is_some() || !building {
+            break;
+        }
+        cx.background_executor().timer(INDEX_POLL).await;
+    }
+    Ok(index)
+}
+
 /// Kit's editor asks this for definitions on ⌘-hover, ⌘-click and F12.
 struct Definitions {
     view: WeakEntity<Workbench>,
@@ -296,18 +315,7 @@ impl DefinitionProvider for Definitions {
         cx.spawn(async move |cx| {
             // First use (or a rebuild) of the workspace index: a definition in another file is
             // only found once it is there.
-            let mut index = index;
-            let deadline = std::time::Instant::now() + INDEX_WAIT;
-            while index.is_none() && std::time::Instant::now() < deadline {
-                let (now, building) = indexer.update(cx, |this, _| {
-                    (this.nav.symbols.clone(), this.symbol_index_building())
-                })?;
-                index = now;
-                if index.is_some() || !building {
-                    break;
-                }
-                cx.background_executor().timer(INDEX_POLL).await;
-            }
+            let index = wait_for_symbol_index(index, indexer, cx).await?;
             let targets = cx
                 .background_spawn(async move {
                     resolve(&path, language, &source, offset, index.as_deref())
@@ -784,22 +792,71 @@ impl Workbench {
             return;
         };
         let state = editor.read(cx);
-        let text = state.text().to_string();
+        let source = state.text().clone();
         let offset = state.cursor();
-        let files = self
-            .symbol_index(cx)
-            .map(|index| index.files().to_vec())
-            .unwrap_or_default();
+        let focus = state.focus_handle(cx);
+        let (active, root, file_generation) =
+            (self.active, self.root.clone(), self.file_generation);
+        let indexer = indexing_view(cx.entity(), &path, root.as_deref(), cx);
+        let index = if indexer.entity_id() == cx.entity_id() {
+            self.symbol_index(cx)
+        } else {
+            indexer.update(cx, |this, cx| this.symbol_index(cx))
+        };
+        let indexer = indexer.downgrade();
+        self.nav.generation += 1;
+        let request = self.nav.generation;
         self.message = "正在查找引用…".into();
-        let job =
-            cx.background_spawn(async move { references(&path, language, &text, offset, files) });
+        // Match F12: leaving the source cancels the task, even if focus returns later.
+        let blur_subscription = cx.on_blur(&focus, window, move |this, _, cx| {
+            if this.nav.generation == request {
+                this.nav.generation += 1;
+                this.nav.task = None;
+                if this.message == "正在查找引用…" {
+                    this.message.clear();
+                    cx.notify();
+                }
+            }
+        });
         self.nav.task = Some(cx.spawn_in(window, async move |this, cx| {
-            let targets = job.await;
+            let _blur_subscription = blur_subscription;
+            let Ok(index) = wait_for_symbol_index(index, indexer, cx).await else {
+                return;
+            };
+            let files = index
+                .map(|index| index.files().to_vec())
+                .unwrap_or_default();
+            let text = source.to_string();
+            let source_path = path.clone();
+            let targets = cx
+                .background_spawn(async move { references(&path, language, &text, offset, files) })
+                .await;
             let _ = this.update_in(cx, |this, window, cx| {
+                if this.nav.generation != request {
+                    return;
+                }
+                let valid = !this.closing
+                    && this.active == active
+                    && this.root == root
+                    && this.file_generation == file_generation
+                    && this
+                        .active_document()
+                        .is_some_and(|(path, current)| path == source_path && current == editor)
+                    && focus.is_focused(window)
+                    && editor.read(cx).cursor() == offset
+                    && editor.read(cx).text() == &source;
+                if !valid {
+                    if this.message == "正在查找引用…" {
+                        this.message.clear();
+                        cx.notify();
+                    }
+                    return;
+                }
                 this.message.clear();
                 this.show_locations(targets, "引用", None, window, cx);
             });
         }));
+        cx.notify();
     }
 }
 
