@@ -21,3 +21,8 @@ target
 #.idea/
 .DS_Store
 .zvec-grep/*
+
+# Claude Code local state; the project skills under .claude/skills are committed.
+.claude/worktrees/
+.claude/.cc-writes/
+.claude/settings.local.json
