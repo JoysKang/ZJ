@@ -174,6 +174,166 @@ fn python_module(text: &str) -> Option<Module> {
     Some(Module { level, parts })
 }
 
+/// Rust paths `use` and `extern crate` name, in source order, split on `::`. Leading
+/// qualifiers (`crate`, `self`, `super`, `std`, …) stay in the path; a braced group keeps
+/// only the path before `{`, because its members are items of that module.
+pub fn rust_modules(text: &str) -> Vec<Vec<String>> {
+    let lines: Vec<&str> = text.lines().take(MAX_LINES).collect();
+    let mut modules: Vec<Vec<String>> = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index].trim();
+        let is_use = line.starts_with("use ") || line.starts_with("pub use ");
+        let is_crate = line.starts_with("extern crate ");
+        if !is_use && !is_crate {
+            index += 1;
+            continue;
+        }
+        let mut end = index;
+        while end + 1 < lines.len() && continues(lines[end].trim_end()) {
+            end += 1;
+        }
+        let statement = lines[index..=end].join(" ");
+        let rest = statement
+            .trim_start()
+            .strip_prefix("pub use ")
+            .or_else(|| statement.trim_start().strip_prefix("use "))
+            .or_else(|| statement.trim_start().strip_prefix("extern crate "));
+        if let Some(rest) = rest {
+            let rest = rest.split([';', '{']).next().unwrap_or_default();
+            let rest = rest.split(" as ").next().unwrap_or(rest);
+            let path: Vec<String> = rest
+                .split("::")
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect();
+            if !path.is_empty() && !modules.contains(&path) {
+                modules.push(path);
+            }
+        }
+        index = end + 1;
+    }
+    modules
+}
+
+/// Go import paths, in source order, from a single `import "x"` or an `import ( … )` block.
+pub fn go_modules(text: &str) -> Vec<String> {
+    let mut modules: Vec<String> = Vec::new();
+    let mut in_block = false;
+    for line in text.lines().take(MAX_LINES) {
+        let line = line.trim();
+        if in_block {
+            if line.starts_with(')') {
+                in_block = false;
+            } else if let Some(path) = quoted_value(line)
+                && !modules.iter().any(|known| known == path)
+            {
+                modules.push(path.to_string());
+            }
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("import ") else {
+            continue;
+        };
+        let rest = rest.trim();
+        if rest.starts_with('(') {
+            in_block = true;
+        } else if let Some(path) = quoted_value(rest)
+            && !modules.iter().any(|known| known == path)
+        {
+            modules.push(path.to_string());
+        }
+    }
+    modules
+}
+
+/// Ruby `require` paths, in source order. `require_relative` and `require` given a relative
+/// path stay inside the workspace, so only the installed-library spellings are listed.
+pub fn ruby_requires(text: &str) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for line in text.lines().take(MAX_LINES) {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("require") else {
+            continue;
+        };
+        // `require_dependency` and similar helpers are not Ruby's own require.
+        if !rest.starts_with([' ', '(', '\t']) {
+            continue;
+        }
+        let Some(start) = rest.find(['\'', '"']) else {
+            continue;
+        };
+        let quote = rest[start..].chars().next().unwrap_or('\'');
+        let quoted = &rest[start + quote.len_utf8()..];
+        let Some(end) = quoted.find(quote) else {
+            continue;
+        };
+        let path = &quoted[..end];
+        if !path.is_empty()
+            && !path.starts_with(['.', '/'])
+            // `require "#{name}/x"` names nothing fixed.
+            && !path.contains("#{")
+            && !paths.iter().any(|known| known == path)
+        {
+            paths.push(path.to_string());
+        }
+    }
+    paths
+}
+
+/// The first quoted string in `text`, with `"` or a backtick.
+fn quoted_value(text: &str) -> Option<&str> {
+    let start = text.find(['"', '`'])?;
+    let quote = text[start..].chars().next()?;
+    let rest = &text[start + quote.len_utf8()..];
+    Some(&rest[..rest.find(quote)?])
+}
+
+/// Module specifiers JavaScript / TypeScript imports, in source order: the quoted path after
+/// `from`, inside `require(`, or of a side-effect `import 'x'`.
+pub fn javascript_specifiers(text: &str) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().take(MAX_LINES).collect();
+    let mut specifiers: Vec<String> = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index].trim();
+        if !is_import("javascript", line) {
+            index += 1;
+            continue;
+        }
+        let mut end = index;
+        while end + 1 < lines.len() && continues(lines[end].trim_end()) {
+            end += 1;
+        }
+        let statement = lines[index..=end].join(" ");
+        let specifier = quoted_after(&statement, "from ")
+            .or_else(|| quoted_after(&statement, "require("))
+            .or_else(|| {
+                let rest = statement.trim_start().strip_prefix("import ")?.trim_start();
+                let quote = rest.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+                let rest = &rest[quote.len_utf8()..];
+                Some(&rest[..rest.find(quote)?])
+            });
+        if let Some(specifier) = specifier
+            && !specifier.is_empty()
+            && !specifiers.iter().any(|known| known == specifier)
+        {
+            specifiers.push(specifier.to_string());
+        }
+        index = end + 1;
+    }
+    specifiers
+}
+
+/// The quoted string following `marker`.
+fn quoted_after<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
+    let rest = text.get(text.find(marker)? + marker.len()..)?.trim_start();
+    let quote = rest.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+    let rest = &rest[quote.len_utf8()..];
+    Some(&rest[..rest.find(quote)?])
+}
+
 /// Modules and symbols `text` imports, deduplicated, in source order.
 pub fn names(language: &str, text: &str) -> Vec<String> {
     let lines: Vec<&str> = text.lines().take(MAX_LINES).collect();
@@ -294,6 +454,44 @@ mod tests {
             ]
         );
         assert!(python_modules("print('from x import y')\n").is_empty());
+    }
+
+    #[test]
+    fn rust_and_go_keep_their_module_paths() {
+        let rust = "use serde::{Deserialize, Serialize};\npub use tokio::runtime::Runtime as Rt;\nuse std::collections::HashMap;\nextern crate libc;\n";
+        assert_eq!(
+            rust_modules(rust),
+            [
+                vec!["serde"],
+                vec!["tokio", "runtime", "Runtime"],
+                vec!["std", "collections", "HashMap"],
+                vec!["libc"],
+            ]
+        );
+        let go = "import \"fmt\"\n\nimport (\n\t\"example.com/a/b\"\n\talias \"example.com/c\"\n\t_ \"embed\"\n)\n";
+        assert_eq!(
+            go_modules(go),
+            ["fmt", "example.com/a/b", "example.com/c", "embed"]
+        );
+        assert!(rust_modules("fn main() { let x = 1; }").is_empty());
+        assert!(go_modules("var x = \"example.com/a\"\n").is_empty());
+    }
+
+    #[test]
+    fn javascript_specifiers_keep_the_quoted_path() {
+        let text = "import React from 'react';\nimport {\n  a,\n} from \"../lib/util\";\nconst x = require('left-pad');\nimport './side-effect.css';\n";
+        assert_eq!(
+            javascript_specifiers(text),
+            ["react", "../lib/util", "left-pad", "./side-effect.css"]
+        );
+        assert!(javascript_specifiers("const a = 'from x';\n").is_empty());
+    }
+
+    #[test]
+    fn ruby_requires_keep_the_load_path() {
+        let text = "require 'json'\nrequire \"active_support/core_ext\"\nrequire_relative 'helper'\nrequire './local'\nrequire_dependency 'app/models/user'\nname = \"require 'nope'\"\n";
+        assert_eq!(ruby_requires(text), ["json", "active_support/core_ext"]);
+        assert!(ruby_requires("puts 'require foo'\n").is_empty());
     }
 
     #[test]

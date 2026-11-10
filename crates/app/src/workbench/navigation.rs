@@ -25,6 +25,8 @@ use std::{
 };
 
 const MAX_TARGETS: usize = 50;
+/// How many third-party files one jump may read while looking for the definition.
+const MAX_EXTERNAL_FILES: usize = 16;
 const MAX_REFERENCES: usize = 500;
 const MAX_HISTORY: usize = 50;
 /// A definition asked for while the workspace index is being built waits this long for it,
@@ -129,6 +131,34 @@ fn target(path: &Path, text: &str, symbol: &symbols::Symbol) -> Target {
     }
 }
 
+/// The definition in a third-party module the imports name, if that module defines `name`:
+/// `from peewee import Model`, or `import { useState } from "react"`. Reads at most a few
+/// files from a workspace venv / enclosing `node_modules`; nothing enters the symbol index.
+fn external_definition(from: &Path, language: &str, source: &str, name: &str) -> Option<Target> {
+    for file in crate::library::module_files(from, language, source)
+        .into_iter()
+        .take(MAX_EXTERNAL_FILES)
+    {
+        let Some(other_language) = symbol_index::language(&file) else {
+            continue;
+        };
+        let Some(text) = symbol_index::read(&file) else {
+            continue;
+        };
+        let Some(symbols) = symbols::scan(other_language, &text) else {
+            continue;
+        };
+        if let Some(symbol) = symbols
+            .definitions
+            .iter()
+            .find(|symbol| symbol.name == name)
+        {
+            return Some(target(&file, &text, symbol));
+        }
+    }
+    None
+}
+
 /// Resolves the identifier at `offset` in `path` (whose current text is `text`).
 pub(super) fn resolve(
     path: &Path,
@@ -190,6 +220,9 @@ pub(super) fn resolve(
             .or_else(|| symbol_index::imported_definition(path, language, text, &others));
         if let Some(location) = chosen {
             others = vec![location];
+        } else if let Some(target) = external_definition(path, language, text, &name) {
+            // The import names an installed package, which the workspace index never holds.
+            return vec![target];
         }
     }
     let mut targets: Vec<Target> = same_file
@@ -1082,6 +1115,50 @@ mod tests {
             resolve(&main, "python", source, offset, Some(&index)).len(),
             2
         );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_third_party_import_jumps_into_the_workspace_venv() {
+        let root = std::env::temp_dir().join(format!("zj-nav-venv-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let site = root.join(".venv/lib/python3.12/site-packages");
+        fs::create_dir_all(&site).unwrap();
+        fs::write(root.join(".venv/pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+        let module = site.join("peewee.py");
+        fs::write(&module, "class Model:\n    pass\n").unwrap();
+        let main = root.join("app.py");
+        let source = "from peewee import Model\n\n\ndef f():\n    return Model()\n";
+        fs::write(&main, source).unwrap();
+        let index = SymbolIndex::build(vec![main.clone()], &AtomicBool::new(false));
+        let offset = source.rfind("Model").unwrap() + 1;
+        let targets = resolve(&main, "python", source, offset, Some(&index));
+        assert_eq!(targets.len(), 1, "{targets:?}");
+        assert_eq!((targets[0].path.clone(), targets[0].line), (module, 0));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_third_party_import_jumps_into_node_modules() {
+        let root = std::env::temp_dir().join(format!("zj-nav-node-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let types = root.join("node_modules/@types/react");
+        fs::create_dir_all(&types).unwrap();
+        let entries = types.join("index.d.ts");
+        fs::write(
+            &entries,
+            "export declare function useState<S>(value: S): [S, (next: S) => void];\n",
+        )
+        .unwrap();
+        let main = root.join("src/app.tsx");
+        let source = "import { useState } from \"react\";\n\nexport function App() {\n    return useState(1);\n}\n";
+        fs::create_dir_all(main.parent().unwrap()).unwrap();
+        fs::write(&main, source).unwrap();
+        let index = SymbolIndex::build(vec![main.clone()], &AtomicBool::new(false));
+        let offset = source.rfind("useState").unwrap() + 1;
+        let targets = resolve(&main, "tsx", source, offset, Some(&index));
+        assert_eq!(targets.len(), 1, "{targets:?}");
+        assert_eq!((targets[0].path.clone(), targets[0].line), (entries, 0));
         fs::remove_dir_all(&root).unwrap();
     }
 

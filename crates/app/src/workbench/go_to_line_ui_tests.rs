@@ -423,6 +423,100 @@ async fn go_to_definition_waits_for_the_workspace_index(cx: &mut TestAppContext)
     let _ = std::fs::remove_dir_all(root);
 }
 
+#[gpui_kit::test]
+async fn go_to_definition_opens_a_third_party_module_from_the_venv(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-go-to-venv-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let site = root.join(".venv/lib/python3.12/site-packages");
+    std::fs::create_dir_all(&site).unwrap();
+    std::fs::write(root.join(".venv/pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+    let module = site.join("peewee.py");
+    std::fs::write(&module, "class Model:\n    pass\n").unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let module = root.join(".venv/lib/python3.12/site-packages/peewee.py");
+    let b = "from peewee import Model\n\n\ndef main():\n    return Model()\n";
+    std::fs::write(root.join("app.py"), b).unwrap();
+    let (window, this) = open(cx, root.clone());
+    let path = root.join("app.py");
+    let folder = Some(root.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(path.clone(), folder, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.focus(window, cx);
+            editor.set_cursor_position(
+                gpui_kit::component::input::Position::new(4, 12),
+                window,
+                cx,
+            );
+        });
+        window.render_frame(cx);
+        window.dispatch_action(Box::new(gpui_kit::component::input::GoToDefinition), cx);
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| match p.active {
+            Pane::Document(id) => p.document(id).is_some_and(|doc| doc.path == module),
+            _ => false,
+        })
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A Ruby `require` jumps into the gems installed for the workspace.
+#[gpui_kit::test]
+async fn go_to_definition_opens_a_ruby_gem_from_vendor_bundle(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-go-to-gem-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let source = root.join("vendor/bundle/ruby/3.2.0/gems/activesupport-7.1.0/lib/active_support");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("core_ext.rb"),
+        "module ActiveSupport\n  class TimeWithZone\n  end\nend\n",
+    )
+    .unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let gem = root
+        .join("vendor/bundle/ruby/3.2.0/gems/activesupport-7.1.0/lib/active_support/core_ext.rb");
+    let b = "require 'active_support/core_ext'\n\ndef main\n  TimeWithZone.new\nend\n";
+    std::fs::write(root.join("app.rb"), b).unwrap();
+    let (window, this) = open(cx, root.clone());
+    let path = root.join("app.rb");
+    let folder = Some(root.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(path.clone(), folder, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.focus(window, cx);
+            editor.set_cursor_position(gpui_kit::component::input::Position::new(3, 4), window, cx);
+        });
+        window.render_frame(cx);
+        window.dispatch_action(Box::new(gpui_kit::component::input::GoToDefinition), cx);
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| match p.active {
+            Pane::Document(id) => p.document(id).is_some_and(|doc| doc.path == gem),
+            _ => false,
+        })
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// A file opened in a window whose folder does not hold it looks its definitions up in the
 /// window whose folder does.
 #[gpui_kit::test]

@@ -160,6 +160,10 @@ fn sources(language: &str) -> Option<(Vec<&'static str>, Vec<&'static str>)> {
             vec![query!("bash-tags.scm")],
             vec![query!("bash-locals.scm")],
         ),
+        "ruby" => (
+            vec![query!("ruby-tags.scm")],
+            vec![query!("ruby-locals.scm")],
+        ),
         _ => return None,
     })
 }
@@ -177,6 +181,7 @@ pub const LANGUAGES: &[&str] = &[
     "typescript",
     "tsx",
     "bash",
+    "ruby",
 ];
 
 fn queries(language: &str) -> Option<&'static Queries> {
@@ -524,6 +529,16 @@ pub(crate) mod tests {
             "#!/bin/bash\ngreet() { echo hi; }\nname=world\n‸greet \"$name\"\n",
             1,
         ),
+        (
+            "ruby",
+            "class Greeter\n  def hello(name)\n    greeting = \"hi\"\n    ‸greeting\n  end\nend\n",
+            2,
+        ),
+        (
+            "ruby",
+            "class Report\n  def build\n    ‸Report.new\n  end\nend\n",
+            0,
+        ),
     ];
 
     pub fn split(source: &str) -> (String, usize) {
@@ -561,11 +576,14 @@ pub(crate) mod tests {
                 "{language}: locals query failed"
             );
         }
-        let outline = outline(
+        let rust_outline = outline(
             "rust",
             "mod net {}\nconst MAX: u32 = 1;\nstruct A { field: u8 }\ntrait T {}\nimpl A { fn new() {} }\nfn main() {}\n",
         );
-        let names: Vec<_> = outline.iter().map(|s| (s.name.as_str(), s.kind)).collect();
+        let names: Vec<_> = rust_outline
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind))
+            .collect();
         assert_eq!(
             names,
             [
@@ -580,6 +598,23 @@ pub(crate) mod tests {
         );
         let (_, local) = resolve_local("rust", "fn main() {}\n", 3).unwrap();
         assert_eq!(local, Local::OnDefinition);
+        let ruby_outline = outline(
+            "ruby",
+            "module Greeting\n  class Person\n    MAX = 3\n    def hello(name)\n    end\n  end\nend\n",
+        );
+        let names: Vec<_> = ruby_outline
+            .iter()
+            .map(|s| (s.name.as_str(), s.kind))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("Greeting", Kind::Module),
+                ("Person", Kind::Class),
+                ("MAX", Kind::Constant),
+                ("hello", Kind::Method),
+            ]
+        );
     }
 
     #[test]

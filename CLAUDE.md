@@ -84,7 +84,7 @@ AI 辅助开发时需要遵守的约定。需求细节见 `轻量代码编辑器
   - `workbench/graph_view.rs`：编辑区里的 Git 图（纯函数的车道布局、分页提交列表、提交详情、打开提交 Diff）。
   - `time.rs`：Git 图、提交、stash 与 blame 的本地时间显示，以及恢复快照的毫秒时间戳。
   - `session.rs`：重启时恢复的窗口记录（`session.json`，每个窗口的文件夹、位置大小、文件标签和激活的标签、侧栏宽度/可见性/视图；退出时按系统窗口的前后顺序保存，重启按从后到前的顺序创建；重启时只读入激活的标签，其余标签点开时才读）。
-  - `symbols.rs`：tree-sitter tags / locals 查询做定义、引用、文件大纲和局部绑定跳转（查询在 `crates/app/queries/`）；`imports.rs`：按语言读 import 语句，供跨文件候选排序，Python 还保留点分模块路径，用于把 `from db.models import X` 解析到具体文件（唯一命中直接跳转，否则仍列候选）；`symbol_index.rs`：首次跳转时后台建立的工作区符号索引；`workbench/navigation.rs`：转到定义、符号列表、查找引用、转到行（⌃G，命令中心里的 `:行:列`）和前进后退。编辑器文字颜色只用 Kit 的语法类别高亮，不按绑定另行着色。不跑语言服务器，见 docs/决策/0002-代码导航.md。
+  - `symbols.rs`：tree-sitter tags / locals 查询做定义、引用、文件大纲和局部绑定跳转（查询在 `crates/app/queries/`）；`imports.rs`：按语言读 import 语句，供跨文件候选排序，Python 还保留点分模块路径，用于把 `from db.models import X` 解析到具体文件（唯一命中直接跳转，否则仍列候选）；`symbol_index.rs`：首次跳转时后台建立的工作区符号索引；`library.rs`：跳转时按需找到 Python（工作区 venv 的 site-packages）、JS / TS（上层 node_modules）、Rust（`CARGO_HOME/registry/src`，版本取最近的 `Cargo.lock`）、Go（`GOMODCACHE`，经最近的 `go.mod` 的 require / replace）和 Ruby（`vendor/bundle`、`GEM_HOME` / `GEM_PATH`、`~/.gem/ruby`、Homebrew 等 gem 目录，版本取最近的 `Gemfile.lock`）的第三方模块文件，只读一个文件，不建索引；`workbench/navigation.rs`：转到定义、符号列表、查找引用、转到行（⌃G，命令中心里的 `:行:列`）和前进后退。编辑器文字颜色只用 Kit 的语法类别高亮，不按绑定另行着色。不跑语言服务器，见 docs/决策/0002-代码导航.md。
 - `vendor/`：打过补丁的 GPUI macOS 渲染器和窗口层（`gpui-pre-apple` / `gpui-pre-macos`），以及 GPUI Kit 的 `gpui-base`（编辑器光标常亮），都用 `[patch.crates-io]` 指向。改动都标 `ZJ patch`，说明在 `vendor/README.md`，理由和测量方法在 docs/决策/0005-渲染内存.md；`ZJ_GPU_LOWMEM=0` 恢复上游行为。升级 GPUI 时要先处理这里。
 - UI 的 render 回调里不做 IO、不跑 Git 命令、不做全文解析；这些都通过 `background_spawn` 执行，结果带 generation 校验。
 
