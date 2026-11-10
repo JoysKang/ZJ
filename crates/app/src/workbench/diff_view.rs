@@ -80,6 +80,16 @@ pub(super) enum DiffList {
     Inline,
 }
 
+/// A scroll that waits for the rows it belongs to.
+#[derive(Clone, Copy)]
+pub(super) enum PendingScroll {
+    /// A source row, mapped to its display row once folding is ready.
+    Row(usize, ScrollStrategy),
+    /// The first change of the layout being built; resolved once its change list exists,
+    /// so whitespace filtering and the chosen layout apply.
+    FirstChange,
+}
+
 #[derive(Clone, Copy)]
 enum Fill {
     Plain,
@@ -176,8 +186,20 @@ impl Workbench {
             self.diff.review.inline = Vec::new();
             self.diff.review.pair_changes = Vec::new();
             self.diff.review.inline_changes = Vec::new();
-            if let Some((source, strategy)) = self.diff.pending_scroll.take() {
-                self.diff.scroll.scroll_to_item_strict(source, strategy);
+            if let Some(pending) = self.diff.pending_scroll.take() {
+                match pending {
+                    PendingScroll::Row(source, strategy) => {
+                        self.diff.scroll.scroll_to_item_strict(source, strategy);
+                    }
+                    PendingScroll::FirstChange => {
+                        let first = self.diff_change_starts().first().copied();
+                        if let Some(row) = first {
+                            self.diff
+                                .scroll
+                                .scroll_to_item_strict(row, ScrollStrategy::Center);
+                        }
+                    }
+                }
             } else if let Some(source) = top_source {
                 self.diff
                     .scroll
@@ -240,9 +262,21 @@ impl Workbench {
                 }
                 if find_open {
                     this.diff_reveal_hit(cx);
-                } else if let Some((source, strategy)) = pending {
-                    let row = this.diff_visible_row(source, this.diff_is_inline());
-                    this.diff.scroll.scroll_to_item_strict(row, strategy);
+                } else if let Some(pending) = pending {
+                    match pending {
+                        PendingScroll::Row(source, strategy) => {
+                            let row = this.diff_visible_row(source, this.diff_is_inline());
+                            this.diff.scroll.scroll_to_item_strict(row, strategy);
+                        }
+                        PendingScroll::FirstChange => {
+                            let first = this.diff_change_starts().first().copied();
+                            if let Some(row) = first {
+                                this.diff
+                                    .scroll
+                                    .scroll_to_item_strict(row, ScrollStrategy::Center);
+                            }
+                        }
+                    }
                 } else if let Some(source) = top_source {
                     let (source, strategy) = this
                         .diff
@@ -453,7 +487,7 @@ impl Workbench {
             self.diff.scroll.scroll_to_item_strict(row, strategy);
             self.diff.pending_scroll = None;
         } else {
-            self.diff.pending_scroll = Some((source, strategy));
+            self.diff.pending_scroll = Some(PendingScroll::Row(source, strategy));
         }
     }
 
@@ -650,7 +684,15 @@ impl Workbench {
                         "折叠未变区域"
                     })
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.diff.review.collapse = !this.diff.review.collapse;
+                        if this.diff.review.collapse {
+                            // Expanding keeps whatever source row was on top; land on the
+                            // first change instead, as when the diff opens.
+                            this.diff.pending_scroll = Some(PendingScroll::FirstChange);
+                            this.diff.review.collapse = false;
+                        } else {
+                            this.diff.pending_scroll = None;
+                            this.diff.review.collapse = true;
+                        }
                         this.diff.selection = None;
                         this.diff_review_changed(window, cx);
                     })),
@@ -1504,8 +1546,8 @@ pub(super) struct DiffPane {
     pub(super) change: Option<usize>,
     pub(super) inline: bool,
     pub(super) scroll: UniformListScrollHandle,
-    /// A scroll target in source rows, applied once folded display rows are ready.
-    pub(super) pending_scroll: Option<(usize, ScrollStrategy)>,
+    /// A scroll target, applied once the display rows it refers to are ready.
+    pub(super) pending_scroll: Option<PendingScroll>,
     pub(super) stale: bool,
     /// The patch is being (re)loaded: what is shown may be older than the status.
     pub(super) loading: bool,

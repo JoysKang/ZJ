@@ -163,6 +163,85 @@ async fn a_folded_diff_opens_at_its_first_change(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+async fn expanding_unchanged_regions_lands_on_the_first_change(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
+    let old = format!("{}old();\n", "context\n".repeat(100));
+    let patch: Arc<str> = crate::save::text_patch(&old, &old.replace("old();", "new();")).into();
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.show_diff_tab(
+                DiffTab {
+                    label: "expand.txt".into(),
+                    tooltip: "expand.txt".into(),
+                    path: PathBuf::from("/tmp/expand.txt"),
+                    source: DiffSource::Local(patch, "old → new"),
+                    checkpoint: None,
+                },
+                window,
+                cx,
+            )
+        });
+    })
+    .unwrap();
+    // Both layouts, with and without whitespace filtering; filtering takes the asynchronous
+    // row path, where the target is resolved once the filtered change lists exist.
+    for (inline, whitespace) in [
+        (false, Whitespace::Exact),
+        (true, Whitespace::Exact),
+        (false, Whitespace::Trailing),
+        (true, Whitespace::Trailing),
+    ] {
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                p.diff.inline = inline;
+                p.diff.review.whitespace = whitespace;
+                p.diff.review.collapse = true;
+                p.diff_review_changed(window, cx);
+            });
+        })
+        .unwrap();
+        settle(cx, None, |cx| {
+            this.read_with(cx, |p, _| p.diff_display_rows(inline).is_some())
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                // The user scrolled to the top of the folded document.
+                let mut scroll = p.diff.scroll.0.borrow_mut();
+                scroll.deferred_scroll_to_item = None;
+                scroll
+                    .base_handle
+                    .set_offset(point(Pixels::ZERO, Pixels::ZERO));
+                cx.notify();
+            });
+            window.render_frame(cx);
+            assert_eq!(this.read_with(cx, |p, _| p.diff.visible_top_row()), 0);
+            window.click("diff-collapse", cx);
+            window.render_frame(cx);
+        })
+        .unwrap();
+        settle(cx, None, |cx| {
+            this.read_with(cx, |p, _| {
+                whitespace == Whitespace::Exact || p.diff_display_rows(inline).is_some()
+            })
+        });
+        this.read_with(cx, |p, _| {
+            let start = p.diff_change_starts().first().copied().unwrap();
+            let top = p.diff.visible_top_row();
+            assert!(
+                top > 0,
+                "expanding left the view at the file top (inline={inline}, whitespace={whitespace:?})"
+            );
+            assert!(
+                top <= start && start < top + 60,
+                "the first change is not in view: top={top} start={start} \
+                 (inline={inline}, whitespace={whitespace:?})"
+            );
+        });
+    }
+}
+
+#[gpui_kit::test]
 async fn diff_find_reveals_folded_matches_and_repeated_shortcuts_replace_query(
     cx: &mut TestAppContext,
 ) {
