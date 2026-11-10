@@ -200,7 +200,7 @@ impl Workbench {
                 .find(|saved| saved.id == id)
                 .and_then(|saved| saved.pane.tab.as_ref())
                 .map(|tab| tab.path.clone()),
-            Pane::Welcome => None,
+            Pane::Welcome | Pane::Settings => None,
         }
         .or_else(|| self.root.clone())?;
         (0..self.groups.len())

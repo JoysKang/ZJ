@@ -967,10 +967,10 @@ impl Workbench {
                                             })
                                             .on_click(cx.listener(|this, on: &bool, window, cx| {
                                                 let on = *on;
+                                                // The settings observer re-runs a shown query.
                                                 this.change_settings(window, cx, |s| {
                                                     s.search_use_excludes = on
                                                 });
-                                                this.schedule_search(Duration::ZERO, window, cx);
                                             })),
                                             ),
                                     ),

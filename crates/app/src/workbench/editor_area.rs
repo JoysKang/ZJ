@@ -63,9 +63,9 @@ impl Tabs {
     }
 }
 
-struct TabSpec {
+pub(super) struct TabSpec {
     key: usize,
-    pane: Pane,
+    pub(super) pane: Pane,
     icon: &'static str,
     /// A Lucide icon instead of a file-type icon (the Git Graph tab).
     lucide: Option<IconName>,
@@ -181,6 +181,7 @@ impl Workbench {
                     Pane::Large => this.close_large(window, cx),
                     Pane::Image(id) => this.close_image(id, window, cx),
                     Pane::SavedDiff(id) => this.close_saved_diff(id, window, cx),
+                    Pane::Settings => this.close_settings(window, cx),
                     Pane::Welcome => {}
                 }
             }));
@@ -312,7 +313,7 @@ impl Workbench {
             .into_any_element()
     }
 
-    fn tab_specs(&self) -> Vec<TabSpec> {
+    pub(super) fn tab_specs(&self) -> Vec<TabSpec> {
         let mut specs: Vec<TabSpec> = self
             .documents
             .iter()
@@ -406,6 +407,21 @@ impl Workbench {
                 label: "Git 图".to_string(),
                 tooltip: format!("Git 图 · {}", graph.repo.worktree.display()),
                 path: graph.repo.worktree.clone(),
+                dirty: false,
+                note: None,
+                deleted: false,
+                pending: None,
+            });
+        }
+        if self.settings_pane.is_some() {
+            specs.push(TabSpec {
+                key: usize::MAX - 3,
+                pane: Pane::Settings,
+                icon: "",
+                lucide: Some(IconName::Settings),
+                label: "设置".to_string(),
+                tooltip: "设置".to_string(),
+                path: std::path::PathBuf::new(),
                 dirty: false,
                 note: None,
                 deleted: false,
@@ -519,6 +535,7 @@ impl Workbench {
                     }
                     Pane::Graph => format!("{} · Git 图", spec.path.display()),
                     Pane::Large => format!("{} · 只读", path.display()),
+                    Pane::Settings => "设置".to_string(),
                     _ => path.display().to_string(),
                 }
                 .replace(SINGLE_LINE, "⏎");
@@ -777,6 +794,7 @@ impl Workbench {
             Pane::Diff => self.render_diff(cx),
             Pane::Graph => self.render_graph(cx),
             Pane::Large => self.render_large(cx),
+            Pane::Settings => self.render_settings(cx),
             Pane::Image(id) => self.render_image(id, cx),
             Pane::Document(id) => match self.documents.iter().find(|doc| doc.id == id) {
                 Some(doc) if doc.markdown.as_ref().is_some_and(|md| !md.source) => {

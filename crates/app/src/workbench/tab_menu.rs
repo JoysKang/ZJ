@@ -90,7 +90,7 @@ impl Workbench {
                 .find(|saved| saved.id == id)
                 .and_then(|saved| saved.pane.tab.as_ref())
                 .map(|tab| tab.path.clone()),
-            Pane::Welcome => None,
+            Pane::Welcome | Pane::Settings => None,
         }
     }
 
@@ -107,6 +107,7 @@ impl Workbench {
             + usize::from(self.diff.tab.is_some())
             + usize::from(self.graph.is_some())
             + usize::from(self.large.is_some())
+            + usize::from(self.settings_pane.is_some())
             + self.images.len()
             + self.archived_diffs.len();
         let in_tree = (pending.is_some() || matches!(pane, Pane::Document(_) | Pane::Image(_)))
@@ -208,6 +209,7 @@ impl Workbench {
             Pane::Large => self.close_large(window, cx),
             Pane::Image(id) => self.close_image(id, window, cx),
             Pane::SavedDiff(id) => self.close_saved_diff(id, window, cx),
+            Pane::Settings => self.close_settings(window, cx),
             Pane::Welcome => {}
         }
     }
@@ -284,6 +286,9 @@ impl Workbench {
                     }
                     if keep != Pane::Large && this.large.is_some() {
                         this.close_large(window, cx);
+                    }
+                    if keep != Pane::Settings && this.settings_pane.is_some() {
+                        this.close_settings(window, cx);
                     }
                     let images: Vec<_> = this
                         .images

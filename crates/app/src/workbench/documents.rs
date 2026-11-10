@@ -396,6 +396,7 @@ impl Workbench {
             Pane::Large => self.close_large(window, cx),
             Pane::Image(id) => self.close_image(id, window, cx),
             Pane::SavedDiff(id) => self.close_saved_diff(id, window, cx),
+            Pane::Settings => self.close_settings(window, cx),
             Pane::Welcome => self.close_window_after_confirm(window, cx),
         }
     }

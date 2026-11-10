@@ -1,5 +1,6 @@
-//! ⌘, opens the settings file (created if missing; in tests a temporary file); saving it puts
-//! it into effect, and a file that does not parse leaves the settings in use.
+//! ⌘, opens the Settings tab; its controls change the settings file (in tests a temporary
+//! file) and take effect at once. The JSON file still opens in a tab, and saving it puts it
+//! into effect; a file that does not parse leaves the settings in use.
 
 use super::test_support::{loaded, new_window, open_window, settle};
 use super::*;
@@ -484,4 +485,287 @@ async fn completing_old_settings_does_not_start_delay_auto_save(cx: &mut TestApp
 #[gpui_kit::test]
 async fn completing_old_settings_does_not_start_focus_change_auto_save(cx: &mut TestAppContext) {
     completion_waits_for_user_edits(cx, crate::save::AutoSave::OnFocusChange).await;
+}
+
+/// Opens the Settings tab and completes one frame so its controls can be found by id.
+fn open_settings_tab(
+    cx: &mut TestAppContext,
+    window: WindowHandle<gpui_kit::base::Root>,
+    this: &Entity<Workbench>,
+) {
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_settings(window, cx));
+        window.render_frame(cx);
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+async fn the_settings_tab_changes_settings_without_editing_json(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let path = Settings::path().unwrap();
+    let _ = std::fs::remove_file(&path);
+    let (window, this) = open_window(cx, None, Settings::default());
+    open_settings_tab(cx, window, &this);
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.active, Pane::Settings);
+        assert!(p.settings_pane.is_some());
+        assert!(
+            p.tab_specs().iter().any(|spec| spec.pane == Pane::Settings),
+            "the Settings tab has a tab-bar entry"
+        );
+    });
+    // A second ⌘, returns to the same tab, keeping its input.
+    let hidden = this.read_with(cx, |p, _| p.settings_pane.as_ref().unwrap().hidden.clone());
+    open_settings_tab(cx, window, &this);
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.active, Pane::Settings);
+        assert_eq!(p.settings_pane.as_ref().unwrap().hidden, hidden);
+    });
+
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click("settings-show-hidden", cx);
+    })
+    .unwrap();
+    cx.read(|cx| assert!(cx.global::<Settings>().show_hidden));
+    cx.run_until_parked();
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(written["show_hidden"], true);
+
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click("settings-font-larger", cx);
+        window.render_frame(cx);
+        window.click("settings-auto-save-off", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.read(|cx| {
+        assert_eq!(cx.global::<Settings>().editor_font_size, 14.);
+        assert_eq!(
+            cx.global::<Settings>().auto_save,
+            crate::save::AutoSave::Off
+        );
+    });
+
+    // ⌘W closes it like any other tab.
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.close_editor(window, cx));
+    })
+    .unwrap();
+    this.read_with(cx, |p, _| {
+        assert!(p.settings_pane.is_none());
+        assert_eq!(p.active, Pane::Welcome);
+        assert!(!p.tab_specs().iter().any(|spec| spec.pane == Pane::Settings));
+    });
+
+    // The JSON file stays reachable from the tab.
+    open_settings_tab(cx, window, &this);
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click("settings-json", cx);
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[gpui_kit::test]
+async fn hidden_rules_apply_only_when_valid(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let path = Settings::path().unwrap();
+    let _ = std::fs::remove_file(&path);
+    let (window, this) = open_window(cx, None, Settings::default());
+    open_settings_tab(cx, window, &this);
+    let set_rules = |cx: &mut TestAppContext, text: &str| {
+        let text = text.to_string();
+        cx.update_window(window.into(), |_, window, cx| {
+            this.update(cx, |p, cx| {
+                let pane = p.settings_pane.as_ref().unwrap();
+                pane.hidden
+                    .update(cx, |input, cx| input.set_value(text, window, cx));
+            });
+        })
+        .unwrap();
+    };
+    let apply = |cx: &mut TestAppContext| {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("settings-hidden-apply", cx);
+        })
+        .unwrap();
+    };
+
+    set_rules(cx, ".DS_Store\n*.log\n!重要.log\n");
+    apply(cx);
+    cx.read(|cx| {
+        assert_eq!(
+            cx.global::<Settings>().hidden_files.patterns(),
+            [".DS_Store", "*.log", "!重要.log"]
+        )
+    });
+    this.read_with(cx, |p, _| assert_eq!(p.message, "隐藏规则已生效"));
+
+    set_rules(cx, ".DS_Store\nsrc/tmp\n");
+    apply(cx);
+    cx.read(|cx| {
+        assert_eq!(
+            cx.global::<Settings>().hidden_files.patterns(),
+            [".DS_Store", "*.log", "!重要.log"],
+            "an invalid pattern must keep the rules in use"
+        )
+    });
+    this.read_with(cx, |p, _| {
+        assert!(p.message.contains("无效"), "{}", p.message)
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[gpui_kit::test]
+async fn applying_stale_hidden_rules_keeps_a_newer_edit(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let path = Settings::path().unwrap();
+    let _ = std::fs::remove_file(&path);
+    let (window, this) = open_window(cx, None, Settings::default());
+    open_settings_tab(cx, window, &this);
+    // The rules changed elsewhere: the JSON file in its tab, or another window.
+    cx.update(|cx| {
+        let rules = crate::hidden_files::HiddenFiles::new(vec![".DS_Store".into()]).unwrap();
+        crate::settings::update(cx, |settings| settings.hidden_files = rules).detach();
+    });
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    this.read_with(cx, |p, cx| {
+        assert_eq!(
+            p.settings_pane
+                .as_ref()
+                .unwrap()
+                .hidden
+                .read(cx)
+                .value()
+                .as_ref(),
+            ".DS_Store",
+            "the untouched textarea follows the newer rules"
+        );
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.click("settings-hidden-apply", cx);
+    })
+    .unwrap();
+    cx.read(|cx| {
+        assert_eq!(
+            cx.global::<Settings>().hidden_files.patterns(),
+            [".DS_Store"],
+            "应用 must not write back rules the user never saw"
+        )
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[gpui_kit::test]
+async fn applied_text_with_a_trailing_newline_still_follows_a_later_edit(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let path = Settings::path().unwrap();
+    let _ = std::fs::remove_file(&path);
+    let (window, this) = open_window(cx, None, Settings::default());
+    open_settings_tab(cx, window, &this);
+    let typed = ".DS_Store\n*.log\n\n";
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            let pane = p.settings_pane.as_ref().unwrap();
+            pane.hidden
+                .update(cx, |input, cx| input.set_value(typed, window, cx));
+        });
+    })
+    .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("settings-hidden-apply", cx);
+    })
+    .unwrap();
+    // The textarea keeps the typed text, so what it shows and the applied rules differ.
+    cx.update(|cx| {
+        let rules = crate::hidden_files::HiddenFiles::new(vec![".DS_Store".into()]).unwrap();
+        crate::settings::update(cx, |settings| settings.hidden_files = rules).detach();
+    });
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| window.render_frame(cx))
+        .unwrap();
+    this.read_with(cx, |p, cx| {
+        assert_eq!(
+            p.settings_pane
+                .as_ref()
+                .unwrap()
+                .hidden
+                .read(cx)
+                .value()
+                .as_ref(),
+            ".DS_Store",
+            "text with no unapplied edits must follow a newer rule change"
+        );
+    });
+    let _ = std::fs::remove_file(&path);
+}
+
+#[gpui_kit::test]
+async fn the_settings_tab_keeps_the_file_the_session_should_restore(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let path = Settings::path().unwrap();
+    let _ = std::fs::remove_file(&path);
+    let (window, this) = open_window(cx, None, Settings::default());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_settings_file(window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let saved = this.read_with(cx, |p, _| p.saved_active());
+    open_settings_tab(cx, window, &this);
+    assert_eq!(
+        this.read_with(cx, |p, _| p.saved_active()),
+        saved,
+        "the Settings tab has no file: restoring the one before it is more useful"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[gpui_kit::test]
+async fn an_open_diff_follows_the_saved_layout_from_elsewhere(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let path = Settings::path().unwrap();
+    let _ = std::fs::remove_file(&path);
+    let (window, this) = open_window(cx, None, Settings::default());
+    let old = "a\nb\nc\n";
+    let patch: Arc<str> = crate::save::text_patch(old, "a\nB\nc\n").into();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.show_diff_tab(
+                DiffTab {
+                    label: "layout.txt".into(),
+                    tooltip: "layout.txt".into(),
+                    path: PathBuf::from("/tmp/layout.txt"),
+                    source: DiffSource::Local(patch, "old → new"),
+                    checkpoint: None,
+                },
+                window,
+                cx,
+            )
+        });
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.diff.doc.is_some() && !p.diff.loading)
+    });
+    this.read_with(cx, |p, _| assert!(p.diff.inline, "the default layout"));
+    cx.update(|cx| {
+        crate::settings::update(cx, |settings| settings.diff_inline = false).detach();
+    });
+    cx.run_until_parked();
+    this.read_with(cx, |p, _| {
+        assert!(!p.diff.inline, "the open Diff followed the setting");
+    });
+    let _ = std::fs::remove_file(&path);
 }

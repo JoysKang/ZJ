@@ -53,9 +53,11 @@ pub const TREE_BASE: Pixels = px(12.);
 pub const SEARCH_SWITCH_INSET_X: Pixels = px(8.);
 pub const SEARCH_SWITCH_INSET_Y: Pixels = px(4.);
 pub const SEARCH_SWITCH_GUTTER: Pixels = px(44.);
-/// The Search view's glob lists are textareas: this line height makes one line as high as
-/// the single-line query above them (24 px), whose text gets the same 18 px.
-pub const SEARCH_GLOB_LINE: Pixels = px(18.);
+/// One line of a multi-line text field: as high as the 24 px single-line query above it,
+/// whose text gets the same 18 px.
+pub const FIELD_LINE: Pixels = px(18.);
+/// The Search view's glob lists use the shared field line height.
+pub const SEARCH_GLOB_LINE: Pixels = FIELD_LINE;
 /// Search jumps leave a few lines of context above the selected match.
 pub const SEARCH_RESULT_TOP: Pixels = px(64.);
 pub const TREE_STEP: Pixels = px(8.);
@@ -88,6 +90,8 @@ pub const RADIUS_LARGE: Pixels = px(8.);
 pub const WORKBENCH_RADIUS: Pixels = px(6.);
 /// Each panel contributes 2 px to the 4 px gap between surfaces.
 pub const WORKBENCH_INSET: Pixels = px(2.);
+/// The Settings tab's content column (a readable measure, centred in the editor area).
+pub const SETTINGS_WIDTH: Pixels = px(720.);
 /// The editor's floating find / replace widget (VS Code: 419 px wide, inputs about 220 px).
 pub const FIND_WIDTH: Pixels = px(500.);
 pub const FIND_INPUT_WIDTH: Pixels = px(236.);

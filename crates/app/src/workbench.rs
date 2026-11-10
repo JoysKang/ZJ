@@ -122,6 +122,7 @@ mod restore_ui_tests;
 #[cfg(test)]
 #[path = "workbench/session_ui_tests.rs"]
 mod session_ui_tests;
+mod settings_view;
 mod sidebar;
 mod switch_hud;
 mod tab_menu;
@@ -180,6 +181,7 @@ gpui_kit::actions!(
         ZoomReset,
         ToggleHiddenFiles,
         FindInFiles,
+        OpenSettings,
         OpenSettingsFile
     ]
 );
@@ -230,6 +232,8 @@ enum Pane {
     Graph,
     /// The restricted viewer of a file too large (or not UTF-8) to edit, one at a time.
     Large,
+    /// The Settings tab (one at a time): every setting from `settings.json`, changed in place.
+    Settings,
 }
 
 struct Document {
@@ -477,11 +481,15 @@ pub struct Workbench {
     explorer: sidebar::Explorer,
     /// Source Control lists only repositories with changes (settings).
     hide_clean_repos: bool,
+    /// Search skips .gitignore'd files (settings): a change re-runs the shown results.
+    search_excludes: bool,
     /// Source Control rows vary in height (repository rows wrap long branch names), so they
     /// use a measured list instead of `uniform_list`.
     scm_list: ListState,
     search: search_view::SearchState,
     find: find_widget::FindState,
+    /// The Settings tab's inputs; `Some` while the tab is open.
+    settings_pane: Option<settings_view::SettingsPane>,
     /// The selection ⌘D made from the word under the cursor: the next ⌘D matches whole words.
     whole_word_selection: Option<(DocumentId, std::ops::Range<usize>)>,
     /// Buffers being reloaded after a replace in the Search view: their next change event
@@ -579,6 +587,8 @@ impl Workbench {
                 let settings = cx.global::<crate::settings::Settings>();
                 let show_hidden = settings.show_hidden;
                 let hidden_files = settings.hidden_files.clone();
+                let diff_inline = settings.diff_inline;
+                let search_excludes = settings.search_use_excludes;
                 if show_hidden != this.explorer.show_hidden
                     || hidden_files != this.explorer.hidden_files
                 {
@@ -589,6 +599,17 @@ impl Workbench {
                         this.schedule_search(Duration::ZERO, window, cx);
                     }
                     this.update_quick_open(window, cx);
+                }
+                if search_excludes != this.search_excludes {
+                    this.search_excludes = search_excludes;
+                    if !this.search.query.read(cx).value().is_empty() {
+                        this.schedule_search(Duration::ZERO, window, cx);
+                    }
+                }
+                // The Settings tab may be open here; its textarea follows outside edits.
+                this.sync_hidden_rules(window, cx);
+                if this.diff.tab.is_some() && this.diff.inline != diff_inline {
+                    this.follow_saved_diff_layout(diff_inline, cx);
                 }
             });
         if !cx.has_global::<reading_state::ReviewStoreChanged>() {
@@ -709,9 +730,11 @@ impl Workbench {
                 message: String::new(),
             },
             hide_clean_repos: cx.global::<crate::settings::Settings>().hide_clean_repos,
+            search_excludes: cx.global::<crate::settings::Settings>().search_use_excludes,
             scm_list: ListState::new(0, ListAlignment::Top, theme::SCM_LIST_OVERDRAW),
             search,
             find,
+            settings_pane: None,
             reloading: Default::default(),
             whole_word_selection: None,
             index: None,
@@ -1043,8 +1066,9 @@ impl Workbench {
         .detach();
     }
 
-    /// ⌘,: the settings file in a tab, written first if it does not exist yet. Saving it puts
-    /// it into effect (`apply_saved_settings`).
+    /// The settings file in a tab, written first if it does not exist yet. ⌘, now opens the
+    /// Settings tab; this stays in the command palette and on that tab. Saving it puts it into
+    /// effect (`apply_saved_settings`).
     fn open_settings_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = crate::settings::Settings::path() else {
             self.message = "找不到设置目录（HOME 未设置）".into();
@@ -1182,7 +1206,12 @@ impl Workbench {
                 .snapshot
                 .clone()
                 .or_else(|| self.diff.fallback.clone()),
-            Pane::Welcome | Pane::Graph | Pane::Large | Pane::Image(_) | Pane::SavedDiff(_) => None,
+            Pane::Welcome
+            | Pane::Graph
+            | Pane::Large
+            | Pane::Settings
+            | Pane::Image(_)
+            | Pane::SavedDiff(_) => None,
         }
     }
 
@@ -1692,7 +1721,15 @@ impl Workbench {
             }
         }
         tabs.sort_by_key(|path| self.tab_rank(path));
-        let active = match self.active {
+        let active = self.saved_active();
+        self.remember_reading(false, window, cx);
+        crate::session::remember_tabs(window, tabs, active, persist, cx);
+        self.remember_layout(false, cx);
+    }
+
+    /// The file the session should restore as active.
+    pub(super) fn saved_active(&self) -> Option<PathBuf> {
+        match self.active {
             Pane::Image(id) => self
                 .images
                 .iter()
@@ -1702,11 +1739,16 @@ impl Workbench {
                 .document(id)
                 .filter(|doc| !doc.untitled)
                 .map(|doc| doc.path.clone()),
+            // Settings has no file; restoring the file seen before it is more useful than
+            // reopening every tab as a pending one.
+            Pane::Settings => self
+                .recent_documents
+                .iter()
+                .find_map(|id| self.document(*id))
+                .filter(|doc| !doc.untitled)
+                .map(|doc| doc.path.clone()),
             _ => None,
-        };
-        self.remember_reading(false, window, cx);
-        crate::session::remember_tabs(window, tabs, active, persist, cx);
-        self.remember_layout(false, cx);
+        }
     }
 
     /// A file read in the background becomes a tab (or focuses the tab that already has it,
@@ -2793,6 +2835,9 @@ impl Render for Workbench {
             .on_action(cx.listener(|this, action: &ExportPatch, window, cx| this.run_reading_action(action, window, cx)))
             .on_action(cx.listener(|this, _: &OpenFolder, window, cx| {
                 this.choose_path(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.open_settings(window, cx);
             }))
             .on_action(cx.listener(|this, _: &OpenSettingsFile, window, cx| {
                 this.open_settings_file(window, cx);

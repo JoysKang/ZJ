@@ -218,11 +218,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         cx.bind_keys([
             KeyBinding::new("cmd-shift-n", workbench::NewWindow, Some("WorkspaceEditor")),
             KeyBinding::new("secondary-c", workbench::CopyLargeLines, Some("LargeView")),
-            KeyBinding::new(
-                "cmd-,",
-                workbench::OpenSettingsFile,
-                Some("WorkspaceEditor"),
-            ),
+            KeyBinding::new("cmd-,", workbench::OpenSettings, Some("WorkspaceEditor")),
             KeyBinding::new("secondary-s", workbench::Save, Some("WorkspaceEditor")),
             KeyBinding::new(
                 "secondary-shift-s",
@@ -525,7 +521,7 @@ fn install_menus(cx: &mut App) {
 fn app_menus(auto_save: save::AutoSave) -> [Menu; 5] {
     [
         Menu::new("ZJ").items([
-            MenuItem::action("设置…", workbench::OpenSettingsFile),
+            MenuItem::action("设置…", workbench::OpenSettings),
             MenuItem::separator(),
             MenuItem::os_submenu("服务", SystemMenuType::Services),
             MenuItem::separator(),

@@ -512,12 +512,39 @@ impl Workbench {
     }
 
     pub(super) fn toggle_diff_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.diff.inline = !self.diff.inline;
+        self.set_diff_layout(!self.diff.inline, window, cx);
+    }
+
+    /// Chosen by the toolbar toggle and by the Settings tab, which both save the preference.
+    pub(super) fn set_diff_layout(
+        &mut self,
+        inline: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.change_settings(window, cx, |settings| settings.diff_inline = inline);
+        self.apply_diff_layout(inline, cx);
+    }
+
+    /// Another window (or the settings file) chose the layout: follow it without writing the
+    /// setting again, which would notify every window back.
+    pub(super) fn follow_saved_diff_layout(&mut self, inline: bool, cx: &mut Context<Self>) {
+        self.apply_diff_layout(inline, cx);
+    }
+
+    /// Selection and caret are row-indexed, so they cannot survive the switch.
+    fn apply_diff_layout(&mut self, inline: bool, cx: &mut Context<Self>) {
+        if self.diff.inline == inline {
+            return;
+        }
+        self.diff.inline = inline;
         self.diff.selection = None;
         self.diff.dragging = false;
         self.diff.caret = None;
-        let inline = self.diff.inline;
-        self.change_settings(window, cx, |settings| settings.diff_inline = inline);
+        self.move_diff_layout_scroll(cx);
+    }
+
+    fn move_diff_layout_scroll(&mut self, cx: &mut Context<Self>) {
         // Row indexes differ between the layouts; keep the current change in view.
         self.diff.scroll = UniformListScrollHandle::new();
         if let Some(index) = self.diff.change
