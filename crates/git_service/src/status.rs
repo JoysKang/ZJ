@@ -48,6 +48,9 @@ pub struct Status {
     pub branch: Option<String>,
     pub oid: Option<String>,
     pub upstream: Option<String>,
+    /// The branch is configured to track a remote branch whose tracking ref is not present
+    /// locally, so `git status` leaves `branch.upstream` out.
+    pub upstream_configured: bool,
     pub ahead: usize,
     pub behind: usize,
     /// Filesystem snapshot attached by GitService, never inferred from display strings.

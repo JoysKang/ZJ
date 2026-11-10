@@ -701,6 +701,10 @@ impl GitService {
             let after = write::snapshot_version(repo)?;
             if before == after {
                 status.version = write::worktree_version(repo, &status, after)?;
+                if status.upstream.is_none() {
+                    status.upstream_configured =
+                        self.branch_tracks_remote(repo, &status, cancel)?;
+                }
                 return Ok(status);
             }
             eprintln!("event=status_index_changed attempt={attempt}");
@@ -709,6 +713,51 @@ impl GitService {
             }
         }
         Err(error("Git 索引在查询期间发生变化，请刷新"))
+    }
+
+    /// `git status` omits `branch.upstream` when the configured tracking ref is absent locally,
+    /// for example in a clone whose fetch refspec only covers the default branch. Reading the
+    /// branch config distinguishes that from a branch that was never published. An unreadable
+    /// config is reported as "not configured" rather than failing the whole status query.
+    fn branch_tracks_remote(
+        &self,
+        repo: &Repository,
+        status: &Status,
+        cancel: &AtomicBool,
+    ) -> io::Result<bool> {
+        let Some(branch) = status.branch.as_deref() else {
+            return Ok(false);
+        };
+        if branch == "(detached)" || matches!(status.oid.as_deref(), None | Some("(initial)")) {
+            return Ok(false);
+        }
+        for key in ["remote", "merge"] {
+            let output = match self.run_command(
+                &repo.worktree,
+                &[
+                    "config".into(),
+                    "--get".into(),
+                    format!("branch.{branch}.{key}").into(),
+                ],
+                cancel,
+                true,
+            ) {
+                Ok(output) => output,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::Interrupted | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return Err(e);
+                }
+                Err(_) => return Ok(false),
+            };
+            if output.is_empty() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Local and remote-tracking branches, most recently committed first.

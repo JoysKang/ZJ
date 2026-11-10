@@ -2604,3 +2604,62 @@ async fn change_tree_file_actions_keep_original_status_indices(cx: &mut TestAppC
     assert_eq!(git_out(&repo, &["show", ":a.txt"]), "a");
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }
+
+#[gpui_kit::test]
+async fn publish_is_hidden_when_the_upstream_is_configured_but_missing_locally(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let repo = fixture("publish-configured", 0);
+    let (handle, this) = cx.update(|cx| {
+        let documents =
+            super::super::test_support::install_globals(cx, crate::settings::Settings::default());
+        let service = GitService::new(1, Duration::from_secs(5)).unwrap();
+        let mut this = None;
+        let (handle, _) = gpui_kit::open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                    point(px(0.), px(0.)),
+                    size(theme::SIDEBAR_MIN, px(640.)),
+                ))),
+                ..Default::default()
+            },
+            cx,
+            |window, cx| {
+                let workbench = cx.new(|cx| {
+                    Workbench::new(Some(repo.clone()), service, documents, 1, window, cx)
+                });
+                this = Some(workbench.clone());
+                cx.new(|_| NarrowScm(workbench))
+            },
+        )
+        .unwrap();
+        (handle, this.unwrap())
+    });
+    settle(cx, None, |cx| super::super::test_support::loaded(cx, &this));
+    this.update(cx, |p, cx| {
+        let status = p.groups[0].status.as_mut().unwrap().as_mut().unwrap();
+        Arc::make_mut(status).upstream = None;
+        Arc::make_mut(status).upstream_configured = true;
+        cx.notify();
+    });
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find(("scm-publish", 0usize)).is_none(),
+            "an unfetched upstream is not an unpublished branch"
+        );
+    })
+    .unwrap();
+    this.update(cx, |p, cx| {
+        let status = p.groups[0].status.as_mut().unwrap().as_mut().unwrap();
+        Arc::make_mut(status).upstream_configured = false;
+        cx.notify();
+    });
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.find(("scm-publish", 0usize)).visible());
+    })
+    .unwrap();
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}

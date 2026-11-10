@@ -719,6 +719,7 @@ impl Workbench {
             .when(
                 status.is_some_and(|s| {
                     s.upstream.is_none()
+                        && !s.upstream_configured
                         && !matches!(s.oid.as_deref(), None | Some("(initial)"))
                         && s.branch.as_deref() != Some("(detached)")
                 }),
