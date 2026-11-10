@@ -293,6 +293,56 @@ pub fn module_name(location: &Location) -> Option<&str> {
     }
 }
 
+/// The candidate a Python import names by its module file, when exactly one candidate lives
+/// there: `from db.models import X` points at the `db/models.py` beside the importing file or
+/// above it (a project root on `sys.path`), `from .models import X` at its own package's.
+/// `None` when nothing matches or several do, so the picker still decides.
+pub fn imported_definition(
+    from: &Path,
+    language: &str,
+    source: &str,
+    candidates: &[Location],
+) -> Option<Location> {
+    if language != "python" {
+        return None;
+    }
+    let current = from.parent()?;
+    for module in crate::imports::python_modules(source) {
+        let bases: Vec<PathBuf> = if module.level == 0 {
+            current.ancestors().map(Path::to_path_buf).collect()
+        } else {
+            let mut base = current.to_path_buf();
+            for _ in 1..module.level {
+                if !base.pop() {
+                    break;
+                }
+            }
+            vec![base]
+        };
+        for base in bases {
+            let module_path = module.parts.iter().fold(base, |path, part| path.join(part));
+            let files = if module.parts.is_empty() {
+                vec![module_path.join("__init__.py")]
+            } else {
+                vec![
+                    module_path.with_extension("py"),
+                    module_path.join("__init__.py"),
+                ]
+            };
+            for file in files {
+                let mut hits = candidates.iter().filter(|location| location.path == file);
+                let Some(first) = hits.next() else {
+                    continue;
+                };
+                if hits.all(|location| location.path == first.path) {
+                    return Some(first.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Ranks candidate definitions for a reference to `name` in `from`: same file, same directory,
 /// a file that imports the name or its module, a file whose module the source merely mentions,
 /// then by path distance. `source` is the importing file's text.

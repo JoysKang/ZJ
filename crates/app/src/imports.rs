@@ -109,6 +109,71 @@ fn tokens(statement: &str) -> impl Iterator<Item = &str> {
         })
 }
 
+/// A module a Python import statement names: how many dots lead it (0 is an absolute
+/// import, 1 the importing file's own package) and the dotted path after them. An empty
+/// path with a level is `from . import x`, which names the package's `__init__`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Module {
+    pub level: usize,
+    pub parts: Vec<String>,
+}
+
+/// Python modules `text` imports, in source order. Unlike `names`, this keeps the dotted
+/// path, so `from db.models import X` can be resolved to the file it names.
+pub fn python_modules(text: &str) -> Vec<Module> {
+    let lines: Vec<&str> = text.lines().take(MAX_LINES).collect();
+    let mut modules = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index].trim();
+        let from = line.strip_prefix("from ");
+        let import = line.strip_prefix("import ");
+        if from.is_none() && import.is_none() {
+            index += 1;
+            continue;
+        }
+        let mut end = index;
+        while end + 1 < lines.len() && continues(lines[end].trim_end()) {
+            end += 1;
+        }
+        let statement = lines[index..=end].join(" ");
+        if let Some(rest) = statement.trim_start().strip_prefix("from ") {
+            if let Some(module) = python_module(rest.split_whitespace().next().unwrap_or("")) {
+                modules.push(module);
+            }
+        } else if let Some(rest) = statement.trim_start().strip_prefix("import ") {
+            for item in rest.split(',') {
+                if let Some(module) = python_module(item.split_whitespace().next().unwrap_or("")) {
+                    modules.push(module);
+                }
+            }
+        }
+        index = end + 1;
+    }
+    modules
+}
+
+/// One dotted module name as Python writes it: `..db.models`, `.`, `db.models`.
+fn python_module(text: &str) -> Option<Module> {
+    let level = text.chars().take_while(|c| *c == '.').count();
+    let parts: Vec<String> = text[level..]
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect();
+    if parts.is_empty() && level == 0 {
+        return None;
+    }
+    let identifier = |part: &str| {
+        part.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    if !parts.iter().all(|part| identifier(part)) {
+        return None;
+    }
+    Some(Module { level, parts })
+}
+
 /// Modules and symbols `text` imports, deduplicated, in source order.
 pub fn names(language: &str, text: &str) -> Vec<String> {
     let lines: Vec<&str> = text.lines().take(MAX_LINES).collect();
@@ -201,6 +266,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn python_modules_keep_the_dotted_path() {
+        let text =
+            "import os, a.b as c\nfrom ..db.models import (\n    X,\n)\nfrom . import helper\n";
+        assert_eq!(
+            python_modules(text),
+            [
+                Module {
+                    level: 0,
+                    parts: vec!["os".into()]
+                },
+                Module {
+                    level: 0,
+                    parts: vec!["a".into(), "b".into()]
+                },
+                Module {
+                    level: 2,
+                    parts: vec!["db".into(), "models".into()]
+                },
+                Module {
+                    level: 1,
+                    parts: Vec::new()
+                },
+            ]
+        );
+        assert!(python_modules("print('from x import y')\n").is_empty());
     }
 
     #[test]

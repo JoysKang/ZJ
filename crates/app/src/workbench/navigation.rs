@@ -184,7 +184,10 @@ pub(super) fn resolve(
     if same_file.is_empty() {
         let chosen = qualifier(text, here.start)
             .and_then(|name| unique(&others, &[name]))
-            .or_else(|| unique(&others, &named));
+            .or_else(|| unique(&others, &named))
+            // `from db.models import X` names a file even when several files share the
+            // module's name: jump to it instead of asking.
+            .or_else(|| symbol_index::imported_definition(path, language, text, &others));
         if let Some(location) = chosen {
             others = vec![location];
         }
@@ -1039,6 +1042,44 @@ mod tests {
         let offset = source.rfind("connect").unwrap();
         assert_eq!(
             resolve(&main, "rust", source, offset, Some(&index)).len(),
+            2
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_import_names_the_file_among_same_named_modules() {
+        let root = std::env::temp_dir().join(format!("zj-nav-import-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for repo in ["zerocap_otc", "zerocap_hubspot"] {
+            fs::create_dir_all(root.join(repo).join("db")).unwrap();
+            fs::write(
+                root.join(repo).join("db/models.py"),
+                "class TransactionsHistory:\n    pass\n",
+            )
+            .unwrap();
+        }
+        let otc = root.join("zerocap_otc/db/models.py");
+        let main = root.join("zerocap_otc/data_helper.py");
+        let source = "from db.models import TransactionsHistory\n\n\ndef f():\n    return TransactionsHistory()\n";
+        fs::write(&main, source).unwrap();
+        let index = SymbolIndex::build(
+            vec![
+                otc.clone(),
+                root.join("zerocap_hubspot/db/models.py"),
+                main.clone(),
+            ],
+            &AtomicBool::new(false),
+        );
+        let offset = source.rfind("TransactionsHistory").unwrap() + 2;
+        let targets = resolve(&main, "python", source, offset, Some(&index));
+        assert_eq!(targets.len(), 1, "the imported file decides: {targets:?}");
+        assert_eq!(targets[0].path, otc);
+        // An import of a module that is not in the workspace leaves the choice to the picker.
+        let source = "from other.models import TransactionsHistory\n\nTransactionsHistory()\n";
+        let offset = source.rfind("TransactionsHistory").unwrap() + 2;
+        assert_eq!(
+            resolve(&main, "python", source, offset, Some(&index)).len(),
             2
         );
         fs::remove_dir_all(&root).unwrap();
