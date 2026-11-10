@@ -679,6 +679,48 @@ async fn the_tab_menu_closes_copies_and_reveals_the_clicked_tab(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
+async fn clicking_a_tab_does_not_expand_collapsed_folders(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = fixture("no-auto-expand");
+    let (window, this) = open(cx, root.clone());
+    open_files(cx, window, &this, &root);
+    let sub = root.join("sub");
+    let file = sub.join("c.txt");
+    // Opening a file inside a collapsed folder leaves the folder collapsed.
+    this.read_with(cx, |p, _| {
+        assert!(!p.explorer.expanded.contains(&sub));
+        assert!(!p.explorer.rows.iter().any(|row| row.entry.path == file));
+    });
+
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("tab", 0usize), cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    this.read_with(cx, |p, _| {
+        assert_eq!(p.active, Pane::Document(p.documents[0].id));
+        assert!(
+            !p.explorer.expanded.contains(&sub),
+            "switching tabs must not expand a collapsed folder"
+        );
+    });
+
+    // 在资源管理器视图中显示 is the explicit request that expands the way to the file.
+    menu_click(cx, window, &this, 2, REVEAL_IN_EXPLORER);
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| {
+            p.explorer.rows.iter().any(|row| row.entry.path == file)
+        })
+    });
+    this.read_with(cx, |p, _| {
+        assert!(p.explorer.expanded.contains(&sub));
+        assert_eq!(p.explorer.selection.as_deref(), Some(file.as_path()));
+    });
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[gpui_kit::test]
 async fn tab_shortcuts_act_on_the_active_tab(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let root = fixture("keys");

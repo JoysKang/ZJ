@@ -376,7 +376,10 @@ impl Workbench {
         if matches!(pane, Pane::Document(_)) {
             self.select_pane(pane, window, cx);
         }
-        self.select_tree_path(path, window, cx);
+        self.select_tree_path(path.clone(), window, cx);
+        // Only this explicit request expands the folders on the way; selecting a tab does not.
+        self.explorer.reveal_pending = Some(path);
+        self.reveal_tree_entry(window, cx);
     }
 
     pub(super) fn active_pane_action(

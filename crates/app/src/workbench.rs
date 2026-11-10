@@ -827,9 +827,9 @@ impl Workbench {
         }
     }
 
-    /// Lists the root and every expanded folder again, keeping what is expanded.
+    /// Lists the root and every expanded folder again, keeping what is expanded. Folders the
+    /// user collapsed stay collapsed; only an explicit reveal expands them.
     fn reload_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.explorer.reveal_pending = self.active_document().map(|(path, _)| path.clone());
         self.explorer.generation += 1;
         self.explorer.tasks.clear();
         self.explorer.restore_expanded = std::mem::take(&mut self.explorer.expanded);
@@ -1293,7 +1293,6 @@ impl Workbench {
             self.recent_documents.insert(0, id);
             self.remember_recent_file(id);
         }
-        self.explorer.reveal_pending = self.active_document().map(|(path, _)| path.clone());
         self.clear_tree_selection_for(pane);
         self.find_update(false, cx);
         if std::mem::take(&mut self.explorer.focus_on_open) {
@@ -1302,7 +1301,6 @@ impl Workbench {
             self.focus_active_editor(window, cx);
         }
         self.observe_cursor(cx);
-        self.reveal_tree_entry(window, cx);
         self.remember_tabs(false, window, cx);
         cx.notify();
     }
