@@ -25,6 +25,7 @@ impl Workbench {
     /// A new preview only replaces an unfixed preview. In-flight work is cancelled before moving it.
     pub(super) fn prepare_new_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cancel_file_open();
+        self.diff.pending_scroll = None;
         if self.diff_pinned && self.diff.tab.is_some() {
             self.diff.cancel.store(true, Ordering::Relaxed);
             self.diff.task = None;

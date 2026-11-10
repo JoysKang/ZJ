@@ -61,7 +61,7 @@ impl DiffReview {
             hits: Vec::new(),
             current: None,
             whitespace: Whitespace::Exact,
-            collapse: false,
+            collapse: true,
             document: None,
             pair: Vec::new(),
             inline: Vec::new(),
@@ -176,7 +176,9 @@ impl Workbench {
             self.diff.review.inline = Vec::new();
             self.diff.review.pair_changes = Vec::new();
             self.diff.review.inline_changes = Vec::new();
-            if let Some(source) = top_source {
+            if let Some((source, strategy)) = self.diff.pending_scroll.take() {
+                self.diff.scroll.scroll_to_item_strict(source, strategy);
+            } else if let Some(source) = top_source {
                 self.diff
                     .scroll
                     .scroll_to_item_strict(source, ScrollStrategy::Top);
@@ -223,6 +225,7 @@ impl Workbench {
                 {
                     return;
                 }
+                let pending = this.diff.pending_scroll.take();
                 let review = &mut this.diff.review;
                 review.document = Some(wanted);
                 review.pair = pair;
@@ -231,9 +234,15 @@ impl Workbench {
                 review.inline_changes = inline_changes;
                 review.hits = hits;
                 review.current = review.current.filter(|&i| i < review.hits.len());
-                this.diff.change = None;
-                if review.find_open && !review.hits.is_empty() {
+                let find_open = review.find_open && !review.hits.is_empty();
+                if pending.is_none() {
+                    this.diff.change = None;
+                }
+                if find_open {
                     this.diff_reveal_hit(cx);
+                } else if let Some((source, strategy)) = pending {
+                    let row = this.diff_visible_row(source, this.diff_is_inline());
+                    this.diff.scroll.scroll_to_item_strict(row, strategy);
                 } else if let Some(source) = top_source {
                     let (source, strategy) = this
                         .diff
@@ -423,11 +432,28 @@ impl Workbench {
     /// Reveals the first change of a freshly opened diff.
     pub(super) fn reveal_first_change(&mut self) {
         self.diff.change = None;
-        if let Some(&row) = self.diff_change_starts().first() {
-            self.diff.change = Some(0);
+        let Some(&start) = self.diff_change_starts().first() else {
+            return;
+        };
+        self.diff.change = Some(0);
+        if self.diff_review_current() {
             self.diff
                 .scroll
-                .scroll_to_item_strict(row, ScrollStrategy::Center);
+                .scroll_to_item_strict(start, ScrollStrategy::Center);
+        } else {
+            // The change list is still in source rows; folded rows arrive after the load.
+            self.diff_scroll_to_source(start, ScrollStrategy::Center);
+        }
+    }
+
+    /// Scrolls to a source row, waiting for folded display rows when a diff just loaded.
+    pub(super) fn diff_scroll_to_source(&mut self, source: usize, strategy: ScrollStrategy) {
+        if self.diff_display_rows(self.diff_is_inline()).is_some() {
+            let row = self.diff_visible_row(source, self.diff_is_inline());
+            self.diff.scroll.scroll_to_item_strict(row, strategy);
+            self.diff.pending_scroll = None;
+        } else {
+            self.diff.pending_scroll = Some((source, strategy));
         }
     }
 
@@ -1444,6 +1470,7 @@ impl DiffPane {
             change: None,
             inline: cx.global::<crate::settings::Settings>().diff_inline,
             scroll: UniformListScrollHandle::new(),
+            pending_scroll: None,
             stale: false,
             loading: false,
             task: None,
@@ -1477,6 +1504,8 @@ pub(super) struct DiffPane {
     pub(super) change: Option<usize>,
     pub(super) inline: bool,
     pub(super) scroll: UniformListScrollHandle,
+    /// A scroll target in source rows, applied once folded display rows are ready.
+    pub(super) pending_scroll: Option<(usize, ScrollStrategy)>,
     pub(super) stale: bool,
     /// The patch is being (re)loaded: what is shown may be older than the status.
     pub(super) loading: bool,

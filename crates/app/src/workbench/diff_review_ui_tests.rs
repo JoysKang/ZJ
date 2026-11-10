@@ -59,6 +59,9 @@ async fn diff_visible_top_uses_content_row_height_in_both_layouts(cx: &mut TestA
         cx.update_window(handle.into(), |_, window, cx| {
             this.update(cx, |p, cx| {
                 p.diff.inline = inline;
+                // This test measures raw row heights; default folding would change the row count.
+                p.diff.review.collapse = false;
+                p.diff_review_changed(window, cx);
                 p.diff.scroll = UniformListScrollHandle::new();
                 cx.notify();
             });
@@ -79,6 +82,84 @@ async fn diff_visible_top_uses_content_row_height_in_both_layouts(cx: &mut TestA
         })
         .unwrap();
     }
+}
+
+#[gpui_kit::test]
+async fn a_fresh_diff_folds_unchanged_regions(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
+    let old = format!("{}old();\n", "context\n".repeat(40));
+    let patch: Arc<str> = crate::save::text_patch(&old, &old.replace("old();", "new();")).into();
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.show_diff_tab(
+                DiffTab {
+                    label: "folded.txt".into(),
+                    tooltip: "folded.txt".into(),
+                    path: PathBuf::from("/tmp/folded.txt"),
+                    source: DiffSource::Local(patch, "old → new"),
+                    checkpoint: None,
+                },
+                window,
+                cx,
+            )
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| p.diff.doc.is_some() && p.diff_review_current())
+    });
+    this.read_with(cx, |p, _| {
+        assert!(p.diff.review.collapse, "a fresh diff starts folded");
+        let rows = p.diff_display_rows(false).unwrap();
+        assert!(rows.iter().any(|row| row.folded.is_some()));
+        assert!(rows.len() < p.diff.doc.as_ref().unwrap().rows.len());
+    });
+}
+
+#[gpui_kit::test]
+async fn a_folded_diff_opens_at_its_first_change(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
+    let mut old = String::new();
+    for n in 0..40 {
+        old.push_str(&"context\n".repeat(100));
+        old.push_str(&format!("old_{n}();\n"));
+    }
+    let patch: Arc<str> = crate::save::text_patch(&old, &old.replace("old_", "new_")).into();
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.show_diff_tab(
+                DiffTab {
+                    label: "first.txt".into(),
+                    tooltip: "first.txt".into(),
+                    path: PathBuf::from("/tmp/first.txt"),
+                    source: DiffSource::Local(patch, "old → new"),
+                    checkpoint: None,
+                },
+                window,
+                cx,
+            )
+        });
+    })
+    .unwrap();
+    settle(cx, None, |cx| {
+        this.read_with(cx, |p, _| {
+            p.diff.doc.is_some() && p.diff_display_rows(false).is_some()
+        })
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+    })
+    .unwrap();
+    this.read_with(cx, |p, _| {
+        assert_eq!(
+            p.diff.source_row(p.diff.visible_top_row()),
+            0,
+            "the first change must open near the top of the folded document"
+        );
+        assert_eq!(p.diff.change, Some(0));
+    });
 }
 
 #[gpui_kit::test]

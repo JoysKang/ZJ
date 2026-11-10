@@ -490,11 +490,7 @@ fn reading_state_pinned_scroll_uses_source_rows_after_folding(cx: &mut TestAppCo
     settle(cx, Some(window), |cx| {
         this.read_with(cx, |p, _| p.diff.doc.is_some() && !p.diff.loading)
     });
-    cx.update_window(window.into(), |_, window, cx| {
-        window.render_frame(cx);
-        window.click("diff-collapse", cx);
-    })
-    .unwrap();
+    // A fresh diff folds unchanged regions by default.
     settle(cx, Some(window), |cx| {
         this.read_with(cx, |p, _| {
             p.diff_display_rows(false)
@@ -519,6 +515,66 @@ fn reading_state_pinned_scroll_uses_source_rows_after_folding(cx: &mut TestAppCo
         assert!(
             saved.top_row > visible + 50,
             "folded rows persisted a visible index instead of the original source row"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn reading_state_restores_a_folded_pin_to_its_source_row(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let dir = Fixture::new();
+    let left = dir.0.join("pin-old.txt");
+    let right = dir.0.join("pin-new.txt");
+    let old: String = (0..500).map(|n| format!("original line {n}\n")).collect();
+    let new: String = (0..500)
+        .map(|n| {
+            if (100..300).contains(&n) {
+                format!("changed line {n}\n")
+            } else {
+                format!("original line {n}\n")
+            }
+        })
+        .collect();
+    fs::write(&left, &old).unwrap();
+    fs::write(&right, &new).unwrap();
+    let saved = ReadingSession {
+        pinned: vec![PinnedComparison {
+            source: ComparisonSource::Files {
+                left: left.clone(),
+                right: right.clone(),
+            },
+            top_row: 143,
+            inline: Some(false),
+        }],
+        ..Default::default()
+    };
+    let (window, this) = open_window(cx, None, crate::settings::Settings::default());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.restore_reading(saved, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| !p.reading.restoring_pins)
+    });
+    let id = this.read_with(cx, |p, _| p.archived_diffs[0].id);
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.activate_saved_diff(id, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| {
+            p.diff.doc.is_some() && p.diff_display_rows(false).is_some()
+        })
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+    })
+    .unwrap();
+    this.read_with(cx, |p, _| {
+        assert_eq!(
+            p.diff.source_row(p.diff.visible_top_row()),
+            143,
+            "a restored pin must map its source row through the folded rows"
         );
     });
 }

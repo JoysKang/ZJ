@@ -199,9 +199,8 @@ impl Workbench {
         if let Some(inline) = saved.inline {
             self.diff.inline = inline;
         }
-        self.diff
-            .scroll
-            .scroll_to_item_strict(saved.top_row, ScrollStrategy::Top);
+        // `top_row` is a source row; folded display rows may still be loading.
+        self.diff_scroll_to_source(saved.top_row, ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -532,8 +531,7 @@ impl Workbench {
                                     pane.inline = inline;
                                 }
                                 pane.loading = true;
-                                pane.scroll
-                                    .scroll_to_item_strict(saved.top_row, ScrollStrategy::Top);
+                                // The pinned source row is applied once the loaded rows are folded.
                                 this.archived_diffs.push(diff_tabs::SavedDiff {
                                     id: DocumentId::allocate(),
                                     pane,
