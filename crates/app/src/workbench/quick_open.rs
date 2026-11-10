@@ -253,6 +253,7 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_navigation();
         if let Some(quick) = self.quick_open.as_ref().filter(|quick| quick.launcher) {
             let input = quick.input.clone();
             input.update(cx, |input, cx| {

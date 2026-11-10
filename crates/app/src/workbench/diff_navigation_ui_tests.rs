@@ -599,6 +599,40 @@ async fn diff_delayed_definition_does_not_change_a_new_comparison(cx: &mut TestA
 }
 
 #[gpui_kit::test]
+async fn diff_definition_does_not_replace_a_picker_opened_while_it_waits(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (handle, this) = open_window(cx, None, crate::settings::Settings::default());
+    let patch = "--- a/a.py\n+++ b/a.py\n@@ -1,5 +1,5 @@\n helper()\n def helper():\n-    return 0\n+    return 1\n def helper():\n     return 2\n";
+    show(cx, handle, &this, patch);
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.diff.caret = Some(Caret {
+                old: true,
+                line: 0,
+                column: 1,
+            });
+            p.diff_go_to_definition(window, cx);
+            // The lookup is still pending; the user moves on to file search.
+            p.open_quick_open(window, cx);
+        });
+        window.render_frame(cx);
+        this.read_with(cx, |p, _| {
+            assert!(p.message.is_empty(), "cancelled lookup left its message");
+            assert!(p.quick_open.as_ref().unwrap().items.is_none());
+        });
+    })
+    .unwrap();
+    cx.run_until_parked();
+    this.read_with(cx, |p, _| {
+        assert!(p.message.is_empty());
+        assert!(
+            p.quick_open.as_ref().unwrap().items.is_none(),
+            "a late definition replaced the opened picker"
+        );
+    });
+}
+
+#[gpui_kit::test]
 async fn diff_definition_in_another_file_opens_the_file_and_returns_to_diff(
     cx: &mut TestAppContext,
 ) {

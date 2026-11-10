@@ -783,6 +783,17 @@ impl Workbench {
         }));
     }
 
+    /// Opening a picker means the user moved on: a pending definition or references result
+    /// must not arrive later and replace it, and its status message must not stay behind.
+    /// The editor blur that also cancels can be delivered after the result.
+    pub(super) fn cancel_navigation(&mut self) {
+        self.nav.generation += 1;
+        self.nav.task = None;
+        if matches!(self.message.as_str(), "正在查找定义…" | "正在查找引用…") {
+            self.message.clear();
+        }
+    }
+
     /// ⇧F12: occurrences of the name at the cursor across the workspace.
     pub(super) fn find_references(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((path, editor)) = self.active_document() else {
