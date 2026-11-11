@@ -567,6 +567,7 @@ impl Workbench {
             column: line.column,
             len: line.len,
             viewport_y: Some(theme::SEARCH_RESULT_TOP),
+            center: false,
         };
         self.remember(cx);
         self.go(path, place, window, cx);

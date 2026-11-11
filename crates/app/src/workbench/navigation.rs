@@ -706,11 +706,21 @@ impl Workbench {
         if record {
             self.remember(cx);
         }
+        // Wrapped prose counts display rows, not lines, so it keeps Kit's scroll.
+        let wrapped = self
+            .documents
+            .iter()
+            .find(|doc| doc.path == target.path)
+            .map_or_else(
+                || super::documents::soft_wrap_default(crate::languages::for_path(&target.path).0),
+                |doc| doc.soft_wrap,
+            );
         let place = Placement::Point {
             line: target.line,
             column: target.column,
             len: target.len,
             viewport_y: None,
+            center: !wrapped,
         };
         self.go(target.path, place, window, cx);
     }
@@ -964,6 +974,9 @@ pub enum Placement {
         len: u32,
         /// Optional vertical placement for the selected match, consumed by layout.
         viewport_y: Option<Pixels>,
+        /// Center a jump that leaves the line off screen, instead of letting Kit park it on
+        /// the nearest edge.
+        center: bool,
     },
     Offset(usize),
     /// `column` in characters; `center` scrolls the line to the middle of the editor.
@@ -977,37 +990,21 @@ pub enum Placement {
 impl Placement {
     fn apply(&self, editor: &Entity<EditorState>, window: &mut Window, cx: &mut App) {
         editor.update(cx, |state, cx| {
-            if let Placement::Line {
-                line,
-                column,
-                center,
-            } = *self
-            {
-                state.set_cursor_position(lsp_types::Position::new(line, column), window, cx);
-                // Kit only scrolls the cursor into view at the nearest edge. Buffer lines are
-                // display rows only without soft wrap, so wrapped buffers keep Kit's scroll.
-                if center
-                    && let (Some(height), Some(bounds)) = (state.line_height(), state.text_bounds())
-                {
-                    let top = height * line as f32 - (bounds.size.height - height) / 2.;
-                    let x = state.scroll_offset().x;
-                    state.set_scroll_offset(point(x, -top.max(Pixels::ZERO)), cx);
-                }
-                return;
-            }
             let rope = state.text().clone();
             let (start, end) = match *self {
-                Placement::Line { .. } => return,
-                Placement::Point {
-                    line, column, len, ..
-                } => {
+                Placement::Line { line, column, .. } | Placement::Point { line, column, .. } => {
                     // A column past the line (the file changed since the search) stays on it.
                     let column = (column as usize).min(rope.line_len(line as usize));
                     let start = rope.point_to_offset(gpui_kit::component::input::Point::new(
                         line as usize,
                         column,
                     ));
-                    (start, (start + len as usize).min(rope.len()))
+                    match *self {
+                        Placement::Point { len, .. } => {
+                            (start, (start + len as usize).min(rope.len()))
+                        }
+                        _ => (start, start),
+                    }
                 }
                 Placement::Offset(offset) => {
                     let offset = offset.min(rope.len());
@@ -1028,8 +1025,90 @@ impl Placement {
             if end > start {
                 state.set_selected_range(start..end, cx);
             }
+            // Kit only scrolls the cursor into view at the nearest edge. Buffer lines are
+            // display rows only without soft wrap, so wrapped buffers keep Kit's scroll.
+            let (center, always) = match *self {
+                Placement::Point {
+                    center,
+                    viewport_y: None,
+                    ..
+                } => (center, false),
+                Placement::Line { center, .. } => (center, true),
+                _ => (false, false),
+            };
+            if center && !center_caret(state, start, always, cx) {
+                // A file opened by the jump has no layout, and a line scrolled out of view has
+                // no bounds; the next paint supplies both, and Kit's own reveal has run by then.
+                center_after_layout(editor.clone(), start, always, 6, window);
+            }
         });
     }
+}
+
+/// Puts the caret's line in the middle of the editor. A line already in view with context on
+/// both sides stays put unless `always` is set. The position comes from the line's laid-out
+/// bounds, so rows pushed down by conflict bars still land where they are drawn.
+///
+/// Returns false before those bounds exist, so the caller can try again after a paint.
+fn center_caret(
+    state: &mut EditorState,
+    caret: usize,
+    always: bool,
+    cx: &mut Context<EditorState>,
+) -> bool {
+    let (Some(row), Some(bounds), Some(height)) = (
+        state.range_to_bounds(&(caret..caret)),
+        state.text_bounds(),
+        state.line_height(),
+    ) else {
+        return false;
+    };
+    let offset = state.scroll_offset();
+    let content_y = row.top() - bounds.top();
+    // A few lines of context on both sides; one line is what Kit leaves when it stops at the
+    // nearest edge, which is exactly the placement this avoids.
+    let margin = height * 3.;
+    let top = -offset.y;
+    let comfortable =
+        content_y >= top + margin && content_y + height <= top + bounds.size.height - margin;
+    if comfortable && !always {
+        return true;
+    }
+    // Only the vertical offset moves: Kit reveals the caret's column itself, by now, and a
+    // whole-offset write would drop that reveal.
+    let y = ((bounds.size.height - height) / 2. - content_y).min(Pixels::ZERO);
+    if y != offset.y {
+        state.set_scroll_offset(point(offset.x, y), cx);
+    }
+    true
+}
+
+/// Waits for the editor's next layout, then centers the jump. Gives up while the caret has
+/// moved elsewhere or after a few frames.
+fn center_after_layout(
+    editor: Entity<EditorState>,
+    caret: usize,
+    always: bool,
+    attempts: u8,
+    window: &mut Window,
+) {
+    if attempts == 0 {
+        return;
+    }
+    let next = editor.clone();
+    window.on_next_frame(move |window, cx| {
+        // The captured handle keeps the editor alive until this callback has run.
+        next.update(cx, |state, cx| {
+            // A selection leaves the caret at its end; the jump's start is its anchor.
+            let selection = state.selected_range();
+            if selection.start != caret && state.cursor() != caret {
+                return;
+            }
+            if !center_caret(state, caret, always, cx) {
+                center_after_layout(next.clone(), caret, always, attempts - 1, window);
+            }
+        });
+    });
 }
 
 /// Go to definition, references and back / forward: the symbol index and the navigation history.

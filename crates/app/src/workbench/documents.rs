@@ -1587,7 +1587,7 @@ impl Document {
 }
 
 /// Prose wraps by default, code does not.
-fn soft_wrap_default(language: &str) -> bool {
+pub(super) fn soft_wrap_default(language: &str) -> bool {
     matches!(language, "markdown" | "plain")
 }
 

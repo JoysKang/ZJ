@@ -144,13 +144,21 @@ async fn ctrl_g_goes_to_a_line_of_the_active_file(cx: &mut TestAppContext) {
     press(cx, window, "ctrl-g");
     input(cx, window, "200");
     press(cx, window, "enter");
-    settle(cx, Some(window), |cx| {
-        editor.read_with(cx, |state, _| {
-            state.visible_row_range().is_some_and(|rows| {
-                let middle = (rows.start + rows.end) / 2;
-                rows.contains(&199) && middle.abs_diff(199) <= 2
-            })
+    // The line is centered on the frame after the jump, once its bounds are known.
+    for _ in 0..4 {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.simulate_next_frame(cx);
         })
+        .unwrap();
+    }
+    editor.read_with(cx, |state, _| {
+        let rows = state.visible_row_range().expect("laid out");
+        let middle = (rows.start + rows.end) / 2;
+        assert!(
+            rows.contains(&199) && middle.abs_diff(199) <= 2,
+            "line 200 at rows {rows:?}"
+        );
     });
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -485,7 +493,13 @@ async fn go_to_definition_follows_a_python_reexport_inside_the_venv(cx: &mut Tes
         "__all__ = ['BaseModel']\n\n\ndef __getattr__(name):\n    return name\n",
     )
     .unwrap();
-    std::fs::write(site.join("main.py"), "class BaseModel:\n    pass\n").unwrap();
+    // Deep enough that the jump cannot leave the definition on the last visible line.
+    let filler = "x = 1\n".repeat(118);
+    std::fs::write(
+        site.join("main.py"),
+        format!("{filler}class BaseModel:\n    pass\n"),
+    )
+    .unwrap();
     let root = std::fs::canonicalize(root).unwrap();
     let module = root.join(".venv/lib/python3.12/site-packages/pydantic/main.py");
     let b = "from pydantic import BaseModel\n\n\ndef build():\n    return BaseModel()\n";
@@ -521,6 +535,36 @@ async fn go_to_definition_follows_a_python_reexport_inside_the_venv(cx: &mut Tes
             _ => false,
         })
     });
+    // The definition sits in the middle of the editor, not on its bottom edge. The editor
+    // centers after its first layout, so let a few frames run.
+    for _ in 0..4 {
+        cx.update_window(window.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.simulate_next_frame(cx);
+        })
+        .unwrap();
+    }
+    let (offset, viewport, height) = this.read_with(cx, |p, cx| {
+        let editor = p
+            .documents
+            .iter()
+            .find(|doc| doc.path == module)
+            .expect("the module is open")
+            .editor
+            .clone();
+        editor.read_with(cx, |state, _| {
+            (
+                f32::from(state.scroll_offset().y),
+                f32::from(state.text_bounds().expect("laid out").size.height),
+                f32::from(state.line_height().expect("line height")),
+            )
+        })
+    });
+    let expected = (height * 118. - (viewport - height) / 2.).max(0.);
+    assert!(
+        (offset + expected).abs() < 1.,
+        "scroll offset {offset}, expected -{expected} (line height {height}, viewport {viewport})"
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
