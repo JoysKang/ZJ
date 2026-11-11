@@ -470,6 +470,60 @@ async fn go_to_definition_opens_a_third_party_module_from_the_venv(cx: &mut Test
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// The package entry point often only re-exports the class (pydantic 2's `__init__.py`
+/// names the module in a `__getattr__` table); the jump follows it to the defining module.
+#[gpui_kit::test]
+async fn go_to_definition_follows_a_python_reexport_inside_the_venv(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = std::env::temp_dir().join(format!("zj-go-to-reexport-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let site = root.join(".venv/lib/python3.12/site-packages/pydantic");
+    std::fs::create_dir_all(&site).unwrap();
+    std::fs::write(root.join(".venv/pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+    std::fs::write(
+        site.join("__init__.py"),
+        "__all__ = ['BaseModel']\n\n\ndef __getattr__(name):\n    return name\n",
+    )
+    .unwrap();
+    std::fs::write(site.join("main.py"), "class BaseModel:\n    pass\n").unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let module = root.join(".venv/lib/python3.12/site-packages/pydantic/main.py");
+    let b = "from pydantic import BaseModel\n\n\ndef build():\n    return BaseModel()\n";
+    std::fs::write(root.join("app.py"), b).unwrap();
+    let (window, this) = open(cx, root.clone());
+    let path = root.join("app.py");
+    let folder = Some(root.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| p.open_file(path.clone(), folder, window, cx));
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1)
+    });
+    let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        editor.update(cx, |editor, cx| {
+            editor.focus(window, cx);
+            // On `BaseModel` in the import itself, as the user clicks it.
+            editor.set_cursor_position(
+                gpui_kit::component::input::Position::new(0, 22),
+                window,
+                cx,
+            );
+        });
+        window.render_frame(cx);
+        window.dispatch_action(Box::new(gpui_kit::component::input::GoToDefinition), cx);
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| match p.active {
+            Pane::Document(id) => p.document(id).is_some_and(|doc| doc.path == module),
+            _ => false,
+        })
+    });
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// A Ruby `require` jumps into the gems installed for the workspace.
 #[gpui_kit::test]
 async fn go_to_definition_opens_a_ruby_gem_from_vendor_bundle(cx: &mut TestAppContext) {

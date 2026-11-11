@@ -27,6 +27,8 @@ use std::{
 const MAX_TARGETS: usize = 50;
 /// How many third-party files one jump may read while looking for the definition.
 const MAX_EXTERNAL_FILES: usize = 16;
+/// How many modules of a Python package the jump may read when the package entry re-exports.
+const MAX_PACKAGE_FILES: usize = 32;
 const MAX_REFERENCES: usize = 500;
 const MAX_HISTORY: usize = 50;
 /// A definition asked for while the workspace index is being built waits this long for it,
@@ -139,24 +141,70 @@ fn external_definition(from: &Path, language: &str, source: &str, name: &str) ->
         .into_iter()
         .take(MAX_EXTERNAL_FILES)
     {
-        let Some(other_language) = symbol_index::language(&file) else {
-            continue;
-        };
-        let Some(text) = symbol_index::read(&file) else {
-            continue;
-        };
-        let Some(symbols) = symbols::scan(other_language, &text) else {
-            continue;
-        };
-        if let Some(symbol) = symbols
-            .definitions
-            .iter()
-            .find(|symbol| symbol.name == name)
+        if let Some(found) = definition_in(&file, name) {
+            return Some(found);
+        }
+        if language == "python"
+            && let Some(found) = python_reexport(&file, name)
         {
-            return Some(target(&file, &text, symbol));
+            return Some(found);
         }
     }
     None
+}
+
+/// The definition of `name` in `file`, when the file defines it itself.
+fn definition_in(file: &Path, name: &str) -> Option<Target> {
+    let language = symbol_index::language(file)?;
+    let text = symbol_index::read(file)?;
+    let symbols = symbols::scan(language, &text)?;
+    let symbol = symbols
+        .definitions
+        .iter()
+        .find(|symbol| symbol.name == name)?;
+    Some(target(file, &text, symbol))
+}
+
+/// `from pydantic import BaseModel` lands on `pydantic/__init__.py`, which often only
+/// re-exports the class from a module of its own package (`from .main import *`), or names
+/// that module in a lazy `__getattr__` table instead of an import. The definition is in the
+/// module the package imports from, or failing that in one of its own modules.
+fn python_reexport(init: &Path, name: &str) -> Option<Target> {
+    if init.file_name().and_then(|file| file.to_str()) != Some("__init__.py") {
+        return None;
+    }
+    let package = init.parent()?;
+    if let Some(text) = symbol_index::read(init) {
+        for module in crate::imports::python_modules(&text) {
+            if module.level == 0 || module.parts.is_empty() {
+                continue;
+            }
+            let mut directory = package.to_path_buf();
+            for _ in 1..module.level {
+                directory.pop();
+            }
+            let base = module
+                .parts
+                .iter()
+                .fold(directory, |path, part| path.join(part));
+            for file in [base.with_extension("py"), base.join("__init__.py")] {
+                if let Some(found) = definition_in(&file, name) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    let mut modules: Vec<PathBuf> = std::fs::read_dir(package)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path != init && path.extension().is_some_and(|extension| extension == "py"))
+        .collect();
+    modules.sort();
+    modules
+        .into_iter()
+        .take(MAX_PACKAGE_FILES)
+        .find_map(|module| definition_in(&module, name))
 }
 
 /// Resolves the identifier at `offset` in `path` (whose current text is `text`).
@@ -1019,8 +1067,34 @@ fn same_family(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{AtomicBool, Path, SymbolIndex, parse_line_query, references, resolve};
+    use super::{
+        AtomicBool, Path, SymbolIndex, parse_line_query, python_reexport, references, resolve,
+    };
     use std::fs;
+
+    /// A package entry point resolves the class it re-exports, whether it names the module in
+    /// an import (pydantic's `from .main import *`) or only in a lazy `__getattr__` table.
+    #[test]
+    fn a_package_entry_point_follows_its_reexport() {
+        let root = std::env::temp_dir().join(format!("zj-nav-reexport-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let package = root.join("site-packages/pkg");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(package.join("main.py"), "class BaseModel:\n    pass\n").unwrap();
+        let init = package.join("__init__.py");
+        fs::write(&init, "from .main import *\n").unwrap();
+        assert_eq!(
+            python_reexport(&init, "BaseModel").map(|target| target.path),
+            Some(package.join("main.py"))
+        );
+        fs::write(&init, "__all__ = ['BaseModel']\n").unwrap();
+        assert_eq!(
+            python_reexport(&init, "BaseModel").map(|target| target.path),
+            Some(package.join("main.py"))
+        );
+        assert!(python_reexport(&init, "Missing").is_none());
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn line_queries_parse_line_and_column() {

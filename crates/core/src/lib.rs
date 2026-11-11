@@ -12,6 +12,8 @@ pub const EXCLUDED_DIRS: &[&str] = &[
     "target",
     ".venv",
     "venv",
+    "site-packages",
+    "dist-packages",
     "__pycache__",
     ".uv-cache",
     ".tox",
@@ -199,6 +201,9 @@ mod tests {
         assert_eq!(git_marker(&root.join("symlinked-file")), GitMarker::Valid);
         assert_eq!(git_marker(&root.join("broken-link")), GitMarker::Invalid);
         assert!(is_excluded_dir(std::ffi::OsStr::new(".uv-cache")));
+        // A venv with a non-standard name still keeps its installed packages out of the walk.
+        assert!(is_excluded_dir(std::ffi::OsStr::new("site-packages")));
+        assert!(is_excluded_dir(std::ffi::OsStr::new("dist-packages")));
         assert!(!is_excluded_dir(std::ffi::OsStr::new("build")));
         fs::remove_dir_all(root).unwrap();
     }
