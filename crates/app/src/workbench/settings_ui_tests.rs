@@ -70,8 +70,18 @@ async fn the_settings_file_opens_and_applies_when_saved(cx: &mut TestAppContext)
     cx.run_until_parked();
     cx.read(|cx| assert_eq!(cx.global::<Settings>().editor_font_size, 19.));
     this.read_with(cx, |p, _| {
-        assert!(p.message.contains("不是有效的 JSON"), "{}", p.message)
+        let notice = p.notice.as_ref().expect("a bad file opens the reason");
+        assert_eq!(notice.title, "设置文件有误");
+        assert!(
+            notice.detail.contains("不是有效的 JSON"),
+            "{}",
+            notice.detail
+        );
     });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.press("escape", cx);
+    })
+    .unwrap();
     // Changes to this test's own file still require a save-conflict decision.
     let external = r#"{ "editor_font_size": 14 }"#;
     std::fs::write(&path, external).unwrap();
@@ -385,7 +395,13 @@ async fn saving_hidden_rules_refreshes_both_windows_without_toggling_show_hidden
         .unwrap();
     assert!(saved.await);
     this.read_with(cx, |p, _| {
-        assert!(p.message.contains("hidden_files 必须"), "{}", p.message)
+        let notice = p.notice.as_ref().expect("a bad file opens the reason");
+        assert_eq!(notice.title, "设置文件有误");
+        assert!(
+            notice.detail.contains("hidden_files 必须"),
+            "{}",
+            notice.detail
+        );
     });
     cx.read(|cx| {
         assert_eq!(

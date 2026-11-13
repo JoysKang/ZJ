@@ -205,7 +205,11 @@ pub fn terminal_line_height(font: Pixels) -> Pixels {
 /// Overview ruler at the right edge of the diff editor, and its smallest marker.
 pub const DIFF_RULER: Pixels = px(14.);
 pub const DIFF_RULER_MIN: Pixels = px(3.);
-pub const SCM_NOTICE_MAX: Pixels = px(100.);
+/// The Git failure dialog: wide enough for a path and a commit summary, never wider than
+/// the window allows.
+pub const DIALOG_WIDTH: Pixels = px(520.);
+/// Its raw output scrolls inside this height, so a long Git error stays bounded.
+pub const DIALOG_DETAIL_MAX: Pixels = px(260.);
 /// Source Control repository rows: the branch line under the name, and wrapped lines.
 pub const SCM_DETAIL_LINE: Pixels = px(20.);
 /// Centers a `SCM_DETAIL_LINE` line inside a `ROW_HEIGHT` row: derived from the two, not a
@@ -597,6 +601,8 @@ pub struct Colors {
     pub shadow: Hsla,
     pub card: Hsla,
     pub card_border: Hsla,
+    /// Dimming behind a modal dialog, over whatever it covers.
+    pub scrim: Hsla,
     pub strong_border: Hsla,
     /// Small icon buttons inside list rows (VS Code `toolbar.hoverBackground` /
     /// `toolbar.activeBackground`): the text color, faint, so they show on a hovered row too.
@@ -674,6 +680,7 @@ impl Palette {
             shadow: hsla(0x000000).opacity(self.shadow_alpha),
             card: hsla(self.card),
             card_border: hsla(self.card_border),
+            scrim: hsla(0x000000).opacity(0.2),
             strong_border: hsla(self.strong_border),
             switch_halo: hsla(self.editor).opacity(0.85),
             control_hover: hsla(self.foreground).opacity(0.12),

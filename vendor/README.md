@@ -151,6 +151,13 @@ and its debug-only screenshot configuration alongside ZJ's shared atlas and draw
     a next-frame callback) starts the link again. It uses `try_lock`; when the window state is
     held by one of its own callbacks, the wake runs on the main queue next.
   - When the window is visible again, it calls `zj_restore_surfaces` and sets `zj_force_present`.
+  - `prompt`: upstream moves the keyboard focus (and therefore Space) onto the last
+    non-cancel button so the middle button of "Save / Don't Save / Cancel" is reachable.
+    Prompts whose first button is Cancel are irreversible confirmations that must be picked
+    deliberately, so they now keep the focus on the default (Cancel); the action stays
+    reachable by click or Tab instead of Space. Cancel also carries the Escape equivalent,
+    which replaces the Return equivalent it would hold in first position, so Return cannot
+    run the action either.
     The next display-link `step` then passes `require_presentation: true`, so GPUI presents the
     last scene again even if nothing changed.
 - `Cargo.toml`: the same lint override.

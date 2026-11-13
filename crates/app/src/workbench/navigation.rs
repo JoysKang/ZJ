@@ -42,6 +42,8 @@ gpui_kit::actions!(
     [
         GoToSymbol,
         GoToLine,
+        NextConflict,
+        PreviousConflict,
         FindReferences,
         NavigateBack,
         NavigateForward
@@ -837,6 +839,61 @@ impl Workbench {
             center,
         };
         self.go(path, place, window, cx);
+    }
+
+    /// F8 / ⇧F8: the next or previous merge conflict in the active document, wrapping around.
+    /// The conflict is centered like ⌃G, so the markers and their action bar are both in view.
+    pub(super) fn jump_to_conflict(
+        &mut self,
+        forwards: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self.active_document_id() else {
+            return;
+        };
+        let Some(doc) = self.document(id) else {
+            return;
+        };
+        if doc.conflicts.version != Some(doc.version) {
+            // Only conflicted files are scanned; others never get a result to wait for.
+            self.message = if self.conflict_entry(&doc.path).is_some() {
+                "正在扫描冲突…".into()
+            } else {
+                "当前文件没有冲突".into()
+            };
+            cx.notify();
+            return;
+        }
+        let list = doc.conflicts.list.clone();
+        if list.is_empty() {
+            self.message = "当前文件没有冲突".into();
+            cx.notify();
+            return;
+        }
+        let cursor = doc.editor.read(cx).cursor();
+        // A conflict the caret is inside is the current one; the marker line itself does not
+        // count, so F8 on a file that opens with a conflict still reaches that conflict.
+        let inside = list
+            .iter()
+            .position(|conflict| conflict.whole.start < cursor && cursor < conflict.whole.end);
+        let index = match (forwards, inside) {
+            (true, Some(i)) => (i + 1) % list.len(),
+            (true, None) => list
+                .iter()
+                .position(|conflict| conflict.whole.start >= cursor)
+                .unwrap_or(0),
+            (false, Some(i)) => (i + list.len() - 1) % list.len(),
+            (false, None) => list
+                .iter()
+                .rposition(|conflict| conflict.whole.start < cursor)
+                .unwrap_or(list.len() - 1),
+        };
+        // Land on the first content line so the next F8 knows the caret is inside this
+        // conflict, and the marker with its action bar stays one line above.
+        self.go_to_line(list[index].line as u32 + 1, 0, window, cx);
+        self.message = format!("冲突 {} / {}", index + 1, list.len());
+        cx.notify();
     }
 
     /// ⌘⇧O: the outline of the active file in a filterable list.

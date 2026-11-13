@@ -263,7 +263,7 @@ impl Workbench {
                             doc.dirty && !doc.deleted && doc.auto_save.fire(ticket)
                         });
                     if due {
-                        this.save_document(id, false, window, cx).detach();
+                        this.save_automatically(id, window, cx).detach();
                     }
                 });
             }));
@@ -291,8 +291,19 @@ impl Workbench {
             .map(|doc| doc.id)
             .collect();
         for id in ids {
-            self.save_document(id, false, window, cx).detach();
+            self.save_automatically(id, window, cx).detach();
         }
+    }
+
+    /// An automatic save. A failure waits in the status bar instead of a dialog: the user
+    /// did not ask for this write and may be typing when it fails.
+    pub(super) fn save_automatically(
+        &mut self,
+        id: DocumentId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
+        self.save_document_inner(id, false, true, window, cx)
     }
 
     pub(super) fn set_auto_save(
@@ -456,6 +467,20 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<bool> {
+        self.save_document_inner(id, overwrite, false, window, cx)
+    }
+
+    /// The write itself. `auto_save` travels with this request through the wait for another
+    /// save, so its own result — not whichever save happened to finish first — decides
+    /// whether a failure may take the keyboard.
+    fn save_document_inner(
+        &mut self,
+        id: DocumentId,
+        overwrite: bool,
+        auto_save: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<bool> {
         let Some(doc) = self.document(id) else {
             return Task::ready(false);
         };
@@ -487,7 +512,7 @@ impl Workbench {
                     }
                 }
                 match this.update_in(cx, |this, window, cx| {
-                    this.save_document(id, overwrite, window, cx)
+                    this.save_document_inner(id, overwrite, auto_save, window, cx)
                 }) {
                     Ok(task) => task.await,
                     Err(_) => false,
@@ -515,8 +540,14 @@ impl Workbench {
                     doc.saving = false;
                 }
                 let next = match result {
-                    Ok(state) => Task::ready(this.saved(id, &path, state, version, window, cx)),
-                    Err(error) => this.save_failed(id, error, window, cx),
+                    Ok(state) => {
+                        let saved = this.saved(id, &path, state, version, window, cx);
+                        if saved {
+                            this.apply_saved_settings(id, auto_save, window, cx);
+                        }
+                        Task::ready(saved)
+                    }
+                    Err(error) => this.save_failed(id, error, auto_save, window, cx),
                 };
                 this.recheck_after_save(id, window, cx);
                 next
@@ -580,7 +611,6 @@ impl Workbench {
             self.relist_folder(parent.to_path_buf(), window, cx);
         }
         self.schedule_blame(cx);
-        self.apply_saved_settings(id, cx);
         cx.notify();
         true
     }
@@ -589,6 +619,7 @@ impl Workbench {
         &mut self,
         id: DocumentId,
         error: SaveError,
+        auto_save: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Task<bool> {
@@ -596,29 +627,59 @@ impl Workbench {
             return Task::ready(false);
         };
         let name = doc.name();
+        let path = doc.path.clone();
         match error {
+            // Auto-save never interrupts typing with a native prompt: it leaves the reason
+            // in the status bar, and the next save by hand asks again.
+            SaveError::Conflict if auto_save => {
+                self.report_save_failure(
+                    format!("无法保存「{name}」"),
+                    format!(
+                        "文件：{}\n\n文件已在磁盘上更改；下次手动保存时会再次确认。",
+                        path.display()
+                    ),
+                    false,
+                    window,
+                    cx,
+                );
+                Task::ready(false)
+            }
+            SaveError::ReadOnly(why) if auto_save => {
+                self.report_save_failure(
+                    format!("无法保存「{name}」"),
+                    format!(
+                        "文件：{}\n\n{why}。下次手动保存时可以另存为。",
+                        path.display()
+                    ),
+                    false,
+                    window,
+                    cx,
+                );
+                Task::ready(false)
+            }
             SaveError::Conflict => {
                 let answer = window.prompt(
                     PromptLevel::Warning,
                     "文件已在磁盘上更改",
                     Some(&format!("「{name}」已被其他程序修改。")),
+                    // Both 覆盖 and 重新加载 lose work, so neither sits on Return.
                     &crate::workbench::prompt_buttons(&[
+                        "取消",
                         "覆盖",
                         "重新加载（丢弃我的修改）",
                         "比较",
-                        "取消",
                     ]),
                     cx,
                 );
                 cx.spawn_in(window, async move |this, cx| {
                     let choice = answer.await.ok();
                     let next = this.update_in(cx, |this, window, cx| match choice {
-                        Some(0) => Some(this.save_document(id, true, window, cx)),
-                        Some(1) => {
+                        Some(1) => Some(this.save_document(id, true, window, cx)),
+                        Some(2) => {
                             this.reload_from_disk(id, window, cx);
                             None
                         }
-                        Some(2) => {
+                        Some(3) => {
                             this.compare_with_disk(id, window, cx);
                             None
                         }
@@ -649,8 +710,13 @@ impl Workbench {
                 })
             }
             SaveError::Io(error) => {
-                self.message = format!("保存「{name}」失败：{error}");
-                cx.notify();
+                self.report_save_failure(
+                    format!("无法保存「{name}」"),
+                    format!("文件：{}\n\n{error}", path.display()),
+                    !auto_save,
+                    window,
+                    cx,
+                );
                 Task::ready(false)
             }
         }
@@ -820,7 +886,13 @@ impl Workbench {
                     if let Some(doc) = this.document_mut(id) {
                         doc.saving = false;
                     }
-                    this.message = format!("另存为失败：{error}");
+                    this.report_save_failure(
+                        "另存为失败".into(),
+                        error.to_string(),
+                        true,
+                        window,
+                        cx,
+                    );
                     this.recheck_after_save(id, window, cx);
                     cx.notify();
                 }
@@ -876,7 +948,9 @@ impl Workbench {
                             this.set_soft_wrap(id, soft_wrap_default(language), window, cx);
                         }
                         this.document_path_changed(id, cx);
-                        this.saved(id, &path, state, version, window, cx);
+                        if this.saved(id, &path, state, version, window, cx) {
+                            this.apply_saved_settings(id, false, window, cx);
+                        }
                         if this.document(id).is_some_and(|doc| doc.dirty) {
                             this.schedule_snapshot(id, window, cx);
                         }
@@ -887,7 +961,18 @@ impl Workbench {
                         true
                     }
                     Err(error) => {
-                        this.message = format!("另存为失败：{error}");
+                        let name = path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned();
+                        this.report_save_failure(
+                            format!("无法另存为「{name}」"),
+                            format!("文件：{}\n\n{error}", path.display()),
+                            true,
+                            window,
+                            cx,
+                        );
                         cx.notify();
                         false
                     }

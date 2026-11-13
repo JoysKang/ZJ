@@ -289,7 +289,9 @@ impl GitService {
         // Of those, the ones added with `git add -N`, whose index entry goes first.
         let mut intent: Vec<PathBuf> = Vec::new();
         // Every path the discard deletes, checked afterwards: `git clean -f` skips nested
-        // repositories without failing.
+        // repositories without failing. `-x` is needed because a listed path can match an
+        // ignore rule (an ignored file added with `git add -N`); without it clean leaves it
+        // and exits 0.
         let mut deleting: Vec<PathBuf> = Vec::new();
         let mut input = None;
         match &request.operation {
@@ -351,7 +353,7 @@ impl GitService {
                         args.extend(["restore".into(), "--staged".into()])
                     }
                     WriteOperation::Discard { .. } if untracked.len() == paths.len() => {
-                        args.extend(["clean".into(), "-f".into(), "-q".into()]);
+                        args.extend(["clean".into(), "-f".into(), "-x".into(), "-q".into()]);
                         untracked.clear();
                     }
                     WriteOperation::Discard { .. } => {
@@ -797,6 +799,7 @@ impl GitService {
                 "--literal-pathspecs".into(),
                 "clean".into(),
                 "-f".into(),
+                "-x".into(),
                 "-q".into(),
                 "--".into(),
             ];

@@ -822,12 +822,23 @@ impl Workbench {
             .children(self.render_disk_banner(cx))
             .children(self.render_conflict_bar(cx))
             .child(
-                div()
-                    .relative()
+                h_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(content)
-                    .children(self.render_find(cx)),
+                    .min_w_0()
+                    // `h_flex` centers on the cross axis; the editor fills the row's height.
+                    .items_stretch()
+                    .child(
+                        div()
+                            .relative()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .child(content)
+                            .children(self.render_find(cx)),
+                    )
+                    // Outside the find overlay's frame, right of the editor's scrollbar.
+                    .children(self.render_conflict_ruler(cx)),
             )
             .into_any_element()
     }

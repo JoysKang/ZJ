@@ -11,7 +11,10 @@
 //!   文里、浮层打开时有意义。
 //! - 纯内部的（Kit 的 Enter / Escape / Tab、列表导航）。
 
-use super::navigation::{FindReferences, GoToLine, GoToSymbol, NavigateBack, NavigateForward};
+use super::navigation::{
+    FindReferences, GoToLine, GoToSymbol, NavigateBack, NavigateForward, NextConflict,
+    PreviousConflict,
+};
 use super::*;
 use gpui_kit::{
     Action, App, Keystroke, Modifiers, Window,
@@ -67,6 +70,7 @@ pub(super) const COMMANDS: &[Command] = &[
     command!("视图: 转到文件…", QuickOpenFile),
     command!("视图: 显示所有命令", ShowAllCommands),
     command!("视图: 切换主侧栏", ToggleSidebar),
+    command!("视图: 聚焦源代码管理", FocusSourceControl),
     command!("视图: 切换自动换行", ToggleSoftWrap),
     command!("视图: 放大", ZoomIn),
     command!("视图: 缩小", ZoomOut),
@@ -76,6 +80,8 @@ pub(super) const COMMANDS: &[Command] = &[
     command!("转到: 转到文件中的符号…", GoToSymbol),
     command!("转到: 转到定义", GoToDefinition),
     command!("转到: 查找所有引用", FindReferences),
+    command!("转到: 下一个冲突", NextConflict),
+    command!("转到: 上一个冲突", PreviousConflict),
     command!("转到: 返回", NavigateBack),
     command!("转到: 前进", NavigateForward),
     command!("编辑: 切换行注释", ToggleLineComment),

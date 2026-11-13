@@ -14,7 +14,7 @@ use gpui_kit::{
 };
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     rc::Rc,
     sync::{
@@ -87,6 +87,7 @@ pub use find_widget::{
     ToggleFindInSelection, ToggleFindRegex, ToggleFindWord, TogglePreserveCase,
 };
 pub use markdown_preview::ToggleMarkdownPreview;
+pub use scm::key_bindings as scm_key_bindings;
 #[cfg(test)]
 #[path = "workbench/auto_save_ui_tests.rs"]
 mod auto_save_ui_tests;
@@ -181,6 +182,7 @@ gpui_kit::actions!(
         ZoomReset,
         ToggleHiddenFiles,
         FindInFiles,
+        FocusSourceControl,
         OpenSettings,
         OpenSettingsFile
     ]
@@ -340,8 +342,6 @@ struct Group {
     _commit_subscription: Subscription,
     write_task: Option<Task<()>>,
     write_pending: bool,
-    write_message: String,
-    write_feedback: Option<scm_feedback::GitFeedback>,
     /// Commits the upstream does not have, loaded with the status (empty when none).
     outgoing: Result<Vec<Commit>, String>,
     outgoing_collapsed: bool,
@@ -353,7 +353,6 @@ impl Group {
         matches!(&self.status, Some(Ok(status)) if status.changes.is_empty() && status.behind == 0)
             && self.remote_error.is_none()
             && !self.write_pending
-            && self.write_message.is_empty()
     }
 
     /// Commits ahead of the upstream (0 without one).
@@ -372,16 +371,26 @@ const OUTGOING_LIMIT: usize = 100;
 const SINGLE_LINE: [char; 2] = ['\n', '\r'];
 
 /// Highlighter language (only grammars compiled into Kit) and status bar display name.
-/// Prompt buttons, the action first (macOS puts it on the right, on Return) and 取消 marked
-/// as the cancel button so Escape answers it; a plain "取消" label is not recognized as one.
-pub(crate) fn prompt_buttons(labels: &[&str]) -> Vec<PromptButton> {
+/// Prompt buttons, the first label on the right (and on Return if it keeps that key
+/// equivalent), and 取消 marked as the cancel button so Escape answers it; a plain "取消"
+/// label is not recognized as one.
+pub(crate) fn prompt_buttons(labels: &[impl AsRef<str>]) -> Vec<PromptButton> {
     labels
         .iter()
-        .map(|&label| match label {
-            "取消" => PromptButton::cancel(label),
-            _ => PromptButton::new(label),
+        .map(|label| match label.as_ref() {
+            "取消" => PromptButton::cancel(label.as_ref()),
+            _ => PromptButton::new(label.as_ref()),
         })
         .collect()
+}
+
+/// Confirmation buttons for an action that cannot be undone, and the index that runs it.
+/// 取消 comes first, so it is the right-hand default and the button Space lands on; it also
+/// carries Escape. Neither key can run the action: that takes Tab onto the action or a
+/// click. macOS otherwise puts the first button on Return, which would make the
+/// destructive action the one-key answer to every prompt.
+pub(crate) fn destructive_prompt(action: impl Into<String>) -> (Vec<String>, usize) {
+    (vec!["取消".to_owned(), action.into()], 1)
 }
 
 fn language_for(path: &std::path::Path) -> (&'static str, &'static str) {
@@ -450,12 +459,32 @@ enum Event {
 pub struct Workbench {
     focus_handle: FocusHandle,
     sidebar_focus: FocusHandle,
+    /// A failed Git write or the repository errors a scan could not read; the dialog owns
+    /// the keyboard while it is open. Failures that arrive while it is open wait here, so
+    /// two repositories failing at once do not lose the first reason.
+    notice: Option<scm_feedback::Notice>,
+    queued_notices: VecDeque<scm_feedback::Notice>,
+    /// Where the keyboard was before the dialog took it, given back when the last one closes.
+    notice_return_focus: Option<FocusHandle>,
+    notice_focus: FocusHandle,
+    /// Failures of writes the user did not ask for (auto-save). A dialog would take the
+    /// keyboard in the middle of typing, so they wait in the status bar until opened.
+    deferred_notices: Vec<scm_feedback::Notice>,
+    /// Where the keyboard was when the first of those arrived. Opening them happens by
+    /// clicking the status bar, so the click's own focus is not where the user was.
+    deferred_return_focus: Option<FocusHandle>,
+    /// Results of writes that finished while another repository's 「正在…」 line held the
+    /// status bar; released together so a slow push cannot hide a commit.
+    deferred_results: Vec<String>,
     root: Option<PathBuf>,
     service: GitService,
     groups: Vec<Group>,
     rows: Vec<Row>,
     scm_repo: Option<RepoId>,
     write_generation: u64,
+    /// The generation of the write whose 「正在…」 line the status bar is showing; only that
+    /// write may clear it or replace it with its result.
+    write_progress: Option<u64>,
     sidebar: Sidebar,
     sidebar_visible: bool,
     /// The width the user last chose; the layout clamps it to leave the editor usable.
@@ -486,6 +515,9 @@ pub struct Workbench {
     /// Source Control rows vary in height (repository rows wrap long branch names), so they
     /// use a measured list instead of `uniform_list`.
     scm_list: ListState,
+    /// The file row the Source Control keyboard acts on (↑ / ↓, Return, Space, ⌘⌫).
+    scm_selected: Option<scm::ScmSelection>,
+    scm_focus: FocusHandle,
     search: search_view::SearchState,
     find: find_widget::FindState,
     /// The Settings tab's inputs; `Some` while the tab is open.
@@ -682,12 +714,20 @@ impl Workbench {
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
+            notice: None,
+            queued_notices: VecDeque::new(),
+            notice_return_focus: None,
+            notice_focus: cx.focus_handle(),
+            deferred_notices: Vec::new(),
+            deferred_return_focus: None,
+            deferred_results: Vec::new(),
             root,
             service,
             groups: vec![],
             rows: vec![],
             scm_repo: None,
             write_generation: 0,
+            write_progress: None,
             sidebar: Sidebar::Explorer,
             sidebar_visible: true,
             sidebar_width: theme::SIDEBAR_WIDTH,
@@ -732,6 +772,8 @@ impl Workbench {
             hide_clean_repos: cx.global::<crate::settings::Settings>().hide_clean_repos,
             search_excludes: cx.global::<crate::settings::Settings>().search_use_excludes,
             scm_list: ListState::new(0, ListAlignment::Top, theme::SCM_LIST_OVERDRAW),
+            scm_selected: None,
+            scm_focus: cx.focus_handle(),
             search,
             find,
             settings_pane: None,
@@ -1057,9 +1099,15 @@ impl Workbench {
         let saved = crate::settings::update(cx, change);
         cx.spawn_in(window, async move |this, cx| {
             if let Err(error) = saved.await {
-                let _ = this.update(cx, |this, cx| {
-                    this.message = format!("设置未能保存：{error}");
-                    cx.notify();
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.report_failure(
+                        "设置未能保存".into(),
+                        "更改只在本次运行中生效；重启后会恢复设置文件里的值。",
+                        error.to_string(),
+                        true,
+                        window,
+                        cx,
+                    );
                 });
             }
         })
@@ -1133,7 +1181,13 @@ impl Workbench {
 
     /// A saved buffer that is the settings file: its text goes into effect in every window,
     /// or the status bar says why not.
-    pub(super) fn apply_saved_settings(&mut self, id: DocumentId, cx: &mut Context<Self>) {
+    pub(super) fn apply_saved_settings(
+        &mut self,
+        id: DocumentId,
+        auto_save: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(doc) = self.document(id) else {
             return;
         };
@@ -1149,7 +1203,14 @@ impl Workbench {
                 crate::settings::apply(settings, cx);
                 self.message = "设置已生效".into();
             }
-            Err(error) => self.message = format!("{error}；仍使用原来的设置"),
+            Err(error) => self.report_failure(
+                "设置文件有误".into(),
+                "仍在使用原来的设置；改正这一处后保存即可生效。",
+                error.to_string(),
+                !auto_save,
+                window,
+                cx,
+            ),
         }
         cx.notify();
     }
@@ -2179,8 +2240,6 @@ impl Workbench {
                                             _commit_subscription: subscription,
                                             write_task: None,
                                             write_pending: false,
-                                            write_message: String::new(),
-                                            write_feedback: None,
                                             outgoing: Ok(Vec::new()),
                                             outgoing_collapsed: false,
                                             remote_error: None,
@@ -2277,6 +2336,10 @@ impl Workbench {
         let kept = old.min(new);
         self.scm_list.splice(kept..old, new - kept);
         self.scm_list.remeasure_items(0..new);
+        // The keyboard's row follows its file to the other group, and goes away with it.
+        self.scm_selected = self
+            .scm_selected_index()
+            .and_then(|index| self.scm_target(index));
     }
 
     fn fill_rows(&mut self) {
@@ -2927,6 +2990,9 @@ impl Render for Workbench {
                 this.open_quick_open_with(">", window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| this.toggle_sidebar(window, cx)))
+            .on_action(cx.listener(|this, _: &FocusSourceControl, window, cx| {
+                this.focus_source_control(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ZoomIn, window, cx| this.zoom(Some(1.), window, cx)))
             .on_action(
                 cx.listener(|this, _: &ZoomOut, window, cx| this.zoom(Some(-1.), window, cx)),
@@ -2980,6 +3046,16 @@ impl Render for Workbench {
                     this.navigate_forward(window, cx)
                 }),
             )
+            .on_action(
+                cx.listener(|this, _: &navigation::NextConflict, window, cx| {
+                    this.jump_to_conflict(true, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &navigation::PreviousConflict, window, cx| {
+                    this.jump_to_conflict(false, window, cx)
+                }),
+            )
             .bg(colors.title)
             .text_color(colors.foreground)
             .child(self.render_title_bar(window, cx))
@@ -2994,5 +3070,24 @@ impl Render for Workbench {
             .child(self.render_status_bar(cx))
             .children(self.render_quick_open(window, cx))
             .children(self.render_switch_hud(cx))
+            .children(self.render_notice(cx))
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::{destructive_prompt, prompt_buttons};
+
+    #[test]
+    fn irreversible_prompts_put_cancel_first() {
+        let (labels, proceed) = destructive_prompt("删除文件");
+        assert_eq!(labels, ["取消", "删除文件"]);
+        let buttons = prompt_buttons(&labels);
+        assert!(
+            buttons[0].is_cancel(),
+            "the default button must be the one Escape answers"
+        );
+        assert!(!buttons[1].is_cancel());
+        assert_eq!(proceed, 1, "only the chosen action runs the write");
     }
 }

@@ -321,6 +321,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 Some("WorkspaceEditor"),
             ),
             KeyBinding::new("ctrl-g", nav::GoToLine, Some("WorkspaceEditor")),
+            // VS Code: F8 / ⇧F8 walk merge conflicts.
+            KeyBinding::new("f8", nav::NextConflict, Some("WorkspaceEditor")),
+            KeyBinding::new("shift-f8", nav::PreviousConflict, Some("WorkspaceEditor")),
             KeyBinding::new("f12", GoToDefinition, Some("Input")),
             KeyBinding::new("f12", GoToDefinition, Some("DiffEditor")),
             KeyBinding::new("shift-f12", nav::FindReferences, Some("WorkspaceEditor")),
@@ -447,6 +450,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         cx.bind_keys(workbench::edit_key_bindings());
         cx.bind_keys(workbench::search_key_bindings());
         cx.bind_keys(workbench::explorer_key_bindings());
+        cx.bind_keys(workbench::scm_key_bindings());
         install_menus(cx);
         let documents: DocumentOwners = Rc::new(RefCell::new(Default::default()));
         cx.set_global(workbench::OpenDocuments(documents.clone()));

@@ -407,11 +407,6 @@ impl Workbench {
             },
             GitFlowStep::RemoteDetails(detail) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(detail.clone()));
-                if let Some(g) = self.group_of(repo) {
-                    self.groups[g].set_git_feedback("已复制远程详情", detail, FeedbackKind::Info);
-                    self.groups[g].expanded = true;
-                    self.rebuild_rows();
-                }
                 self.message = "已复制脱敏的远程详情（含实际 Push 地址）".into();
                 cx.notify();
                 return;

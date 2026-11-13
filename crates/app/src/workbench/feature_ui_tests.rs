@@ -606,3 +606,186 @@ fn image_versions_share_budget_by_actual_size(cx: &mut TestAppContext) {
     .unwrap();
     cx.run_until_parked();
 }
+
+#[gpui_kit::test]
+async fn a_failed_save_keeps_the_reason_in_one_dialog(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = Fixture::new("save-failure");
+    let file = root.0.join("a.txt");
+    std::fs::write(&file, "one\n").unwrap();
+    let (window, this) = open(cx, root.0.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(file.clone(), Some(root.0.clone()), window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1 && !p.loading)
+    });
+    let (id, editor) = this.read_with(cx, |p, _| {
+        (p.documents[0].id, p.documents[0].editor.clone())
+    });
+    // A directory where the atomic write wants its temp file makes the write fail with
+    // something other than a permission error, so it is a real I/O failure.
+    let blocker = root
+        .0
+        .join(format!(".a.txt.zj-save-{}", std::process::id()));
+    std::fs::create_dir(&blocker).unwrap();
+    let saved = cx
+        .update_window(window.into(), |_, window, cx| {
+            // A typed edit marks the buffer edited; `set_value` would not.
+            editor.update(cx, |state, cx| {
+                state.replace_text_in_range(Some(0..3), "two", window, cx)
+            });
+            this.update(cx, |p, cx| p.save_document(id, false, window, cx))
+        })
+        .unwrap();
+    assert!(!saved.await, "the write must fail");
+    cx.run_until_parked();
+    this.read_with(cx, |p, _| {
+        let notice = p.notice.as_ref().expect("a failed save opens its reason");
+        assert_eq!(notice.title, "无法保存「a.txt」");
+        assert!(
+            notice.detail.contains(&file.display().to_string()),
+            "the reason names the file that was not written: {}",
+            notice.detail
+        );
+    });
+    std::fs::remove_dir(&blocker).unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    this.read_with(cx, |p, _| {
+        assert!(p.notice.is_none(), "Escape closes the reason");
+        assert!(p.documents[0].dirty, "the edit is still unsaved");
+    });
+}
+
+#[gpui_kit::test]
+async fn an_auto_save_failure_leaves_the_keyboard_in_the_editor(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = Fixture::new("auto-save-failure");
+    let file = root.0.join("a.txt");
+    std::fs::write(&file, "one\n").unwrap();
+    let (window, this) = open(cx, root.0.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(file.clone(), Some(root.0.clone()), window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1 && !p.loading)
+    });
+    let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
+    let blocker = root
+        .0
+        .join(format!(".a.txt.zj-save-{}", std::process::id()));
+    std::fs::create_dir(&blocker).unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        editor.update(cx, |state, cx| {
+            state.replace_text_in_range(Some(0..3), "two", window, cx)
+        });
+        editor.read(cx).focus_handle(cx).focus(window, cx);
+    })
+    .unwrap();
+    // No ⌘S: the one-second auto-save writes it on its own, and fails.
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| !p.deferred_notices.is_empty())
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        this.read_with(cx, |p, cx| {
+            assert!(
+                p.notice.is_none(),
+                "an unasked-for save must not open a dialog over the editor"
+            );
+            assert_eq!(p.deferred_notices[0].title, "无法保存「a.txt」");
+            assert!(p.documents[0].editor.focus_handle(cx).is_focused(window));
+            assert!(
+                window.find("status-save-failure").visible(),
+                "the status bar carries the failure"
+            );
+        });
+        // Typing still reaches the buffer while the failure waits.
+        window.input("x", cx);
+        this.read_with(cx, |p, cx| {
+            assert_eq!(p.documents[0].editor.read(cx).text(), "twox\n");
+            assert!(p.notice.is_none(), "typing does not open it");
+        });
+        window.click("status-save-failure", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        this.read_with(cx, |p, _| {
+            let notice = p.notice.as_ref().expect("the entry opens the reason");
+            assert_eq!(notice.title, "无法保存「a.txt」");
+            assert!(
+                p.notice_focus.is_focused(window),
+                "opening it on purpose hands it the keyboard"
+            );
+        });
+        window.press("escape", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.read_with(cx, |p, cx| {
+            assert!(p.notice.is_none(), "Escape closes it");
+            assert!(p.deferred_notices.is_empty(), "the entry is used up");
+            assert!(p.documents[0].dirty, "the edit is still unsaved");
+            assert!(p.documents[0].editor.focus_handle(cx).is_focused(window));
+        });
+    })
+    .unwrap();
+    std::fs::remove_dir(&blocker).unwrap();
+}
+
+#[gpui_kit::test]
+async fn an_auto_save_that_meets_a_changed_file_does_not_prompt(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let root = Fixture::new("auto-save-conflict");
+    let file = root.0.join("a.txt");
+    std::fs::write(&file, "one\n").unwrap();
+    let (window, this) = open(cx, root.0.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(file.clone(), Some(root.0.clone()), window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| p.documents.len() == 1 && !p.loading)
+    });
+    let id = this.read_with(cx, |p, _| p.documents[0].id);
+    // Another program writes the file and the auto-save runs before the watcher can
+    // update the snapshot it compares against.
+    let saved = cx
+        .update_window(window.into(), |_, window, cx| {
+            std::fs::write(&file, "外部写入\n").unwrap();
+            this.update(cx, |p, cx| p.save_automatically(id, window, cx))
+        })
+        .unwrap();
+    assert!(!saved.await, "the auto-save must not overwrite the file");
+    cx.run_until_parked();
+    assert!(
+        !cx.has_pending_prompt(),
+        "an unasked-for save must not open a native prompt"
+    );
+    this.read_with(cx, |p, _| {
+        assert!(p.notice.is_none());
+        let notice = p
+            .deferred_notices
+            .first()
+            .expect("the conflict waits in the status bar");
+        assert_eq!(notice.title, "无法保存「a.txt」");
+        assert!(notice.detail.contains("磁盘上"), "{}", notice.detail);
+    });
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "外部写入\n");
+}

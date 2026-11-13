@@ -9,7 +9,9 @@ use super::super::*;
 // `gpui_kit::*` also exports a `test` macro; `#[gpui_kit::test]` expands to the built-in one.
 #[allow(unused_imports)]
 use core::prelude::v1::test;
-use gpui_kit::{InputEvent as _, TestAppContext, test::TestWindowExt};
+use gpui_kit::{
+    InputEvent as _, TestAppContext, component::input::RopeExt as _, test::TestWindowExt,
+};
 
 fn git(dir: &std::path::Path, args: &[&str]) {
     let output = std::process::Command::new("git")
@@ -131,19 +133,13 @@ async fn incoming_commits_have_an_explicit_pull_action(cx: &mut TestAppContext) 
         git_out(&repo, &["rev-parse", "HEAD"]),
         git_out(&repo, &["rev-parse", "origin/main"])
     );
-    assert_eq!(
-        rows(cx, &this),
-        ["repo", "message"],
-        "keep the result reachable until dismissed"
-    );
-    cx.update_window(window.into(), |_, window, cx| {
-        window.render_frame(cx);
-        window.click(("git-result-dismiss", 0usize), cx);
-    })
-    .unwrap();
+    this.read_with(cx, |p, _| {
+        assert!(p.message.contains("：拉取完成"), "{}", p.message);
+        assert!(p.notice.is_none(), "a pull that worked opens no dialog");
+    });
     assert!(
         rows(cx, &this).is_empty(),
-        "clean repositories hide after the result is dismissed"
+        "a clean repository hides; the status bar carries the result"
     );
     this.update(cx, |p, cx| {
         p.hide_clean_repos = false;
@@ -775,7 +771,7 @@ async fn inactive_commit_button_does_not_keep_the_active_fill(cx: &mut TestAppCo
                     p.groups[0].expanded,
                     "disabled commit toggled its repository"
                 );
-                assert!(p.groups[0].write_message.is_empty());
+                assert!(!p.message.contains("请输入提交消息"));
             });
             assert!(!cx.has_pending_prompt());
         }
@@ -828,7 +824,7 @@ async fn empty_commit_reveals_and_focuses_its_message(cx: &mut TestAppContext) {
                 cx,
             );
             assert!(p.groups[0].expanded);
-            assert_eq!(p.groups[0].write_message, "请输入提交消息");
+            assert!(p.message.ends_with("：请输入提交消息"), "{}", p.message);
             assert!(p.groups[0].commit_input.focus_handle(cx).is_focused(window));
             assert!(!p.groups[0].write_pending);
         });
@@ -861,7 +857,7 @@ async fn repository_more_menu_keeps_advanced_commit_actions(cx: &mut TestAppCont
             .enumerate()
         {
             this.update(cx, |p, cx| {
-                p.groups[0].write_message.clear();
+                p.message.clear();
                 cx.notify();
             });
             cx.update_window(window.into(), |_, window, cx| {
@@ -885,7 +881,7 @@ async fn repository_more_menu_keeps_advanced_commit_actions(cx: &mut TestAppCont
             } else {
                 // An enabled new commit with no message asks for one; a disabled item is inert.
                 assert_eq!(
-                    this.read_with(cx, |p, _| p.groups[0].write_message == "请输入提交消息"),
+                    this.read_with(cx, |p, _| p.message.ends_with("：请输入提交消息")),
                     enabled[index]
                 );
                 assert!(!cx.has_pending_prompt());
@@ -1993,7 +1989,7 @@ async fn staging_a_file_that_still_has_conflict_markers_asks_first(cx: &mut Test
 }
 
 #[gpui_kit::test]
-async fn failed_git_writes_prompt_and_keep_copyable_details(cx: &mut TestAppContext) {
+async fn failed_git_writes_open_one_dialog_with_copyable_details(cx: &mut TestAppContext) {
     use std::os::unix::fs::PermissionsExt;
     cx.executor().allow_parking();
     for (kind, title, reason) in [
@@ -2063,24 +2059,48 @@ async fn failed_git_writes_prompt_and_keep_copyable_details(cx: &mut TestAppCont
         settle(cx, None, |cx| {
             this.read_with(cx, |p, _| !p.groups[0].write_pending)
         });
-        let (actual_title, detail) = cx
-            .pending_prompt()
-            .expect("failed Git write must show a dialog");
-        assert_eq!(actual_title, title);
-        assert!(detail.contains(repo.to_str().unwrap()), "{detail}");
-        assert!(detail.contains(reason), "{detail}");
+        // One surface: the in-app dialog, not a native prompt plus a panel result.
+        assert!(!cx.has_pending_prompt());
         this.read_with(cx, |p, cx| {
-            assert!(p.groups[0].write_message.contains(reason));
-            assert!(p.groups[0].write_message.contains("失败"));
+            let notice = p.notice.as_ref().expect("失败必须打开结果对话框");
+            assert!(notice.title.starts_with("repo："), "{}", notice.title);
+            assert!(notice.title.ends_with(title), "{}", notice.title);
+            assert!(
+                notice.detail.contains(repo.to_str().unwrap()),
+                "{}",
+                notice.detail
+            );
+            assert!(notice.detail.contains(reason), "{}", notice.detail);
             assert_eq!(
                 p.groups[0].commit_input.read(cx).value().as_ref(),
                 "feat: 保留输入"
             );
             assert!(!p.message.contains("正在"));
         });
-        cx.simulate_prompt_answer("确定");
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("scm-notice").visible());
+            let detail = window.find("scm-notice-detail").bounds();
+            assert!(
+                detail.size.height <= theme::DIALOG_DETAIL_MAX + theme::ROW_INSET * 4.,
+                "the raw output must stay bounded: {:?}",
+                detail
+            );
+            window.click("scm-notice-copy", cx);
+        })
+        .unwrap();
+        let copied = cx.read_from_clipboard().unwrap().text().unwrap();
+        assert!(copied.contains(repo.to_str().unwrap()), "{copied}");
+        assert!(copied.contains(reason), "{copied}");
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("scm-notice-refresh", cx);
+        })
+        .unwrap();
         cx.run_until_parked();
-        assert!(!cx.has_pending_prompt());
+        this.read_with(cx, |p, _| {
+            assert!(p.notice.is_none(), "刷新状态 closes the dialog")
+        });
         let _ = std::fs::remove_dir_all(repo.parent().unwrap());
     }
 }
@@ -2661,5 +2681,326 @@ async fn publish_is_hidden_when_the_upstream_is_configured_but_missing_locally(
         assert!(window.find(("scm-publish", 0usize)).visible());
     })
     .unwrap();
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+#[gpui_kit::test]
+async fn conflicts_are_marked_on_the_ruler_and_reached_with_f8(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("conflict-navigation", 0);
+    std::fs::write(repo.join("a.txt"), "top\nbase 1\nm1\nm2\nm3\nm4\nbase 2\n").unwrap();
+    git(&repo, &["commit", "-q", "-am", "base"]);
+    git(&repo, &["switch", "-q", "-c", "feature"]);
+    std::fs::write(
+        repo.join("a.txt"),
+        "top\nfeature 1\nm1\nm2\nm3\nm4\nfeature 2\n",
+    )
+    .unwrap();
+    git(&repo, &["commit", "-q", "-am", "feature"]);
+    git(&repo, &["switch", "-q", "main"]);
+    std::fs::write(repo.join("a.txt"), "top\nmain 1\nm1\nm2\nm3\nm4\nmain 2\n").unwrap();
+    git(&repo, &["commit", "-q", "-am", "main"]);
+    let merge = std::process::Command::new("git")
+        .args(["-C", repo.to_str().unwrap(), "merge", "-q", "feature"])
+        .output()
+        .unwrap();
+    assert!(!merge.status.success(), "the merge must conflict");
+
+    let (window, this) = open(cx, repo.clone());
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(repo.join("a.txt"), Some(repo.clone()), window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| {
+            p.documents
+                .first()
+                .is_some_and(|doc| doc.conflicts_found() == Some(2))
+        })
+    });
+
+    let editor = this.read_with(cx, |p, _| p.documents[0].editor.clone());
+    // Each conflict's first line, and the fraction of the document its mark must cover.
+    let (lines, spans) = this.read_with(cx, |p, cx| {
+        let editor = p.documents[0].editor.read(cx);
+        let rope = editor.text();
+        let total = rope.lines_len().max(1) as f32;
+        let found = crate::conflicts::find(&rope.to_string());
+        let lines = found
+            .iter()
+            .map(|conflict| conflict.line)
+            .collect::<Vec<_>>();
+        let spans = found
+            .iter()
+            .map(|conflict| {
+                let end = rope.offset_to_position(conflict.theirs_marker.start).line as usize + 1;
+                (
+                    conflict.line as f32 / total,
+                    (end - conflict.line) as f32 / total,
+                )
+            })
+            .collect::<Vec<_>>();
+        (lines, spans)
+    });
+    cx.update(|cx| {
+        cx.bind_keys([
+            KeyBinding::new("f8", navigation::NextConflict, Some("WorkspaceEditor")),
+            KeyBinding::new(
+                "shift-f8",
+                navigation::PreviousConflict,
+                Some("WorkspaceEditor"),
+            ),
+        ])
+    });
+
+    cx.update_window(window.into(), |_, window, cx| {
+        editor.update(cx, |state, cx| state.focus(window, cx));
+        window.render_frame(cx);
+        let ruler = window.find("conflict-ruler").bounds();
+        assert_eq!(ruler.size.width, theme::DIFF_RULER);
+        for (i, (top, height)) in spans.iter().enumerate() {
+            let mark = window.find(("conflict-ruler-mark", i)).bounds();
+            let expected_top = ruler.top() + ruler.size.height * *top;
+            let expected_height = (ruler.size.height * *height).max(theme::DIFF_RULER_MIN);
+            assert!(
+                (mark.top() - expected_top).abs() <= px(1.)
+                    && (mark.size.height - expected_height).abs() <= px(1.),
+                "mark {i} covers its conflict's lines: {mark:?}"
+            );
+        }
+    })
+    .unwrap();
+
+    let cursor_line = |cx: &mut TestAppContext| {
+        this.read_with(cx, |p, cx| {
+            let editor = p.documents[0].editor.read(cx);
+            editor.text().offset_to_position(editor.cursor()).line as usize
+        })
+    };
+    let pump = |cx: &mut TestAppContext| {
+        for _ in 0..4 {
+            cx.update_window(window.into(), |_, window, cx| {
+                window.render_frame(cx);
+                window.simulate_next_frame(cx);
+            })
+            .unwrap();
+        }
+    };
+    // Cursor at the top: F8 lands on the first conflict's content, then the second, then
+    // wraps. The keystrokes go through the real bindings and their key context.
+    cx.update_window(window.into(), |_, window, cx| {
+        editor.update(cx, |state, cx| {
+            state.set_cursor_position(gpui_kit::component::input::Position::new(0, 0), window, cx)
+        });
+        window.render_frame(cx);
+        window.press("f8", cx);
+    })
+    .unwrap();
+    pump(cx);
+    assert_eq!(cursor_line(cx), lines[0] + 1);
+    assert_eq!(this.read_with(cx, |p, _| p.message.clone()), "冲突 1 / 2");
+
+    cx.update_window(window.into(), |_, window, cx| window.press("f8", cx))
+        .unwrap();
+    pump(cx);
+    assert_eq!(cursor_line(cx), lines[1] + 1);
+    assert_eq!(this.read_with(cx, |p, _| p.message.clone()), "冲突 2 / 2");
+
+    cx.update_window(window.into(), |_, window, cx| window.press("f8", cx))
+        .unwrap();
+    pump(cx);
+    assert_eq!(
+        cursor_line(cx),
+        lines[0] + 1,
+        "F8 wraps to the first conflict"
+    );
+
+    cx.update_window(window.into(), |_, window, cx| window.press("shift-f8", cx))
+        .unwrap();
+    pump(cx);
+    assert_eq!(
+        cursor_line(cx),
+        lines[1] + 1,
+        "⇧F8 from the first conflict wraps to the last"
+    );
+
+    // A click on a mark jumps the same way.
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click(("conflict-ruler-mark", 0usize), cx);
+    })
+    .unwrap();
+    pump(cx);
+    assert_eq!(cursor_line(cx), lines[0] + 1);
+
+    // A file without conflicts says so instead of waiting for a scan that never comes.
+    std::fs::write(repo.join("b.txt"), "plain\n").unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.open_file(repo.join("b.txt"), Some(repo.clone()), window, cx)
+        });
+    })
+    .unwrap();
+    settle(cx, Some(window), |cx| {
+        this.read_with(cx, |p, _| {
+            p.documents.len() == 2 && p.active == Pane::Document(p.documents[1].id)
+        })
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("conflict-ruler").is_none(),
+            "a file without conflicts has no ruler"
+        );
+        window.press("f8", cx);
+    })
+    .unwrap();
+    assert_eq!(
+        this.read_with(cx, |p, _| p.message.clone()),
+        "当前文件没有冲突"
+    );
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+#[gpui_kit::test]
+async fn scm_file_rows_answer_the_keyboard(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let repo = fixture("scm-keys", 0);
+    std::fs::write(repo.join("a.txt"), "changed\n").unwrap();
+    std::fs::write(repo.join("b.txt"), "new\n").unwrap();
+    let (handle, this) = open(cx, repo.clone());
+    cx.update(|cx| cx.bind_keys(crate::workbench::scm_key_bindings()));
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            p.refresh_completed && p.rows.iter().any(|row| matches!(row, Row::File(..)))
+        })
+    });
+    // ⌃⇧G shows Source Control and puts the keyboard on the first file, no mouse involved.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("ctrl-shift-g", cx);
+    })
+    .unwrap();
+    let first = this.read_with(cx, |p, _| {
+        assert!(matches!(p.sidebar, Sidebar::SourceControl));
+        p.scm_selected
+            .as_ref()
+            .map(|selected| selected.path.clone())
+            .expect("⌃⇧G selects the first file")
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("down", cx);
+    })
+    .unwrap();
+    let second = this.read_with(cx, |p, _| {
+        p.scm_selected
+            .as_ref()
+            .map(|selected| selected.path.clone())
+            .unwrap()
+    });
+    assert_ne!(second, first, "↓ moves to the next file");
+    // Space stages the selected file, exactly like the row's + button.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("space", cx);
+    })
+    .unwrap();
+    assert!(!cx.has_pending_prompt(), "staging asks nothing");
+    settle(cx, Some(handle), |cx| {
+        this.read_with(cx, |p, _| {
+            p.message.ends_with("：已暂存所选更改")
+                && p.groups[0]
+                    .status
+                    .as_ref()
+                    .and_then(|status| status.as_ref().ok())
+                    .is_some_and(|status| {
+                        status
+                            .changes
+                            .iter()
+                            .any(|change| change.path == second && change.staged())
+                    })
+        })
+    });
+    this.read_with(cx, |p, _| {
+        let selected = p.scm_selected.as_ref().unwrap();
+        assert_eq!(selected.path, second, "the selection follows the file");
+        assert!(
+            matches!(selected.side, DiffSide::Staged),
+            "it follows it into the staged group"
+        );
+    });
+    // ↓ past the staged row lands on the other file's worktree row.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("down", cx);
+    })
+    .unwrap();
+    this.read_with(cx, |p, _| {
+        let selected = p.scm_selected.as_ref().unwrap();
+        assert_eq!(selected.path, first);
+        assert!(matches!(selected.side, DiffSide::Worktree));
+    });
+    // ⌘⌫ asks before discarding, with 取消 first.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("cmd-backspace", cx);
+    })
+    .unwrap();
+    assert!(cx.has_pending_prompt(), "discarding always asks");
+    // The confirmation names the decision and its object, not "确定要…吗？".
+    assert_eq!(
+        cx.pending_prompt().unwrap().0,
+        format!(
+            "放弃“{}”中的更改？",
+            first.file_name().unwrap().to_string_lossy()
+        )
+    );
+    cx.simulate_prompt_answer("取消");
+    cx.run_until_parked();
+    assert_eq!(
+        std::fs::read_to_string(repo.join(&first)).unwrap(),
+        "changed\n",
+        "取消 leaves the file alone"
+    );
+    // Return opens the diff for the row the keyboard is on, not just any diff.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.press("enter", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    this.read_with(cx, |p, _| {
+        let tab = p.diff.tab.as_ref().expect("Return opens the diff");
+        assert_eq!(tab.path, repo.join(&first));
+        assert!(matches!(
+            tab.request().map(|request| &request.operation),
+            Some(workspace_editor_git::Operation::Diff {
+                side: DiffSide::Worktree,
+                ..
+            })
+        ));
+    });
+    // Space inside the commit box must stay a space, not stage anything.
+    this.update(cx, |p, cx| {
+        p.groups[0].expanded = true;
+        p.rebuild_rows();
+        cx.notify();
+    });
+    cx.update_window(handle.into(), |_, window, cx| {
+        this.update(cx, |p, cx| {
+            p.groups[0].commit_input.focus_handle(cx).focus(window, cx);
+        });
+        window.render_frame(cx);
+        window.press("space", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    this.read_with(cx, |p, cx| {
+        assert_eq!(p.groups[0].commit_input.read(cx).value().as_str(), " ");
+        assert!(!p.groups[0].write_pending, "Space did not stage anything");
+    });
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }

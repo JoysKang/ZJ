@@ -1,6 +1,5 @@
 //! UI intent captures repository identity, paths and the displayed version before prompting.
 use super::quick_open::{Pick, PickIcon, PickItem, StashAction};
-use super::scm_feedback::FeedbackKind;
 use super::*;
 use gpui_kit::assets::IconName;
 use std::path::Path;
@@ -15,6 +14,19 @@ pub(super) enum CommitMode {
     Commit,
     CommitAndPush,
     Amend,
+}
+
+/// Whether the confirmed write changes disk state that Git cannot restore afterwards.
+/// Only these ask with 取消 first; everything else keeps the action on Return.
+fn irreversible(operation: &WriteOperation) -> bool {
+    matches!(
+        operation,
+        WriteOperation::Discard { .. }
+            | WriteOperation::ApplyExternalPatch { .. }
+            | WriteOperation::ApplyPatch { cached: false, .. }
+            | WriteOperation::AbortOperation { .. }
+            | WriteOperation::RemoveWorktree { .. }
+    )
 }
 
 impl Workbench {
@@ -151,6 +163,7 @@ impl Workbench {
                     .iter()
                     .map(|path| path.display().to_string())
                     .collect();
+                let (buttons, stage) = crate::workbench::destructive_prompt("仍然暂存");
                 let answer = window.prompt(
                     PromptLevel::Warning,
                     &format!("{} 个文件里还有冲突标记，仍要标记为已解决？", marked.len()),
@@ -158,11 +171,11 @@ impl Workbench {
                         "{}\n暂存后 Git 不再把它们当作冲突，标记会随提交进入历史。",
                         names.join("\n")
                     )),
-                    &crate::workbench::prompt_buttons(&["仍然暂存", "取消"]),
+                    &crate::workbench::prompt_buttons(&buttons),
                     cx,
                 );
                 cx.spawn_in(window, async move |this, cx| {
-                    if answer.await == Ok(0) {
+                    if answer.await == Ok(stage) {
                         let _ = this.update_in(cx, |this, window, cx| {
                             this.confirm_git_write(request, window, cx)
                         });
@@ -206,10 +219,11 @@ impl Workbench {
                         .to_string_lossy()
                         .into_owned()
                 };
+                // The title states the decision and its object; the detail carries the scope.
                 let title = match (paths.as_slice(), untracked) {
-                    ([path], 1) => format!("确定要删除“{}”吗？", name(path)),
-                    ([path], _) => format!("确定要放弃“{}”中的更改吗？", name(path)),
-                    _ => format!("确定要放弃 {} 个文件中的全部更改吗？", paths.len()),
+                    ([path], 1) => format!("删除“{}”？", name(path)),
+                    ([path], _) => format!("放弃“{}”中的更改？", name(path)),
+                    _ => format!("放弃 {} 个文件中的全部更改？", paths.len()),
                 };
                 let mut detail = format!("仓库：{}\n", request.repo.worktree.display());
                 if tracked > 0 {
@@ -400,15 +414,20 @@ impl Workbench {
             _ => None,
         };
         if let Some((title, detail, action)) = warning {
+            let (buttons, proceed) = if irreversible(&request.operation) {
+                crate::workbench::destructive_prompt(action)
+            } else {
+                (vec![action.to_owned(), "取消".to_owned()], 0)
+            };
             let answer = window.prompt(
                 PromptLevel::Warning,
                 &title,
                 Some(&detail),
-                &crate::workbench::prompt_buttons(&[action, "取消"]),
+                &crate::workbench::prompt_buttons(&buttons),
                 cx,
             );
             cx.spawn_in(window, async move |this, cx| {
-                if answer.await == Ok(0) {
+                if answer.await == Ok(proceed) {
                     let _ = this.update_in(cx, |this, window, cx| {
                         this.start_git_write(request, window, cx)
                     });
@@ -493,29 +512,65 @@ impl Workbench {
                 Some(format!("正在删除标签 {name}…")),
                 format!("无法删除标签 {name}"),
             ),
-            WriteOperation::Stage { .. } => ("已暂存所选更改", None, "暂存失败".into()),
-            WriteOperation::Unstage { .. } => ("已取消暂存", None, "取消暂存失败".into()),
-            WriteOperation::Discard { .. } => ("已放弃所选更改", None, "放弃更改失败".into()),
-            WriteOperation::Commit { push: true, .. } => {
-                ("已提交并推送", None, "提交并推送失败".into())
+            WriteOperation::Stage { .. } => (
+                "已暂存所选更改",
+                Some("正在暂存…".into()),
+                "暂存失败".into(),
+            ),
+            WriteOperation::Unstage { .. } => (
+                "已取消暂存",
+                Some("正在取消暂存…".into()),
+                "取消暂存失败".into(),
+            ),
+            WriteOperation::Discard { .. } => (
+                "已放弃所选更改",
+                Some("正在放弃更改…".into()),
+                "放弃更改失败".into(),
+            ),
+            WriteOperation::Commit { push: true, .. } => (
+                "已提交并推送",
+                Some("正在提交并推送…".into()),
+                "提交并推送失败".into(),
+            ),
+            WriteOperation::Commit { amend: true, .. } => (
+                "已修改上次提交",
+                Some("正在修改上次提交…".into()),
+                "修改上次提交失败".into(),
+            ),
+            WriteOperation::Commit { .. } => {
+                ("已提交", Some("正在提交…".into()), "提交失败".into())
             }
-            WriteOperation::Commit { amend: true, .. } => {
-                ("已修改上次提交", None, "修改上次提交失败".into())
-            }
-            WriteOperation::Commit { .. } => ("已提交", None, "提交失败".into()),
-            WriteOperation::Push => ("推送完成", None, "推送失败".into()),
-            WriteOperation::ApplyPatch { cached: true, .. } => {
-                ("暂存区已更新", None, "更新暂存区失败".into())
-            }
-            WriteOperation::ApplyPatch { .. } => {
-                ("已还原所选更改", None, "还原所选更改失败".into())
-            }
-            WriteOperation::StashPush { .. } => ("Stash 已创建", None, "创建 Stash 失败".into()),
-            WriteOperation::StashApply { pop: true, .. } => {
-                ("Stash 已弹出", None, "弹出 Stash 失败".into())
-            }
-            WriteOperation::StashApply { .. } => ("Stash 已应用", None, "应用 Stash 失败".into()),
-            WriteOperation::StashDrop { .. } => ("Stash 已删除", None, "删除 Stash 失败".into()),
+            WriteOperation::Push => ("推送完成", Some("正在推送…".into()), "推送失败".into()),
+            WriteOperation::ApplyPatch { cached: true, .. } => (
+                "暂存区已更新",
+                Some("正在更新暂存区…".into()),
+                "更新暂存区失败".into(),
+            ),
+            WriteOperation::ApplyPatch { .. } => (
+                "已还原所选更改",
+                Some("正在还原所选更改…".into()),
+                "还原所选更改失败".into(),
+            ),
+            WriteOperation::StashPush { .. } => (
+                "Stash 已创建",
+                Some("正在创建 Stash…".into()),
+                "创建 Stash 失败".into(),
+            ),
+            WriteOperation::StashApply { pop: true, .. } => (
+                "Stash 已弹出",
+                Some("正在弹出 Stash…".into()),
+                "弹出 Stash 失败".into(),
+            ),
+            WriteOperation::StashApply { .. } => (
+                "Stash 已应用",
+                Some("正在应用 Stash…".into()),
+                "应用 Stash 失败".into(),
+            ),
+            WriteOperation::StashDrop { .. } => (
+                "Stash 已删除",
+                Some("正在删除 Stash…".into()),
+                "删除 Stash 失败".into(),
+            ),
             WriteOperation::PublishBranch { .. } => (
                 "分支已发布",
                 Some("正在发布分支…".into()),
@@ -533,9 +588,17 @@ impl Workbench {
         });
         if let Some(text) = &progress {
             self.message = text.clone();
+            self.write_progress = Some(version);
         }
         group.write_pending = true;
-        group.clear_git_feedback();
+        // Publishing names the ref it created; other writes have no count to report, so
+        // their completion label is the honest result.
+        let published = match &request.operation {
+            WriteOperation::PublishBranch { remote, target, .. } => {
+                Some(format!("已发布到 {remote}/{target}"))
+            }
+            _ => None,
+        };
         let service = self.service.clone();
         // Window replacement/close is blocked while writing. Do not cancel a write on refresh.
         let job =
@@ -549,46 +612,72 @@ impl Workbench {
                 }
             });
             let _ = this.update_in(cx, |this, window, cx| {
-                if let Some(text) = &progress
-                    && this.message == *text
-                {
-                    this.message.clear();
+                // Only the write whose line is showing may clear it: another repository's
+                // write can take the status bar while this one runs.
+                let owns_progress = this.write_progress == Some(version);
+                if owns_progress {
+                    this.write_progress = None;
+                    if let Some(text) = &progress
+                        && this.message == *text
+                    {
+                        this.message.clear();
+                    }
                 }
-                if let Err(error) = &result {
-                    let detail = format!("仓库：{}\n\n原因：\n{error}", worktree.display());
-                    // The answer does not matter; the dialog is informational.
-                    let _answer = window.prompt(
-                        PromptLevel::Critical,
-                        &failed,
-                        Some(&detail),
-                        &crate::workbench::prompt_buttons(&["确定"]),
-                        cx,
-                    );
+                let g = this.groups.iter().position(|group| group.repo.id == id);
+                if let Some(g) = g {
+                    this.groups[g].write_pending = false;
                 }
-                if let Some(group) = this.groups.iter_mut().find(|g| g.repo.id == id) {
-                    group.write_pending = false;
-                    match result {
-                        Ok(output) => {
-                            if submitted_message.as_deref()
-                                == Some(group.commit_input.read(cx).value().as_ref())
-                            {
-                                group
-                                    .commit_input
-                                    .update(cx, |input, cx| input.set_value("", window, cx));
+                match result {
+                    Ok(output) => {
+                        if let Some(g) = g {
+                            let unchanged = submitted_message.as_deref()
+                                == Some(this.groups[g].commit_input.read(cx).value().as_ref());
+                            if unchanged {
+                                let input = this.groups[g].commit_input.clone();
+                                input.update(cx, |input, cx| input.set_value("", window, cx));
                             }
                             let output = String::from_utf8_lossy(&output);
                             let push_summary = workspace_editor_git::push_result_summary(&output);
-                            let summary = if show_result && push_summary == "远程无变化"
-                                && (completed != "同步完成" || output.contains("Already up to date")) {
-                                "远端已是最新"
-                            } else { completed };
-                            let detail_heading = if show_result { format!("{completed} · {push_summary}") } else { completed.into() };
-                            group.set_git_feedback(summary, format!("{detail_heading}\n仓库：{}\n分支：{branch}\n{output}", worktree.display()), FeedbackKind::Success);
+                            let summary = match published {
+                                Some(ref published) => published.clone(),
+                                None if show_result
+                                    && push_summary == "远程无变化"
+                                    && (completed != "同步完成"
+                                        || output.contains("Already up to date")) =>
+                                {
+                                    "远端已是最新".to_owned()
+                                }
+                                None => completed.to_owned(),
+                            };
+                            // While another repository is still writing, its 「正在…」 line
+                            // stays; this result is shown with the others once it is free.
+                            if let Some(line) = this.git_result_line(g, &summary) {
+                                this.deferred_results.push(line);
+                                if this.deferred_results.len() > 3 {
+                                    this.deferred_results.remove(0);
+                                }
+                            }
+                            this.release_write_results(cx);
                         }
-                        Err(error) => {
-                            group.set_git_feedback(failed, format!("失败（操作可能部分完成，请刷新检查）\n仓库：{}\n分支：{branch}\n{error}", worktree.display()), FeedbackKind::Error);
-                            group.expanded = true;
-                        }
+                    }
+                    Err(error) => {
+                        // The dialog is global, so a failure still shows after its repository
+                        // row went away.
+                        let detail =
+                            format!("仓库：{}\n分支：{branch}\n\n{error}", worktree.display());
+                        let name = worktree
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .replace(SINGLE_LINE, "⏎");
+                        let summary = if name.is_empty() {
+                            failed.clone()
+                        } else {
+                            format!("{name}：{failed}")
+                        };
+                        this.report_git_failure(summary, detail, window, cx);
+                        // Other repositories' finished writes still deserve their line.
+                        this.release_write_results(cx);
                     }
                 }
                 this.refresh(window, cx);
@@ -615,13 +704,13 @@ impl Workbench {
         let message = group.commit_input.read(cx).value().to_string();
         // Amending may keep the last message; a new commit needs one.
         if mode != CommitMode::Amend && message.trim().is_empty() {
-            let index = self.groups.iter().position(|g| g.repo.id == id);
-            if let Some(group) = index.map(|index| &mut self.groups[index]) {
-                group.set_git_feedback("请输入提交消息", "请输入提交消息", FeedbackKind::Info);
-                group.expanded = true;
-                group.commit_input.focus_handle(cx).focus(window, cx);
+            if let Some(index) = self.groups.iter().position(|g| g.repo.id == id) {
+                let input = self.groups[index].commit_input.clone();
+                // Reveal the message box: the hint is useless if it stays collapsed.
+                self.groups[index].expanded = true;
+                self.note_git_result(index, "请输入提交消息", cx);
                 self.rebuild_rows();
-                cx.notify();
+                input.focus_handle(cx).focus(window, cx);
             }
             return;
         }
@@ -758,14 +847,14 @@ impl Workbench {
                 "仓库：{}\n同时删除远程标签时，先删远程的，成功后再删本地的。",
                 worktree.display()
             )),
-            &crate::workbench::prompt_buttons(&["删除本地标签", "同时删除远程标签", "取消"]),
+            &crate::workbench::prompt_buttons(&["取消", "删除本地标签", "同时删除远程标签"]),
             cx,
         );
         let repo = repo.clone();
         cx.spawn_in(window, async move |this, cx| {
             let remote = match answer.await {
-                Ok(0) => false,
-                Ok(1) => true,
+                Ok(1) => false,
+                Ok(2) => true,
                 _ => return,
             };
             let _ = this.update_in(cx, |this, window, cx| {
@@ -969,16 +1058,17 @@ impl Workbench {
             self.scm_request_for(repo, operation, window, cx);
             return;
         }
+        let (buttons, drop) = crate::workbench::destructive_prompt("删除");
         let answer = window.prompt(
             PromptLevel::Warning,
             &format!("删除 stash@{{{index}}}？"),
             Some("删除后无法从这里恢复。"),
-            &crate::workbench::prompt_buttons(&["删除", "取消"]),
+            &crate::workbench::prompt_buttons(&buttons),
             cx,
         );
         let repo = repo.clone();
         cx.spawn_in(window, async move |this, cx| {
-            if answer.await == Ok(0) {
+            if answer.await == Ok(drop) {
                 let _ = this.update_in(cx, |this, window, cx| {
                     this.scm_request_for(&repo, operation, window, cx)
                 });
@@ -1006,9 +1096,9 @@ impl Workbench {
             let Some(pointer) = job.await else { return; };
             let _ = this.update_in(cx, |this, _, cx| {
                 if this.file_generation != generation { return; }
-                let detail = format!("Git LFS 指针：{}\nSHA-256：{}\n真实内容大小：{} 字节\n当前显示指针文本；ZJ 不自动下载或还原 LFS 对象。请用外部 git lfs pull 获取真实内容后重新打开；已经还原的工作区文件可正常查看。", path.display(), pointer.oid, pointer.size);
-                this.message = detail.clone();
-                if let Some(group) = this.groups.iter_mut().find(|g| path.starts_with(&g.repo.worktree)) { group.set_git_feedback("Git LFS 指针，尚未下载真实内容", detail, FeedbackKind::Info); this.rebuild_rows(); }
+                let detail = format!("Git LFS 指针（尚未下载真实内容）：{}\nSHA-256：{}\n真实内容大小：{} 字节\n当前显示指针文本；ZJ 不自动下载或还原 LFS 对象。请用外部 git lfs pull 获取真实内容后重新打开；已经还原的工作区文件可正常查看。", path.display(), pointer.oid, pointer.size);
+                // The status bar shows one line; hovering it shows all of this.
+                this.message = detail;
                 cx.notify();
             });
         }).detach();
@@ -1180,5 +1270,38 @@ impl Workbench {
             }
         });
         self.refresh(window, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::irreversible;
+    use std::path::PathBuf;
+    use workspace_editor_git::WriteOperation;
+
+    #[test]
+    fn only_writes_that_cannot_be_undone_ask_with_cancel_first() {
+        assert!(irreversible(&WriteOperation::Discard { paths: vec![] }));
+        assert!(irreversible(&WriteOperation::ApplyExternalPatch {
+            path: PathBuf::new(),
+            patch: String::new(),
+        }));
+        // Reverting selected worktree lines is irreversible; applying them to the index is not.
+        assert!(irreversible(&WriteOperation::ApplyPatch {
+            path: PathBuf::new(),
+            patch: String::new(),
+            cached: false,
+        }));
+        assert!(!irreversible(&WriteOperation::ApplyPatch {
+            path: PathBuf::new(),
+            patch: String::new(),
+            cached: true,
+        }));
+        // Staging, committing, pushing and safe branch deletion stay on Return.
+        assert!(!irreversible(&WriteOperation::Push));
+        assert!(!irreversible(&WriteOperation::DeleteBranch {
+            name: String::new(),
+            oid: String::new(),
+        }));
     }
 }

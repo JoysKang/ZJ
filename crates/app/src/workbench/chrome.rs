@@ -5,6 +5,7 @@ use crate::indent::Indent;
 use crate::theme;
 use gpui_kit::{
     assets::IconName,
+    base::TestSupportExt,
     component::{
         Icon, Sizable, TitleBar,
         button::{Button, ButtonCustomVariant, ButtonVariants},
@@ -292,15 +293,49 @@ impl Workbench {
                 )
             })
             .when(!self.issues.is_empty(), |bar| {
-                let first = self.issues.first().cloned().unwrap_or_default();
+                let count = self.issues.len();
+                // A real Button, so Enter and Space open the list like a click does.
                 bar.child(
-                    status_item("status-issues", colors)
+                    status_action(
+                        "status-issues",
+                        format!("查看 {count} 项仓库错误的原文"),
+                        colors,
+                    )
+                    .flex_shrink_0()
+                    .child(icon(IconName::TriangleAlert))
+                    .child(format!("{count} 项仓库错误"))
+                    .tooltip(|window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new("打开全部仓库错误的原文")
+                            .build(window, cx)
+                    })
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.show_repository_errors(window, cx)),
+                    ),
+                )
+            })
+            .when(!self.deferred_notices.is_empty(), |bar| {
+                let count = self.deferred_notices.len();
+                // The status bar keeps one short entry; the reason is one click away.
+                let label = if count == 1 {
+                    "保存失败".to_owned()
+                } else {
+                    format!("{count} 项保存失败")
+                };
+                let reason = self.deferred_notices[0].title.clone();
+                // A real Button: a background failure must not take the keyboard, but it
+                // stays one click or Return away.
+                bar.child(
+                    status_action("status-save-failure", label.clone(), colors)
+                        .flex_shrink_0()
                         .child(icon(IconName::TriangleAlert))
-                        .child(format!("{} 项仓库错误", self.issues.len()))
+                        .child(label)
                         .tooltip(move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(first.clone())
+                            gpui_kit::component::tooltip::Tooltip::new(reason.clone())
                                 .build(window, cx)
-                        }),
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.show_deferred_notices(window, cx)
+                        })),
                 )
             })
             .when_some(self.watch.error.clone(), |bar, error| {
@@ -315,13 +350,20 @@ impl Workbench {
                 )
             })
             .when(!self.message.is_empty(), |bar| {
+                let message = self.message.clone();
                 bar.child(
                     div()
+                        .id("status-message")
+                        .test_support()
                         .px_2()
                         .min_w_0()
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
+                        .tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(message.clone())
+                                .build(window, cx)
+                        })
                         .child(self.message.clone()),
                 )
             });

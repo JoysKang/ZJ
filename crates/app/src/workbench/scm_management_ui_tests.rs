@@ -52,21 +52,21 @@ async fn git_management_publish_requires_remote_target_and_keeps_copyable_result
     cx.simulate_prompt_answer("发布分支");
     settle(cx, None, |cx| {
         this.read_with(cx, |p, _| {
-            !p.groups[0].write_pending && p.groups[0].write_message.contains("上游配置已回读")
+            !p.groups[0].write_pending
+                && p.message.contains("已发布到")
+                && p.groups[0]
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| status.as_ref().unwrap().upstream.is_some())
         })
     });
+    // The status line names the ref that was published, and the row shows the upstream
+    // Git read back, so neither needs the raw push output.
     this.read_with(cx, |p, _| {
-        assert!(p.groups[0].write_message.contains("远程引用已更新"));
-        assert!(p.groups[0].write_message.contains("published-ui"));
+        assert!(p.message.contains("published-ui"), "{}", p.message);
+        let status = p.groups[0].status.as_ref().unwrap().as_ref().unwrap();
+        assert_eq!(status.upstream.as_deref(), Some("origin/published-ui"));
     });
-    cx.update_window(handle.into(), |_, window, cx| {
-        window.render_frame(cx);
-        window.click(("git-copy-result", 0usize), cx);
-    })
-    .unwrap();
-    let copied = cx.read_from_clipboard().unwrap().text().unwrap();
-    assert!(copied.contains("published-ui"));
-    assert!(copied.contains("refs/heads/"));
     let _ = std::fs::remove_dir_all(repo.parent().unwrap());
 }
 #[gpui_kit::test]

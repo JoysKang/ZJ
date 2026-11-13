@@ -7,7 +7,7 @@
 use super::SINGLE_LINE;
 use super::quick_open::StashAction;
 use super::scm_actions::CommitMode;
-use super::{Row, Workbench, sidebar::chevron};
+use super::{Row, Sidebar, Workbench, sidebar::chevron};
 use crate::{file_icons, theme};
 use gpui_kit::{
     assets::IconName,
@@ -24,6 +24,52 @@ use gpui_kit::{
 };
 use workspace_editor_core::RepoId;
 use workspace_editor_git::{ChangeKind, DiffSide, WriteOperation, WriteRequest};
+
+gpui_kit::actions!(
+    scm,
+    [ScmNext, ScmPrevious, ScmOpen, ScmToggleStage, ScmDiscard]
+);
+
+/// The file row the SCM keyboard acts on. It is kept by repository, path and side, not by
+/// row index: staging rebuilds the list and moves the file from one group to the other,
+/// and a half-staged file has a row on each side.
+#[derive(Clone)]
+pub(super) struct ScmSelection {
+    repo: RepoId,
+    path: std::path::PathBuf,
+    side: DiffSide,
+}
+
+impl ScmSelection {
+    fn same_file(&self, other: &Self) -> bool {
+        self.repo == other.repo && self.path == other.path
+    }
+
+    fn same_row(&self, other: &Self) -> bool {
+        self.same_file(other)
+            && matches!(
+                (self.side, other.side),
+                (DiffSide::Staged, DiffSide::Staged) | (DiffSide::Worktree, DiffSide::Worktree)
+            )
+    }
+}
+
+/// Keys on the focused list: the same actions the row's hover buttons and context menu
+/// offer, so a file row needs no mouse. ⌃⇧G is VS Code's "show Source Control".
+pub fn key_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new(
+            "ctrl-shift-g",
+            super::FocusSourceControl,
+            Some("WorkspaceEditor"),
+        ),
+        KeyBinding::new("down", ScmNext, Some("SourceControl && !Input")),
+        KeyBinding::new("up", ScmPrevious, Some("SourceControl && !Input")),
+        KeyBinding::new("enter", ScmOpen, Some("SourceControl && !Input")),
+        KeyBinding::new("space", ScmToggleStage, Some("SourceControl && !Input")),
+        KeyBinding::new("cmd-backspace", ScmDiscard, Some("SourceControl && !Input")),
+    ]
+}
 
 pub(super) fn count_badge(count: usize, colors: theme::Colors) -> impl IntoElement {
     div()
@@ -351,18 +397,79 @@ impl Workbench {
             None
         };
         v_flex()
+            .id("scm-panel")
+            .track_focus(&self.scm_focus)
+            .key_context("SourceControl")
+            .on_action(cx.listener(|this, _: &ScmNext, window, cx| {
+                if this.scm_keys_here(window) {
+                    this.scm_move_selection(true, window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ScmPrevious, window, cx| {
+                if this.scm_keys_here(window) {
+                    this.scm_move_selection(false, window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ScmOpen, window, cx| {
+                if this.scm_keys_here(window) {
+                    this.scm_open_selected(window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ScmToggleStage, window, cx| {
+                if this.scm_keys_here(window) {
+                    this.scm_toggle_selected(window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ScmDiscard, window, cx| {
+                if this.scm_keys_here(window) {
+                    this.scm_discard_selected(window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
             .size_full()
             .min_h_0()
             .when_some(status_line, |view, line| {
+                let errors = !self.issues.is_empty();
+                // The error count is a real Button, so Tab reaches it and Enter or Space
+                // opens the list; plain status text stays a label.
+                let text = if errors {
+                    gpui_kit::base::Button::new("scm-status-errors")
+                        .h_full()
+                        .justify_start()
+                        .cursor_pointer()
+                        .accessibility_label(format!("查看 {} 项仓库错误的原文", self.issues.len()))
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new("打开全部仓库错误的原文")
+                                .build(window, cx)
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.show_repository_errors(window, cx);
+                        }))
+                        .child(line)
+                        .into_any_element()
+                } else {
+                    div().child(line).into_any_element()
+                };
                 view.child(
                     h_flex()
+                        .id("scm-status-line")
+                        .test_support()
                         .h(theme::ROW_HEIGHT)
                         .flex_shrink_0()
                         .pl(theme::TREE_BASE)
                         .pr_2()
                         .text_size(theme::TEXT_CAPTION)
                         .text_color(colors.muted)
-                        .child(line),
+                        .child(text),
                 )
             })
             .child(
@@ -852,9 +959,6 @@ impl Workbench {
                             ),
                     ),
             )
-            .when(!group.write_message.is_empty(), |view| {
-                view.child(self.render_git_feedback(g, cx))
-            })
             .into_any_element()
     }
 
@@ -1259,6 +1363,11 @@ impl Workbench {
                 }
         });
         let untracked = change.kind == ChangeKind::Untracked;
+        // The row the keyboard is on, so Tab into the panel and ↑ / ↓ have something to show.
+        let keyboard = self.scm_selected.as_ref().is_some_and(|selected| {
+            self.scm_target(index)
+                .is_some_and(|target| target.same_row(selected))
+        });
         let (toggle_icon, toggle_label) = match side {
             DiffSide::Staged => (IconName::Minus, "取消暂存更改"),
             DiffSide::Worktree => (IconName::Plus, "暂存更改"),
@@ -1273,6 +1382,8 @@ impl Workbench {
         let context_toggle = toggle.clone();
         let context_discard = discard.clone();
         let open_file = file_path.clone();
+        let select_repo = self.groups[g].repo.id.clone();
+        let select_path = change.path.clone();
         base.pl(theme::TREE_BASE + theme::TREE_STEP * (depth + 1) as f32)
             .child(div().w(theme::TWISTY_WIDTH).flex_shrink_0())
             .role(Role::Button)
@@ -1288,6 +1399,8 @@ impl Workbench {
             .when(selected, |row| {
                 row.bg(colors.selected).text_color(colors.selected_fg)
             })
+            // The keyboard's current row, while the panel has the focus.
+            .when(!selected && keyboard, |row| row.bg(colors.hover))
             .hover(|row| {
                 row.bg(if selected {
                     colors.selected
@@ -1390,9 +1503,17 @@ impl Workbench {
             .tooltip(move |window, cx| {
                 gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
             })
-            .on_click(
-                cx.listener(move |this, _, window, cx| this.open_diff(g, i, side, window, cx)),
-            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.scm_select_target(
+                    ScmSelection {
+                        repo: select_repo.clone(),
+                        path: select_path.clone(),
+                        side,
+                    },
+                    cx,
+                );
+                this.open_diff(g, i, side, window, cx);
+            }))
             .context_menu(move |menu, _, _| {
                 let view = weak.clone();
                 let path = context_file.clone();
@@ -1419,6 +1540,136 @@ impl Workbench {
                     })
             })
             .into_any_element()
+    }
+}
+
+impl Workbench {
+    /// The row keys belong to the list itself. A button inside the panel keeps its own
+    /// Enter and Space, so a focused control is never answered by the list instead.
+    fn scm_keys_here(&self, window: &Window) -> bool {
+        self.sidebar == Sidebar::SourceControl && self.scm_focus.is_focused(window)
+    }
+
+    /// What the keyboard acts on at `index`, if that row is a file.
+    pub(super) fn scm_target(&self, index: usize) -> Option<ScmSelection> {
+        let Row::File(g, i, side, _) = self.rows.get(index)? else {
+            return None;
+        };
+        let group = self.groups.get(*g)?;
+        let status = group.status.as_ref()?.as_ref().ok()?;
+        let change = status.changes.get(*i)?;
+        Some(ScmSelection {
+            repo: group.repo.id.clone(),
+            path: change.path.clone(),
+            side: *side,
+        })
+    }
+
+    /// The selected row, preferring the side it was on. Staging moves the file to the
+    /// other group, and falling back by path lets the selection follow it there.
+    pub(super) fn scm_selected_index(&self) -> Option<usize> {
+        let selected = self.scm_selected.as_ref()?;
+        let mut same_file = None;
+        for index in 0..self.rows.len() {
+            let Some(target) = self.scm_target(index) else {
+                continue;
+            };
+            if target.same_row(selected) {
+                return Some(index);
+            }
+            if same_file.is_none() && target.same_file(selected) {
+                same_file = Some(index);
+            }
+        }
+        same_file
+    }
+
+    /// A click: remember the row without taking the focus away from where the click puts it.
+    /// The target comes from what was painted, not from a row index a rebuild may have moved.
+    fn scm_select_target(&mut self, target: ScmSelection, cx: &mut Context<Self>) {
+        self.scm_selected = Some(target);
+        cx.notify();
+    }
+
+    fn scm_select_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.scm_target(index) else {
+            return;
+        };
+        self.scm_selected = Some(target);
+        self.scm_list.scroll_to_reveal_item(index);
+        self.scm_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn scm_move_selection(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self.scm_selected_index();
+        let next = match current {
+            Some(current) if forward => {
+                (current + 1..self.rows.len()).find(|&index| self.scm_target(index).is_some())
+            }
+            Some(current) => (0..current)
+                .rev()
+                .find(|&index| self.scm_target(index).is_some()),
+            None => (0..self.rows.len()).find(|&index| self.scm_target(index).is_some()),
+        };
+        if let Some(index) = next.or(current) {
+            self.scm_select_row(index, window, cx);
+        }
+    }
+
+    fn scm_open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.scm_selected_index() else {
+            return;
+        };
+        let Some(Row::File(g, i, side, _)) = self.rows.get(index).cloned() else {
+            return;
+        };
+        self.open_diff(g, i, side, window, cx);
+        // The diff takes the focus; the list keeps it so ↑ / ↓ still move.
+        self.scm_focus.focus(window, cx);
+    }
+
+    fn scm_toggle_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.scm_selected_index() else {
+            return;
+        };
+        let Some(Row::File(g, i, side, _)) = self.rows.get(index).cloned() else {
+            return;
+        };
+        if let Some(request) = self.scm_paths(g, Some(i), side) {
+            self.request_git_write(request, window, cx);
+        }
+    }
+
+    fn scm_discard_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.scm_selected_index() else {
+            return;
+        };
+        let Some(Row::File(g, i, side, _)) = self.rows.get(index).cloned() else {
+            return;
+        };
+        if !matches!(side, DiffSide::Worktree) {
+            return;
+        }
+        if let Some(request) = self.scm_discard(g, Some(i)) {
+            self.request_git_write(request, window, cx);
+        }
+    }
+
+    /// ⇧⌃G and the palette: show the Source Control view with the first file ready for keys.
+    pub(super) fn focus_source_control(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar = Sidebar::SourceControl;
+        self.sidebar_visible = true;
+        self.remember_layout(true, cx);
+        if self.scm_selected_index().is_none()
+            && let Some(index) =
+                (0..self.rows.len()).find(|&index| self.scm_target(index).is_some())
+        {
+            self.scm_list.scroll_to_reveal_item(index);
+            self.scm_selected = self.scm_target(index);
+        }
+        self.scm_focus.focus(window, cx);
+        cx.notify();
     }
 }
 

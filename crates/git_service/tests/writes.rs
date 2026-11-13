@@ -1180,6 +1180,40 @@ fn discarding_an_intent_to_add_file_deletes_it_instead_of_emptying_it() {
 }
 
 #[test]
+fn discarding_an_intent_to_add_file_that_the_ignore_rules_match_deletes_it() {
+    common::hermetic();
+    let fixture = fixture();
+    let service = GitService::new(2, Duration::from_secs(10)).unwrap();
+    // All-untracked runs one `git clean`; a tracked edit beside it takes the restore then
+    // clean path. Both must remove a listed file the ignore rules match.
+    for (name, with_tracked_edit) in [("a", false), ("b", true)] {
+        let root = fixture.0.join(name);
+        fs::write(root.join(".gitignore"), "*.sql\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        fs::create_dir_all(root.join("docs/sql")).unwrap();
+        let sql = root.join("docs/sql/query.sql");
+        fs::write(&sql, "select 1;\n").unwrap();
+        // How such a file reaches the change list: intent-to-add lists it even though the
+        // ignore rules match, so `git clean` without `-x` leaves it behind and exits 0.
+        git(&root, &["add", "-N", "-f", "docs/sql/query.sql"]);
+        let mut paths = vec!["docs/sql/query.sql".into()];
+        if with_tracked_edit {
+            fs::write(root.join("src/main.rs"), "changed\n").unwrap();
+            paths.push("src/main.rs".into());
+        }
+        write(&service, &root, WriteOperation::Discard { paths }).unwrap();
+        assert!(!sql.exists(), "{name}");
+        assert_eq!(
+            fs::read_to_string(root.join("src/main.rs")).unwrap(),
+            "original\n",
+            "{name}"
+        );
+        assert_eq!(git(&root, &["status", "--porcelain"]), "", "{name}");
+    }
+}
+
+#[test]
 fn deleting_an_untracked_nested_repository_reports_that_it_stayed() {
     common::hermetic();
     let fixture = fixture();

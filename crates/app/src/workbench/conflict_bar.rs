@@ -9,7 +9,7 @@ use gpui_kit::component::{
     Sizable,
     button::{Button, ButtonVariants},
     h_flex,
-    input::{RangeDecoration, RangeDecorationCollection, RangeDecorationStyle},
+    input::{RangeDecoration, RangeDecorationCollection, RangeDecorationStyle, RopeExt},
 };
 use workspace_editor_git::{ChangeKind, WriteOperation, WriteRequest};
 
@@ -23,8 +23,8 @@ pub(super) struct ConflictTarget {
 #[derive(Default)]
 pub(super) struct ConflictDoc {
     /// The markers in the text of `version`.
-    list: Arc<Vec<Conflict>>,
-    version: Option<u64>,
+    pub(super) list: Arc<Vec<Conflict>>,
+    pub(super) version: Option<u64>,
     decorations: Option<RangeDecorationCollection>,
     task: Option<Task<()>>,
 }
@@ -42,7 +42,7 @@ impl Document {
 
 impl Workbench {
     /// The repository and relative path of `path` when Git lists it as conflicted.
-    fn conflict_entry(&self, path: &std::path::Path) -> Option<(RepoId, PathBuf)> {
+    pub(super) fn conflict_entry(&self, path: &std::path::Path) -> Option<(RepoId, PathBuf)> {
         self.groups.iter().find_map(|group| {
             let relative = path.strip_prefix(&group.repo.worktree).ok()?;
             let status = group.status.as_ref()?.as_ref().ok()?;
@@ -377,6 +377,63 @@ impl Workbench {
                             this.mark_resolved(id, window, cx)
                         })),
                 )
+                .into_any_element(),
+        )
+    }
+
+    /// The conflicts as clickable ranges on the editor's right edge, placed by line as the
+    /// diff view's overview ruler, so where they are is visible without searching.
+    pub(super) fn render_conflict_ruler(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let id = self.active_document_id()?;
+        let doc = self.document(id)?;
+        if doc.conflicts.version != Some(doc.version) || doc.conflicts.list.is_empty() {
+            return None;
+        }
+        let colors = theme::colors(cx);
+        let editor = doc.editor.read(cx);
+        let rope = editor.text();
+        let total = rope.lines_len().max(1) as f32;
+        let marks: Vec<(usize, usize)> = doc
+            .conflicts
+            .list
+            .iter()
+            .map(|conflict| {
+                let start = conflict.line;
+                // The closing marker starts on the conflict's last row, whether or not the
+                // file ends with a newline there.
+                let end = rope.offset_to_position(conflict.theirs_marker.start).line as usize + 1;
+                (start, end)
+            })
+            .collect();
+        Some(
+            div()
+                .id("conflict-ruler")
+                .test_support()
+                .relative()
+                .w(theme::DIFF_RULER)
+                .h_full()
+                .flex_shrink_0()
+                .border_l_1()
+                .border_color(colors.border)
+                .bg(colors.editor)
+                .children(marks.into_iter().enumerate().map(|(i, (start, end))| {
+                    div()
+                        .id(("conflict-ruler-mark", i))
+                        .test_support()
+                        .absolute()
+                        .left_1()
+                        .right_1()
+                        .top(relative(start as f32 / total))
+                        .h(relative((end - start) as f32 / total))
+                        .min_h(theme::DIFF_RULER_MIN)
+                        .bg(colors.conflict)
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            // The first content row, as F8 does, so the caret counts as inside
+                            // the conflict and the next jump moves on.
+                            this.go_to_line(start as u32 + 1, 0, window, cx)
+                        }))
+                }))
                 .into_any_element(),
         )
     }
